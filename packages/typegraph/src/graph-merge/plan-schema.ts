@@ -9,8 +9,10 @@ import {
 } from "./evidence";
 import type { JsonValue } from "./typegraph-internal";
 
-// Format 3 adds the composition-orphan review field to format 2's allocation
-// owner, validity clearing and recreation intent. A required field added under
+// Format 3 adds the identity-conflict review field (`identityConflicts`) to
+// format 2's allocation owner, validity clearing and recreation intent, and is
+// written only by a planner that refuses every structural conflict the apply
+// is certain to meet (`plan-structure.ts`). A required field added under
 // an existing version number would make the strict current schema reject
 // every artifact serialized before it as "malformed", when the correct signal
 // is "this artifact predates the current format": `parseMergePlanArtifact`
@@ -248,16 +250,16 @@ export type MergePlanTypeReconciliation = Readonly<{
  *   all — its composition edge was dropped or collapsed while both
  *   endpoints survive. There is no whole to name, so `whole` is absent.
  *
- * Surfaced here so a dry run reports it; apply re-verifies the same finding
- * under the write lock and refuses with `MergeCompositionOrphanError` when
- * it recurs.
+ * Every finding is refused while the plan is built: the plan's revision
+ * fence makes it a certain apply refusal, since the unchanged target refuses
+ * it and any target write that would resolve it makes the plan stale. Apply
+ * re-verifies the same finding under the write lock and refuses with
+ * `MergeCompositionOrphanError` too.
  *
- * Between branches, the same two shapes are refused at plan time instead of
- * reported, with `branchId` naming the branch whose attachment would be lost:
- * `"moved"` when one branch attached a part to a whole that survives while
- * another deletes the part, `"deleted"` when one branch attached a surviving
- * part to a whole another deletes. No target write can resolve that conflict,
- * so such a finding never appears in `MergePlanReview.compositionOrphans`.
+ * Between branches, the same two shapes carry `branchId`, naming the branch
+ * whose attachment would be lost: `"moved"` when one branch attached a part
+ * to a whole that survives while another deletes the part, `"deleted"` when
+ * one branch attached a surviving part to a whole another deletes.
  */
 export type MergePlanCompositionOrphan = Readonly<{
   part: MergePlanEntityRef;
@@ -279,7 +281,6 @@ export type MergePlanReview = Readonly<{
   baseAmbiguities: readonly JsonValue[];
   provenanceRecords: readonly JsonValue[];
   warnings: readonly string[];
-  compositionOrphans: readonly MergePlanCompositionOrphan[];
   diagnostics?: MergePlanDiagnostics | undefined;
   /** Optional, omitted when empty — see the review schema's format-version note. */
   identityConflicts?: readonly JsonValue[] | undefined;
@@ -295,11 +296,8 @@ export type MergePlanDigest = Readonly<{
   value: string;
 }>;
 
-/** A review as formats 1 and 2 wrote it, before composition orphans and identity conflicts. */
-export type LegacyMergePlanReview = Omit<
-  MergePlanReview,
-  "compositionOrphans" | "identityConflicts"
->;
+/** A review as formats 1 and 2 wrote it, before identity conflicts. */
+export type LegacyMergePlanReview = Omit<MergePlanReview, "identityConflicts">;
 
 /** The current wire contract, the only format a plan can be applied from. */
 export type MergePlanArtifactV3 = Readonly<{
@@ -813,22 +811,10 @@ const mergePlanReviewSchema = z
     ),
     provenanceRecords: z.array(identityProvenanceRecordSchema),
     warnings: z.array(z.string()),
-    compositionOrphans: z.array(
-      z
-        .object({
-          part: mergePlanEntityRefSchema,
-          whole: mergePlanEntityRefSchema.optional(),
-          viaEdgeKind: nonEmptyStringSchema,
-          cause: z.enum(["deleted", "moved", "unattached"]),
-          branchId: nonEmptyStringSchema.optional(),
-        })
-        .strict(),
-    ),
     diagnostics: diagnosticsSchema.optional(),
     // Optional and omitted when empty (the `diagnostics` precedent above): a
-    // merge the separation veto never touched produces a review object
-    // byte-identical to one written before the veto existed, so
-    // `MERGE_PLAN_FORMAT_VERSION` stays at 2 and those artifacts still parse.
+    // merge the separation veto never touched produces the review object it
+    // would have without the veto. Format 1 and 2 grammars refuse the field.
     identityConflicts: z.array(identityUnresolvedConflictSchema).optional(),
   })
   .strict();
@@ -869,10 +855,7 @@ const legacyMergePlanArtifactBaseSchema = z
       z.literal(LEGACY_MERGE_PLAN_FORMAT_VERSIONS[1]),
     ]),
     target: legacyMergePlanTargetFenceSchema,
-    review: mergePlanReviewSchema.omit({
-      compositionOrphans: true,
-      identityConflicts: true,
-    }),
+    review: mergePlanReviewSchema.omit({ identityConflicts: true }),
   })
   .strict();
 

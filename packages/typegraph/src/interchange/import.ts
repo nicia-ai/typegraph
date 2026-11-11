@@ -201,6 +201,7 @@ import {
   type IngestionImportTarget,
   resolveIngestionImportTarget,
 } from "./ingestion-import-target";
+import { parseInterchangeOptions } from "./options";
 import { exportStreamBackend } from "./stream-source";
 import {
   type GraphData,
@@ -279,7 +280,11 @@ export async function importGraph<G extends GraphDef>(
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
-  const options = ImportOptionsSchema.parse(rawOptions);
+  const options = parseInterchangeOptions(
+    "importGraph",
+    ImportOptionsSchema,
+    rawOptions,
+  );
   return withImportStreamLease(store, () =>
     importGraphData(store, data, options),
   );
@@ -840,7 +845,11 @@ export async function importGraphStream<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
-  const options = ImportOptionsSchema.parse(rawOptions);
+  const options = parseInterchangeOptions(
+    "importGraphStream",
+    ImportOptionsSchema,
+    rawOptions,
+  );
   const targetBackend = storeBackend(store);
   const refusal = streamedImportRefusal(store, exportStreamBackend(chunks));
   if (refusal?.reason === "requiredComposition") {

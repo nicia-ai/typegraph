@@ -6,7 +6,10 @@ import {
   ensureEngineSerializedWriterSlot,
   hasPendingWriteTransactionRevision,
 } from "../store/operations/write-transaction";
-import { hasPendingRecordedGraphWrites } from "../store/recorded-capture";
+import {
+  hasPendingRecordedGraphWrites,
+  runRecordedTransactionSavepoint,
+} from "../store/recorded-capture";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { MergePlanCapabilityError } from "./errors";
@@ -37,5 +40,45 @@ export async function assertMergeTransactionPristine<G extends GraphDef>(
     txBackend,
     target.revisionSchema,
     statements,
+  );
+}
+
+const ADOPTED_MERGE_APPLY_SAVEPOINT = "typegraph_merge_apply";
+
+/**
+ * Runs an adopted merge apply as one unit inside the caller's transaction: a
+ * refusal or failure rolls every row the apply wrote back to where it began
+ * before it propagates.
+ *
+ * The apply replays a plan one row at a time and checks some invariants only
+ * once its last row has landed — the required-existence rule for the parts
+ * the plan touches is deferred until then. A caller that caught a refusal
+ * raised after the first write and committed would otherwise keep a
+ * half-applied merge that no constraint ever judged, such as a required part
+ * whose old attaching edge is gone and whose new one was never written. The
+ * savepoint is the transaction's own rollback boundary, so that commit keeps
+ * none of the merge's writes; the recorded-capture state that mirrors them is
+ * restored with it ({@link runRecordedTransactionSavepoint}).
+ *
+ * A target whose transactions expose no statement execution has no savepoint
+ * to take, so it is refused before anything is applied.
+ */
+export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  apply: () => Promise<T>,
+): Promise<T> {
+  const statements = statementExecutionVerdict(storeBackend(target));
+  if (!statements.supported) {
+    throw new MergePlanCapabilityError(
+      "Adopted merge application requires transaction-scoped statement execution to roll a refused apply back atomically.",
+      { details: { capability: "mergeTransactionSavepoint" } },
+    );
+  }
+  return runRecordedTransactionSavepoint(
+    txBackend,
+    statements,
+    ADOPTED_MERGE_APPLY_SAVEPOINT,
+    async () => ({ action: "release", value: await apply() }),
   );
 }

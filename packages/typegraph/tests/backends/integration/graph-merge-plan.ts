@@ -24,6 +24,7 @@ import { branch } from "../../../src/graph-merge/branch";
 import {
   BranchError,
   CandidatePlanningScopeError,
+  MergeCompositionOrphanError,
   MergePlanCapabilityError,
   MergePlanningStaleError,
   MergePlanSchemaMismatchError,
@@ -125,11 +126,7 @@ export function registerGraphMergePlanIntegrationTests(
         );
         const current = unwrap(await planMerge(base, [source]));
         const { digest: _digest, review, ...input } = current;
-        const {
-          compositionOrphans: _orphans,
-          identityConflicts: _conflicts,
-          ...legacyReview
-        } = review;
+        const { identityConflicts: _conflicts, ...legacyReview } = review;
         const { owner: _owner, ...revision } = input.target.revision;
         const legacyInputs = [
           {
@@ -508,7 +505,7 @@ export function registerGraphMergePlanIntegrationTests(
       expect(scoped.error.details).toEqual({
         capability: "boundedCandidatePlanning",
         requiredPlanningScope: "full",
-        planningScope: { scope: "whole-target", reason: "planned-evolution" },
+        planningScope: { scope: "full", reason: "planned-evolution" },
       });
       expect(scopedBackend).not.toHaveBeenCalled();
 
@@ -522,7 +519,7 @@ export function registerGraphMergePlanIntegrationTests(
         }),
       );
       expect(planningScope).toEqual({
-        scope: "whole-target",
+        scope: "full",
         reason: "planned-evolution",
       });
       expect(mergePlan.target.schema).toEqual({
@@ -763,7 +760,7 @@ export function registerGraphMergePlanIntegrationTests(
       ).toBeUndefined();
     });
 
-    it("reports composition orphans under the resulting schema's registry", async () => {
+    it("refuses composition orphans under the resulting schema's registry", async () => {
       const [target] = await createAdapterStoreWithSchema(
         compositionEvolutionGraph,
         context.getBackend(),
@@ -780,19 +777,19 @@ export function registerGraphMergePlanIntegrationTests(
       await source.store.edges.planFiledIn.delete(filing.id);
       const evolutionPlan = await target.planEvolution(requiredFilingExtension);
 
-      const artifact = unwrap(
-        await planMergeForEvolution(target, evolutionPlan, [source]),
-      );
+      const planned = await planMergeForEvolution(target, evolutionPlan, [
+        source,
+      ]);
 
       // Under the baseline registry the sheet owes no whole, so a merge that
-      // drops its only filing edge would report nothing here.
-      expect(artifact.review.compositionOrphans).toEqual([
-        {
-          part: { kind: "PlanSheet", id: "sheet" },
-          viaEdgeKind: "planFiledIn",
-          cause: "unattached",
-        },
-      ]);
+      // drops its only filing edge would plan cleanly here.
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(planned.error.details).toEqual({
+        part: { kind: "PlanSheet", id: "sheet" },
+        viaEdgeKind: "planFiledIn",
+        cause: "unattached",
+      });
     });
 
     it("preserves branch failures when forking a resulting-schema branch", async () => {

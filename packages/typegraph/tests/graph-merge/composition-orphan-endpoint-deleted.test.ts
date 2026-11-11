@@ -12,15 +12,16 @@
  * Under `modifyWins` and `flag`, `p1` survives, while the edge is dropped
  * with `edge:endpoint-deleted`: its whole is gone. The merge issues no write
  * for that dropped edge, so no per-write composition guard ever sees it. The
- * plan-time report and the in-transaction apply refusal still catch the
- * orphan, because the "deleted" arm reads the target's live parts closure of
- * every whole the plan deletes. Under `deleteWins` the part is deleted with
- * its whole and the merge commits cleanly.
+ * planner still refuses the orphan, because the "deleted" arm reads the
+ * target's live parts closure of every whole the plan deletes. Under
+ * `deleteWins` the part is deleted with its whole and the merge commits
+ * cleanly.
  *
  * The surviving part is also a node upsert, so the final-state "unattached"
  * check would refuse it as well; asserting `cause: "deleted"` pins the
- * "deleted" arm, which runs first. Disabling that arm turns the refusal into
- * `cause: "unattached"`; disabling both lets apply commit the orphan.
+ * "deleted" arm, which runs first. Disabling that arm turns the plan-time
+ * refusal into `cause: "unattached"`; disabling both in the planner leaves
+ * the refusal to apply's own re-verification.
  */
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
@@ -34,7 +35,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
-import { ENDPOINT_DELETED_DROP_REASON } from "../../src/graph-merge/edge-repoint";
 import { MergeCompositionOrphanError } from "../../src/graph-merge/errors";
 import {
   applyMergePlan,
@@ -155,7 +155,7 @@ describe.each(backendMatrix())(
     }
 
     it.each(ORPHANING_POLICIES)(
-      "reports at plan time and refuses at apply when the part survives under %s",
+      "refuses at plan time when the part survives under %s",
       async (policy) => {
         const { target, edgeId, branches } = await divergentBranches();
 
@@ -165,34 +165,11 @@ describe.each(backendMatrix())(
           branches,
           options: { onDeleteModifyConflict: policy },
         });
-        if (!isOk(planResult)) throw planResult.error;
-        const artifact = planResult.data;
-
-        expect(
-          artifact.writes.nodeDeletes.map((deletion) => deletion.id),
-        ).toEqual(["w1"]);
-        expect(artifact.review.dropped).toContainEqual({
-          kind: "edge",
-          id: edgeId,
-          reason: ENDPOINT_DELETED_DROP_REASON,
-        });
-        expect(artifact.review.compositionOrphans).toEqual([
-          {
-            part: { kind: "EPart", id: "p1" },
-            whole: { kind: "EWhole", id: "w1" },
-            viaEdgeKind: "eHolds",
-            cause: "deleted",
-          },
-        ]);
-
-        const applyResult = await applyMergePlan(target, artifact);
-        if (!isErr(applyResult)) {
-          throw new Error(
-            `expected apply to be refused; committed revision ${JSON.stringify(applyResult.data)}`,
-          );
+        if (!isErr(planResult)) {
+          throw new Error("expected the plan to be refused");
         }
-        expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
-        expect(applyResult.error.details).toEqual({
+        expect(planResult.error).toBeInstanceOf(MergeCompositionOrphanError);
+        expect(planResult.error.details).toEqual({
           part: { kind: "EPart", id: "p1" },
           whole: { kind: "EWhole", id: "w1" },
           viaEdgeKind: "eHolds",
@@ -227,7 +204,6 @@ describe.each(backendMatrix())(
       expect(
         artifact.writes.nodeDeletes.map((deletion) => deletion.id).toSorted(),
       ).toEqual(["p1", "w1"]);
-      expect(artifact.review.compositionOrphans).toEqual([]);
 
       const applyResult = await applyMergePlan(target, artifact);
       if (!isOk(applyResult)) throw applyResult.error;

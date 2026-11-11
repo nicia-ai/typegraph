@@ -771,7 +771,7 @@ async function planMutationSteps<G extends GraphDef>(
     const bounded = scope.data === "candidate";
     if (bounded) {
       const targetScope = candidatePlanningScope(target);
-      if (targetScope.scope === "whole-target")
+      if (targetScope.scope === "full")
         throw new CandidatePlanningScopeError(targetScope);
     }
     const backend = storeBackend(target);

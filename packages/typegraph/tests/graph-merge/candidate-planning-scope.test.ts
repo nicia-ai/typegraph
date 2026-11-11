@@ -221,7 +221,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   },
   {
     name: "a composition pair",
-    expected: { scope: "whole-target", reason: "composition" },
+    expected: { scope: "full", reason: "composition" },
     decidedStatically: true,
     arrange: async (backend) =>
       arranged(
@@ -231,7 +231,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   },
   {
     name: "an acyclic edge",
-    expected: { scope: "whole-target", reason: "acyclic-relation" },
+    expected: { scope: "full", reason: "acyclic-relation" },
     decidedStatically: true,
     arrange: async (backend) =>
       arranged(
@@ -241,7 +241,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   },
   {
     name: "a target-side cardinality",
-    expected: { scope: "whole-target", reason: "target-side-cardinality" },
+    expected: { scope: "full", reason: "target-side-cardinality" },
     decidedStatically: true,
     arrange: async (backend) =>
       arranged(
@@ -251,7 +251,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   },
   {
     name: "a oneActive edge on a backend without the active source read",
-    expected: { scope: "whole-target", reason: "missing-active-source-read" },
+    expected: { scope: "full", reason: "missing-active-source-read" },
     decidedStatically: true,
     arrange: async (backend) =>
       arranged(
@@ -264,7 +264,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   },
   {
     name: "a match-identity edge on a backend without the keyed owner read",
-    expected: { scope: "whole-target", reason: "missing-match-identity-read" },
+    expected: { scope: "full", reason: "missing-match-identity-read" },
     decidedStatically: true,
     arrange: async (backend) =>
       arranged(
@@ -278,7 +278,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   {
     name: "an identity graph whose runtime lacks the scoped identity reads",
     expected: {
-      scope: "whole-target",
+      scope: "full",
       reason: "missing-scoped-identity-reads",
     },
     decidedStatically: true,
@@ -296,7 +296,7 @@ const SCOPE_CASES: readonly ScopeCase[] = [
   {
     name: "a match-identity owner excluded from the clone projection",
     expected: {
-      scope: "whole-target",
+      scope: "full",
       reason: "match-identity-owner-not-clone-visible",
     },
     decidedStatically: false,
@@ -445,7 +445,7 @@ describe("candidate planning scope", () => {
       });
       if (isErr(full)) throw full.error;
       expect(full.data.planningScope).toEqual({
-        scope: "whole-target",
+        scope: "full",
         reason: "full-requested",
       });
       if (testCase.expected.scope !== "candidate") return;
@@ -469,7 +469,7 @@ describe("candidate planning scope", () => {
     const expected = {
       capability: "boundedCandidatePlanning",
       requiredPlanningScope: "full",
-      planningScope: { scope: "whole-target", reason: "acyclic-relation" },
+      planningScope: { scope: "full", reason: "acyclic-relation" },
     };
 
     const reviewBackend = stagingBackend();

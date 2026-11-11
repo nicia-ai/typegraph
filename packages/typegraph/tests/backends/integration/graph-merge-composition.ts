@@ -10,21 +10,28 @@
  * plan moves away.
  *
  * Each case runs over the full existence x cardinality matrix where the
- * dimension matters, and checks the plan review beside the apply: the review
- * must report no orphan for a plan the apply accepts.
+ * dimension matters, and plans before it applies: the planner must refuse a
+ * plan the apply would refuse, and must accept every plan the apply accepts.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
   asNodeId,
+  CompositionError,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
   type Store,
+  type StoreHooks,
 } from "../../../src";
-import { isErr, unwrap } from "../../../src/graph-merge";
+import {
+  CardinalityMergeConflictError,
+  isErr,
+  MergeError,
+  unwrap,
+} from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
 import {
   applyMergePlan,
@@ -75,10 +82,11 @@ async function seededTarget(
   context: IntegrationTestContext,
   existence: Existence,
   cardinality: Cardinality,
+  hooks?: StoreHooks,
 ): Promise<TestStore> {
   const target = await context.createStore(
     compositionGraph(existence, cardinality),
-    { revisionTracking: true },
+    { revisionTracking: true, ...(hooks === undefined ? {} : { hooks }) },
   );
   await target.nodes.GmcWhole.create({ label: "w1" }, { id: "w1" });
   await target.nodes.GmcWhole.create({ label: "w2" }, { id: "w2" });
@@ -92,12 +100,28 @@ async function seededTarget(
 async function fork(
   context: IntegrationTestContext,
   target: TestStore,
+  id = "branch-a",
 ): Promise<GraphBranch<CompositionGraph>> {
   return unwrap(
     await branch(target, () => context.createIsolatedBackend(), {
-      id: asBranchId("branch-a"),
+      id: asBranchId(id),
     }),
   );
+}
+
+/** Asserts a plan was refused because two edges would hold one part's whole. */
+function expectOccupiedWholeConflict(error: MergeError): void {
+  expect(error).toBeInstanceOf(CardinalityMergeConflictError);
+  expect(error.cause).toBeInstanceOf(CompositionError);
+  expect(error.details).toMatchObject({
+    constraintCode: "COMPOSITION_WHOLE_OCCUPIED",
+    situation: "occupied",
+    partId: "p1",
+  });
+  const { edges } = error.details as Readonly<{
+    edges: readonly Readonly<{ fromId: string; toId: string }>[];
+  }>;
+  expect(edges.map((edge) => edge.fromId)).toEqual(["p1", "p1"]);
 }
 
 /** The whole each live part hangs from, by part id. */
@@ -113,13 +137,12 @@ async function livePartIds(store: TestStore): Promise<readonly string[]> {
   return parts.map((part) => part.id).toSorted();
 }
 
-/** Plans the merge, asserts a clean review, applies it, and returns nothing. */
+/** Plans the merge, applies it, and returns nothing. */
 async function planThenApply(
   target: TestStore,
   source: GraphBranch<CompositionGraph>,
 ): Promise<void> {
   const plan = unwrap(await planMerge(target, [source]));
-  expect(plan.review.compositionOrphans).toEqual([]);
   const applied = await applyMergePlan(target, plan);
   if (isErr(applied)) throw applied.error;
 }
@@ -196,7 +219,6 @@ export function registerGraphMergeCompositionIntegrationTests(
               branches: [source],
             }),
           );
-          expect(plan.review.compositionOrphans).toEqual([]);
           await plannedTarget.transaction((tx) =>
             applyMergePlanInTransaction(plannedTarget, tx, plan),
           );
@@ -277,6 +299,100 @@ export function registerGraphMergeCompositionIntegrationTests(
           expect(
             Object.fromEntries(edges.map((edge) => [edge.fromId, edge.toId])),
           ).toEqual({ p1: "w2", p2: "w1" });
+          expect(await target.verifyConstraintFences()).toEqual([]);
+        });
+
+        it("refuses two branches reparenting one part to different wholes at plan time", async () => {
+          const target = await seededTarget(context, existence, cardinality);
+          await target.nodes.GmcWhole.create({ label: "w3" }, { id: "w3" });
+          const toW2 = await fork(context, target, "branch-a");
+          const toW3 = await fork(context, target, "branch-b");
+          await toW2.store.nodes.GmcPart.reparent(asNodeId<typeof Part>("p1"), {
+            whole: wholeRef("w2"),
+          });
+          await toW3.store.nodes.GmcPart.reparent(asNodeId<typeof Part>("p1"), {
+            whole: wholeRef("w3"),
+          });
+
+          const planned = await planMerge(target, [toW2, toW3]);
+          if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+          expectOccupiedWholeConflict(planned.error);
+
+          const merged = await merge(target, [toW3, toW2]);
+          if (!isErr(merged)) throw new Error("expected a merge refusal");
+          expectOccupiedWholeConflict(merged.error);
+          expect(await attachments(target)).toEqual({ p1: "w1" });
+        });
+
+        it("refuses a branch reparent that disagrees with the target's own reparent at plan time", async () => {
+          const forkPoint = await seededTarget(context, existence, cardinality);
+          await forkPoint.nodes.GmcWhole.create({ label: "w3" }, { id: "w3" });
+          const source = await fork(context, forkPoint, "branch-a");
+          const { store: target } = await fork(
+            context,
+            forkPoint,
+            "target-clone",
+          );
+          await target.nodes.GmcPart.reparent(asNodeId<typeof Part>("p1"), {
+            whole: wholeRef("w2"),
+          });
+          await source.store.nodes.GmcPart.reparent(
+            asNodeId<typeof Part>("p1"),
+            { whole: wholeRef("w3") },
+          );
+
+          const planned = await planMergeIncremental({
+            forkPoint,
+            target,
+            branches: [source],
+          });
+          if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+          expectOccupiedWholeConflict(planned.error);
+          expect(await attachments(target)).toEqual({ p1: "w2" });
+        });
+
+        it("leaves nothing of an in-transaction apply that failed after writing, even when the caller commits", async () => {
+          let refuseWholeWrites = false;
+          const target = await seededTarget(context, existence, cardinality, {
+            onOperationStart: (operation) => {
+              if (
+                refuseWholeWrites &&
+                operation.entity === "node" &&
+                operation.kind === "GmcWhole"
+              ) {
+                throw new Error("whole writes are refused by this test");
+              }
+            },
+          });
+          const source = await fork(context, target);
+          // The apply deletes or ends the old attachment, then writes nodes,
+          // then the new attachment: the new whole's write fails in between.
+          await source.store.nodes.GmcWhole.create(
+            { label: "w4" },
+            { id: "w4" },
+          );
+          await source.store.nodes.GmcPart.reparent(
+            asNodeId<typeof Part>("p1"),
+            { whole: wholeRef("w2") },
+          );
+          const plan = unwrap(await planMerge(target, [source]));
+
+          refuseWholeWrites = true;
+          let refusal: unknown;
+          await target.transaction(async (tx) => {
+            try {
+              await applyMergePlanInTransaction(target, tx, plan);
+            } catch (error) {
+              refusal = error;
+            }
+          });
+          refuseWholeWrites = false;
+
+          expect(refusal).toBeInstanceOf(MergeError);
+          expect(await attachments(target)).toEqual({ p1: "w1" });
+          expect(
+            await target.nodes.GmcWhole.getById(asNodeId<typeof Whole>("w4")),
+          ).toBeUndefined();
           expect(await target.verifyConstraintFences()).toEqual([]);
         });
 

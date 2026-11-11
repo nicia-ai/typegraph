@@ -927,6 +927,77 @@ describe("Export Options", () => {
 // Import Conflict Strategy Tests
 // ============================================================
 
+function expectUnknownOption(
+  error: unknown,
+  operation: string,
+  option: string,
+): void {
+  expect(error).toBeInstanceOf(ConfigurationError);
+  expect((error as ConfigurationError).details).toEqual({
+    code: "INTERCHANGE_OPTION_UNKNOWN",
+    operation,
+    option,
+  });
+}
+
+describe("Interchange option keys", () => {
+  let store: TestStore;
+
+  beforeEach(async () => {
+    store = createStore(testGraph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+  });
+
+  it("refuses an undeclared importGraph option instead of dropping it", async () => {
+    const data = await exportGraph(store);
+    const target = createStore(testGraph, createTestBackend());
+
+    const refusal = await importGraph(target, data, {
+      onConflict: "error",
+      validateReference: false,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraph", "validateReference");
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses an undeclared importGraphStream option before reading a chunk", async () => {
+    const target = createStore(testGraph, createTestBackend());
+    let pulled = false;
+    async function* chunks(): AsyncIterable<GraphInterchangeChunk> {
+      pulled = true;
+      yield* await Promise.resolve([]);
+    }
+
+    const refusal = await importGraphStream(target, chunks(), {
+      onConflict: "error",
+      bogus: true,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraphStream", "bogus");
+    expect(pulled).toBe(false);
+  });
+
+  it("refuses an undeclared exportGraph option, including a stream-only one", async () => {
+    for (const option of ["bogus", "batchSize"]) {
+      const refusal = await exportGraph(store, { [option]: 10 }).catch(
+        (error: unknown) => error,
+      );
+      expectUnknownOption(refusal, "exportGraph", option);
+    }
+  });
+
+  it("refuses an undeclared exportGraphStream option", async () => {
+    const chunks = exportGraphStream(store, {
+      includeMetadata: true,
+    } as never)[Symbol.asyncIterator]();
+    // The refusal arrives with the first chunk request.
+    const refusal = await chunks.next().catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "exportGraphStream", "includeMetadata");
+  });
+});
+
 describe("Import Conflict Strategies", () => {
   let sourceBackend: GraphBackend;
   let sourceStore: TestStore;

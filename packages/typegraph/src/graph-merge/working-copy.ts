@@ -267,7 +267,6 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           includeMeta: true,
           includeTemporal: true,
           includeDeleted: false,
-          batchSize: CLONE_IMPORT_BATCH_SIZE,
         } as const;
         const importOptions = {
           onConflict: "error",
@@ -288,7 +287,10 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           ) ?
             await importGraphStream(
               freshStore,
-              exportGraphStream(baseStore, exportOptions),
+              exportGraphStream(baseStore, {
+                ...exportOptions,
+                batchSize: CLONE_IMPORT_BATCH_SIZE,
+              }),
               importOptions,
             )
           : await importGraph(

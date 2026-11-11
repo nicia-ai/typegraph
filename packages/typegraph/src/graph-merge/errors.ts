@@ -1,6 +1,6 @@
 import { requireDefined } from "../utils/presence";
 import type { MergePlanCompositionOrphan } from "./plan-schema";
-import type { WholeTargetPlanningScope } from "./sparse-candidate-branch";
+import type { FullPlanningScope } from "./sparse-candidate-branch";
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
 import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
 
@@ -48,6 +48,8 @@ export const MERGE_ERROR_CODES = {
   operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE",
   operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED",
   compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN",
+  cardinalityConflict: "GRAPH_MERGE_CARDINALITY_CONFLICT",
+  restrictedDeleteConflict: "GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT",
 } as const;
 
 /**
@@ -237,10 +239,10 @@ export function translateMergeCommitError(error: unknown): unknown {
 }
 
 /**
- * Raised at PLAN time when two branches conflict over a composition
- * attachment — one branch attaches a part to a whole while another deletes
- * one end of it (`details.branchId` names the attaching branch) — and at
- * APPLY when the plan would separate a composition part from its
+ * Raised at plan time, and again at apply, when two branches conflict over a
+ * composition attachment — one branch attaches a part to a whole while
+ * another deletes one end of it (`details.branchId` names the attaching
+ * branch) — or when the plan would separate a composition part from its
  * whole behind the target's back: a live part of a whole the plan deletes is
  * not itself among the plan's node deletions (the target gained that part
  * AFTER the branch point, or independently of it), or a part the plan
@@ -249,20 +251,17 @@ export function translateMergeCommitError(error: unknown): unknown {
  * trusted would leave the part pointing at a whole that no longer exists, or
  * take it from a whole that does.
  *
- * `planMerge`/`planMergeIncremental` surface the SAME finding, computed by the
- * same `planCompositionCascade` / `unattachedRequiredPartOrphansAmong` owners
- * against the target's state at plan time, as
- * `MergePlanReview.compositionOrphans` — a best-effort, racy dry-run report.
- * This error is the authoritative one: it is thrown from inside the apply
- * transaction, under the per-graph write lock, so it cannot miss an orphan
- * the plan-time report's unlocked read raced past.
+ * Every planning entry point refuses the SAME finding with this error,
+ * computed by the same `planCompositionCascade` /
+ * `unattachedRequiredPartOrphansAmong` owners against the target's state at
+ * plan time: the plan's revision fence makes it a certain apply refusal, so a
+ * plan carrying it could never be applied. Apply re-verifies inside its
+ * transaction, under the per-graph write lock, and raises it again for an
+ * artifact whose rows no longer agree with the target.
  *
  * `details` is typed as {@link MergePlanCompositionOrphan} — the SAME shape
- * `assertNoCompositionOrphans`/`assertNoUnattachedRequiredParts` (`merge.ts`)
- * pass straight into this constructor — rather than a second,
- * structurally-identical type. Two names for one finding is exactly the kind
- * of drift a future field (say, the realizing edge id) could silently
- * introduce between the dry-run report and the apply-time refusal.
+ * every arm (`merge.ts`) passes straight into this constructor — rather than
+ * a second, structurally-identical type.
  *
  * `details.cause` picks the message: `"deleted"` names the whole this plan
  * would delete; `"moved"` names the live whole the target holds a part under
@@ -376,8 +375,8 @@ export type IdentityMergeConflictCode =
   | typeof MERGE_ERROR_CODES.identityConflict
   | typeof MERGE_ERROR_CODES.identitySeparationConflict;
 
-/** One offending edge named in an {@link AcyclicityMergeConflictError}. */
-export type AcyclicityMergeConflictEdge = Readonly<{
+/** One edge a plan-time structural conflict names, at its post-plan endpoints. */
+export type MergeConflictEdge = Readonly<{
   edgeId: string;
   edgeKind: string;
   fromKind: string;
@@ -391,7 +390,7 @@ export type AcyclicityMergeConflictDetails = Readonly<{
   /** The declared acyclic relation the resolved plan would close a cycle in. */
   relation: string;
   /** Every edge of `relation` the plan-time probe found on the cycle. */
-  edges: readonly AcyclicityMergeConflictEdge[];
+  edges: readonly MergeConflictEdge[];
   [key: string]: unknown;
 }>;
 
@@ -412,6 +411,84 @@ export class AcyclicityMergeConflictError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "AcyclicityMergeConflictError";
+  }
+}
+
+/**
+ * `details` carried by {@link CardinalityMergeConflictError}: the store
+ * refusal apply would raise, in the {@link MergeConstraintConflictError} shape,
+ * plus the two `edges` that collide.
+ */
+export type CardinalityMergeConflictDetails =
+  MergeConstraintConflictErrorDetails &
+    Readonly<{ edges: readonly MergeConflictEdge[] }>;
+
+/**
+ * Raised at plan time when the resolved plan would leave two live edges
+ * holding one reservation the store allows a single holder of: a part's one
+ * whole (`cause` is the `CompositionError` `COMPOSITION_WHOLE_OCCUPIED` apply
+ * would raise), or a declared `cardinality` / `targetCardinality` slot (`cause`
+ * is the `CardinalityError`). Two branches reparenting one part to different
+ * wholes, or a branch and the incremental target each adding an incoming edge
+ * to a `targetCardinality: "one"` endpoint, are this conflict.
+ *
+ * Plan time, not apply time, because the plan's revision fence makes the
+ * apply's verdict certain: the unchanged target refuses it, and any target
+ * write that would resolve it makes the plan stale. `details.edges` names
+ * the incumbent first, then the edge that collides with it.
+ */
+export class CardinalityMergeConflictError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.cardinalityConflict;
+  declare readonly cause: TypeGraphError;
+  declare readonly details: CardinalityMergeConflictDetails;
+
+  constructor(cause: TypeGraphError, edges: readonly MergeConflictEdge[]) {
+    super(`The merge plan would violate ${cause.name}: ${cause.message}`, {
+      cause,
+      details: {
+        ...cause.details,
+        constraintCode: cause.code,
+        constraintErrorName: cause.name,
+        constraintDetails: cause.details,
+        edges,
+      },
+      suggestion:
+        "Drop one of the conflicting edge writes from its branch (or, for an incremental merge, from the branch that disagrees with the target), then plan the merge again.",
+    });
+    this.name = "CardinalityMergeConflictError";
+  }
+}
+
+/**
+ * Raised at plan time when the resolved plan deletes an `onDelete: "restrict"`
+ * node that still has a connected non-composition edge the plan does not
+ * delete — typically an edge the incremental target added after the fork.
+ * `cause` is the `RestrictedDeleteError` apply would raise, and `details`
+ * carries its `nodeKind`, `nodeId`, `edgeCount` and `edgeKinds` in the
+ * {@link MergeConstraintConflictError} shape. Plan time for the same reason as
+ * {@link CardinalityMergeConflictError}: no target write can resolve it
+ * without making the plan stale.
+ */
+export class RestrictedDeleteMergeConflictError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.restrictedDeleteConflict;
+  declare readonly cause: TypeGraphError;
+  declare readonly details: MergeConstraintConflictErrorDetails;
+
+  constructor(cause: TypeGraphError) {
+    super(`The merge plan would violate ${cause.name}: ${cause.message}`, {
+      cause,
+      details: {
+        ...cause.details,
+        constraintCode: cause.code,
+        constraintErrorName: cause.name,
+        constraintDetails: cause.details,
+      },
+      suggestion:
+        "Delete the blocking edges in the branch before deleting the node, or keep the node, then plan the merge again.",
+    });
+    this.name = "RestrictedDeleteMergeConflictError";
   }
 }
 
@@ -561,10 +638,10 @@ export class CandidatePlanningScopeError extends MergePlanCapabilityError {
   declare readonly details: Readonly<{
     capability: "boundedCandidatePlanning";
     requiredPlanningScope: "full";
-    planningScope: WholeTargetPlanningScope;
+    planningScope: FullPlanningScope;
   }>;
 
-  constructor(planningScope: WholeTargetPlanningScope) {
+  constructor(planningScope: FullPlanningScope) {
     super(
       `This candidate cannot be planned with bounded reads; it needs the whole target (${planningScope.reason}).`,
       {
@@ -574,7 +651,7 @@ export class CandidatePlanningScopeError extends MergePlanCapabilityError {
           planningScope,
         },
         suggestion:
-          'Pass planningScope: "full" to permit a whole-target copy, or remove the cause named by details.planningScope.reason.',
+          'Pass planningScope: "full" to permit a full copy of the target, or remove the cause named by details.planningScope.reason.',
       },
     );
     this.name = "CandidatePlanningScopeError";

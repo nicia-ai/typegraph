@@ -14,6 +14,9 @@ import {
   type PostgresTableNames,
   type PostgresTables,
 } from "../../src/backend/drizzle/schema/postgres";
+import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
+import type { MergePlanArtifactV3 } from "../../src/graph-merge/plan-schema";
+import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import type { Embedder } from "../../src/graph-merge/types";
 import type { importGraph } from "../../src/interchange";
 import { storeBackend } from "../../src/store/runtime-port";
@@ -406,4 +409,28 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * Re-fences `artifact` to the target's CURRENT revision, as a forged or
+ * replayed artifact would be, so a test can reach apply's own in-transaction
+ * re-verification of a conflict the planner now refuses: plan before the
+ * target write that causes the conflict, make the write, re-fence, apply.
+ */
+export async function refenceMergePlan<G extends GraphDef>(
+  target: Store<G>,
+  artifact: MergePlanArtifactV3,
+): Promise<MergePlanArtifactV3> {
+  const { digest: _digest, ...input } = artifact;
+  const fence = await captureMergePlanTargetFence(target);
+  return constructMergePlanArtifact({
+    ...input,
+    target: {
+      ...fence,
+      revision: {
+        ...fence.revision,
+        owner: requireDefined(fence.revision.owner),
+      },
+    },
+  });
 }

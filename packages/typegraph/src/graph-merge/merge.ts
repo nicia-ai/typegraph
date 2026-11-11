@@ -15,7 +15,10 @@ import { groupBy } from "../utils/array";
 import { nowIso } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { assertMergeTransactionPristine } from "./adopted-transaction";
+import {
+  assertMergeTransactionPristine,
+  withAdoptedMergeApplySavepoint,
+} from "./adopted-transaction";
 import {
   assertMergeCallbackResult,
   assertOnlyDeclaredApplyOptions,
@@ -118,7 +121,6 @@ import {
   withRepointedEndpoints,
 } from "./edge-repoint";
 import {
-  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   describeCause,
   IdentityMergeConflictError,
@@ -202,6 +204,16 @@ import type {
 } from "./plan-schema";
 import { MERGE_PLAN_FORMAT_VERSION } from "./plan-schema";
 import {
+  acyclicityConflict,
+  assertPlanStructurallySound,
+  edgeClaimConflict,
+  MERGE_NODE_DELETE_POLICY,
+  type PlanStructuralCheck,
+  type PlanStructure,
+  restrictedDeleteConflict,
+  statesValidityEnd,
+} from "./plan-structure";
+import {
   constructMergePlanArtifact,
   validateMergePlanArtifact,
 } from "./plan-wire";
@@ -245,7 +257,6 @@ import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
   Edge,
-  EdgeAcyclicityViolation,
   EdgeId,
   GraphBackend,
   GraphDef,
@@ -259,7 +270,6 @@ import type {
   NodeId,
   NodeRow,
   NodeType,
-  ProposedRelationEdge,
   Store,
   TransactionBackend,
   TransactionDeleteNodeWithPolicy,
@@ -270,27 +280,21 @@ import type {
 import type { IdentityDecisionProvenance } from "./typegraph-internal";
 import {
   activeSchemaHash,
-  acyclicEdgeRelations,
   advanceRevisionClock,
   BATCH_POINT_READ,
   batchPointReadVerdict,
   bindExtraIfReachable,
   compositionEdgeAttachesPart,
-  createSqlSchema,
-  edgeKindIsInAcyclicRelation,
   findLiveCompositionAttachment,
   findLiveCompositionWhole,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
-  getDialect,
-  getEdgeRowsByIds,
   type GraphWriteLock,
   isLiveNodeRow,
   loadIdentityWindowHistory,
   lockRecordedGraphWrite,
   orientCompositionEndpoints,
   planCompositionCascade,
-  readProposedEdgeAcyclicityViolations,
   readRecordedClock,
   readRevisionOrigin,
   runRetriedUnit,
@@ -2272,16 +2276,6 @@ function validityEndMutationOf(
   return write.validTo === undefined ? {} : { validTo: write.validTo };
 }
 
-/** Whether a write states its own end of validity — an instant or an explicit reopening — rather than keeping the stored row's. */
-function statesValidityEnd(
-  write: Readonly<{
-    validTo?: string | undefined;
-    clearValidTo?: boolean | undefined;
-  }>,
-): boolean {
-  return write.validTo !== undefined || write.clearValidTo === true;
-}
-
 /** Whether a live edge of `edgeKind` ending at `validTo` still attaches its `partKind` part. */
 function liveCompositionEdgeAttaches(
   registry: KindRegistry,
@@ -2445,10 +2439,7 @@ async function applyNodeRows<G extends GraphDef>(
       // ends them at the retraction's instant and still stamps the node as
       // their cause, so the target's history and transition log read as the
       // branch's did.
-      const deletePolicy: NodeDeletePolicy = {
-        enforceDeleteBehavior: true,
-        cascadeComposition: false,
-      };
+      const deletePolicy: NodeDeletePolicy = MERGE_NODE_DELETE_POLICY;
       const assertionEndsByNode = plannedAssertionEndsByNode(
         deletions,
         identityRetractions,
@@ -3787,27 +3778,27 @@ function assertNoLostBranchAttachments(
 }
 
 /**
- * The plan-time composition-orphan REPORT: every finding from all three arms —
- * {@link compositionOrphansAmong} (`cause: "deleted"`),
+ * The plan-time composition-orphan REFUSAL: the first finding of all three
+ * arms — {@link compositionOrphansAmong} (`cause: "deleted"`),
  * {@link compositionMovedPartsAmong} (`cause: "moved"`) and
- * {@link unattachedRequiredPartOrphansAmong} (`cause: "unattached"`) — for the
- * plan's review payload. Every arm reads the target's current state through
- * the plan's own {@link PlannedCompositionState}, so the report describes the
- * graph the apply would leave, by the same functions the apply refuses with.
+ * {@link unattachedRequiredPartOrphansAmong} (`cause: "unattached"`). Every
+ * arm reads the target's current state through the plan's own
+ * {@link PlannedCompositionState}, so it judges the graph the apply would
+ * leave, by the same functions the apply refuses with.
  *
- * Deliberately unlocked (`uncapturedGraphWriteLock`): plan time is a
- * best-effort, racy dry-run read over the target's CURRENT state, not a
- * write — there is no write transaction here to hold the per-graph write
- * lock inside, and `assertPlanningFenceUnchanged` already re-verifies the
- * broader plan-vs-target staleness question around this call. A concurrent
- * attach this read races past is not a correctness gap: `applyGraphRows`
- * re-runs these SAME checks, under a REAL lock, inside the apply transaction,
- * and refuses with `MergeCompositionOrphanError` if any recurs there.
+ * A plan-time finding is a certain apply refusal, not a report to act on: the
+ * plan is fenced by the target's revision, so the unchanged target refuses it
+ * at apply and any target write that would resolve it makes the plan stale.
+ * It is therefore refused here, like every other structural conflict.
+ *
+ * Unlocked (`uncapturedGraphWriteLock`): planning does no write and holds no
+ * write transaction to lock inside. `applyGraphRows` re-runs these SAME
+ * checks, under a REAL lock, inside the apply transaction.
  */
-async function planTimeCompositionOrphans<G extends GraphDef>(
-  target: Store<G>,
-  writes: MergePlanWrites,
-): Promise<readonly MergePlanCompositionOrphan[]> {
+async function compositionOrphanConflict<G extends GraphDef>(
+  structure: PlanStructure<G>,
+): Promise<MergeError | undefined> {
+  const { target, writes } = structure;
   const ctx = {
     graphId: target.graphId,
     registry: target.registry,
@@ -3815,27 +3806,43 @@ async function planTimeCompositionOrphans<G extends GraphDef>(
   };
   const backend = storeBackend(target);
   const planned = plannedCompositionState(target.registry, writes);
-  const deleted = await compositionOrphansAmong(
-    ctx,
-    backend,
-    writes.nodeDeletes,
-    planned,
-  );
-  const moved = await compositionMovedPartsAmong(
-    ctx,
-    backend,
-    writes.nodeDeletes,
-    planned,
-  );
-  const unattached = await unattachedRequiredPartOrphansAmong(
-    ctx,
-    backend,
-    await requiredExistenceOrphanCandidates(ctx, backend, writes),
-    batchedNodeReader(target, backend),
-    planned,
-  );
-  return [...deleted, ...moved, ...unattached];
+  const [orphan] = [
+    ...(await compositionOrphansAmong(
+      ctx,
+      backend,
+      writes.nodeDeletes,
+      planned,
+    )),
+    ...(await compositionMovedPartsAmong(
+      ctx,
+      backend,
+      writes.nodeDeletes,
+      planned,
+    )),
+    ...(await unattachedRequiredPartOrphansAmong(
+      ctx,
+      backend,
+      await requiredExistenceOrphanCandidates(ctx, backend, writes),
+      batchedNodeReader(target, backend),
+      planned,
+    )),
+  ];
+  return orphan === undefined ? undefined : (
+      new MergeCompositionOrphanError(orphan)
+    );
 }
+
+/**
+ * The structural conflicts every planning entry point refuses, in the order
+ * a plan meeting several is refused by: one more conflict kind is one more
+ * entry here.
+ */
+const PLAN_STRUCTURAL_CHECKS: readonly PlanStructuralCheck[] = [
+  acyclicityConflict,
+  compositionOrphanConflict,
+  restrictedDeleteConflict,
+  edgeClaimConflict,
+];
 
 /**
  * Apply's AUTHORITATIVE re-verification of the "deleted" and "moved" findings
@@ -4186,7 +4193,6 @@ async function resolvedMergeArtifact<G extends GraphDef>(
 ): Promise<MergePlanArtifactV3> {
   const { plan, options } = resolved;
   const writes = resolvedMergeWrites(plan);
-  const compositionOrphans = await planTimeCompositionOrphans(target, writes);
   const input: MergePlanArtifactV3Input = {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode,
@@ -4247,7 +4253,6 @@ async function resolvedMergeArtifact<G extends GraphDef>(
       baseAmbiguities: plan.baseAmbiguities,
       provenanceRecords: plan.provenanceRecords,
       warnings: plan.warnings,
-      compositionOrphans,
       ...(plan.candidateDiagnostics === undefined ?
         {}
       : { diagnostics: plan.candidateDiagnostics }),
@@ -4266,156 +4271,6 @@ async function resolvedMergeArtifact<G extends GraphDef>(
     },
   };
   return constructMergePlanArtifact(input);
-}
-
-/**
- * The resolved plan's edge writes, projected to the shape the shared
- * acyclicity predicate reads: FINAL `(kind, id)` endpoints — through
- * {@link finalEdgeEndpoint}, exactly as the commit itself resolves them
- * (`applyInternalMergePlan`, `applyWireMergeWrites`) — and the window END each
- * write leaves on its row, so the plan-time preview and the eventual write can
- * never disagree about what the plan actually writes. A write that states an
- * end (`validTo` or `clearValidTo`) leaves that one; a write that states none
- * keeps the stored row's, which is read here — the same rule
- * {@link plannedEdgeUpsertAttachesPart} applies — and a row the target does
- * not hold yet is born open. The shared predicate then drops a row its
- * relation does not count in that state (an ended composition membership).
- *
- * An edge whose kind is in no acyclic relation is dropped here already;
- * {@link readProposedEdgeAcyclicityViolations} would drop it too, but
- * filtering here keeps the mapped list — and the stored-row read — free of
- * edges no relation cares about.
- */
-async function resolvedPlanAcyclicityCandidates<G extends GraphDef>(
-  target: Store<G>,
-  plan: MergePlan<G>,
-): Promise<readonly ProposedRelationEdge[]> {
-  const relationEdges = plan.mergedEdges.filter((edge) =>
-    edgeKindIsInAcyclicRelation(target.graph, target.registry, edge.kind),
-  );
-  const keepsStoredEnd = (edge: MergedEdge): boolean =>
-    !statesValidityEnd(edge);
-  const backend = storeBackend(target);
-  const storedRows = await getEdgeRowsByIds(
-    backend,
-    batchPointReadVerdict(backend),
-    target.graphId,
-    relationEdges.filter((edge) => keepsStoredEnd(edge)).map((edge) => edge.id),
-  );
-  return relationEdges.map((edge) => {
-    const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
-    const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
-    return {
-      edgeId: edge.id,
-      edgeKind: edge.kind,
-      fromKind: from.kind,
-      fromId: from.id,
-      toKind: to.kind,
-      toId: to.id,
-      validTo:
-        keepsStoredEnd(edge) ? storedRows.get(edge.id)?.valid_to : edge.validTo,
-    };
-  });
-}
-
-/**
- * Builds the typed plan-time conflict from the first violated relation. A
- * plan can violate several relations at once (for example when composition
- * relations overlap), so every other violated relation is named in
- * `details.additionalRelations` without complicating the primary message.
- */
-function acyclicityMergeConflict(
-  violations: readonly EdgeAcyclicityViolation[],
-  proposedById: ReadonlyMap<string, ProposedRelationEdge>,
-): AcyclicityMergeConflictError {
-  const [firstViolation, ...remaining] = violations;
-  if (firstViolation === undefined) {
-    throw new MergeError(
-      "acyclicityMergeConflict called with no violations — this is a defect in the caller, not a real conflict.",
-    );
-  }
-  const edges = firstViolation.edgeIds.map((edgeId) =>
-    requireDefined(proposedById.get(edgeId)),
-  );
-  const describedEdges = edges
-    .map(
-      (edge) =>
-        `${edge.edgeKind} ${edge.fromKind}:${edge.fromId} -> ${edge.toKind}:${edge.toId}`,
-    )
-    .join(", ");
-  return new AcyclicityMergeConflictError(
-    `The merge plan would close a cycle in acyclic relation "${firstViolation.relation}": ${describedEdges}.`,
-    {
-      details: {
-        relation: firstViolation.relation,
-        edges,
-        ...(remaining.length === 0 ?
-          {}
-        : {
-            additionalRelations: remaining.map((violation) => ({
-              relation: violation.relation,
-              edgeIds: violation.edgeIds,
-            })),
-          }),
-      },
-    },
-  );
-}
-
-/**
- * Plan time: does the resolved plan's projected edge writes — layered
- * onto the target's CURRENT live edges, less the edges the same plan deletes
- * — close a cycle in a declared-acyclic relation. Apply removes those edges
- * before it writes, so a reversal or re-rooting inside the relation is judged
- * by the DAG it produces, not by rows that will be gone. Runs for every commit mode (`merge()`'s direct commit and
- * `planMerge()`'s reviewable artifact both flow through `resolveMerge`,
- * before either branches to its own `complete` callback), so a reviewer of
- * either surface sees the SAME typed conflict instead of only discovering
- * the cycle when the write is attempted.
- *
- * Read-only and lock-free (`readProposedEdgeAcyclicityViolations`): this is
- * a PREVIEW, not the write gate. It runs before any per-graph write lock
- * exists (planning does no write) and is inherently racy against a
- * concurrent writer of the same relation, which is fine — the actual commit
- * re-verifies under the per-graph write lock regardless (the existing
- * write-path fence, unchanged by this check), and stays
- * the sole authority. This function only turns an otherwise-silent future
- * refusal into an up-front, reviewable conflict.
- */
-async function assertResolvedPlanEdgesAcyclic<G extends GraphDef>(
-  target: Store<G>,
-  plan: MergePlan<G>,
-): Promise<void> {
-  if (acyclicEdgeRelations(target.graph, target.registry).length === 0) return;
-  const proposed = await resolvedPlanAcyclicityCandidates(target, plan);
-  if (proposed.length === 0) return;
-
-  const backend = storeBackend(target);
-  const violations = await readProposedEdgeAcyclicityViolations(
-    {
-      graphId: target.graphId,
-      registry: target.registry,
-      schema: createSqlSchema(backend.tableNames),
-      dialect: getDialect(backend.dialect),
-      target: backend,
-      operation: "mergePlanAcyclicity",
-    },
-    target.graph,
-    proposed,
-    // Every stored row the plan rewrites is replaced by its proposed state
-    // (or dropped, when that state is no member), and every row it deletes is
-    // gone: the walk judges the relation the plan produces.
-    [
-      ...[...plan.edgeDeletions.keys()].map((identity) => idOf(identity)),
-      ...proposed.map((edge) => edge.edgeId),
-    ],
-  );
-  if (violations.length === 0) return;
-
-  const proposedById = new Map(
-    proposed.map((edge) => [edge.edgeId, edge] as const),
-  );
-  throw acyclicityMergeConflict(violations, proposedById);
 }
 
 async function resolveMerge<G extends GraphDef, Output>(
@@ -4734,12 +4589,18 @@ async function resolveMerge<G extends GraphDef, Output>(
       );
     }
 
-    // Plan time: does the resolved plan's edge writes — after
-    // canonicalization and repointing — close a cycle in a declared-acyclic
-    // relation. Runs for BOTH commit modes, exactly like the one-id-one-truth
-    // check above: a typed conflict here, before either callback runs, is
-    // what lets a `planMerge()` review see the cycle without ever writing.
-    await assertResolvedPlanEdgesAcyclic(target, plan);
+    // Plan time: every structural refusal the apply is certain to meet —
+    // a cycle, a composition orphan, a restricted delete, two holders of one
+    // claim — judged over the resolved writes after canonicalization and
+    // repointing. Runs for BOTH commit modes, exactly like the
+    // one-id-one-truth check above: a typed conflict here, before either
+    // callback runs, is what keeps `planMerge()` from returning a plan that
+    // can never be applied.
+    await assertPlanStructurallySound(
+      target,
+      resolvedMergeWrites(plan),
+      PLAN_STRUCTURAL_CHECKS,
+    );
 
     let identityGuard: IdentityPeerProbe | undefined;
     if (identityProbeIds !== undefined && incremental !== undefined) {
@@ -6264,7 +6125,9 @@ export async function applyMergePlan<G extends GraphDef>(
  *
  * The caller owns commit, rollback, and whole-transaction retry. This function
  * opens no transaction and throws on every failure so the surrounding callback
- * rejects rather than accidentally committing partial work. Plans requesting
+ * rejects. The apply runs behind a savepoint ({@link withAdoptedMergeApplySavepoint}),
+ * so a failure raised after some rows were written still leaves none of them:
+ * a caller that catches and commits keeps no half-applied merge. Plans requesting
  * persisted provenance are refused because the sidecar cannot yet be enlisted in
  * this caller-owned transaction.
  *
@@ -6304,13 +6167,18 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     const txBackend = transactionBackend(tx);
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
-    const merged = await applyValidatedMergePlanInTransaction(
+    const merged = await withAdoptedMergeApplySavepoint(
       effectiveTarget,
-      tx,
-      artifact,
-      {},
-      true,
-      decision,
+      txBackend,
+      () =>
+        applyValidatedMergePlanInTransaction(
+          effectiveTarget,
+          tx,
+          artifact,
+          {},
+          true,
+          decision,
+        ),
     );
     return reportFromArtifact(artifact, merged, artifact.review.warnings);
   } catch (error) {

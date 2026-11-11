@@ -92,8 +92,9 @@ export {
 export { DURABLE_OPERATION_KEY_MAX_BYTES } from "./durable-operation";
 export type {
   AcyclicityMergeConflictDetails,
-  AcyclicityMergeConflictEdge,
+  CardinalityMergeConflictDetails,
   IdentityMergeConflictCode,
+  MergeConflictEdge,
   MergeConstraintConflictErrorDetails,
   MergeErrorOptions,
 } from "./errors";
@@ -104,6 +105,7 @@ export {
   CandidatePlanningScopeError,
   CandidateSourceError,
   CandidateWriteSetError,
+  CardinalityMergeConflictError,
   DurableEvidenceUndeliveredError,
   DurableOperationConflictError,
   DurableOperationError,
@@ -127,6 +129,7 @@ export {
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,
+  RestrictedDeleteMergeConflictError,
   SimilarityUnavailableError,
   StaleMergePlanError,
   StoreOperationError,
@@ -251,7 +254,7 @@ export type {
 export type {
   CandidatePlanningScope,
   CandidatePlanningScopeReason,
-  WholeTargetPlanningScope,
+  FullPlanningScope,
 } from "./sparse-candidate-branch";
 export {
   captureStoreOperationTarget,

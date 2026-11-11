@@ -21,6 +21,8 @@ export {
 export { REVISION_JOURNAL_ENTITY } from "../backend/revision-journal";
 export { sharesSerializedTransactionResource } from "../backend/transaction-resource";
 export type {
+  ClaimEdgeCardinalityParams,
+  EdgeRow,
   EngineRevision,
   EntityKey,
   GraphBackend,
@@ -104,6 +106,17 @@ export {
   type ProposedRelationEdge,
   readProposedEdgeAcyclicityViolations,
 } from "../store/acyclicity";
+export { targetIdentity } from "../store/claims/axis";
+export {
+  edgeInsertClaims,
+  edgeKindOwesAnyClaim,
+} from "../store/claims/composition-claims";
+export {
+  claimRefusalFor,
+  claimsInProbeOrder,
+  edgeCardinalityClaimTarget,
+} from "../store/claims/edge-claims";
+export { edgeKindCardinalityDeclarations } from "../store/constraints";
 export { type UniqueIntrospection } from "../store/introspect";
 export { planCompositionCascade } from "../store/operations/composition-cascade";
 export {
@@ -112,7 +125,10 @@ export {
   findLiveCompositionWhole,
   withDeferredCompositionExistence,
 } from "../store/operations/composition-create";
-export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
+export {
+  judgeNodeDeleteBehavior,
+  type NodeDeletePolicy,
+} from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
