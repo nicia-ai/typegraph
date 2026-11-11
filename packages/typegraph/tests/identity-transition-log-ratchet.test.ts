@@ -181,7 +181,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "identity/service-interchange-write.ts",
     reason:
-      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, and importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / writeIdentityTransitionRetentionWatermark / hasNativeIdentityTransitionsBefore to write and check rows verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
+      "Imports the IdentityDecisionProvenance type to type a governed-apply's decision metadata before handing it to noteTransition, and importIdentityTransitionsIntoTarget's archival restore, which calls transition-log.ts's own encodeIdentityTransitionRow / insertIdentityTransitionValues / advanceIdentityTransitionCut to write rows and the restored retention cut verbatim — delegating to the relation's one owner, never a second inline write, and never a membership read.",
   },
   {
     file: "store/recorded-capture.ts",
@@ -191,7 +191,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "store/runtime-port.ts",
     reason:
-      "Imports the IdentityDecisionProvenance type to declare the optional `decision` parameter graph-merge's identity apply threads through applyIdentityMergeAtTarget, and IdentityTransitionCursor / IdentityTransitionTransfer to type the archival readIdentityTransitionPageAtTarget / importIdentityTransitionsAtTarget port members — every one a port signature, no relation access.",
+      "Imports the IdentityDecisionProvenance type to declare the optional `decision` parameter graph-merge's identity apply threads through applyIdentityMergeAtTarget, and IdentityTransitionCursor / IdentityTransitionCut / IdentityTransitionRetention / IdentityTransitionTransfer to type the archival readIdentityTransitionPageAtTarget / identityTransitionRetentionAtTarget / importIdentityTransitionsAtTarget port members — every one a port signature, no relation access.",
   },
   {
     file: "store/store.ts",
@@ -216,7 +216,7 @@ const MODULE_ALLOWLIST: readonly AllowedModule[] = [
   {
     file: "identity/service.ts",
     reason:
-      "Re-exports transition-log.ts's readIdentityTransitionPageForInterchange / readTransitionRetentionDetails / toTransitionTransfer functions and the IdentityTransitionCursor / IdentityTransitionTransfer types onto the internal identity-service barrel store.ts imports from — the archival interchange boundary's own read functions, delegating to the one owner, never a second reader.",
+      "Re-exports transition-log.ts's readIdentityTransitionPageForInterchange / readIdentityTransitionRetention / archivalRetentionCut / toTransitionTransfer functions and the IdentityTransitionCursor / IdentityTransitionCut / IdentityTransitionRetention / IdentityTransitionTransfer types onto the internal identity-service barrel store.ts imports from — the archival interchange boundary's own read functions, delegating to the one owner, never a second reader.",
   },
   {
     file: "interchange/import.ts",

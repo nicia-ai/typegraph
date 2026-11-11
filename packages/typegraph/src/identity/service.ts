@@ -18,13 +18,12 @@ export {
 } from "./service-facade";
 export {
   applyIdentityChangesForContext,
-  assertIdentityTransitionsMonotone,
+  createIdentityTransitionShapeCheck,
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
   importIdentityAssertionsIntoTarget,
   importIdentityTransitionsIntoTarget,
   isIdentityTransitionRestore,
-  readIdentityRestoreBaseline,
 } from "./service-interchange-write";
 export type {
   IdentityFoldPlan,
@@ -66,6 +65,6 @@ export type {
 } from "./transition-log";
 export {
   readIdentityTransitionPageForInterchange,
-  readTransitionRetentionDetails,
+  readIdentityTransitionRetention,
   toTransitionTransfer,
 } from "./transition-log";

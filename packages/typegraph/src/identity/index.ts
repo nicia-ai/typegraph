@@ -17,6 +17,9 @@ export {
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
+  type IdentityTransitionCut,
+  type IdentityTransitionPruneResult,
+  type IdentityTransitionRetention,
   type IdentityTransitionTransfer,
   pruneIdentityTransitions,
 } from "./transition-log";

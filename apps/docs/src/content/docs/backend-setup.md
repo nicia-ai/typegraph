@@ -1151,9 +1151,10 @@ declaration.
 
 Version 9 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
 `store.identity.transitionsOf()` and `store.identity.replay()` read, and
-`typegraph_identity_transition_retention`, the per-graph watermark `pruneIdentityTransitions()`
-advances. Every database gets both, whether or not any graph in it enables identity, the same way
-version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
+`typegraph_identity_transition_retention`, one row per graph holding the watermark
+`pruneIdentityTransitions()` advances and the cut an archival restore carried in, each with the
+recorded time of the instant it was made at. Every database gets both, whether or not any graph in
+it enables identity, the same way version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
 `identityTransitionRetention`; replace the default names below consistently when the adapter
 overrides them. The step only creates relations, so it never rewrites existing rows and finishes in
 the time two `CREATE TABLE` statements and three `CREATE INDEX` statements on empty tables take.
@@ -1163,8 +1164,9 @@ or an explicit `backend.adoptBaseSchema()`. Until one of them has run, a DML-onl
 runtime (`createVerifiedStore()`, graph-template attach) refuses with `BaseSchemaMigrationError`,
 so finish privileged adoption before those workers start. A plain `createStore()` attaches without
 reading the marker; on an identity graph opened with `history: true`, its first write that records
-an identity transition then fails with `ConfigurationError` and
-`details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`, naming both relations.
+an identity transition, and any `transitionsOf()`, `replay()` or `pruneIdentityTransitions()` call,
+then fails with `ConfigurationError` and `details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`,
+naming both relations.
 
 Externally managed DDL applies these statements, then advances the marker to 9 with the monotonic
 `INSERT ... ON CONFLICT` shown above. For PostgreSQL:
@@ -1196,14 +1198,16 @@ CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx"
 CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
   "graph_id" TEXT NOT NULL,
   "pruned_before_revision" BIGINT NOT NULL,
-  "pruned_at" TIMESTAMPTZ NOT NULL,
+  "pruned_before_recorded_at" TIMESTAMPTZ,
+  "restored_pruned_before_revision" BIGINT,
+  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
   PRIMARY KEY ("graph_id")
 );
 ```
 
-SQLite uses the same statements with `INTEGER` for the two revision columns and `TEXT` for the
-timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_at`, `assertion_ids`,
-`decision`).
+SQLite uses the same statements with `INTEGER` for the three revision columns and `TEXT` for the
+timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_before_recorded_at`,
+`restored_pruned_before_recorded_at`, `assertion_ids`, `decision`).
 
 Advancing the marker to 9 is one-way: a library release that knows only version 8 or lower refuses a
 database stamped 9 as newer, so roll forward rather than back once any process has adopted it. A

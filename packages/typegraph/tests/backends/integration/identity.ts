@@ -1329,7 +1329,7 @@ export function registerIdentityIntegrationTests(
       expect(document.identity?.assertions).toEqual([]);
     });
 
-    it("restores archival identity transitions and the retention watermark, and tolerates a re-import", async () => {
+    it("restores archival identity transitions without claiming a retention cut, and tolerates a re-import", async () => {
       const backend = context.getStore().backend;
       const [source] = await createStoreWithSchema(
         identityRestoreSourceGraph,
@@ -1377,7 +1377,9 @@ export function registerIdentityIntegrationTests(
           false,
         );
       }
-      expect(truncatedBeforeOf(replay)).toBeDefined();
+      // Nothing was pruned anywhere, and a restore cuts nothing on this
+      // graph's own axis, so no retention cut is claimed.
+      expect(truncatedBeforeOf(replay)).toBeUndefined();
 
       // A second, identical import — `ON CONFLICT (graph_id, transition_id)
       // DO NOTHING` — must not raise a raw driver UNIQUE-constraint error on

@@ -28,6 +28,10 @@ import { identityTransitionsOf } from "../../../src/identity/replay";
 import { createStore } from "../../../src/store";
 import { storeRuntime } from "../../../src/store/runtime-port";
 import { isCanonicalIsoDate } from "../../../src/utils/date";
+import {
+  expectTransitionLogRefusesMissingRelations,
+  TRANSITION_LOG_RELATIONS,
+} from "../../identity-transition-relations-missing";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 
@@ -65,6 +69,21 @@ describe("identity transition log on PGlite (PostgreSQL dialect)", () => {
         ).toBe(true);
         expect(isCanonicalIsoDate(transition.validAt)).toBe(true);
       }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses transition-log reads, prune and writes with the typed missing-relations error", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      await expectTransitionLogRefusesMissingRelations(backend, async () => {
+        for (const relation of TRANSITION_LOG_RELATIONS) {
+          await client.exec(`DROP TABLE IF EXISTS "${relation}"`);
+        }
+      });
     } finally {
       await backend.close();
     }
