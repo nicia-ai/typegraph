@@ -386,7 +386,7 @@ function assertCandidateScopeEligible<G extends GraphDef>(
   message: string,
 ): void {
   const planningScope = candidatePlanningScope(target);
-  if (planningScope.scope === "whole-target")
+  if (planningScope.scope === "full")
     throw new MergeReviewError(message, {
       details: { reason: "candidate-scope-ineligible", planningScope },
     });

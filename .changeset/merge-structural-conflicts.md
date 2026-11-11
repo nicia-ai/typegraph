@@ -1,0 +1,18 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+**A merge plan is never returned when its apply is certain to refuse.** A plan is fenced by the target's revision, so a conflict its own writes produce against the target's current rows cannot be resolved by a later target write without making the plan stale. Every planning entry point (`merge()`, `mergeAgainstBase()`, `mergeIncremental()`, `planMerge()`, `planMergeIncremental()`, `planMergeForEvolution()` and the candidate and mutation planners built on them) now refuses these conflicts while the plan is built, judged with the store's own decision over the state the plan would leave:
+
+- Two live edges holding one reservation the store allows a single holder of — a part's one whole, or a declared `cardinality` / `targetCardinality` slot — are the new `CardinalityMergeConflictError` (`GRAPH_MERGE_CARDINALITY_CONFLICT`). Two branches that reparent one part to different wholes, a branch reparent that disagrees with the incremental target's own, or a branch and the target each adding an edge to a `targetCardinality: "one"` endpoint all planned cleanly before and could never apply. Its `cause` is the `CompositionError` (`COMPOSITION_WHOLE_OCCUPIED`) or `CardinalityError` apply would raise, `details` copies that error's code, name and fields like `MergeConstraintConflictError`, and `details.edges` names the incumbent edge and the one colliding with it.
+- A node the plan deletes whose `onDelete: "restrict"` keeps a non-composition edge the plan does not delete — typically an edge the incremental target added after the fork — is the new `RestrictedDeleteMergeConflictError` (`GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`), whose `cause` is the `RestrictedDeleteError` apply would raise. The plan used to list that blocking edge under `dropped` as `edge:endpoint-deleted`, as if it were resolved.
+- Composition orphans of every cause are refused with `MergeCompositionOrphanError`, as cross-branch orphans and cycles (`AcyclicityMergeConflictError`) already were.
+
+Apply re-verifies every one of these inside its transaction and still refuses an artifact whose rows no longer agree with the target.
+
+**`applyMergePlanInTransaction()` leaves nothing of a failed apply in the caller's transaction.** It runs the plan behind a savepoint, so a refusal or failure raised after some of the plan's rows were written rolls them back before the error reaches the caller. A caller that caught the error and committed could previously keep a half-applied merge that no constraint had judged, such as a required part whose old attachment was deleted before the write of its new one failed.
+
+### Breaking
+
+- `MergeConstraintConflictError` is no longer how `merge()`, `mergeIncremental()` and `applyMergePlan()` report a cardinality or restricted-delete conflict the plan itself produces against the current target: `merge()` and `mergeIncremental()` return `CardinalityMergeConflictError` or `RestrictedDeleteMergeConflictError` instead, and `planMerge()` / `planMergeIncremental()` return them where they returned a plan whose apply refused with `MergeConstraintConflictError`. Branch on the new classes, or on `category: "constraint"` and `details.constraintCode`, which all three share.
+- `applyMergePlanInTransaction()` refuses a target whose transactions expose no statement execution with `MergePlanCapabilityError` (`details.capability: "mergeTransactionSavepoint"`) before applying anything, since it cannot take the savepoint there. The bundled Drizzle backends expose it; a custom backend implements `executeStatement`.

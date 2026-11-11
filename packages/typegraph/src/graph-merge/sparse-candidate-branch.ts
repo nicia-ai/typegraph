@@ -58,20 +58,20 @@ export type CandidatePlanningScopeReason =
 
 /** The rows candidate planning stages, and why when it is not the candidate's own. */
 export type CandidatePlanningScope =
-  Readonly<{ scope: "candidate" }> | WholeTargetPlanningScope;
+  Readonly<{ scope: "candidate" }> | FullPlanningScope;
 
-/** {@link CandidatePlanningScope}'s whole-target decision. */
-export type WholeTargetPlanningScope = Readonly<{
-  scope: "whole-target";
+/** {@link CandidatePlanningScope}'s `"full"` decision: planning copies the whole target. */
+export type FullPlanningScope = Readonly<{
+  scope: "full";
   reason: CandidatePlanningScopeReason;
 }>;
 
 const CANDIDATE_SCOPE = Object.freeze({ scope: "candidate" } as const);
 
-export function wholeTargetPlanningScope(
+export function fullPlanningScope(
   reason: CandidatePlanningScopeReason,
-): WholeTargetPlanningScope {
-  return { scope: "whole-target", reason };
+): FullPlanningScope {
+  return { scope: "full", reason };
 }
 
 /**
@@ -99,9 +99,8 @@ export function candidatePlanningScope<G extends GraphDef>(
       (relation) => relation.name === COMPOSITION_RELATION_NAME,
     )
   )
-    return wholeTargetPlanningScope("composition");
-  if (acyclicRelations.length > 0)
-    return wholeTargetPlanningScope("acyclic-relation");
+    return fullPlanningScope("composition");
+  if (acyclicRelations.length > 0) return fullPlanningScope("acyclic-relation");
   const edges = Object.values(target.graph.edges);
   if (
     edges.some((edge) =>
@@ -110,23 +109,23 @@ export function candidatePlanningScope<G extends GraphDef>(
       ),
     )
   )
-    return wholeTargetPlanningScope("target-side-cardinality");
+    return fullPlanningScope("target-side-cardinality");
   const backend = storeBackend(target);
   if (
     backend.findActiveEdgesBySourceV1 === undefined &&
     edges.some((edge) => edge.cardinality === "oneActive")
   )
-    return wholeTargetPlanningScope("missing-active-source-read");
+    return fullPlanningScope("missing-active-source-read");
   if (
     backend.findEdgesByMatchIdentity === undefined &&
     edges.some((edge) => edge.matchIdentity !== undefined)
   )
-    return wholeTargetPlanningScope("missing-match-identity-read");
+    return fullPlanningScope("missing-match-identity-read");
   if (
     target.graph.identity !== undefined &&
     !hasScopedIdentityReads(storeRuntime(target))
   )
-    return wholeTargetPlanningScope("missing-scoped-identity-reads");
+    return fullPlanningScope("missing-scoped-identity-reads");
   return CANDIDATE_SCOPE;
 }
 
@@ -156,7 +155,7 @@ export type CandidatePlanningScopeResolution =
       ownerRead: CandidateMatchIdentityOwnerRead;
     }>
   | Readonly<{
-      planningScope: WholeTargetPlanningScope;
+      planningScope: FullPlanningScope;
     }>;
 
 /**
@@ -170,12 +169,12 @@ export async function resolveCandidatePlanningScope<G extends GraphDef>(
   writeSet: CandidateWriteSet,
 ): Promise<CandidatePlanningScopeResolution> {
   const planningScope = candidatePlanningScope(target);
-  if (planningScope.scope === "whole-target") return { planningScope };
+  if (planningScope.scope === "full") return { planningScope };
   const fence = await captureMergePlanTargetFence(target);
   const ownerRead = await readCandidateMatchIdentityOwners(target, writeSet);
   if (!matchIdentityOwnersAreCloneVisible(ownerRead.owners))
     return {
-      planningScope: wholeTargetPlanningScope(
+      planningScope: fullPlanningScope(
         "match-identity-owner-not-clone-visible",
       ),
     };

@@ -348,20 +348,19 @@ describe.each(backendMatrix())(
 
           // The edit survives the delete/modify resolution, so the plan keeps
           // the edge the target already holds while deleting its part: the
-          // target-side `moved` arm reports it and apply refuses it. No
-          // branch created the attachment, so no branch is named.
+          // target-side `moved` arm refuses it. No branch created the
+          // attachment, so no branch is named.
           const targetSideFinding = {
             part: { kind: "Part", id: P1 },
             whole: { kind: "Whole", id: W1 },
             viaEdgeKind: "attach",
             cause: "moved",
           } as const;
-          const artifact = unwrap(
+          expectCompositionRefusal(
             await planMerge(forkPoint, [deleter, editor]),
-          );
-          expect(artifact.review.compositionOrphans).toEqual([
             targetSideFinding,
-          ]);
+            "planMerge",
+          );
           expectCompositionRefusal(
             await merge(forkPoint, [deleter, editor]),
             targetSideFinding,

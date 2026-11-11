@@ -437,6 +437,12 @@ if (isErr(result) && result.error instanceof MergeConstraintConflictError) {
 
 Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
 refusals share this surface when they arise from node or edge application.
+Those the plan's own writes are certain to meet against the target's current
+rows are refused while the plan is built instead — two edges holding one
+cardinality slot or one part's whole as `CardinalityMergeConflictError`, a
+restricted node the plan deletes as `RestrictedDeleteMergeConflictError` — so
+this error is the apply-time re-verification for an artifact whose rows no
+longer agree with the target.
 The planner normally co-buckets nodes with the same declared unique key, but a
 late store-owned uniqueness refusal uses the same completeness boundary rather
 than falling back to a system error.
@@ -473,9 +479,54 @@ no per-graph lock, since planning does no write) is not caught here — the
 unchanged apply-time write path still refuses it as
 `MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
 
+### `CardinalityMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan would leave two live edges holding one reservation the store
+allows a single holder of: a part's one whole, or a declared `cardinality` /
+`targetCardinality` slot. Two branches that reparent one part to different
+wholes, or a branch and the incremental target that each add an edge to a
+`targetCardinality: "one"` endpoint, are this conflict. The plan's revision
+fence makes the apply's refusal certain, so no plan is returned.
+
+```typescript
+import {
+  CardinalityMergeConflictError,
+  isErr,
+  planMerge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(store, branches);
+if (isErr(planned) && planned.error instanceof CardinalityMergeConflictError) {
+  console.log(planned.error.code); // "GRAPH_MERGE_CARDINALITY_CONFLICT"
+  console.log(planned.error.details.constraintCode); // "COMPOSITION_WHOLE_OCCUPIED" or "CARDINALITY_ERROR"
+  console.log(planned.error.details.edges); // the incumbent edge, then the one colliding with it
+  console.log(planned.error.cause); // the CompositionError or CardinalityError apply would raise
+}
+```
+
+Like `MergeConstraintConflictError`, `details` copies the store refusal's own
+fields beside `constraintCode`, `constraintErrorName` and `constraintDetails`.
+Reconcile the branches (or the branch with the target) and plan again. See
+[Structural conflicts](/graph-merge#structural-conflicts).
+
+### `RestrictedDeleteMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan deletes an `onDelete: "restrict"` node (the default) that keeps
+a non-composition edge the plan does not delete — typically an edge the
+incremental target added after the fork. `code` is
+`GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`, `cause` is the `RestrictedDeleteError`
+apply would raise, and `details` carries its `nodeKind`, `nodeId`,
+`edgeCount` and `edgeKinds` beside `constraintCode`, `constraintErrorName` and
+`constraintDetails`. Delete the blocking edges in the branch, or keep the
+node, and plan again.
+
 ### `MergeCompositionOrphanError`
 
-Thrown from inside `applyMergePlan`'s transaction when applying the plan would
+Returned at merge **plan time** by every planning entry point, and thrown
+again from inside `applyMergePlan`'s transaction for an artifact whose rows no
+longer agree with the target, when applying the plan would
 delete a composition whole while one of its live parts is not itself among
 the plan's node deletions — the target gained that part after the branch
 point (or independently of it), and the branch's diff carries no deletion for
@@ -487,35 +538,32 @@ the plan leaves standing.
 
 ```typescript
 import {
-  applyMergePlan,
   isErr,
   MergeCompositionOrphanError,
+  planMergeIncremental,
 } from "@nicia-ai/typegraph/graph-merge";
 
-const applied = await applyMergePlan(store, plan);
-if (isErr(applied) && applied.error instanceof MergeCompositionOrphanError) {
-  console.log(applied.error.code); // "GRAPH_MERGE_COMPOSITION_ORPHAN"
-  console.log(applied.error.details.part); // { kind, id }
-  console.log(applied.error.details.cause); // "deleted" | "moved" | "unattached"
-  console.log(applied.error.details.whole); // { kind, id } — absent for cause: "unattached"
-  console.log(applied.error.details.viaEdgeKind);
+const planned = await planMergeIncremental({ forkPoint, target, branches });
+if (isErr(planned) && planned.error instanceof MergeCompositionOrphanError) {
+  console.log(planned.error.code); // "GRAPH_MERGE_COMPOSITION_ORPHAN"
+  console.log(planned.error.details.part); // { kind, id }
+  console.log(planned.error.details.cause); // "deleted" | "moved" | "unattached"
+  console.log(planned.error.details.whole); // { kind, id } — absent for cause: "unattached"
+  console.log(planned.error.details.viaEdgeKind);
 }
 ```
 
-`planMerge` and `planMergeIncremental` surface the same finding, best-effort,
-in `MergePlanReview.compositionOrphans` — a dry-run report computed against
-the target's state at plan time. This error is the authoritative,
-apply-time re-verification of that same check, run under the per-graph write
-lock so it cannot miss an orphan the plan-time report's unlocked read raced
-past. `cause: "deleted"` names the whole a branch deletes while a part
+The plan is fenced by the target's revision, so a finding computed against
+the target's state at plan time is a certain apply refusal: it is refused
+there rather than returned in a plan that could never apply. `applyMergePlan`
+re-verifies the same check under the per-graph write lock. `cause: "deleted"` names the whole a branch deletes while a part
 survives; `cause: "moved"` names the live whole the target holds a part under
 that the plan would delete; `cause: "unattached"` (a part that requires a
 whole) has no whole to name — recompute the merge plan against the target's
 current state, or delete, attach or reconcile the part in the branch before
 merging.
 
-Every planning entry point (`merge`, `mergeIncremental`, `planMerge`,
-`planMergeIncremental`) also returns this error when two branches conflict
+Every planning entry point also returns this error when two branches conflict
 over one composition attachment: one branch moves, attaches or re-attaches
 (reopens an ended `oneActive` row) a part while another deletes the part (`cause: "moved"`, `whole` is the surviving whole
 the part was moved under) or the whole (`cause: "deleted"`, `whole` is the
@@ -551,7 +599,7 @@ if (isErr(applied)) {
 | Error | Code | Meaning |
 | --- | --- | --- |
 | `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
-| `CandidatePlanningScopeError` | `GRAPH_MERGE_PLAN_CAPABILITY` | A `MergePlanCapabilityError`: bounded candidate, mutation or evolution planning needs the whole target. `details.planningScope.reason` names why; pass `planningScope: "full"` to permit the whole-target copy. |
+| `CandidatePlanningScopeError` | `GRAPH_MERGE_PLAN_CAPABILITY` | A `MergePlanCapabilityError`: bounded candidate, mutation or evolution planning needs the whole target. `details.planningScope.reason` names why; pass `planningScope: "full"` to permit a full copy of the target. |
 | `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. This is an expected retry-and-replan outcome under concurrency: no artifact is returned, so recapture the target and create a new plan before retrying. |
 | `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
 | `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
@@ -2106,7 +2154,9 @@ try {
 | `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
 | `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
-| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | Applying the plan would delete a whole while a live part of it is not among the plan's deletions, or delete a part the target holds under a live whole the plan keeps; or, at planning, one branch's composition attachment loses its part or whole to another branch's deletion |
+| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | The plan would delete a whole while a live part of it is not among the plan's deletions, delete a part the target holds under a live whole the plan keeps, or leave a required part with no whole; or one branch's composition attachment loses its part or whole to another branch's deletion |
+| `GRAPH_MERGE_CARDINALITY_CONFLICT` | `CardinalityMergeConflictError` | constraint | The plan would leave two live edges holding one part's whole or one declared cardinality slot |
+| `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT` | `RestrictedDeleteMergeConflictError` | constraint | The plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |

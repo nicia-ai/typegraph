@@ -218,10 +218,18 @@ await db.transaction(async (nativeTx) => {
 ```
 
 The adopted applier returns `Promise<MergeReport>` and throws a typed
-`MergeError` on refusal or failure. It does not open, commit, roll back, or retry
-a transaction. Let the exception reject the outer callback so all merge and
-application writes roll back together. Never catch it inside the transaction
-and then commit. When the driver reports a retryable transaction failure, retry
+`MergeError` on refusal or failure. It does not open, commit, or retry a
+transaction. It runs the plan behind a savepoint inside the caller's
+transaction: a refusal or failure, including one raised after some of the
+plan's rows were written, rolls every merge row back before the error reaches
+the caller, so the merge never leaves a half-applied state — such as a
+required part whose old attachment is gone and whose new one was never
+written — even if the error is caught and the transaction committed. Let the
+exception reject the outer callback anyway, so the application writes that
+depended on the merge roll back with it. A target whose transactions expose no
+statement execution cannot take the savepoint and is refused with
+`MergePlanCapabilityError` (`details.capability: "mergeTransactionSavepoint"`)
+before anything is applied. When the driver reports a retryable transaction failure, retry
 the entire outer transaction, including the application writes; do not add an
 inner retry or nested transaction around the merge.
 
@@ -314,9 +322,9 @@ authoring the JSON document; it records the evolution plan's resulting schema
 identity rather than the currently active one. The planner stages the candidate
 against that resulting graph and returns, as `plan`, the same resulting-schema
 merge artifact accepted by `withEvolvedTransaction()`. It always stages the
-whole resulting graph, so its `planningScope` is
-`{ scope: "whole-target", reason: "planned-evolution" }` and it takes no
-`planningScope` option.
+whole resulting graph, so the call must state `planningScope: "full"` (any
+other value is refused with `CandidatePlanningScopeError`, reason
+`planned-evolution`), and it reports `{ scope: "full", reason: "planned-evolution" }`.
 
 Candidate resolution still includes the committed target as an accepted source.
 Existing unique matches and property conflicts are therefore visible in the
@@ -442,8 +450,11 @@ On an eligible revision-tracked graph, candidate planning reads existing
 candidate ids and edge endpoints by key, then seeds only those rows in the
 transient working copy. A graph that declares a target-side cardinality, an
 `acyclic` edge or a composition pair is not eligible: those constraints depend
-on rows the sparse base never reads, so planning there uses the
-complete clone, whole-target path and reports why in `planningScope`
+on rows the sparse base never reads, so the default `planningScope:
+"candidate"` refuses there with `CandidatePlanningScopeError`, whose
+`details.planningScope.reason` names the cause. A call that states
+`planningScope: "full"` plans against a complete clone and reports
+`{ scope: "full", reason: "full-requested" }`
 (see [Planning scope](#planning-scope)). On identity-enabled graphs, it also follows live same-id peers and
 current identity assertions from those references to a fixed point. The
 planner reads peers of a candidate edge with `one` cardinality by source,
@@ -604,9 +615,12 @@ without invalidating a candidate-scoped review when it cannot affect the
 fresh resolved plan; the default whole-target review (`formatVersion`
 `MERGE_REVIEW_FORMAT_VERSION`, 3) would report that row change. Applications
 whose approval policy needs the whole-graph rule should omit `reviewScope`.
-The review artifact records its format and scope, so revalidation applies the
-rule originally reviewed. A review stored under format 1 or 2 embeds a
-version-1 plan and is refused with `MergeReviewError`
+The review artifact records its format and review scope, so revalidation
+applies the baseline rule originally reviewed. It does not record the planning
+scope: `planningScope` is a per-call choice about what planning may copy, not
+review content, so revalidating a review that needed `planningScope: "full"`
+states it again. A review stored under format 1 or 2 embeds a format 1 or
+format 2 plan and is refused with `MergeReviewError`
 `details.reason: "unsupported-version"`; plan and review the candidate write
 set again.
 
@@ -617,14 +631,14 @@ the eligibility rules, and `details.planningScope` carries the
 write-set planning, and a review planned without `reviewScope`, apply the
 default bounded `planningScope` the same way: an ineligible graph is refused
 with `CandidatePlanningScopeError` unless the call states
-`planningScope: "full"`, which plans with the complete-clone, whole-target
-planner and reports `full-requested`. Revalidating a
+`planningScope: "full"`, which plans against a complete clone and reports
+`full-requested`. Revalidating a
 stored candidate-scoped review is refused with the same reason when the target
 can no longer be read sparsely, for example after a custom backend loses
 `findActiveEdgesBySourceV1` on a `oneActive` graph.
 On a `oneActive` graph, a custom backend must expose
-`findActiveEdgesBySourceV1` for a candidate-scoped review; without it the
-fallback and the whole-target review remain available.
+`findActiveEdgesBySourceV1` for a candidate-scoped review; without it
+`planningScope: "full"` and the whole-target review remain available.
 A graph that declares a target-side cardinality, an `acyclic` edge or a
 composition pair is not eligible either: those constraints depend on rows
 outside the candidate's own scope.
@@ -651,7 +665,8 @@ added) or re-roots a chain is judged by the DAG it produces and merges. A
 violation surfaces as the
 typed `AcyclicityMergeConflictError` (`code: "GRAPH_MERGE_ACYCLICITY_CONFLICT"`),
 naming the relation and every offending edge in `details`, so a `planMerge()`
-review sees it before deciding whether to apply. Only a cycle that arises from
+caller sees it before any plan exists to approve (see
+[Structural conflicts](#structural-conflicts)). Only a cycle that arises from
 a write racing the plan-time check (which holds no per-graph lock, since
 planning does no write) escapes it, and is still caught by the unchanged
 apply-time write path: apply refuses with `MergeConstraintConflictError`
@@ -1120,11 +1135,54 @@ that change with no conflict; only fields multiple branches changed to differing
 values become conflicts. This holds for node *and* edge properties, so disjoint
 edits compose instead of clobbering each other.
 
+### Structural conflicts
+
+A plan is fenced by the target's revision: `applyMergePlan()` refuses it with
+`StaleMergePlanError` after any intervening target write. A conflict the
+plan's own writes produce against the target's current rows is therefore
+never a race the apply might win. The unchanged target refuses it, and the
+only target write that could resolve it makes the plan stale. Every planning
+entry point (`merge()`, `mergeAgainstBase()`, `mergeIncremental()`,
+`planMerge()`, `planMergeIncremental()` and the candidate and mutation
+planners built on them) therefore refuses such a conflict while the plan is
+built, so a plan they return is never one that cannot be applied:
+
+| Conflict | Error | When |
+| --- | --- | --- |
+| Cycle | `AcyclicityMergeConflictError` | The plan's edges, layered onto the target's, close a cycle in a declared `acyclic: true` relation |
+| Composition orphan | `MergeCompositionOrphanError` | The plan would separate a part from its whole (see [Composition orphans](#composition-orphans)) |
+| Restricted delete | `RestrictedDeleteMergeConflictError` | The plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete, such as one the incremental target added after the fork |
+| Occupied whole or cardinality slot | `CardinalityMergeConflictError` | The plan leaves two live edges holding one reservation: a part's one whole, or a declared `cardinality` / `targetCardinality` slot |
+
+Each refusal is reached through the store's own decision, applied to the
+state the plan would leave: the claim set an edge write takes, the
+delete-behavior verdict a node delete reaches, the acyclicity walk. The
+plan's deletions and rewrites are applied first, so a move (`reparent`) or a
+reversal is judged by the graph it produces. `CardinalityMergeConflictError`
+and `RestrictedDeleteMergeConflictError` carry the store refusal the apply
+would raise as `cause` (`CompositionError` with `COMPOSITION_WHOLE_OCCUPIED`,
+`CardinalityError` or `RestrictedDeleteError`), and copy its code, name and
+details into their own `details` like `MergeConstraintConflictError` does.
+`CardinalityMergeConflictError.details.edges` names the incumbent and the
+edge that collides with it.
+
+The incremental target's changes since the fork count like a branch's here.
+Two branches that reparent one part to different wholes, or a branch and the
+target that do, are refused rather than resolved by "the target wins": the
+plan would hold both attachments, and there is no row-level value to prefer.
+Reconcile the branches (or the branch with the target) and plan again.
+
+Everything else a review shows leaves the plan applicable: property and
+delete/modify conflicts resolved under their policy, `dropped` items, base
+ambiguities, and `identityConflicts`. Apply re-verifies every structural rule
+inside its own transaction regardless, and refuses with the same errors (or
+`MergeConstraintConflictError`) for an artifact whose rows no longer agree
+with the target.
+
 ### Composition orphans
 
 Three independent ways a merge can separate a composition part from its
-whole behind the target's back, all surfaced through the same
-`MergePlanReview.compositionOrphans` finding and the same
+whole behind the target's back, all refused with the same
 `MergeCompositionOrphanError`:
 
 - **`cause: "deleted"`** — a branch deletes a composition whole (see
@@ -1145,14 +1203,15 @@ whole behind the target's back, all surfaced through the same
   or ends, resolves to no live whole at all after canonicalization. There is
   no whole to name for this cause, so `whole` is absent.
 
-`planMerge` and `planMergeIncremental` judge all three against the state the
-plan would leave — the target's current rows with the plan's own writes laid
-over them — and report every finding in `MergePlanReview.compositionOrphans`.
-A part the plan deletes or moves to another whole (a merged `reparent`) is not
-a `"deleted"` orphan, and a required part the plan creates together with its
-composition edge is not an `"unattached"` one. A part the plan deletes is
-still reported as `"moved"` when the target holds it under a live whole the
-plan keeps:
+Every planning entry point judges all three against the state the plan
+would leave — the target's current rows with the plan's own writes laid over
+them — and refuses the first finding as a
+[structural conflict](#structural-conflicts). A part the plan deletes or
+moves to another whole (a merged `reparent`) is not a `"deleted"` orphan, and
+a required part the plan creates together with its composition edge is not an
+`"unattached"` one. A part the plan deletes is still refused as `"moved"` when
+the target holds it under a live whole the plan keeps. The error's `details`
+are:
 
 ```typescript
 type MergePlanCompositionOrphan = {
@@ -1160,7 +1219,7 @@ type MergePlanCompositionOrphan = {
   whole?: { kind: string; id: string }; // absent for cause: "unattached"
   viaEdgeKind: string; // the realizing composition edge
   cause: "deleted" | "moved" | "unattached";
-  branchId?: string; // the attaching branch, for a cross-branch refusal
+  branchId?: string; // the attaching branch, for a cross-branch conflict
 };
 ```
 
@@ -1170,9 +1229,7 @@ by reopening an ended `oneActive` row (`clearValidTo`), while another
 branch's deletion removes one end of that attachment. Merged as-is, the
 attaching branch's composition edge would be dropped as
 `edge:endpoint-deleted` (a reopened row is absorbed by its deletion without
-even that) and its move would be lost. Every planning entry
-point (`merge`, `mergeIncremental`, `planMerge`, `planMergeIncremental`)
-therefore refuses at plan time with `MergeCompositionOrphanError`, and
+even that) and its move would be lost. That conflict is refused too, and
 `details.branchId` names the attaching branch:
 
 - `cause: "moved"`: the part is deleted (directly, or by its old whole's
@@ -1181,28 +1238,22 @@ therefore refuses at plan time with `MergeCompositionOrphanError`, and
 - `cause: "deleted"`: the whole is deleted while the attaching branch put a
   surviving part under it. `whole` names the deleted whole.
 
-Because no target write can resolve this conflict, it is refused while the
-plan is built rather than reported in `compositionOrphans` for apply to
-re-check. The refusal comes before the plan-time report, so a required-existence part caught here is not also
-reported as `"unattached"`. If the plan deletes both the part and the whole,
+A required-existence part caught by that cross-branch check is not also
+refused as `"unattached"`. If the plan deletes both the part and the whole,
 or the edge does not realize a composition pair, the edge is an ordinary
 `edge:endpoint-deleted` drop and the merge proceeds. A finding without
 `branchId` is about the target's own state, including the incremental
 target's own moves.
 
-This is a best-effort, unlocked dry-run read, surfaced for an operator to act
-on before approving the plan. `applyMergePlan` re-verifies the same finding
-inside the apply transaction, under the per-graph write lock, and refuses with
-`MergeCompositionOrphanError` (see [Errors](/errors#mergecompositionorphanerror))
-if it still recurs there — so a plan-time report that comes back empty is not
-a guarantee against a concurrent attach racing the eventual apply. A
+`applyMergePlan` re-verifies the same findings inside the apply transaction,
+under the per-graph write lock, and refuses with `MergeCompositionOrphanError`
+(see [Errors](/errors#mergecompositionorphanerror)) if one recurs there. A
 composition edge canonicalization drops as `edge:endpoint-deleted` issues no
 write, and none is needed to catch it. If a branch made that attachment,
 planning refuses as described above. If the edge already attached its part at
 the branch point, the plan deletes one of its endpoints. A deleted part leaves
 nothing to orphan. For a deleted whole, the `"deleted"` check reads the
-target's live parts of every whole the plan deletes: a surviving part is
-reported at plan time and refused inside the apply transaction. Running
+target's live parts of every whole the plan deletes. Running
 `store.verifyConstraintFences()` after a merge is a generic audit, not a step
 the merge relies on.
 
@@ -1577,7 +1628,11 @@ refused with `BaseVersionMismatchError` instead of committing diffs against an
 ancestor that no longer exists. Only the `target` may advance while the merge
 runs.
 If both the branch and the live target changed the same inherited row, the target
-value/deletion wins and the conflict is reported. Both `merge()` and
+value/deletion wins and the conflict is reported. A change that cannot be
+resolved row by row because the two sides' results cannot coexist — the branch
+and the target reparenting one part to different wholes, or each adding an
+edge to a `targetCardinality: "one"` endpoint — is refused at plan time as a
+[structural conflict](#structural-conflicts). Both `merge()` and
 `mergeIncremental()` commit **transactionally** and require a
 transaction-capable target backend. Managed targets also acquire the
 schema-version write fence; raw targets remain outside schema fencing. On
@@ -3038,7 +3093,7 @@ artifact or its digest.
 ```typescript
 type CandidatePlanningScope =
   | { scope: "candidate" }
-  | { scope: "whole-target"; reason: CandidatePlanningScopeReason };
+  | { scope: "full"; reason: CandidatePlanningScopeReason };
 ```
 
 | `reason` | Cause |
@@ -3059,7 +3114,7 @@ target or candidate needs the whole target, planning is refused with
 `MergePlanCapabilityError` (`GRAPH_MERGE_PLAN_CAPABILITY`) whose details are
 `{ capability: "boundedCandidatePlanning", requiredPlanningScope: "full",
 planningScope }`, and `planningScope.reason` names the cause. Pass
-`planningScope: "full"` to permit the whole-target copy; the result then
+`planningScope: "full"` to permit a full copy of the target; the result then
 reports `full-requested`. `planMutations()` and
 `planCandidateWriteSetForEvolution()` apply the same rule.
 
@@ -3286,8 +3341,8 @@ const result = await merge(base, [agentB, systemOfRecord, agentA], {
 
 Most entry points return a `Result`; the error arm is a typed `TypeGraphError`
 subclass you can branch on. `applyMergePlanInTransaction()` instead throws a
-typed `MergeError` so a caller-owned transaction callback cannot resolve and
-commit after a partially applied failure:
+typed `MergeError`, after rolling back every row it wrote, so the
+caller-owned transaction callback rejects by default:
 
 | Error                        | When                                                                                                                                                                                                                                                                          |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -3295,7 +3350,10 @@ commit after a partially applied failure:
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, opposing relations, and retract/reassert races — see [Identity conflicts](#identity-conflicts) and the [identity guide](/identity/#interchange-and-branch-merge). One related code on the same error class names a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a definitional match or a transitive cluster crosses a class-lifted `different` assertion — see [Identity separation veto](#identity-separation-veto)). |
 | `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
-| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. The resolved plan would violate a deterministic store constraint, such as source- or target-side edge cardinality or node uniqueness. Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
+| `CardinalityMergeConflictError` | Code `GRAPH_MERGE_CARDINALITY_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave two live edges holding one part's whole or one declared `cardinality` / `targetCardinality` slot — two branches reparenting one part to different wholes, or a branch and the incremental target each adding an edge to a `targetCardinality: "one"` endpoint. Its `cause` is the `CompositionError` or `CardinalityError` apply would raise and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |
+| `RestrictedDeleteMergeConflictError` | Code `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`. Returned at plan time when the plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete, such as one the incremental target added after the fork. Its `cause` is the `RestrictedDeleteError` apply would raise. |
+| `MergeCompositionOrphanError` | Code `GRAPH_MERGE_COMPOSITION_ORPHAN`. Returned at plan time, and by apply's in-transaction re-verification, when the plan would separate a composition part from its whole. See [Composition orphans](#composition-orphans). |
+| `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. Applying the plan violated a deterministic store constraint, such as node uniqueness, or a cardinality or restrict rule an artifact no longer agreeing with the target runs into; the conflicts the planner can see are refused at plan time instead (see [Structural conflicts](#structural-conflicts)). Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |
 | `InvalidMergeOptionsError`   | Code `GRAPH_MERGE_INVALID_OPTIONS`. The supplied option combination is invalid, `mergeIncremental()` was given the snapshot-only `target` option instead of silently ignoring it, or `mergeIncremental()`'s `onBasePropertyConflict` is not `"flag"`.                         |
 | `SimilarityUnavailableError` | A `vector`/`hybrid` strategy was requested with no `embedder`.                                                                                                                                                                                                                |
 | `MergeConflictError`         | A conflict could not be resolved under the configured policy.                                                                                                                                                                                                                 |

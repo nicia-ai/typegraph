@@ -185,7 +185,7 @@ const PEER_IDS = ["a", "b", "c", "d"] as const;
 const crossRowCases = [
   {
     name: "target-side cardinality",
-    planningScope: { scope: "whole-target", reason: "target-side-cardinality" },
+    planningScope: { scope: "full", reason: "target-side-cardinality" },
     graph: defineGraph({
       id: "cross_row_target_cardinality",
       nodes: { Peer: { type: Peer } },
@@ -204,7 +204,7 @@ const crossRowCases = [
   },
   {
     name: "acyclic edge",
-    planningScope: { scope: "whole-target", reason: "acyclic-relation" },
+    planningScope: { scope: "full", reason: "acyclic-relation" },
     graph: defineGraph({
       id: "cross_row_acyclic",
       nodes: { Peer: { type: Peer } },
@@ -218,7 +218,7 @@ const crossRowCases = [
   },
   {
     name: "composition",
-    planningScope: { scope: "whole-target", reason: "composition" },
+    planningScope: { scope: "full", reason: "composition" },
     graph: defineGraph({
       id: "cross_row_composition",
       nodes: { Peer: { type: Peer } },
@@ -1091,7 +1091,7 @@ export function registerGraphMergeReviewIntegrationTests(
       Reflect.deleteProperty(backend, "findActiveEdgesBySourceV1");
       try {
         expect(candidatePlanningScope(target)).toEqual({
-          scope: "whole-target",
+          scope: "full",
           reason: "missing-active-source-read",
         });
         const refused = await revalidateCandidateWriteSetReview({
@@ -1817,10 +1817,10 @@ export function registerGraphMergeReviewIntegrationTests(
           }),
         );
         // A sparse base stages only the rows the candidate touches; the
-        // whole-target copy stages every target row.
+        // full copy stages every target row.
         expect(stagedIds.toSorted()).toEqual([...PEER_IDS]);
         expect(planningScope).toEqual({
-          scope: "whole-target",
+          scope: "full",
           reason: "full-requested",
         });
         const full = unwrap(

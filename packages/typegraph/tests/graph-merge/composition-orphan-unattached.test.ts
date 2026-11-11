@@ -60,8 +60,8 @@ import { computeBaseVersion } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import type { CanonicalEntity } from "../../src/graph-merge/canonicalize";
 import type { MergedEdge } from "../../src/graph-merge/edge-repoint";
+import { MergeCompositionOrphanError } from "../../src/graph-merge/errors";
 import {
-  applyMergePlan,
   type MergePlan,
   planMergeIncremental,
   requiredExistenceOrphanCandidates,
@@ -69,7 +69,7 @@ import {
 } from "../../src/graph-merge/merge";
 import { mergeKey } from "../../src/graph-merge/node-key";
 import { mergePlanArtifactV3Schema } from "../../src/graph-merge/plan-schema";
-import { isErr, isOk } from "../../src/graph-merge/result";
+import { isErr } from "../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../src/graph-merge/types";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
@@ -238,7 +238,7 @@ describe.each(backendMatrix())(
     // through `importGraphStream`, which refuses the graph, and `branch()`
     // fails.
 
-    it("reports at plan time and refuses at apply time when a branch drops the part's only composition edge while both endpoints survive", async () => {
+    it("refuses at plan time a branch that drops the part's only composition edge while both endpoints survive", async () => {
       cleanups = [];
       const forkPoint = await makeStore();
       await forkPoint.nodes.UWhole.create({}, { id: "w1" });
@@ -287,63 +287,27 @@ describe.each(backendMatrix())(
         target,
         branches: [branchA],
       });
-      expect(isOk(planResult)).toBe(true);
-      if (!isOk(planResult)) throw planResult.error;
-      const artifact = planResult.data;
 
-      // The plan-time PREVIEW: `unattachedRequiredPartOrphansAmong`'s own
-      // contribution. Nothing has been written yet, so nothing else could
-      // report this — proving the arm fires BEFORE any attempt to apply.
-      expect(artifact.review.compositionOrphans).toEqual([
-        {
-          part: { kind: "UPart", id: "p1" },
-          viaEdgeKind: "uHolds",
-          cause: "unattached",
-        },
-      ]);
+      // `unattachedRequiredPartOrphansAmong`'s own contribution, judged over
+      // the plan's write set before anything is written: the plan's revision
+      // fence makes the apply's refusal certain, so the planner refuses.
+      if (!isErr(planResult)) throw new Error("expected a plan-time refusal");
+      expect(planResult.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(planResult.error.details).toEqual({
+        part: { kind: "UPart", id: "p1" },
+        viaEdgeKind: "uHolds",
+        cause: "unattached",
+      });
 
-      // Apply is refused. For THIS construction — an explicit
-      // `plan.edgeDeletes` entry naming a live required-existence
-      // composition edge — `applyEdgeRows`'s ordinary
-      // `edgeCollection(...).delete(...)` call reaches the composition
-      // edge's PRE-EXISTING per-write detach refusal
-      // (`assertCompositionExistencePreserved`) BEFORE this fix's own
-      // `assertNoUnattachedRequiredParts` gets a chance to run — so the
-      // thrown error is `CompositionExistenceError`, translated to
-      // `MergeConstraintConflictError` at the merge boundary, not
-      // `MergeCompositionOrphanError`. Either way nothing commits, which
-      // is the guarantee the merge-existence audit asks for.
-      // A composition edge canonicalization DROPS as
-      // `ENDPOINT_DELETED_DROP_REASON` issues no delete/update call for the
-      // per-write refusal to intercept; the plan deletes that edge's whole,
-      // so the "deleted" arm reports and refuses it instead
-      // (`composition-orphan-endpoint-deleted.test.ts`).
-      const applyResult = await applyMergePlan(target, artifact);
-      expect(isErr(applyResult)).toBe(true);
-      if (!isErr(applyResult)) throw new Error("expected apply to be refused");
-
-      // Nothing changed on the target: the refusal fires from inside the
-      // SAME apply transaction the edge deletion would have committed
-      // through, so it rolls back with it.
-      await expect(
-        target.nodes.UWhole.getById("w1" as never),
-      ).resolves.toBeDefined();
-      await expect(
-        target.nodes.UPart.getById("p1" as never),
-      ).resolves.toBeDefined();
       await expect(target.edges.uHolds.find({})).resolves.toEqual([
         expect.objectContaining({ id: forkEdgeId }),
       ]);
     });
-    // MUTATION CHECK: comment out the `unattached` computation inside
-    // `planTimeCompositionOrphans` (src/graph-merge/merge.ts) — drop its
-    // call to `unattachedRequiredPartOrphansAmong` and return only
-    // `deleted`. The plan-time `compositionOrphans` assertion above then
-    // reports `[]` instead of the finding. (Apply still refuses either way,
-    // via the pre-existing per-write detach refusal described above — that
-    // refusal is what the final `find({})` assertion actually pins, not
-    // this fix's own code; the `compositionOrphans` assertion is this
-    // test's load-bearing check on the NEW code.)
+    // MUTATION CHECK: drop the `unattachedRequiredPartOrphansAmong` arm from
+    // `compositionOrphanConflict` (src/graph-merge/merge.ts). The plan then
+    // comes back `ok`, and only the apply's pre-existing per-write detach
+    // refusal (`assertCompositionExistencePreserved`, surfaced as
+    // `MergeConstraintConflictError`) stops the merge.
 
     it("finds a candidate reachable through each of the three write sources from the live plan's view and from the wire artifact's view alike", async () => {
       cleanups = [];

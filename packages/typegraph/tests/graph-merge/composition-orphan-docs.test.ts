@@ -1,9 +1,9 @@
 /**
- * The published description of `MergePlanReview.compositionOrphans` must agree
+ * The published description of the composition-orphan refusal must agree
  * with the planner: a part the plan deletes is not a `deleted` orphan but IS
- * reported as `moved` when the target holds it under a live whole the plan
+ * refused as `moved` when the target holds it under a live whole the plan
  * keeps (see composition-orphan.test.ts). The changeset and the merge guide
- * therefore may not say that a part the plan deletes is never reported, and
+ * therefore may not say that a part the plan deletes is never refused, and
  * must speak of all three causes.
  */
 import { readFileSync } from "node:fs";
@@ -23,6 +23,7 @@ const MERGE_GUIDE_PATH = fileURLToPath(
 const NEVER_REPORTED_CLAIMS = [
   "a part the plan deletes, moves or creates with its composition edge is not reported",
   "are not orphans and are not reported",
+  "a part the plan deletes, moves or creates with its composition edge is not refused",
 ] as const;
 
 function flattenWhitespace(text: string): string {
@@ -37,7 +38,7 @@ function compositionOrphanGuideSection(): string {
 }
 
 describe("composition orphan documentation", () => {
-  it("does not claim a part the plan deletes is never reported", () => {
+  it("does not claim a part the plan deletes is never refused", () => {
     const documents = {
       changeset: flattenWhitespace(readFileSync(CHANGESET_PATH, "utf8")),
       guide: compositionOrphanGuideSection(),
@@ -51,8 +52,8 @@ describe("composition orphan documentation", () => {
 
   it("scopes the guide's judged-against-the-plan statement to all three causes", () => {
     const section = compositionOrphanGuideSection();
-    expect(section).toContain("judge all three against the state");
-    expect(section).not.toContain("judge both");
-    expect(section).toContain('still reported as `"moved"`');
+    expect(section).toContain("judges all three against the state");
+    expect(section).not.toContain("judges both");
+    expect(section).toContain('still refused as `"moved"`');
   });
 });

@@ -38,9 +38,9 @@ import {
   type CandidatePlanningScope,
   candidatePlanningScope,
   type CandidatePlanningScopeResolution,
+  fullPlanningScope,
   resolveCandidatePlanningScope,
   sparseCandidateWorkingCopyStrategy,
-  wholeTargetPlanningScope,
 } from "./sparse-candidate-branch";
 import type { GraphDef, Store } from "./typegraph-internal";
 import { storeBackend } from "./typegraph-internal";
@@ -120,7 +120,7 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
    * The target state planning may copy. The default, `"candidate"`, plans
    * from the candidate's own rows and refuses with
    * `CandidatePlanningScopeError` (naming the reason) when this target or
-   * candidate needs the whole target; `"full"` permits that whole-target copy.
+   * candidate needs the whole target; `"full"` permits that full copy.
    */
   planningScope?: PlanningScope;
 }>;
@@ -236,7 +236,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   if (capabilityRefusal !== undefined) return err(capabilityRefusal);
   if (requested.data === "candidate") {
     const targetScope = candidatePlanningScope(args.target);
-    if (targetScope.scope === "whole-target")
+    if (targetScope.scope === "full")
       return err(new CandidatePlanningScopeError(targetScope));
   }
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);
@@ -275,7 +275,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
   let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
   let resolution: CandidatePlanningScopeResolution;
   if (requested.data === "full") {
-    resolution = { planningScope: wholeTargetPlanningScope("full-requested") };
+    resolution = { planningScope: fullPlanningScope("full-requested") };
   } else {
     try {
       resolution = await resolveCandidatePlanningScope(args.target, writeSet);
@@ -289,7 +289,7 @@ export async function planCandidateWriteSet<G extends GraphDef>(
     }
   }
   const { planningScope } = resolution;
-  if (requested.data === "candidate" && planningScope.scope === "whole-target")
+  if (requested.data === "candidate" && planningScope.scope === "full")
     return err(new CandidatePlanningScopeError(planningScope));
   const bounded = "fence" in resolution ? resolution : undefined;
   const sparse =
@@ -429,7 +429,7 @@ export async function planCandidateWriteSetForEvolution<G extends GraphDef>(
     readOwnProperty(args, "planningScope"),
   );
   if (isErr(requested)) return requested;
-  const planningScope = wholeTargetPlanningScope("planned-evolution");
+  const planningScope = fullPlanningScope("planned-evolution");
   if (requested.data !== "full")
     return err(new CandidatePlanningScopeError(planningScope));
   const parsed = CandidateWriteSetSchema.safeParse(args.writeSet);

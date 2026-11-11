@@ -27,7 +27,7 @@ async function legacyArtifact(
   overrides: Readonly<Record<string, unknown>> = {},
 ): Promise<unknown> {
   const { review, target, ...body } = planInput();
-  const { compositionOrphans: _orphans, ...legacyReview } = review;
+  const { identityConflicts: _conflicts, ...legacyReview } = review;
   const { owner: _owner, ...unownedRevision } = target.revision;
   const input = {
     ...body,
@@ -99,7 +99,6 @@ function planInput(): MergePlanArtifactV3Input {
       baseAmbiguities: [],
       provenanceRecords: [],
       warnings: [],
-      compositionOrphans: [],
       diagnostics: { entries: [], total: 0, limit: 10, truncated: false },
     },
     provenance: { includeInReport: true, persist: false },
@@ -238,11 +237,33 @@ describe("merge plan wire format", () => {
       target: planInput().target,
     });
     expect(parseMergePlanArtifact(ownedV1).success).toBe(false);
-    // Neither legacy format carries the composition-orphan review field.
-    const withOrphans = await legacyArtifact(2, {
-      review: planInput().review,
+    // Neither legacy format carries the identity-conflict review field.
+    const identityConflicts = [
+      {
+        kind: "separation",
+        a: { kind: "Person", id: "a" },
+        b: { kind: "Person", id: "b" },
+        assertionIds: ["different-ab"],
+      },
+    ] as const;
+    const withIdentityConflicts = await legacyArtifact(2, {
+      review: {
+        ...planInput().review,
+        identityConflicts,
+      },
     });
-    expect(parseMergePlanArtifact(withOrphans).success).toBe(false);
+    expect(parseMergePlanArtifact(withIdentityConflicts).success).toBe(false);
+    expect(
+      parseMergePlanArtifact(
+        await constructMergePlanArtifact({
+          ...planInput(),
+          review: {
+            ...planInput().review,
+            identityConflicts,
+          },
+        }),
+      ).success,
+    ).toBe(true);
   });
 
   it("requires format 2 or later for validity clearing and recreation", async () => {

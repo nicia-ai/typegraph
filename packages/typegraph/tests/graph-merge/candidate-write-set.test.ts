@@ -438,7 +438,7 @@ describe("candidate write-set planning", () => {
     Reflect.deleteProperty(baseBackend, "findActiveEdgesBySourceV1");
     try {
       expect(candidatePlanningScope(target)).toEqual({
-        scope: "whole-target",
+        scope: "full",
         reason: "missing-active-source-read",
       });
       unwrap(
@@ -1407,7 +1407,7 @@ describe("candidate write-set planning", () => {
       ],
     };
     expect(candidatePlanningScope(target)).toEqual({
-      scope: "whole-target",
+      scope: "full",
       reason: "missing-match-identity-read",
     });
     expect(
@@ -1582,7 +1582,7 @@ describe("candidate write-set planning", () => {
     expect(bounded.error).toBeInstanceOf(CandidatePlanningScopeError);
     expect(bounded.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
     expect(bounded.error.details?.["planningScope"]).toEqual({
-      scope: "whole-target",
+      scope: "full",
       reason: "match-identity-owner-not-clone-visible",
     });
     const full = unwrap(
@@ -1594,7 +1594,7 @@ describe("candidate write-set planning", () => {
       }),
     );
     expect(full.planningScope).toEqual({
-      scope: "whole-target",
+      scope: "full",
       reason: "full-requested",
     });
   });
@@ -2095,7 +2095,7 @@ describe("candidate evolution planning scope", () => {
             capability: "boundedCandidatePlanning",
             requiredPlanningScope: "full",
             planningScope: {
-              scope: "whole-target",
+              scope: "full",
               reason: "planned-evolution",
             },
           },

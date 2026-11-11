@@ -15,9 +15,9 @@ import type { JsonValue } from "./typegraph-internal";
 // A review embeds its plan under the strict current plan schema, so a review
 // stored before the plan's bump to format 3 (`MERGE_PLAN_FORMAT_VERSION`) can
 // never validate. Formats 1 (whole-target baseline) and 2 (candidate-scoped
-// baseline) embedded a version-1 plan; both evidence modes are numbered past
-// them so a stored one is refused as an unsupported version rather than as
-// malformed.
+// baseline) embedded a format 1 or format 2 plan; both evidence modes are
+// numbered past them so a stored one is refused as an unsupported version
+// rather than as malformed.
 
 /** The default review format: its baseline covers the whole target. */
 export const MERGE_REVIEW_FORMAT_VERSION = 3 as const;
