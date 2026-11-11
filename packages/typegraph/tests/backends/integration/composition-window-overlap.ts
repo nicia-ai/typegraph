@@ -23,11 +23,17 @@ import { z } from "zod";
 import {
   asEdgeId,
   CompositionError,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
+  type GraphBackend,
   partOf,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import { type IntegrationTestContext } from "./test-context";
 
 const CwDocument = defineNode("CwDocument", { schema: z.object({}) });
@@ -36,11 +42,15 @@ const CwFigure = defineNode("CwFigure", {
   schema: z.object({ caption: z.string() }),
 });
 const CwPara = defineNode("CwPara", { schema: z.object({}) });
+const CwNote = defineNode("CwNote", { schema: z.object({}) });
 
 const cwFigureIn = defineEdge("cwFigureIn", { schema: z.object({}) });
 const cwFigureInsetOf = defineEdge("cwFigureInsetOf", { schema: z.object({}) });
 const cwParaOf = defineEdge("cwParaOf", { schema: z.object({}) });
 const cwSectionOf = defineEdge("cwSectionOf", { schema: z.object({}) });
+const cwNoteOf = defineEdge("cwNoteOf", {
+  schema: z.object({ tag: z.string() }),
+});
 
 function buildGraph(id: string) {
   return defineGraph({
@@ -60,6 +70,7 @@ function buildGraph(id: string) {
         ],
       },
       CwPara: { type: CwPara },
+      CwNote: { type: CwNote },
     },
     edges: {
       cwFigureIn: {
@@ -86,6 +97,15 @@ function buildGraph(id: string) {
         to: [CwDocument],
         cardinality: "one",
       },
+      // A durable match identity: every batch create of this kind runs the
+      // row-by-row durable fallback.
+      cwNoteOf: {
+        type: cwNoteOf,
+        from: [CwNote],
+        to: [CwDocument],
+        cardinality: "oneActive",
+        matchIdentity: { name: "cw-note-tag", fields: ["tag"] },
+      },
     },
     ontology: [
       partOf(CwFigure, CwSection, { via: cwFigureIn }),
@@ -93,6 +113,7 @@ function buildGraph(id: string) {
       partOf(CwFigure, CwDocument, { via: cwFigureInsetOf }),
       partOf(CwPara, CwSection, { via: cwParaOf, existence: "required" }),
       partOf(CwSection, CwDocument, { via: cwSectionOf }),
+      partOf(CwNote, CwDocument, { via: cwNoteOf }),
     ],
   });
 }
@@ -121,6 +142,22 @@ async function refusal(write: Promise<unknown>): Promise<CompositionError> {
   const composition = error as CompositionError;
   expect(composition.code).toBe(OVERLAP_CODE);
   return composition;
+}
+
+/**
+ * `backend` with `insertEdgesDurableBatchReturning` withheld, on the backend
+ * and on every transaction it opens — a custom port that declares durable
+ * edge match identity but implements only the single-row command.
+ */
+function withoutDurableEdgeBatch(backend: GraphBackend): GraphBackend {
+  const withheld = ["insertEdgesDurableBatchReturning"] as const;
+  return deriveBackend(projectBackendWithout(backend, withheld), {
+    transaction: (fn, options) =>
+      backend.transaction(
+        (tx) => fn(projectBackendWithout(tx, withheld)),
+        options,
+      ),
+  });
 }
 
 export function registerCompositionWindowOverlapIntegrationTests(
@@ -613,6 +650,172 @@ export function registerCompositionWindowOverlapIntegrationTests(
           },
         ),
       ).rejects.toMatchObject({ code: "COMPOSITION_WHOLE_OCCUPIED" });
+    });
+
+    // MUTATION CHECK (both bulkGetOrCreateByEndpoints cases): have each
+    // update leg decide its window again instead of consuming the batch's
+    // `CompositionWindowVerdict` (drop `decidedCompositionWindows` from the leg
+    // options in `executeEdgeBulkGetOrCreateByEndpoints`,
+    // src/store/operations/edge-operations.ts) — the resurrection, written
+    // first, is then judged against the row the later leg shrinks, and the
+    // legal batch is refused.
+    for (const creates of [false, true]) {
+      it(`bulkGetOrCreateByEndpoints on a coalescing store judges its update legs as the state the batch leaves${creates ? " (with a create)" : ""}`, async () => {
+        const store = await context.createStore(buildGraph(nextGraphId()), {
+          coalesceUnchangedUpserts: true,
+        });
+        const since = { validFrom: NODE_SINCE };
+        const paper = await store.nodes.CwDocument.create({}, since);
+        const laterPaper = await store.nodes.CwDocument.create({}, since);
+        const sec = await store.nodes.CwSection.create({}, since);
+        const fig = await store.nodes.CwFigure.create({ caption: "f" }, since);
+        await store.edges.cwFigureIn.create(
+          fig,
+          paper,
+          {},
+          {
+            validFrom: Y2019,
+            validTo: Y2023,
+          },
+        );
+        const retired = await store.edges.cwFigureIn.create(
+          fig,
+          sec,
+          {},
+          {
+            validFrom: NODE_SINCE,
+            validTo: Y2019,
+          },
+        );
+        await store.edges.cwFigureIn.delete(retired.id);
+        const created =
+          creates ?
+            [
+              {
+                from: fig,
+                to: laterPaper,
+                props: {},
+                validFrom: Y2023,
+                validTo: "2024-01-01T00:00:00.000Z",
+              },
+            ]
+          : [];
+        // The section row comes back with a window the paper row covers as
+        // stored, but not as the batch's later item leaves it.
+        const batch = (paperEnd: string) =>
+          store.edges.cwFigureIn.bulkGetOrCreateByEndpoints(
+            [
+              {
+                from: fig,
+                to: sec,
+                props: {},
+                validFrom: Y2021,
+                validTo: Y2022,
+              },
+              { from: fig, to: paper, props: {}, validTo: paperEnd },
+              ...created,
+            ],
+            { ifExists: "update" },
+          );
+        const before = [`cwFigureIn:${paper.id} [${Y2019},${Y2023})`];
+
+        // Genuinely overlapping: the paper row still reaches into the
+        // section row's window. Refused, and nothing is written.
+        const overlapping = await refusal(batch(midYear(2021)));
+        expect(overlapping.details).toMatchObject({
+          situation: "windowOverlap",
+        });
+        expect(await figureRows(store)).toEqual(before);
+
+        const results = await batch(Y2020);
+        expect(results.map((result) => result.action)).toEqual([
+          "resurrected",
+          "updated",
+          ...(creates ? ["created"] : []),
+        ]);
+        expect(await figureRows(store)).toEqual(
+          [
+            `cwFigureIn:${paper.id} [${Y2019},${Y2020})`,
+            `cwFigureIn:${sec.id} [${Y2021},${Y2022})`,
+            ...(creates ?
+              [
+                `cwFigureIn:${laterPaper.id} [${Y2023},2024-01-01T00:00:00.000Z)`,
+              ]
+            : []),
+          ].toSorted(),
+        );
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      });
+    }
+
+    // MUTATION CHECK: have the durable fallback's row-by-row creates decide
+    // their windows again instead of consuming the batch's verdict (drop
+    // `decidedCompositionWindows` from the `executeEdgeCreateInternal` options
+    // in `executeEdgeCreateBatch`, src/store/operations/edge-operations.ts) —
+    // the new row is then judged against the stored row the paired update has
+    // not shrunk yet, and the legal batch is refused.
+    it("bulkUpsertById through the row-by-row durable fallback judges its creates as the state the batch leaves", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const since = { validFrom: NODE_SINCE };
+      const paper = await store.nodes.CwDocument.create({}, since);
+      const laterPaper = await store.nodes.CwDocument.create({}, since);
+      const note = await store.nodes.CwNote.create({}, since);
+      const long = await store.edges.cwNoteOf.create(
+        note,
+        paper,
+        { tag: "first" },
+        { validFrom: Y2019, validTo: Y2023 },
+      );
+      // A backend that declares durable match identity but has no batch
+      // member for it, so every durable batch create runs the row-by-row
+      // fallback — in a transaction too.
+      const fallbackStore = createStore(
+        store.graph,
+        withoutDurableEdgeBatch(context.getBackend()),
+      );
+      const noteRows = async () => {
+        const edges = await store.edges.cwNoteOf.find(
+          {},
+          { temporalMode: "includeEnded" },
+        );
+        return edges
+          .map(
+            (edge) =>
+              `${edge.toId} [${edge.meta.validFrom ?? "-"},${edge.meta.validTo ?? "-"})`,
+          )
+          .toSorted();
+      };
+      const batch = (longEnd: string) =>
+        fallbackStore.edges.cwNoteOf.bulkUpsertById([
+          {
+            id: long.id,
+            from: note,
+            to: paper,
+            props: { tag: "first" },
+            validTo: longEnd,
+          },
+          {
+            id: asEdgeId<typeof cwNoteOf>("cw-note-next"),
+            from: note,
+            to: laterPaper,
+            props: { tag: "second" },
+            validFrom: Y2021,
+            validTo: Y2022,
+          },
+        ]);
+
+      // Genuinely overlapping: refused, and neither write lands.
+      await refusal(batch(midYear(2021)));
+      expect(await noteRows()).toEqual([`${paper.id} [${Y2019},${Y2023})`]);
+
+      await batch(Y2020);
+      expect(await noteRows()).toEqual(
+        [
+          `${paper.id} [${Y2019},${Y2020})`,
+          `${laterPaper.id} [${Y2021},${Y2022})`,
+        ].toSorted(),
+      );
+      expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
     it("verifyConstraintFences reports a part whose stored windows overlap", async () => {
