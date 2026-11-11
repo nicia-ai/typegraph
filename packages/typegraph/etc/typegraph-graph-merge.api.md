@@ -18,18 +18,8 @@ const __nodeId: unique symbol;
 // @public
 export type AcyclicityMergeConflictDetails = Readonly<{
     relation: string;
-    edges: readonly AcyclicityMergeConflictEdge[];
+    edges: readonly MergeConflictEdge[];
     [key: string]: unknown;
-}>;
-
-// @public
-export type AcyclicityMergeConflictEdge = Readonly<{
-    edgeId: string;
-    edgeKind: string;
-    fromKind: string;
-    fromId: string;
-    toKind: string;
-    toId: string;
 }>;
 
 // @public
@@ -257,7 +247,7 @@ never
 ]) ? Reached : AssignableKeyClosure<Relation, Reached | DirectlyAssignableKeys<Relation, Reached>>;
 
 // @public
-type AssignableNodeKinds<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? K | (keyof G["nodes"] & string) : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? K | (keyof G["nodes"] & string) : K | Extract<AssignableKeyClosure<G["ontology"][number], K>, keyof G["nodes"] & string>;
+type AssignableNodeKinds<G extends GraphDef, K extends string> = true extends SubsumptionLiteralsErased<G["ontology"][number]> ? K | (keyof G["nodes"] & string) : K | Extract<AssignableKeyClosure<G["ontology"][number], K>, keyof G["nodes"] & string>;
 
 // @public (undocumented)
 type AssignableNodeTypes<G extends GraphDef, N extends NodeType> = N extends NodeType ? KindNodeTypes<G, Exclude<AssignableNodeKinds<G, N["kind"]>, N["kind"]>> : never;
@@ -742,16 +732,16 @@ type CandidatePair<K extends NodeType = NodeType> = Readonly<{
 // @public
 export type CandidatePlanningScope = Readonly<{
     scope: "candidate";
-}> | WholeTargetPlanningScope;
+}> | FullPlanningScope;
 
 // @public
 export class CandidatePlanningScopeError extends MergePlanCapabilityError {
-    constructor(planningScope: WholeTargetPlanningScope);
+    constructor(planningScope: FullPlanningScope);
     // (undocumented)
     readonly details: Readonly<{
         capability: "boundedCandidatePlanning";
         requiredPlanningScope: "full";
-        planningScope: WholeTargetPlanningScope;
+        planningScope: FullPlanningScope;
     }>;
 }
 
@@ -882,7 +872,7 @@ export const CandidateWriteSetSchema: z.ZodObject<{
         }, z.core.$strip>>>;
         retention: z.ZodOptional<z.ZodObject<{
             prunedBeforeRevision: z.ZodNumber;
-            prunedAt: z.ZodISODateTime;
+            prunedBeforeRecordedAt: z.ZodISODateTime;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -983,6 +973,19 @@ export function captureStoreOperationTarget<G extends GraphDef>(store: Store<G>)
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+export class CardinalityMergeConflictError extends MergeError {
+    constructor(cause: TypeGraphError, edges: readonly MergeConflictEdge[]);
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_CARDINALITY_CONFLICT";
+    // (undocumented)
+    readonly details: StructuralMergeConflictDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
 
 // @public
 type CatalogBackend = Pick<GraphBackend, "catalog">;
@@ -1334,7 +1337,7 @@ type CompositionWholeInput = Readonly<{
 }>;
 
 // @public
-type CompositionWholeKinds<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? keyof G["nodes"] & string : true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ? keyof G["nodes"] & string : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
+type CompositionWholeKinds<G extends GraphDef, K extends string> = true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ? keyof G["nodes"] & string : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
 
 // @public
 type CompositionWholeKindsUndecidable<Relation> = Relation extends unknown ? Relation extends ({
@@ -1354,6 +1357,19 @@ type CompositionWholeReference<G extends GraphDef, K extends string> = Readonly<
 }> | PolymorphicNodeReference<KindNodeTypes<G, CompositionWholeKinds<G, K>>>;
 
 // @public
+export class CompositionWindowMergeConflictError extends MergeError {
+    constructor(cause: TypeGraphError, edges: readonly MergeConflictEdge[]);
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT";
+    // (undocumented)
+    readonly details: StructuralMergeConflictDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
 export function computeBaseVersion<G extends GraphDef>(store: Store<G>): Promise<BaseVersion>;
 
 // @public
@@ -1366,6 +1382,14 @@ type ConditionalExpressionNode = Readonly<{
     then: DatabaseExpression;
     otherwise: DatabaseExpression;
 }>;
+
+// @public
+class ConfigurationError extends TypeGraphError {
+    constructor(message: string, details?: Record<string, unknown>, options?: {
+        cause?: unknown;
+        suggestion?: string;
+    });
+}
 
 // @public
 export type ConflictingValue = Readonly<{
@@ -1387,10 +1411,27 @@ type ConstraintFenceViolation = Readonly<{
 }> | Readonly<{
     family: "edgeCardinality";
     target: ClaimTarget;
+    edgeKind: string;
+    direction: EdgeCardinalityDirection;
+    cardinality: string;
+    keyedOn: Readonly<{
+        from?: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+        to?: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+    }>;
     edgeIds: readonly string[];
 }> | Readonly<{
     family: "composition";
     target: ClaimTarget;
+    part: Readonly<{
+        kind: string;
+        id: string;
+    }>;
     edgeIds: readonly string[];
 }> | Readonly<{
     family: "compositionExistence";
@@ -1402,6 +1443,11 @@ type ConstraintFenceViolation = Readonly<{
 }> | Readonly<{
     family: "compositionFutureWindow";
     edgeKind: string;
+    edgeIds: readonly string[];
+}> | Readonly<{
+    family: "compositionWindowOverlap";
+    partKind: string;
+    partId: string;
     edgeIds: readonly string[];
 }> | Readonly<{
     family: "edgeEndpointAssignability";
@@ -2336,6 +2382,9 @@ type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
 }>;
 
 // @public
+type EdgeCardinalityDirection = "source" | "target";
+
+// @public
 type EdgeChange = Readonly<{
     type: ChangeType;
     kind: string;
@@ -2708,15 +2757,18 @@ export type Embedder = (texts: readonly string[]) => Promise<readonly Float32Arr
 // @public
 const EMBEDDING_BRAND: unique symbol;
 
+// @public
+type EmbeddingBrand = Readonly<{
+    [EMBEDDING_BRAND]: true;
+}>;
+
 // @public (undocumented)
 type EmbeddingFieldAccessor = NullFieldAccessor & Readonly<{
     similarTo: (queryEmbedding: readonly number[], k: number, options?: SimilarToOptions) => Predicate;
 }>;
 
 // @public
-type EmbeddingValue = readonly number[] & {
-    readonly [EMBEDDING_BRAND]: true;
-};
+type EmbeddingValue = readonly number[] & EmbeddingBrand;
 
 // @public (undocumented)
 type EmptyAliasMap = Readonly<Record<never, never>>;
@@ -2856,6 +2908,9 @@ type EvolutionRequirement = Readonly<{
 }> | Readonly<{
     kind: "ontology-tightening";
     changes: readonly OntologyChange[];
+}> | Readonly<{
+    kind: "edge-tightening";
+    edgeKinds: readonly string[];
     edgeCardinalityAxes: readonly EdgeCardinalityDeclaration[];
 }> | Readonly<{
     kind: "identity";
@@ -3140,6 +3195,15 @@ type ExistsSubqueryExpressionNode = Readonly<{
     kind: "exists_subquery";
     subquery: QueryAst;
 }>;
+
+// @public
+type ExpansionAliasNodeType<Axes, Exact extends NodeType, Default extends NodeType, Polymorphic extends NodeType> = [
+Extract<Axes, "narrower">
+] extends [never] ? [
+Extract<Axes, "subclasses">
+] extends [never] ? [
+Extract<Axes, undefined>
+] extends [never] ? Exact : Default : Polymorphic : NodeType;
 
 // @public (undocumented)
 type ExpressionAliasContext<Aliases extends AliasMap, Edges extends EdgeAliasMap, Scope extends string = (keyof Aliases | keyof Edges) & string> = {
@@ -3591,6 +3655,19 @@ export function forkGraphNamespace<G extends GraphDef>(source: Store<G>, targetB
 // @public
 export type ForkHandle = Readonly<{
     dispose?: () => Promise<void>;
+}>;
+
+// @public
+type ForwardedExpansionAxes<O> = O extends Readonly<{
+    expansion: infer Axis;
+}> ? Axis : O extends Readonly<{
+    expansion?: infer Axis;
+}> ? unknown extends Axis ? undefined : Axis | undefined : undefined;
+
+// @public
+export type FullPlanningScope = Readonly<{
+    scope: "full";
+    reason: CandidatePlanningScopeReason;
 }>;
 
 // @public
@@ -4352,6 +4429,9 @@ type IdentityHistoryIncompleteReason = Readonly<{
     reason: "retention-truncated";
     before: RecordedInstant;
 }> | Readonly<{
+    reason: "restored-retention-truncated";
+    before: RestoredRecordedInstant;
+}> | Readonly<{
     reason: "unattributed-restored";
     count: number;
 }> | Readonly<{
@@ -4417,8 +4497,8 @@ type IdentityReplay<G extends GraphDef> = Readonly<{
 
 // @public
 type IdentityReplayOptions = Readonly<{
-    fromRecorded?: string | undefined;
-    toRecorded?: string | undefined;
+    fromRecorded?: RecordedInstant | undefined;
+    toRecorded?: RecordedInstant | undefined;
     cursor?: TransitionPageCursor | undefined;
     limit?: number | undefined;
 }>;
@@ -4428,12 +4508,6 @@ type IdentityReplayStep<G extends GraphDef> = Readonly<{
     transition: RecordedIdentityTransition<G>;
     before: readonly IdentityNodeReference<G>[];
     after: readonly IdentityNodeReference<G>[];
-}>;
-
-// @public
-type IdentityRestoreBaseline = Readonly<{
-    hasOwnHistory: boolean;
-    floorRevision: number;
 }>;
 
 // @public
@@ -4498,10 +4572,22 @@ type IdentityTransitionCursor = Readonly<{
 }>;
 
 // @public
+type IdentityTransitionCut = Readonly<{
+    revision: number;
+    recordedAt: string;
+}>;
+
+// @public
 type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
     transitions: readonly IdentityTransition<G>[];
     nextCursor?: TransitionPageCursor | undefined;
     completeness: IdentityHistoryCompleteness;
+}>;
+
+// @public
+type IdentityTransitionRetention = Readonly<{
+    pruned?: IdentityTransitionCut | undefined;
+    restoredPruned?: IdentityTransitionCut | undefined;
 }>;
 
 // @public
@@ -5060,7 +5146,7 @@ type LabelPropagationOptions<G extends GraphDef> = TemporalAlgorithmOptions & It
 }>;
 
 // @public
-export type LegacyMergePlanReview = Omit<MergePlanReview, "compositionOrphans" | "identityConflicts">;
+export type LegacyMergePlanReview = Omit<MergePlanReview, "identityConflicts">;
 
 // @public
 type LineageBackend = Pick<GraphBackend, "lineage">;
@@ -5330,6 +5416,9 @@ export const MERGE_ERROR_CODES: {
     readonly operationEvidence: "GRAPH_MERGE_OPERATION_EVIDENCE";
     readonly operationUndelivered: "GRAPH_MERGE_OPERATION_UNDELIVERED";
     readonly compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN";
+    readonly cardinalityConflict: "GRAPH_MERGE_CARDINALITY_CONFLICT";
+    readonly restrictedDeleteConflict: "GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT";
+    readonly compositionWindowConflict: "GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT";
 };
 
 // @public
@@ -5368,6 +5457,16 @@ export class MergeCompositionOrphanError extends MergeError {
     // (undocumented)
     protected static readonly errorCategory = "constraint";
 }
+
+// @public
+export type MergeConflictEdge = Readonly<{
+    edgeId: string;
+    edgeKind: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
 
 // @public
 export class MergeConflictError extends MergeError {
@@ -5796,7 +5895,6 @@ export type MergePlanReview = Readonly<{
     baseAmbiguities: readonly JsonValue[];
     provenanceRecords: readonly JsonValue[];
     warnings: readonly string[];
-    compositionOrphans: readonly MergePlanCompositionOrphan[];
     diagnostics?: MergePlanDiagnostics | undefined;
     identityConflicts?: readonly JsonValue[] | undefined;
 }>;
@@ -6258,6 +6356,17 @@ type NodeBulkFindByIndexOptions = Readonly<{
 }>;
 
 // @public
+type NodeBulkGetOrCreateByConstraintItem<Props, Via extends CompositionViaRef | undefined = CompositionViaRef | undefined, Whole extends CompositionWholeInput = CompositionWholeInput> = Readonly<{
+    props: Props;
+    partOf?: CompositionAttachment<Via, Whole>;
+}>;
+
+// @public
+type NodeBulkGetOrCreateByConstraintOptions = Readonly<{
+    ifExists?: IfExistsMode;
+}>;
+
+// @public
 type NodeCandidateQuery = Readonly<{
     compileNodeCandidateIds: (readInstant?: string) => CompiledSelectSql;
     toNodeCandidateSelection: () => NodeCandidateSelection;
@@ -6284,8 +6393,8 @@ type NodeChange = Readonly<{
 }>;
 
 // @public
-type NodeCollection<N extends NodeType, CN extends string = string, Whole extends CompositionWholeInput = never> = Readonly<{
-    create: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(props: z.input<N["schema"]>, options?: NodeCreateOptions<Via, Whole>) => Promise<Node<N>>;
+type NodeCollection<N extends NodeType, CN extends string = string, Whole extends CompositionWholeInput = CompositionWholeInput> = Readonly<{
+    create<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(props: z.input<N["schema"]>, options?: NodeCreateOptions<Via, Whole>): Promise<Node<N>>;
     getById: (id: NodeId<N>, options?: QueryOptions) => Promise<Node<N> | undefined>;
     getByIds: (ids: readonly NodeId<N>[], options?: QueryOptions) => Promise<readonly (Node<N> | undefined)[]>;
     update: (id: NodeId<N>, props: Partial<z.input<N["schema"]>>, options?: ValidityEndMutation) => Promise<Node<N>>;
@@ -6308,11 +6417,11 @@ type NodeCollection<N extends NodeType, CN extends string = string, Whole extend
     }>) => Promise<Readonly<{
         affectedCount: number;
     }>>;
-    reparent: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(id: NodeId<N>, options: NodeReparentOptions<Via, Whole>) => Promise<NodeReparentResult<Via>>;
-    bulkReparent: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly Readonly<{
+    reparent<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(id: NodeId<N>, options: NodeReparentOptions<Via, Whole>): Promise<NodeReparentResult<Via>>;
+    bulkReparent<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly Readonly<{
         id: NodeId<N>;
         options: NodeReparentOptions<Via, Whole>;
-    }>[]) => Promise<readonly NodeReparentResult<Via>[]>;
+    }>[]): Promise<readonly NodeReparentResult<Via>[]>;
     delete: (id: NodeId<N>, options?: NodeDeleteOptions) => Promise<void>;
     hardDelete: (id: NodeId<N>) => Promise<void>;
     planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
@@ -6331,9 +6440,9 @@ type NodeCollection<N extends NodeType, CN extends string = string, Whole extend
         validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
-    bulkCreate: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly (Readonly<{
+    bulkCreate<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(items: readonly (Readonly<{
         props: z.input<N["schema"]>;
-    }> & NodeCreateOptions<Via, Whole>)[]) => Promise<Node<N>[]>;
+    }> & NodeCreateOptions<Via, Whole>)[]): Promise<Node<N>[]>;
     bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
@@ -6358,10 +6467,8 @@ type NodeCollection<N extends NodeType, CN extends string = string, Whole extend
     bulkFindByIndex: (indexName: string, items: readonly Readonly<{
         props: Partial<z.input<N["schema"]>>;
     }>[], options?: NodeBulkFindByIndexOptions) => Promise<readonly Node<N>[][]>;
-    getOrCreateByConstraint: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, props: z.input<N["schema"]>, options?: NodeGetOrCreateByConstraintOptions<Via, Whole>) => Promise<NodeGetOrCreateByConstraintResult<N>>;
-    bulkGetOrCreateByConstraint: <const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-    }>[], options?: NodeGetOrCreateByConstraintOptions<Via, Whole>) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
+    getOrCreateByConstraint<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, props: z.input<N["schema"]>, options?: NodeGetOrCreateByConstraintOptions<Via, Whole>): Promise<NodeGetOrCreateByConstraintResult<N>>;
+    bulkGetOrCreateByConstraint<const Via extends CompositionViaRef | undefined = CompositionViaRef | undefined>(constraintName: CN, items: readonly NodeBulkGetOrCreateByConstraintItem<z.input<N["schema"]>, Via, Whole>[], options?: NodeBulkGetOrCreateByConstraintOptions): Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
 // @public (undocumented)
@@ -6765,38 +6872,15 @@ type OneStatementReadProvenance = Readonly<{
 // @public
 type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "relation" | "edgeRegistration";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
-    probes?: readonly OntologyDataProbe[];
-    removedCustomRelation?: string;
-}>;
-
-// @public (undocumented)
-type OntologyDataProbe = OntologyDataProbeBody & Readonly<{
-    families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
-}>;
-
-// @public
-type OntologyDataProbeBody = Readonly<{
-    kind: "nodeDisjointness";
-    pairs: readonly (readonly [string, string])[];
-}> | Readonly<{
-    kind: "nodeUniqueness";
-    groups: readonly UniquenessComponentProbeGroup[];
-}> | Readonly<{
-    kind: "edgeEndpointAssignability";
-    allowances: readonly EdgeEndpointAllowance[];
-}> | Readonly<{
-    kind: "edgeAcyclicity";
-    edgeKinds: readonly string[];
-}> | Readonly<{
-    kind: "composition";
-    edgeKinds: readonly string[];
-}> | Readonly<{
-    kind: "compositionExistence";
-    edgeKinds: readonly string[];
+    removedCustomRelation?: Readonly<{
+        metaEdge: string;
+        from: string;
+        to: string;
+    }>;
 }>;
 
 // @public (undocumented)
@@ -6816,9 +6900,6 @@ type OntologyRelation = Readonly<{
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
 }> & CompositionRealization;
-
-// @public
-type OntologyTypeErased<G extends GraphDef> = number extends G["ontology"]["length"] ? true : false;
 
 // @public
 export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promise<Store<ProvenanceGraph>>;
@@ -7087,16 +7168,6 @@ type PreparedQueryConfig<R> = Readonly<{
 // @public
 export function prepareNamespaceForkTarget<G extends GraphDef>(source: Store<G>, targetBackend: GraphBackend): Promise<void>;
 
-// @public
-const PROBE_VIOLATION_FAMILIES: {
-    readonly nodeDisjointness: readonly ["nodeDisjointness"];
-    readonly nodeUniqueness: readonly ["nodeUniqueness"];
-    readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
-    readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
-    readonly composition: readonly ["composition", "edgeAcyclicity", "compositionFutureWindow"];
-    readonly compositionExistence: readonly ["compositionExistence"];
-};
-
 // @public (undocumented)
 type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
     meta: EdgeMeta;
@@ -7288,7 +7359,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "subclasses";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<ListPolymorphicNodeType<G, Kinds[number]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    from<const Kinds extends SourceKindList<G>, A extends string, O extends AliasExpansionOptions | undefined>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][Kinds[number]]["type"], ListAliasNodeType<G, Kinds[number]>, ListPolymorphicNodeType<G, Kinds[number]>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
     // (undocumented)
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: undefined;
@@ -7301,7 +7372,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "subclasses";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    from<K extends keyof G["nodes"] & string, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K>, PolymorphicNodeType<G["nodes"][K]["type"]>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
     fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
@@ -7309,7 +7380,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    fromDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor<T>, PolymorphicNodeType<DynamicNodeTypeFor<T>>, PolymorphicNodeType<DynamicNodeTypeFor<T>>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
     fuseWith(options: HybridFusionOptions): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     // @internal
     getExpressionScopeIdentity(): symbol;
@@ -7390,6 +7461,7 @@ type QueryBuilderState = Readonly<{
     startRequestedKinds: readonly string[];
     currentAlias: string;
     startExpansion: AliasExpansionAxis;
+    rowTypeRefusal?: ConfigurationError | undefined;
     traversals: readonly Traversal[];
     predicates: readonly NodePredicate[];
     resultPredicate?: PredicateExpression;
@@ -7988,6 +8060,19 @@ type RestoredIdentityTransition<G extends GraphDef> = Omit<RecordedIdentityTrans
 type RestoredRecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
 };
+
+// @public
+export class RestrictedDeleteMergeConflictError extends MergeError {
+    constructor(cause: TypeGraphError);
+    // (undocumented)
+    readonly cause: TypeGraphError;
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT";
+    // (undocumented)
+    readonly details: MergeConstraintConflictErrorDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
 
 // @public
 export type Result<T, E = Error> = Readonly<{
@@ -9004,14 +9089,9 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         nextAfter?: IdentityTransitionCursor;
         done: boolean;
     }>>;
-    identityTransitionRetentionAtTarget: (target: GraphBackend | TransactionBackend) => Promise<Readonly<{
-        prunedBeforeRevision: number;
-        prunedAt: string;
-    }>>;
-    readIdentityRestoreBaselineAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<IdentityRestoreBaseline>;
-    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedWatermark: number | undefined, baseline: IdentityRestoreBaseline) => Promise<Readonly<{
+    identityTransitionRetentionAtTarget: (target: GraphBackend | TransactionBackend) => Promise<IdentityTransitionRetention>;
+    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
         created: number;
-        watermark: number | undefined;
     }>>;
     applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
         id: string;
@@ -9277,6 +9357,11 @@ type StringPredicate = Readonly<{
     pattern: string | ParameterRef;
 }>;
 
+// @public
+export type StructuralMergeConflictDetails = MergeConstraintConflictErrorDetails & Readonly<{
+    edges: readonly MergeConflictEdge[];
+}>;
+
 // @public (undocumented)
 type SubgraphCompositionSelection = boolean | Readonly<{
     via?: CompositionViaRef;
@@ -9357,7 +9442,7 @@ V
 type SubsumedNodeType<G extends GraphDef, N extends NodeType> = N extends NodeType ? SubsumptionAffected<G, N["kind"]> extends true ? PolymorphicNodeType<N> : N : never;
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = OntologyTypeErased<G> extends true ? true : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true : false;
+type SubsumptionAffected<G extends GraphDef, K extends string> = true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true : false;
 
 // @public
 type SubsumptionElementNamesKind<Relation, K extends string> = Relation extends unknown ? Relation extends ({
@@ -9513,6 +9598,11 @@ type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readon
 }>;
 
 // @public
+type TransactionEffectsMark = Readonly<{
+    discard: (cause: unknown) => void;
+}>;
+
+// @public
 type TransactionOptions = Readonly<{
     isolationLevel?: "read_uncommitted" | "read_committed" | "repeatable_read" | "serializable";
     accessMode?: "read_only" | "read_write";
@@ -9550,6 +9640,7 @@ type TransactionRuntime = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    markEffects: () => TransactionEffectsMark;
 }>;
 
 // @public (undocumented)
@@ -9598,7 +9689,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "subclasses";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K & string>, PolymorphicNodeType<G["nodes"][K]["type"]>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
@@ -9606,7 +9697,7 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: AliasExpansionOptions): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor$1<T>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
@@ -9911,12 +10002,6 @@ type UniqueIntrospection = Readonly<{
     fields: readonly string[];
     scope: UniquenessScope;
     collation: Collation;
-}>;
-
-// @public
-type UniquenessComponentProbeGroup = Readonly<{
-    constraintName: string;
-    coveredKinds: readonly string[];
 }>;
 
 // @public
@@ -10298,12 +10383,6 @@ type WeightedShortestPathResult = Readonly<{
     nodes: readonly PathNode[];
     depth: number;
     totalWeight: number;
-}>;
-
-// @public
-export type WholeTargetPlanningScope = Readonly<{
-    scope: "whole-target";
-    reason: CandidatePlanningScopeReason;
 }>;
 
 // @public

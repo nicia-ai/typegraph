@@ -823,6 +823,9 @@ export type EvolutionRequirement = Readonly<{
 }> | Readonly<{
     kind: "ontology-tightening";
     changes: readonly OntologyChange[];
+}> | Readonly<{
+    kind: "edge-tightening";
+    edgeKinds: readonly string[];
     edgeCardinalityAxes: readonly EdgeCardinalityDeclaration[];
 }> | Readonly<{
     kind: "identity";
@@ -1771,10 +1774,10 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean;
 export function isSchemaInitialized(backend: GraphBackend, graphId: string): Promise<boolean>;
 
 // @public
-export function isStructuralSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
+export function isStructuralSubtype(child: z.ZodType, parent: z.ZodType): StructuralSubsumptionVerdict;
 
 // @public
-export function isTypeLevelSubtype(child: JsonSchema, parent: JsonSchema): StructuralSubtypeResult;
+export function isTypeLevelSubtype(child: z.ZodType, parent: z.ZodType): StructuralSubsumptionVerdict;
 
 // @public (undocumented)
 type JsonPointer = string & {
@@ -2176,38 +2179,15 @@ type NullCheckOp = "isNull" | "isNotNull";
 // @public
 export type OntologyChange = Readonly<{
     type: ChangeType;
-    entity: "relation" | "edgeRegistration";
+    entity: "relation";
     name: string;
     severity: ChangeSeverity;
     details: string;
-    probes?: readonly OntologyDataProbe[];
-    removedCustomRelation?: string;
-}>;
-
-// @public (undocumented)
-export type OntologyDataProbe = OntologyDataProbeBody & Readonly<{
-    families: (typeof PROBE_VIOLATION_FAMILIES)[OntologyDataProbeBody["kind"]];
-}>;
-
-// @public
-type OntologyDataProbeBody = Readonly<{
-    kind: "nodeDisjointness";
-    pairs: readonly (readonly [string, string])[];
-}> | Readonly<{
-    kind: "nodeUniqueness";
-    groups: readonly UniquenessComponentProbeGroup[];
-}> | Readonly<{
-    kind: "edgeEndpointAssignability";
-    allowances: readonly EdgeEndpointAllowance[];
-}> | Readonly<{
-    kind: "edgeAcyclicity";
-    edgeKinds: readonly string[];
-}> | Readonly<{
-    kind: "composition";
-    edgeKinds: readonly string[];
-}> | Readonly<{
-    kind: "compositionExistence";
-    edgeKinds: readonly string[];
+    removedCustomRelation?: Readonly<{
+        metaEdge: string;
+        from: string;
+        to: string;
+    }>;
 }>;
 
 // @public
@@ -2219,9 +2199,6 @@ type OntologyRelation = Readonly<{
 
 // @public
 export type OntologySnapshot = Pick<SerializedSchema, "ontology" | "nodes" | "edges">;
-
-// @public
-export function ontologyTighteningProbes(changes: readonly OntologyChange[]): readonly OntologyDataProbe[];
 
 // @public
 export function parseSerializedSchema(json: string): SerializedSchema;
@@ -2242,22 +2219,6 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 
 // @public
 type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
-
-// @public
-export const PROBE_VIOLATION_FAMILIES: {
-    readonly nodeDisjointness: readonly ["nodeDisjointness"];
-    readonly nodeUniqueness: readonly ["nodeUniqueness"];
-    readonly edgeEndpointAssignability: readonly ["edgeEndpointAssignability"];
-    readonly edgeAcyclicity: readonly ["edgeAcyclicity"];
-    readonly composition: readonly ["composition", "edgeAcyclicity", "compositionFutureWindow"];
-    readonly compositionExistence: readonly ["compositionExistence"];
-};
-
-// @public (undocumented)
-export function probeCoversViolationFamily(probe: Pick<OntologyDataProbe, "families">, family: string): boolean;
-
-// @public
-export function projectTypeVisible(schema: JsonSchema): JsonSchema;
 
 // @public
 type PurgeEdgeClaimsParams = Readonly<{
@@ -2789,6 +2750,12 @@ type StrategyTableContribution = TableContribution;
 export type StructuralIncomparableReason = "unsupported-keyword" | "schema-reference" | "unsupported-construct" | "max-depth-exceeded";
 
 // @public
+export type StructuralSubsumptionVerdict = StructuralSubtypeResult | Readonly<{
+    verdict: "unchecked";
+    reason: "unprojectable-schema";
+}>;
+
+// @public
 export type StructuralSubtypeReason = "missing-required-property" | "optional-in-child-required-in-parent" | "type-token-mismatch" | "unconstrained-where-parent-constrains" | "value-set-not-subset" | "string-length-not-tighter" | "pattern-mismatch" | "format-mismatch" | "numeric-bound-not-tighter" | "multiple-of-mismatch" | "array-bounds-not-tighter" | "tuple-arity-mismatch" | "no-matching-union-member" | "property-names-mismatch";
 
 // @public
@@ -2921,12 +2888,6 @@ export type UniquenessClaimGate = Readonly<{
     constraintName: string;
     axis: string;
     lostKinds: readonly string[];
-}>;
-
-// @public
-export type UniquenessComponentProbeGroup = Readonly<{
-    constraintName: string;
-    coveredKinds: readonly string[];
 }>;
 
 // @public

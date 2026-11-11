@@ -189,6 +189,11 @@ const EMBEDDING_DIMENSIONS_KEY: "_embeddingDimensions";
 const EMBEDDING_INDEX_KEY: "_embeddingIndex";
 
 // @public
+export type EmbeddingBrand = Readonly<{
+    [EMBEDDING_BRAND]: true;
+}>;
+
+// @public
 type EmbeddingIndexOptions = Readonly<{
     metric?: EmbeddingMetric;
     indexType?: EmbeddingIndexType;
@@ -210,9 +215,7 @@ export type EmbeddingSchema<D extends number = number> = z.ZodType<EmbeddingValu
 }>;
 
 // @public
-export type EmbeddingValue = readonly number[] & {
-    readonly [EMBEDDING_BRAND]: true;
-};
+export type EmbeddingValue = readonly number[] & EmbeddingBrand;
 
 // @public (undocumented)
 const EMPTY_SCHEMA: z.ZodObject<{}, z.core.$strip>;

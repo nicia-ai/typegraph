@@ -3181,14 +3181,50 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
-            prunedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
-                name: "pruned_at";
+            prunedBeforeRecordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "pruned_before_recorded_at";
                 tableName: string;
                 dataType: "string";
                 columnType: "SQLiteText";
                 data: string;
                 driverParam: string;
-                notNull: true;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            restoredPrunedBeforeRevision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "restored_pruned_before_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            restoredPrunedBeforeRecordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "restored_pruned_before_recorded_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;

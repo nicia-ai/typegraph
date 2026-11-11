@@ -1156,9 +1156,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Guarded deletes: `NodeCollection.delete(id, options?)` takes the new
   // `NodeDeleteOptions`. `.` exports it; the seven Store-bearing entrypoints
   // reach it only through `Store`: +1 apiece, no other name moved.
+  // Review-fix round. Removed everywhere it was carried: the tightening probe
+  // machinery, now module-private (`OntologyDataProbe`, `OntologyDataProbeBody`,
+  // `PROBE_VIOLATION_FAMILIES`, `UniquenessComponentProbeGroup`), the deleted
+  // `OntologyTypeErased` and the deleted `IdentityRestoreBaseline`. `.` also
+  // drops `AliasExpansionOptions`, which it now exports, and gains the five
+  // unexported helpers the structural-subtype check is spelled with
+  // (`OpaqueTypeLevelValue`, `RuntimeInvisibleTags`,
+  // `StructuralSubtypeMismatchWording`, `TypeLevelChild`, `TypeLevelElement`)
+  // plus `TransactionEffectsMark`, the runtime port's rollback mark: 558→560.
+  // `./schema` only loses `OntologyDataProbeBody`: 307→306. The seven
+  // Store-bearing entrypoints reach these only transitively and each gain
+  // `EdgeCardinalityDirection`, `EmbeddingBrand`, `ExpansionAliasNodeType`,
+  // `ForwardedExpansionAxes`, `IdentityTransitionCut`,
+  // `IdentityTransitionRetention`, `NodeBulkGetOrCreateByConstraintItem`,
+  // `NodeBulkGetOrCreateByConstraintOptions`, `TransactionEffectsMark` and
+  // `ConfigurationError` (the base of the new `CompositionConfigurationError`);
+  // all but `./graph-merge`, which exports the error base types itself, also
+  // gain `ErrorCategory`, `TypeGraphError` and `TypeGraphErrorOptions`. Net +7
+  // apiece (+4 at `./graph-merge`).
   ".": {
-    count: 558,
-    sha256: "3e66349f96cd81c5e8d55c528fc268e9bea3acab75d98adcf73f2bccfe6999d1",
+    count: 560,
+    sha256: "d76b1a7e7eeca96491f520ca828ba7d13e0eab026a558fce992f1dc2173a2ed8",
   },
   "./adapters/drizzle/engine": {
     count: 350,
@@ -1202,8 +1221,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // 959→960, this one 974→975). `.` exports all three and only loses
   // `BrandedNodeReference`: 559→558.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 979,
-    sha256: "7fcd8c0be7bc1ad3b680dd5e2a29f43b8d98cb46267684cb5a4012560913c2c3",
+    count: 986,
+    sha256: "00fc2607ddc4768e0616939a61971600f28dc60dd3a459995f55562811fc17fd",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 282,
@@ -1251,28 +1270,28 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Exact apply receipts expose TransactionReceipt as a named export here:
   // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 971,
-    sha256: "101e1f45c296c7fcd8880277497ad18874201879901520c0b2d8adbd4c48608a",
+    count: 975,
+    sha256: "c27d2f0a481b82005fa4611dd83e183873489df2fe3376ac54304b69a4ad29e0",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 958,
-    sha256: "0c52d3d58d1a12c05cf81f7956754f4bf125d2960dea5f75908343ab4db7cbf5",
+    count: 965,
+    sha256: "4dce65d9ed3d52fe7ce86f72c945289e8ef396a5baabb7fda6f997f08292cc52",
   },
   "./postgres/pglite": {
-    count: 964,
-    sha256: "792f9bf2297e9a442dfdc32dcf4a7c001ab8c4a729f8f6fd7184ed44279c6b9b",
+    count: 971,
+    sha256: "360ffee38513a1ac4476ff5ef49d9f5553102dc6ce95ca49b23f21572025653d",
   },
   "./profiler": {
-    count: 960,
-    sha256: "9506a7f06681b5e227f942ee2251d3dbf7aadab9cc96f2efdc3465b11c6e2ed8",
+    count: 967,
+    sha256: "a2d8f11f7ee72660fc646992d421489201d60a5b2860a85f735ade618d547108",
   },
   "./provenance": {
-    count: 973,
-    sha256: "cc0b47a94e67b8d96bf69728b715822e492067f3a1ad9bb4478b645d321b208b",
+    count: 980,
+    sha256: "56a43ad04b1bb3eff52dde68229653dc108866afc6906c37896c4dc6063c6013",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1284,12 +1303,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 307,
-    sha256: "cb84675941b4f1bc7c184d783f28f56d18c5d2e7d0fa36fbbd57fd470a047557",
+    count: 306,
+    sha256: "4dee0d2995ca1fc5a67102edfb4eb32e5e895b86df0ca5203b2f985b849a376e",
   },
   "./sqlite/local": {
-    count: 964,
-    sha256: "792f9bf2297e9a442dfdc32dcf4a7c001ab8c4a729f8f6fd7184ed44279c6b9b",
+    count: 971,
+    sha256: "360ffee38513a1ac4476ff5ef49d9f5553102dc6ce95ca49b23f21572025653d",
   },
 };
 

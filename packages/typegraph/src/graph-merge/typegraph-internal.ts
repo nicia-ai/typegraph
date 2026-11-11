@@ -23,11 +23,11 @@ export { sharesSerializedTransactionResource } from "../backend/transaction-reso
 export type {
   ClaimEdgeCardinalityParams,
   EdgeRow,
-  InsertEdgeParams,
   EngineRevision,
   EntityKey,
   GraphBackend,
   GraphReadBackend,
+  InsertEdgeParams,
   LineageDelta,
   NodeRow,
   SchemaVersionRow,
@@ -109,14 +109,14 @@ export {
 } from "../store/acyclicity";
 export { targetIdentity } from "../store/claims/axis";
 export {
-  type CompositionWindowTransition,
-  compositionWindowOverlapError,
-  readCompositionWindowConflict,
-} from "../store/claims/composition-windows";
-export {
   edgeInsertClaims,
   edgeKindOwesAnyClaim,
 } from "../store/claims/composition-claims";
+export {
+  compositionWindowOverlapError,
+  type CompositionWindowTransition,
+  readCompositionWindowConflict,
+} from "../store/claims/composition-windows";
 export {
   claimRefusalFor,
   claimsInProbeOrder,

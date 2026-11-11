@@ -2930,14 +2930,48 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
-            prunedAt: drizzle_orm_pg_core.PgColumn<{
-                name: "pruned_at";
+            prunedBeforeRecordedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "pruned_before_recorded_at";
                 tableName: string;
                 dataType: "date";
                 columnType: "PgTimestamp";
                 data: Date;
                 driverParam: string;
-                notNull: true;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            restoredPrunedBeforeRevision: drizzle_orm_pg_core.PgColumn<{
+                name: "restored_pruned_before_revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            restoredPrunedBeforeRecordedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "restored_pruned_before_recorded_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
