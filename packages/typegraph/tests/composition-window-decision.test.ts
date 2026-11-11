@@ -21,10 +21,12 @@ import {
 import { type InsertEdgeParams } from "../src/backend/types";
 import { buildKindRegistry } from "../src/registry";
 import {
+  assertCompositionWindowsDisjoint,
   type CompositionWindowEdge,
   planCompositionWindowDecision,
   readCompositionWindowConflict,
 } from "../src/store/claims/composition-windows";
+import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
 import { createTestBackend } from "./test-utils";
 
 const Reel = defineNode("Reel", { schema: z.object({}) });
@@ -261,5 +263,82 @@ describe("composition window decision: the unfenced preview", () => {
     expect(
       await store.edges.cutOf.find({}, { temporalMode: "includeEnded" }),
     ).toHaveLength(1);
+  });
+});
+
+describe("composition window decision: a verdict is consumed only for the writes it decided", () => {
+  // MUTATION CHECK: make `verdictCoversWrites` answer `true` whenever a
+  // verdict is passed — the different and re-windowed writes below are then
+  // admitted with no decision at all, overlap included.
+  it("returns the verdict for exactly its own writes and decides every other write itself", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const since = { validFrom: "2018-01-01T00:00:00.000Z" };
+    const reel = await store.nodes.Reel.create({}, since);
+    const otherReel = await store.nodes.Reel.create({}, since);
+    const cut = await store.nodes.Cut.create({}, since);
+    await store.edges.cutOf.create(
+      cut,
+      reel,
+      {},
+      {
+        validFrom: Y2020,
+        validTo: Y2022,
+      },
+    );
+    const ctx = {
+      graphId: store.graphId,
+      registry,
+      lock: uncapturedGraphWriteLock(),
+    };
+    const planned = (
+      validFrom: string,
+      validTo: string,
+      id = "planned",
+    ): InsertEdgeParams => ({
+      graphId: store.graphId,
+      id,
+      kind: "cutOf",
+      fromKind: "Cut",
+      fromId: cut.id,
+      toKind: "Reel",
+      toId: otherReel.id,
+      props: {},
+      validFrom,
+      validTo,
+    });
+    const legal = { inserts: [planned(Y2022, "2023-01-01T00:00:00.000Z")] };
+
+    const verdict = await assertCompositionWindowsDisjoint(ctx, backend, legal);
+    // The same writes on the same graph and transaction: the decision stands.
+    await expect(
+      assertCompositionWindowsDisjoint(ctx, backend, legal, verdict),
+    ).resolves.toBe(verdict);
+
+    // The same row stating another window, and another row: each decided
+    // anew, and refused for the overlap the verdict never judged.
+    for (const write of [
+      planned(Y2021, "2023-01-01T00:00:00.000Z"),
+      planned(Y2021, "2023-01-01T00:00:00.000Z", "another"),
+    ]) {
+      await expect(
+        assertCompositionWindowsDisjoint(
+          ctx,
+          backend,
+          { inserts: [write] },
+          verdict,
+        ),
+      ).rejects.toMatchObject({ code: "COMPOSITION_WINDOW_OVERLAP" });
+    }
+
+    // Another graph: decided again there, under its own verdict.
+    await expect(
+      assertCompositionWindowsDisjoint(
+        { ...ctx, graphId: "another_graph" },
+        backend,
+        legal,
+        verdict,
+      ),
+    ).resolves.not.toBe(verdict);
   });
 });

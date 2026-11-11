@@ -162,6 +162,7 @@ import {
 import {
   assertCompositionWindowsDisjoint,
   type CompositionWindowTransition,
+  type CompositionWindowVerdict,
   type CompositionWindowWrites,
 } from "../claims/composition-windows";
 import {
@@ -462,6 +463,12 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     lock?: GraphWriteLock;
     /** A `reparent`'s instant; see {@link assertCompositionEdgeWindowCurrent}. */
     moveInstant?: ResolvedCompositionMoveInstant | undefined;
+    /**
+     * The verdict of an enclosing frame that already judged this create's
+     * composition window together with its whole write set (a batch writing
+     * its rows one at a time); see `CompositionWindowVerdict`.
+     */
+    decidedCompositionWindows?: CompositionWindowVerdict | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
@@ -613,6 +620,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
         "a composition edge create reached validateAndPrepareEdgeCreate with no write lock",
       ),
       { inserts: [insertParams] },
+      options?.decidedCompositionWindows,
     );
   }
 
@@ -751,18 +759,21 @@ function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
  * (`assertCompositionWindowsDisjoint`), read off this module's context:
  * `writes` is every composition-row write the frame makes, decided together
  * before its first statement. A frame writing no composition row decides
- * nothing and reads nothing.
+ * nothing and reads nothing. `decided` is an enclosing frame's verdict over
+ * a write set these writes belong to; see `CompositionWindowVerdict`.
  */
 function assertFrameCompositionWindows<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   target: WriteTarget,
   lock: GraphWriteLock,
   writes: CompositionWindowWrites,
-): Promise<void> {
+  decided?: CompositionWindowVerdict,
+): Promise<CompositionWindowVerdict> {
   return assertCompositionWindowsDisjoint(
     { graphId: ctx.graphId, registry: ctx.registry, lock },
     target,
     writes,
+    decided,
   );
 }
 
@@ -1008,6 +1019,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     convergeOn?: EdgeConvergenceGuard;
     /** Batch callers deliberately skip per-item operation hooks. */
     skipHooks?: boolean;
+    /**
+     * The batch's composition window verdict, which this row-by-row create
+     * consumes instead of judging its window against the batch's
+     * intermediate state; see `CompositionWindowVerdict`.
+     */
+    decidedCompositionWindows?: CompositionWindowVerdict;
   }>,
 ): Promise<EdgeCreateInternalResult> {
   const kind = input.kind;
@@ -1167,6 +1184,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       // does. Every later re-validate call in this frame passes `false`.
       validateRelations: true,
       lock,
+      decidedCompositionWindows: options?.decidedCompositionWindows,
     });
 
     // A converging create owns both the match-key read and the endpoint
@@ -2045,11 +2063,18 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           durableWork.length !== batchInsertWork.length ||
           target.insertEdgesDurableBatchReturning === undefined
         ) {
-          // The row-by-row legs below probe each row against stored state
-          // only, so the batch is probed whole first: a refusal must precede
-          // the first row written, not follow it.
-          await assertBatchEdgeRelations(ctx, target, lock, batchInsertWork);
-          for (const input of inputs) {
+          // The row-by-row legs below would probe each row against stored
+          // state only, so the batch is decided whole first: a refusal must
+          // precede the first row written, not follow it. Each leg consumes
+          // the batch's composition window verdict rather than judging its
+          // row against the rows written before it.
+          const decidedCompositionWindows = await assertBatchEdgeRelations(
+            ctx,
+            target,
+            lock,
+            batchInsertWork,
+          );
+          for (const input of batchFallbackInputs(inputs, batchInsertWork)) {
             await executeEdgeCreateInternal(
               ctx,
               input,
@@ -2057,6 +2082,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
               {
                 returnRow: false,
                 skipHooks: true,
+                decidedCompositionWindows,
               },
             );
           }
@@ -2078,6 +2104,24 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
 }
 
 /**
+ * The inputs a batch's row-by-row fallback creates: each caller input under
+ * the id its batch preparation assigned, so the row written is the row the
+ * batch decided — its composition window verdict names rows by id.
+ */
+function batchFallbackInputs(
+  inputs: readonly CreateEdgeInput[],
+  batchInsertWork: readonly EdgeInsertWork[],
+): readonly CreateEdgeInput[] {
+  return inputs.map((input, index) => ({
+    ...input,
+    id: requireDefined(
+      batchInsertWork[index],
+      "a batch input has no prepared insert",
+    ).params.id,
+  }));
+}
+
+/**
  * Executes batched edge creates and returns the inserted edge payloads.
  *
  * Uses batch validation caching and a single multi-row INSERT with RETURNING
@@ -2092,8 +2136,40 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   options?: EdgeCreateBatchOptions,
 ): Promise<readonly Edge[]> {
+  const { edges } = await executeDecidedEdgeCreateBatch(
+    ctx,
+    inputs,
+    backend,
+    options,
+  );
+  return edges;
+}
+
+/** A batch create's edges, and the composition window verdict it reached. */
+type DecidedEdgeCreateBatch = Readonly<{
+  edges: readonly Edge[];
+  /**
+   * The decision over the batch's inserts and its paired updates' after
+   * states — what the caller's later update legs consume
+   * (`CompositionWindowVerdict`). Absent when the native program wrote the
+   * batch, which admits no composition edge kind.
+   */
+  compositionWindows: CompositionWindowVerdict | undefined;
+}>;
+
+/**
+ * {@link executeEdgeCreateBatch}, also returning the composition window
+ * verdict the batch reached, for a caller that writes the batch's paired
+ * updates afterwards one leg at a time.
+ */
+async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: GraphBackend | TransactionBackend,
+  options?: EdgeCreateBatchOptions,
+): Promise<DecidedEdgeCreateBatch> {
   if (inputs.length === 0) {
-    return [];
+    return { edges: [], compositionWindows: undefined };
   }
 
   const pairedUpdates = options?.pairedUpdates ?? [];
@@ -2126,7 +2202,10 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
       atomicExecutor,
       "rows",
     );
-    return rows.map((row) => rowToEdge(row));
+    return {
+      edges: rows.map((row) => rowToEdge(row)),
+      compositionWindows: undefined,
+    };
   }
 
   return runWritePlan(
@@ -2167,9 +2246,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           durableWork.length !== batchInsertWork.length ||
           target.insertEdgesDurableBatchReturning === undefined
         ) {
-          // See the non-returning fallback: probe the whole batch (and the
-          // updates paired with it) before its first row is written.
-          await assertBatchEdgeRelations(
+          // See the non-returning fallback: decide the whole batch (and the
+          // updates paired with it) before its first row is written, and let
+          // each leg consume that decision. The paired updates land after
+          // every leg, so a leg judging its own window would read rows they
+          // have not shrunk yet.
+          const decidedCompositionWindows = await assertBatchEdgeRelations(
             ctx,
             target,
             lock,
@@ -2177,12 +2259,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
             paired,
           );
           const fallbackRows: Edge[] = [];
-          for (const input of inputs) {
+          for (const input of batchFallbackInputs(inputs, batchInsertWork)) {
             const result = await executeEdgeCreateInternal(
               ctx,
               input,
               nestedManagedWriteTarget(target),
-              { returnRow: true, skipHooks: true },
+              { returnRow: true, skipHooks: true, decidedCompositionWindows },
             );
             if (result.outcome !== "created") {
               throw new CompilerInvariantError(
@@ -2198,9 +2280,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
             }
             fallbackRows.push(result.edge);
           }
-          return fallbackRows;
+          return {
+            edges: fallbackRows,
+            compositionWindows: decidedCompositionWindows,
+          };
         }
-        await assertBatchEdgeRelations(
+        const compositionWindows = await assertBatchEdgeRelations(
           ctx,
           target,
           lock,
@@ -2211,10 +2296,10 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           requireDefined(session.createEdgesDurable)(batchInsertWork),
         );
         assertDurableBatchRows(batchInsertWork, rows);
-        return rows.map((row) => rowToEdge(row));
+        return { edges: rows.map((row) => rowToEdge(row)), compositionWindows };
       }
 
-      await assertBatchEdgeRelations(
+      const compositionWindows = await assertBatchEdgeRelations(
         ctx,
         target,
         lock,
@@ -2225,7 +2310,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         session.createEdges(batchInsertWork),
       );
 
-      return rows.map((row) => rowToEdge(row));
+      return { edges: rows.map((row) => rowToEdge(row)), compositionWindows };
     },
   );
 }
@@ -2384,7 +2469,7 @@ async function assertBatchEdgeRelations<G extends GraphDef>(
     updates: readonly EdgeUpsertUpdateBatchEntry[];
     transitions: readonly CompositionWindowTransition[];
   }>,
-): Promise<void> {
+): Promise<CompositionWindowVerdict> {
   await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
     [
@@ -2392,7 +2477,7 @@ async function assertBatchEdgeRelations<G extends GraphDef>(
       ...proposedRelationEdgesFromReentries(ctx, paired?.updates ?? []),
     ],
   );
-  await assertFrameCompositionWindows(ctx, target, lock, {
+  return assertFrameCompositionWindows(ctx, target, lock, {
     inserts: batchInsertWork.map((work) => work.params),
     revisions: paired?.transitions ?? [],
   });
@@ -2554,13 +2639,13 @@ type EdgeUpdateOptions = Readonly<{
   /** A `reparent`'s window end; see {@link assertCompositionEdgeWindowCurrent}. */
   moveInstant?: ResolvedCompositionMoveInstant;
   /**
-   * The write frame already reached the composition window decision for this
-   * update together with every other write it makes (an update set's
-   * re-prepared entry, {@link writeEdgeUpdateSet}), so judging the row alone
-   * against stored rows its siblings have not written yet would decide a
-   * state the frame never leaves.
+   * The verdict of an enclosing frame that already judged this update's
+   * window together with every other write it makes (an update set, or a
+   * batch that writes its legs one at a time). Judging the row alone against
+   * stored rows its siblings have not written yet would decide a state the
+   * frame never leaves; see `CompositionWindowVerdict`.
    */
-  compositionWindowsDecidedByFrame?: true;
+  decidedCompositionWindows?: CompositionWindowVerdict | undefined;
 }>;
 
 /**
@@ -2905,10 +2990,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     resolvedExisting,
     lock,
   );
-  if (
-    options?.compositionWindowsDecidedByFrame !== true &&
-    ctx.registry.isCompositionEdge(prepared.rowAfter.kind)
-  ) {
+  if (ctx.registry.isCompositionEdge(prepared.rowAfter.kind)) {
     await assertFrameCompositionWindows(
       ctx,
       target,
@@ -2917,6 +2999,7 @@ async function performEdgeUpdate<G extends GraphDef>(
         "a composition edge update reached performEdgeUpdate with no write lock",
       ),
       { revisions: edgeUpdateTransitions([{ prepared }]) },
+      options?.decidedCompositionWindows,
     );
   }
   return writePreparedEdgeUpdate(ctx, input, prepared, session, target);
@@ -3174,9 +3257,12 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
     const prepared = await prepareEdgeUpdateSet(ctx, remaining, target, lock, {
       ...(rows === undefined ? {} : { storedRows: rows }),
     });
-    await assertFrameCompositionWindows(ctx, target, lock, {
-      revisions: edgeUpdateTransitions(prepared),
-    });
+    const decidedCompositionWindows = await assertFrameCompositionWindows(
+      ctx,
+      target,
+      lock,
+      { revisions: edgeUpdateTransitions(prepared) },
+    );
     try {
       for (const [offset, entry] of remaining.entries()) {
         const { prepared: update, preparedAgainstStoredRow } = requireDefined(
@@ -3198,7 +3284,7 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
               target,
               {
                 ...edgeUpdateBatchEntryOptions(entry),
-                compositionWindowsDecidedByFrame: true,
+                decidedCompositionWindows,
               },
               undefined,
               lock,
@@ -3445,6 +3531,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     coalesceCandidate?: BackendEdgeRow;
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
+    /** See {@link EdgeUpdateOptions}' `decidedCompositionWindows`. */
+    decidedCompositionWindows?: CompositionWindowVerdict | undefined;
   }>,
 ): Promise<EdgeUpsertUpdateOutcome> {
   if (input.clearValidTo === true) {
@@ -3550,6 +3638,8 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
     clearDeleted?: boolean;
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
+    /** See {@link EdgeUpdateOptions}' `decidedCompositionWindows`. */
+    decidedCompositionWindows?: CompositionWindowVerdict | undefined;
   }>,
 ): Promise<Edge> {
   const outcome = await executeEdgeUpsertUpdateWithOutcome(
@@ -5378,6 +5468,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 : [update];
             });
 
+        // The composition window decision the update legs below consume: the
+        // create batch's (over its inserts and these legs together) or step
+        // 5's set decision. A leg it does not cover judges itself.
+        let decidedCompositionWindows: CompositionWindowVerdict | undefined;
+
         // Step 4: Execute creates in batch
         if (toCreate.length > 0) {
           // The batch insertion path deliberately remains one multi-row write,
@@ -5393,12 +5488,14 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             );
           }
           const createInputs = toCreate.map((entry) => entry.input);
-          const createdEdges = await executeEdgeCreateBatch(
+          const createBatch = await executeDecidedEdgeCreateBatch(
             ctx,
             createInputs,
             rawTarget,
             { pairedUpdates: owedUpdates },
           );
+          const createdEdges = createBatch.edges;
+          decidedCompositionWindows = createBatch.compositionWindows;
           for (const [batchIndex, entry] of toCreate.entries()) {
             results[entry.index] = {
               edge: requireDefined(createdEdges[batchIndex]),
@@ -5452,7 +5549,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           // own that reaches only its own verdicts before its statement, and
           // probes acyclicity against stored state only: decide them as one
           // set before the first (the create batch already did, when step 4
-          // ran), and probe their resurrections and reopens as one set.
+          // ran), and probe their resurrections and reopens as one set. Each
+          // leg consumes the set's composition window verdict: judged alone,
+          // a leg written early would read rows a later leg has not changed
+          // yet, and could refuse the state the batch leaves.
           if (toCreate.length === 0 && owedUpdates.length > 1) {
             const owedSet = await prepareEdgeUpdateSet(
               ctx,
@@ -5461,9 +5561,12 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
               lock,
               { storedRows: storedRowsOfUpdateEntries(owedUpdates) },
             );
-            await assertFrameCompositionWindows(ctx, target, lock, {
-              revisions: edgeUpdateTransitions(owedSet),
-            });
+            decidedCompositionWindows = await assertFrameCompositionWindows(
+              ctx,
+              target,
+              lock,
+              { revisions: edgeUpdateTransitions(owedSet) },
+            );
           }
           await assertResurrectionsAcyclic(
             ctx,
@@ -5484,7 +5587,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 ctx,
                 input,
                 rawTarget,
-                { clearDeleted: true },
+                { clearDeleted: true, decidedCompositionWindows },
               );
               results[entry.index] = { edge, action: "resurrected" };
               writes += 1;
@@ -5499,6 +5602,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 {
                   coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled,
                   coalesceCandidate: entry.row,
+                  decidedCompositionWindows,
                 },
               );
               results[entry.index] = {

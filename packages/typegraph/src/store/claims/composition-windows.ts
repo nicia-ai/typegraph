@@ -34,6 +34,7 @@
  * - {@link assertCompositionWindowsDisjoint} — the fenced form every store
  *   write path calls before its first statement.
  */
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type EdgeRow,
   type GraphBackend,
@@ -51,7 +52,7 @@ import {
   validityWindowCovers,
   validityWindowsOverlap,
 } from "../../utils/date";
-import { nodeRefKey } from "../../utils/tuple-key";
+import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import {
   compositionRowEndpoints,
   readCompositionEdgesAtRole,
@@ -528,15 +529,122 @@ function wholeOf(
 export type CompositionWindowTarget = GraphReadBackend &
   Pick<GraphBackend, "capabilities" | "commands" | "dialect" | "execute">;
 
+declare const COMPOSITION_WINDOW_VERDICT_BRAND: unique symbol;
+
+/**
+ * A composition window decision a frame reached: the writes it was reached
+ * over, each by what it writes, on the transaction it was reached on. Minted
+ * only by {@link assertCompositionWindowsDisjoint}.
+ *
+ * A frame whose decision covers rows it then writes one at a time — each in a
+ * nested write plan of its own, while the rows written before it are already
+ * stored and the ones after it are not — hands this verdict to every per-row
+ * write. A per-row write the verdict covers consumes it rather than judging
+ * itself again against that intermediate state, which could refuse the legal
+ * state the whole frame leaves (an earlier row overlapping a stored row that a
+ * later write of the same frame shrinks). The decision therefore runs once,
+ * over the final state; a write the verdict does not cover exactly — another
+ * row, or the same row stating a different window — is judged on its own, so
+ * no write runs without one.
+ */
+export type CompositionWindowVerdict = Readonly<{
+  [COMPOSITION_WINDOW_VERDICT_BRAND]: true;
+  graphId: string;
+  /** The root of the transaction target the decision read through. */
+  session: object;
+  /** Each decided write's {@link compositionWriteIdentity}, by edge id. */
+  writes: ReadonlyMap<string, string>;
+}>;
+
+/**
+ * What one write states, as the verdict records it: an insert by its kind,
+ * endpoints and STATED bounds (its lower bound is stamped later, at the
+ * insert's own instant), a revision by the window and liveness its row is
+ * left with.
+ */
+function compositionWriteIdentity(
+  write:
+    | Readonly<{ insert: InsertEdgeParams }>
+    | Readonly<{ revise: CompositionWindowEdge }>,
+): string {
+  if ("insert" in write) {
+    const params = write.insert;
+    return encodeTupleKey([
+      "insert",
+      params.kind,
+      params.fromKind,
+      params.fromId,
+      params.toKind,
+      params.toId,
+      params.validFrom === undefined ? "default"
+      : params.validFrom === null ? "unbounded"
+      : `at:${params.validFrom}`,
+      params.validTo ?? "open",
+    ]);
+  }
+  const row = write.revise;
+  return encodeTupleKey([
+    "revise",
+    row.kind,
+    row.from_kind,
+    row.from_id,
+    row.to_kind,
+    row.to_id,
+    row.valid_from ?? "unbounded",
+    row.valid_to ?? "open",
+    row.deleted_at === undefined ? "live" : "deleted",
+  ]);
+}
+
+/** Every write of `writes`, by edge id, as {@link compositionWriteIdentity} names it. */
+function compositionWriteIdentities(
+  writes: CompositionWindowWrites,
+): ReadonlyMap<string, string> {
+  const identities = new Map<string, string>();
+  for (const params of writes.inserts ?? []) {
+    identities.set(params.id, compositionWriteIdentity({ insert: params }));
+  }
+  for (const { after } of writes.revisions ?? []) {
+    identities.set(after.id, compositionWriteIdentity({ revise: after }));
+  }
+  return identities;
+}
+
+/**
+ * Whether `verdict` already decided `writes` on this graph and transaction:
+ * every write in `writes` is one the verdict was reached over, stating exactly
+ * what it stated then.
+ */
+function verdictCoversWrites(
+  verdict: CompositionWindowVerdict,
+  graphId: string,
+  target: object,
+  writes: CompositionWindowWrites,
+): boolean {
+  if (verdict.graphId !== graphId) return false;
+  if (backendDerivationRoot(target) !== verdict.session) return false;
+  for (const [edgeId, identity] of compositionWriteIdentities(writes)) {
+    if (verdict.writes.get(edgeId) !== identity) return false;
+  }
+  return true;
+}
+
 /**
  * THE gate every store write path takes before the first statement of a frame
  * that writes composition rows: refuses with `CompositionError`
  * (`COMPOSITION_WINDOW_OVERLAP`) when the frame would leave one part with two
- * composition edges whose valid-time windows share an instant.
+ * composition edges whose valid-time windows share an instant, and returns the
+ * {@link CompositionWindowVerdict} it reached.
  *
  * `writes` is EVERY composition-row write of the frame — its inserts, and the
  * stored rows it ends, widens, reopens, resurrects or retires — so the frame is
  * judged as the state it produces, not one row at a time.
+ *
+ * `decided` is the verdict of an enclosing frame that already judged these
+ * writes together with the rest of its write set. When it covers every write
+ * here, exactly as stated, on this graph and transaction, that decision is
+ * the decision and nothing is judged again; otherwise these writes are judged
+ * now.
  *
  * Read-free when the frame brings no part an instant it did not already hold
  * (see {@link planCompositionWindowDecision}); otherwise the read is a
@@ -556,7 +664,14 @@ export async function assertCompositionWindowsDisjoint(
   }>,
   target: CompositionWindowTarget,
   writes: CompositionWindowWrites,
-): Promise<void> {
+  decided?: CompositionWindowVerdict,
+): Promise<CompositionWindowVerdict> {
+  if (
+    decided !== undefined &&
+    verdictCoversWrites(decided, ctx.graphId, target, writes)
+  ) {
+    return decided;
+  }
   const conflict = await readCompositionWindowConflict(
     ctx.registry,
     target,
@@ -573,6 +688,11 @@ export async function assertCompositionWindowsDisjoint(
   if (conflict !== undefined) {
     throw compositionWindowOverlapError(ctx.registry, conflict);
   }
+  return {
+    graphId: ctx.graphId,
+    session: backendDerivationRoot(target),
+    writes: compositionWriteIdentities(writes),
+  } as CompositionWindowVerdict;
 }
 
 /**
