@@ -2,11 +2,11 @@
  * The read-free half of the composition window decision
  * (`planCompositionWindowDecision`, src/store/claims/composition-windows.ts):
  * which frames it settles without reading a stored row, and which it must
- * read for. The ordinary attach and a `reparent` that splits its incumbent's
- * window bring the part no instant it did not already hold, so they cost no
- * read; a backdated attach, a history row, a widened window and a
- * resurrection do. The verdicts the reads lead to are covered on every
- * backend by `tests/backends/integration/composition-window-overlap.ts`.
+ * read for. A `reparent` that splits its incumbent's window brings the part no
+ * instant it did not already hold, so it costs no read; every attach, history
+ * row, widened window and resurrection does. The verdicts the reads lead to
+ * are covered on every backend by
+ * `tests/backends/integration/composition-window-overlap.ts`.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -96,16 +96,26 @@ function partsToRead(
 }
 
 describe("composition window decision: what it settles without a read", () => {
-  it("reads nothing for an attach whose lower bound the insert stamps", () => {
-    // MUTATION CHECK: drop the `opensAtOrAfterWrite` test from
-    // `planCompositionWindowDecision` — every ordinary attach then reads.
+  it("reads for an ordinary attach, whose stamped start may fall inside a stored row written on a later clock, and not for a zero-width row", () => {
+    // The stamped attach's read is load-bearing: see the integration case
+    // "refuses an ordinary attach stamped at a clock behind a history row's
+    // end" (tests/backends/integration/composition-window-overlap.ts).
     const plan = planCompositionWindowDecision(
       registry,
       { inserts: [insert("attach", {})] },
       NOW,
     );
     expect(plan.inFrameConflict).toBeUndefined();
-    expect(partsToRead(plan)).toEqual([]);
+    expect(partsToRead(plan)).toEqual(["Cut:part"]);
+    expect(
+      partsToRead(
+        planCompositionWindowDecision(
+          registry,
+          { inserts: [insert("empty", { validFrom: Y2021, validTo: Y2021 })] },
+          NOW,
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it("reads nothing for a reparent that ends its incumbent where the new attachment starts", () => {

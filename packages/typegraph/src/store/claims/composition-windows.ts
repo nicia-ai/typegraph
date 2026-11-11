@@ -46,6 +46,7 @@ import { compositionPopulationMembership } from "../../registry/composition-rela
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
 import {
+  isEmptyValidityWindow,
   nowIso,
   resolveStampedValidityLowerBound,
   type ValidityWindow,
@@ -209,15 +210,14 @@ export type CompositionWindowPlan = Readonly<{
  *   it from (its own stored window, shrunk; or a `reparent`'s incumbent, whose
  *   window the move splits into the ended half and the new attachment) cannot
  *   meet a stored row that window did not already meet;
- * - a row that starts at or after `operationInstant` — the ordinary attach,
- *   whose lower bound the insert stamps — cannot meet an ended stored row,
- *   because no composition window starts or ends later than the write that
- *   stated it (`assertCompositionWindowCurrent`, audited by the
- *   `compositionFutureWindow` family), and an open stored row is the part's
- *   claim holder, which the composition claim already refuses.
+ * - an empty window (zero width) meets nothing.
  *
- * Everything else — a backdated attach, a history row, a widened or reopened
- * window, a resurrection — reads the part's stored rows.
+ * Everything else reads the part's stored rows — a backdated attach, a
+ * history row, a widened or reopened window, a resurrection, and the ordinary
+ * attach too. An attach stamped at the write instant cannot rely on every
+ * stored window having ended by then: a history row was written with ITS
+ * writer's clock, and a clock that has stepped back since, or another
+ * process's clock running behind, stamps a start inside it.
  *
  * Pure: the merge planner calls it with the writes it plans, the write paths
  * through {@link assertCompositionWindowsDisjoint}.
@@ -261,23 +261,19 @@ export function planCompositionWindowDecision(
 
   const partsToRead: CompositionNodeRef[] = [];
   const uncoveredWrites: JudgedWrite[] = [];
-  const opensAtOrAfterWrite: ValidityWindow = { validFrom: operationInstant };
   for (const { part, writes: partWrites } of writesByPart.values()) {
     const heldWindows = partWrites.flatMap((write) =>
       write.beforeWindow === undefined ? [] : [write.beforeWindow],
     );
-    const uncovered = partWrites.filter(
-      (write) =>
-        write.afterWindow !== undefined &&
-        !heldWindows.some((held) =>
-          validityWindowCovers(held, write.afterWindow ?? {}),
-        ),
-    );
-    const readsStoredRows = uncovered.some(
-      (write) =>
-        !validityWindowCovers(opensAtOrAfterWrite, write.afterWindow ?? {}),
-    );
-    if (readsStoredRows) {
+    const uncovered = partWrites.filter((write) => {
+      const window = write.afterWindow;
+      return (
+        window !== undefined &&
+        !isEmptyValidityWindow(window.validFrom, window.validTo) &&
+        !heldWindows.some((held) => validityWindowCovers(held, window))
+      );
+    });
+    if (uncovered.length > 0) {
       partsToRead.push(part);
       uncoveredWrites.push(...uncovered);
     }

@@ -916,15 +916,16 @@ overlap.**
   `incumbentValidTo`; an omitted bound is unbounded). An import reports it
   as that row's per-row error, so an archive whose history does not overlap
   restores in any row order.
-- The ordinary attach and move cost nothing extra. An attach whose
-  `validFrom` the write stamps starts at or after every stored window's end,
-  because no composition window ends later than the write that stated it,
-  and a `reparent` splits its incumbent's window at the move instant. Any
-  other write — a backdated attach, a history row, a widened or reopened
-  window, a resurrection, a `reparent` of a part with no current whole —
-  reads the part's stored edges under the same per-graph write fence every
-  composition write already takes, so two concurrent writers of one part's
-  history are serialized.
+- A `reparent` of a part with a current whole costs nothing extra: it splits
+  its incumbent's window at the move instant. Every other write — the
+  ordinary attach included, a backdated attach, a history row, a widened or
+  reopened window, a resurrection, a `reparent` of a part with no current
+  whole — reads the part's composition edges under the same per-graph write
+  fence every composition write already takes, so two concurrent writers of
+  one part's history are serialized. The ordinary attach reads too because a
+  history row's end was judged against its own writer's clock: an attach
+  stamped by a clock that has since stepped back, or by another process whose
+  clock runs behind, can start inside it.
 - `population: "one"` is unchanged: its claim already holds a part to one
   row for the row's whole life.
 

@@ -17,7 +17,7 @@
  * (src/store/claims/composition-windows.ts) return before its plan — each
  * refused write then lands, and the asOf read it guards shows two wholes.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -605,6 +605,43 @@ export function registerCompositionWindowOverlapIntegrationTests(
       expect(await wholesAt(store, "CwFigure", fig.id, midYear(2021))).toEqual([
         `CwSection:${sec.id}`,
       ]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    // MUTATION CHECK: restore the stamped-attach fast path in
+    // `planCompositionWindowDecision` (skip the read when every uncovered
+    // write opens at or after the operation instant) — the attach below,
+    // stamped at a clock that stepped back behind the history row's end, is
+    // then admitted and the part reads under two wholes in the gap.
+    it("refuses an ordinary attach stamped at a clock behind a history row's end", async () => {
+      const { store, paper, sec, fig } = await setup();
+      const historyEnd = new Date(Date.now() - 1000).toISOString();
+      await store.edges.cwFigureIn.create(
+        fig,
+        paper,
+        {},
+        {
+          validFrom: Y2019,
+          validTo: historyEnd,
+        },
+      );
+      // Another writer's clock, or this one after a step back, runs behind
+      // the end that row was written with.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(Date.parse(historyEnd) - 60_000);
+        await refusal(store.edges.cwFigureIn.create(fig, sec, {}));
+        await refusal(store.nodes.CwFigure.reparent(fig.id, { whole: sec }));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await figureRows(store)).toEqual([
+        `cwFigureIn:${paper.id} [${Y2019},${historyEnd})`,
+      ]);
+
+      // On a clock at or past that end the same attach is one whole per
+      // instant.
+      await store.edges.cwFigureIn.create(fig, sec, {});
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
 
