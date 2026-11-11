@@ -38,6 +38,7 @@ import {
   MergePlanCapabilityError,
 } from "./errors";
 import {
+  assertMergeWritesStructurallySound,
   assertPlanningFenceUnchanged,
   assertStableMergePostimage,
   captureMergePlanTargetFence,
@@ -1065,8 +1066,16 @@ async function planMutationSteps<G extends GraphDef>(
         });
         if (original.deleted_at !== undefined) nodeResurrections.push(ref);
       }
-      await assertPlanningFenceUnchanged(target, fence);
       const { digest: _digest, ...artifact } = planned.data;
+      const writes = {
+        ...artifact.writes,
+        nodeUpserts: [...nodeUpserts.values()],
+      };
+      // The recreations above change what the apply deletes, so the
+      // structural gate the merge planner already ran is run again over the
+      // write set this artifact will actually carry.
+      await assertMergeWritesStructurallySound(target, writes);
+      await assertPlanningFenceUnchanged(target, fence);
       return {
         success: true,
         data: await finalizeMergePlanArtifact({
@@ -1083,10 +1092,7 @@ async function planMutationSteps<G extends GraphDef>(
             ...artifact.proposed,
             nodes: { ...artifact.proposed.nodes, upserts: nodeUpserts.size },
           },
-          writes: {
-            ...artifact.writes,
-            nodeUpserts: [...nodeUpserts.values()],
-          },
+          writes,
           guards: {
             ...artifact.guards,
             ...(nodeResurrections.length === 0 ? {} : { nodeResurrections }),

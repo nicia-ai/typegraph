@@ -396,6 +396,64 @@ export function registerGraphMergeCompositionIntegrationTests(
           expect(await target.verifyConstraintFences()).toEqual([]);
         });
 
+        it("reports no hook outcome or receipt count for an in-transaction apply rolled back after writing", async () => {
+          let refuseWholeWrites = false;
+          let observing = false;
+          const ended: string[] = [];
+          const target = await seededTarget(context, existence, cardinality, {
+            onOperationStart: (operation) => {
+              if (
+                refuseWholeWrites &&
+                operation.entity === "node" &&
+                operation.kind === "GmcWhole"
+              ) {
+                throw new Error("whole writes are refused by this test");
+              }
+            },
+            onOperationEnd: (operation) => {
+              if (observing) {
+                ended.push(
+                  `${operation.operation}:${operation.entity}:${operation.kind}`,
+                );
+              }
+            },
+          });
+          const source = await fork(context, target);
+          await source.store.nodes.GmcWhole.create(
+            { label: "w4" },
+            { id: "w4" },
+          );
+          await source.store.nodes.GmcPart.reparent(
+            asNodeId<typeof Part>("p1"),
+            { whole: wholeRef("w2") },
+          );
+          const plan = unwrap(await planMerge(target, [source]));
+
+          observing = true;
+          refuseWholeWrites = true;
+          const { receipt } = await target.transactionWithReceipt(
+            async (tx) => {
+              await expect(
+                applyMergePlanInTransaction(target, tx, plan),
+              ).rejects.toBeInstanceOf(MergeError);
+              refuseWholeWrites = false;
+              await tx.nodes.GmcWhole.create({ label: "w5" }, { id: "w5" });
+            },
+          );
+          observing = false;
+
+          // Only the caller's own write committed, so only it is reported.
+          expect(ended).toEqual(["create:node:GmcWhole"]);
+          expect(receipt.writes.total).toBe(1);
+          expect({ ...receipt.writes.nodes }).toEqual({ GmcWhole: 1 });
+          expect({ ...receipt.writes.edges }).toEqual({});
+          expect(await attachments(target)).toEqual({ p1: "w1" });
+        });
+        // MUTATION CHECK (verified): with `effects.discard(error)` removed from
+        // `withAdoptedMergeApplySavepoint` (src/graph-merge/adopted-transaction.ts),
+        // the old attachment's rolled-back delete under `cardinality: "one"`
+        // is still reported by `onOperationEnd` and counted in the receipt.
+
         it("reports no orphan for a part the plan itself deletes", async () => {
           const target = await seededTarget(context, existence, cardinality);
           const source = await fork(context, target);

@@ -11,6 +11,7 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
+  RestrictedDeleteError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
@@ -24,8 +25,10 @@ import {
   planCandidateWriteSet,
   planMerge,
   planMutations,
+  RestrictedDeleteMergeConflictError,
 } from "../../../src/graph-merge";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
+import { storeBackend } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -377,6 +380,56 @@ export function registerMutationPlanningIntegrationTests(
         await store.edges.links.getById(asEdgeId<typeof links>("new")),
       ).toMatchObject({ label: "new" });
     });
+
+    it("refuses at plan time a recreation whose node keeps an edge the plan does not delete", async () => {
+      const store = await context.createHistoryStore({
+        ...graph,
+        id: "recreate_restricted",
+      });
+      const a = await store.nodes.Item.create({ name: "a" }, { id: "a" });
+      const b = await store.nodes.Item.create({ name: "b" }, { id: "b" });
+      // A row of an edge kind the graph no longer declares: the working copy
+      // is cloned from declared kinds only, so the staged delete of `b` never
+      // sees it, while the apply's delete of the live `b` does and refuses
+      // under `restrict`. Only the target-side check over the plan's final
+      // writes (which carry the recreation) can report it.
+      await storeBackend(store).insertEdge({
+        graphId: store.graphId,
+        id: "retired-1",
+        kind: "retiredLink",
+        fromKind: "Item",
+        fromId: a.id,
+        toKind: "Item",
+        toId: b.id,
+        props: {},
+      });
+      const builder = await createMutationPlanBuilder(
+        store,
+        "recreate-restricted",
+      );
+
+      const planned = await builder
+        .deleteNode("Item", b.id)
+        .createNode("Item", b.id, { name: "replacement" })
+        .plan({ makeBackend, planningScope: "full" });
+
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(RestrictedDeleteMergeConflictError);
+      expect(planned.error.cause).toBeInstanceOf(RestrictedDeleteError);
+      expect(planned.error.details).toMatchObject({
+        constraintCode: "RESTRICTED_DELETE",
+        nodeId: b.id,
+        edgeKinds: ["retiredLink"],
+      });
+      expect(await store.nodes.Item.getById(b.id)).toMatchObject({
+        name: "b",
+      });
+    });
+    // MUTATION CHECK (verified): without the structural gate over the final
+    // writes in `planMutations` (src/graph-merge/mutation-plan.ts) the plan
+    // comes back `ok` and its apply refuses with `MergeConstraintConflictError`
+    // (`RESTRICTED_DELETE`). With `mergeNodeDeleteSequence` leaving
+    // recreations out, the plan also comes back `ok`.
 
     it("round-trips clearing node and edge validity through the mutation document and artifact", async () => {
       const store = await context.createHistoryStore({

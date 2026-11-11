@@ -70,6 +70,26 @@ export const MERGE_NODE_DELETE_POLICY = {
   cascadeComposition: false,
 } as const satisfies NodeDeletePolicy;
 
+/**
+ * The node deletes a merge apply runs, in its order: the plan's node
+ * deletions, then the delete half of every recreation (an upsert that deletes
+ * the live node before writing it again). Both run under
+ * {@link MERGE_NODE_DELETE_POLICY}, so each can be refused by its node's
+ * delete behavior. The apply's node phase and the plan-time
+ * {@link restrictedDeleteConflict} both walk this one sequence.
+ */
+export function mergeNodeDeleteSequence<
+  Ref extends Readonly<{ kind: string; id: string }>,
+>(
+  deletions: readonly Ref[],
+  upserts: readonly (Ref & Readonly<{ recreate?: true | undefined }>)[],
+): readonly Ref[] {
+  return [
+    ...deletions,
+    ...upserts.filter((upsert) => upsert.recreate === true),
+  ];
+}
+
 /** Whether a write states its own end of validity — an instant or an explicit reopening — rather than keeping the stored row's. */
 export function statesValidityEnd(
   write: Readonly<{
@@ -97,7 +117,12 @@ export type PlanStructure<G extends GraphDef> = Readonly<{
   edgeRows: readonly ProposedRelationEdge[];
   /** Edge ids whose stored state the plan removes or replaces. */
   supersededEdgeIds: ReadonlySet<string>;
-  /** Nodes the plan deletes. */
+  /**
+   * Nodes the apply deletes — the plan's deletions and the delete half of its
+   * recreations ({@link mergeNodeDeleteSequence}). A stored edge incident to
+   * one leaves with it: its delete removes the edge, or refuses, which
+   * {@link restrictedDeleteConflict} reports.
+   */
   deletedNodes: ReadonlySet<MergeKey>;
   /** The target's live edges incident to one node, read once per node. */
   connectedEdges: (kind: string, id: string) => Promise<readonly EdgeRow[]>;
@@ -157,8 +182,8 @@ async function capturePlanStructure<G extends GraphDef>(
       ...writes.edgeUpserts.map((upsert) => upsert.id),
     ]),
     deletedNodes: new Set(
-      writes.nodeDeletes.map((deletion) =>
-        mergeKey(deletion.kind, deletion.id),
+      mergeNodeDeleteSequence(writes.nodeDeletes, writes.nodeUpserts).map(
+        (deletion) => mergeKey(deletion.kind, deletion.id),
       ),
     ),
     connectedEdges: async (kind, id) => {
@@ -423,9 +448,11 @@ async function storedClaimHolder<G extends GraphDef>(
 }
 
 /**
- * Whether a node the plan deletes would be refused by its own delete
+ * Whether a node the apply deletes would be refused by its own delete
  * behavior: an `onDelete: "restrict"` node (the default) that keeps a
- * non-composition edge the plan does not delete. The verdict is the store's
+ * non-composition edge the plan does not delete. Every node delete counts —
+ * a plan deletion and the delete half of a recreation alike
+ * ({@link mergeNodeDeleteSequence}). The verdict is the store's
  * ({@link judgeNodeDeleteBehavior}), reached in the apply's order — the plan's
  * edge deletes land first, and every earlier node delete's `cascade` /
  * `disconnect` removals are consumed before the next node is judged — under
@@ -443,7 +470,10 @@ export async function restrictedDeleteConflict<G extends GraphDef>(
       params: Readonly<{ nodeKind: string; nodeId: string }>,
     ) => structure.connectedEdges(params.nodeKind, params.nodeId),
   };
-  for (const deletion of structure.writes.nodeDeletes) {
+  for (const deletion of mergeNodeDeleteSequence(
+    structure.writes.nodeDeletes,
+    structure.writes.nodeUpserts,
+  )) {
     try {
       const verdict = await judgeNodeDeleteBehavior(
         { graphId: target.graphId, registry: target.registry },

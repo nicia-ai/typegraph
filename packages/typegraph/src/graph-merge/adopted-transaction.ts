@@ -10,8 +10,13 @@ import {
   hasPendingRecordedGraphWrites,
   runRecordedTransactionSavepoint,
 } from "../store/recorded-capture";
-import { storeBackend } from "../store/runtime-port";
+import {
+  markTransactionEffects,
+  storeBackend,
+  transactionBackend,
+} from "../store/runtime-port";
 import type { Store } from "../store/store";
+import type { TransactionContext } from "../store/types";
 import { MergePlanCapabilityError } from "./errors";
 
 /** A plan's durable revision cannot fence changes still awaiting capture flush. */
@@ -65,7 +70,7 @@ const ADOPTED_MERGE_APPLY_SAVEPOINT = "typegraph_merge_apply";
  */
 export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
   target: Store<G>,
-  txBackend: TransactionBackend,
+  tx: TransactionContext<G>,
   apply: () => Promise<T>,
 ): Promise<T> {
   const statements = statementExecutionVerdict(storeBackend(target));
@@ -75,10 +80,20 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
       { details: { capability: "mergeTransactionSavepoint" } },
     );
   }
-  return runRecordedTransactionSavepoint(
-    txBackend,
-    statements,
-    ADOPTED_MERGE_APPLY_SAVEPOINT,
-    async () => ({ action: "release", value: await apply() }),
-  );
+  // The rows are not the apply's only effects: the transaction context has
+  // also buffered `onOperationEnd` outcomes and receipt counts for them.
+  // Those are forgotten with the rows, so a caller that commits reports only
+  // what it commits.
+  const effects = markTransactionEffects(tx);
+  try {
+    return await runRecordedTransactionSavepoint(
+      transactionBackend(tx),
+      statements,
+      ADOPTED_MERGE_APPLY_SAVEPOINT,
+      async () => ({ action: "release", value: await apply() }),
+    );
+  } catch (error) {
+    effects.discard(error);
+    throw error;
+  }
 }
