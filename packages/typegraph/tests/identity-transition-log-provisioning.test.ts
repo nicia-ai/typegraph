@@ -39,6 +39,7 @@ import {
 } from "../src/backend/sqlite/local";
 import { readIdentityTransitions } from "../src/identity/transition-log";
 import { storeRuntime } from "../src/store/runtime-port";
+import { expectTransitionLogRefusesMissingRelations } from "./identity-transition-relations-missing";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Author = defineNode("Author", {
@@ -199,6 +200,18 @@ describe("identity transition log provisioning", () => {
       expect(refusal.message).toMatch(/typegraph_identity_transitions/);
       expect(refusal.message).not.toMatch(/recorded-time relations/);
       expect(refusal.suggestion).toMatch(/adoptBaseSchema\(\)/);
+    } finally {
+      await result.backend.close();
+    }
+  });
+
+  it("refuses the transition-log reads and the prune with the same typed error a write gets on a database that never adopted the relations", async () => {
+    const result = createLocalSqliteBackend();
+    try {
+      await expectTransitionLogRefusesMissingRelations(result.backend, () => {
+        dropTables(result, TRANSITION_LOG_TABLES);
+        return Promise.resolve();
+      });
     } finally {
       await result.backend.close();
     }

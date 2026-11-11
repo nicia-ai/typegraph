@@ -10,7 +10,6 @@
  * itself supplies boundaries and explanations ONLY; it is never consulted for
  * membership.
  */
-import { requireTypeGraphRecordedRevision } from "../backend/capabilities/recorded-time-ownership";
 import { type GraphAllocationOwner } from "../core/allocation-owner";
 import { type GraphDef } from "../core/define-graph";
 import {
@@ -23,7 +22,11 @@ import {
   recordedInstantWallTime,
   type RestoredRecordedInstant,
 } from "../core/temporal";
-import { IdentityReplayError, ValidationError } from "../errors";
+import {
+  IdentityReplayError,
+  type IdentityTransitionLogOperation,
+  ValidationError,
+} from "../errors";
 import { readGraphAllocationOwner } from "../store/allocation-owner";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { groupBy } from "../utils/array";
@@ -48,11 +51,14 @@ import {
   type IdentityDecisionProvenance,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
+  type IdentityTransitionCut,
+  type IdentityTransitionRetention,
   type IdentityTransitionRow,
   isRestoredTransitionRow,
+  readIdentityTransitionRetention,
   readIdentityTransitions,
-  readTransitionRetentionDetails,
   requireIdentityTransitionLog,
+  requireOwnedTransitionLogRevision,
   transitionClassRef,
   transitionPriorClassRef,
 } from "./transition-log";
@@ -99,9 +105,10 @@ type IdentityTransitionFields<G extends GraphDef> = Omit<
  * {@link RecordedInstant}. `restored.at` is the destination graph's WALL
  * CLOCK at restore time: a restore records history, it does not relive it, so
  * it never advances this graph's recorded revision counter and there is no
- * revision on this graph's own axis to pair the timestamp with. The coarser
- * retention watermark (the `retention-truncated` completeness reason) is the
- * only revision-shaped signal a restore leaves behind.
+ * revision on this graph's own axis to pair the timestamp with. The only
+ * revision-shaped signal a restore leaves behind is the cut its archive
+ * carried, on the source's axis (the `restored-retention-truncated`
+ * completeness reason).
  */
 export type RestoredIdentityTransition<G extends GraphDef> = Omit<
   RecordedIdentityTransition<G>,
@@ -145,10 +152,13 @@ declare const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;
  * has: `fromRecorded` / `toRecorded` refuse it, and `cursor` refuses a bare
  * recorded instant.
  *
- * A cursor is also bound to the reference whose lineage it pages. A position
- * in one reference's lineage says nothing about another's, so a cursor handed
- * to a read for a different reference is refused rather than silently
- * skipping every boundary of that reference below the revision it names.
+ * A cursor is also bound to the reference whose lineage it pages, and to the
+ * graph that minted it. A position in one reference's lineage says nothing
+ * about another's, so a cursor handed to a read for a different reference is
+ * refused rather than silently skipping every boundary of that reference
+ * below the revision it names; a cursor another graph minted is refused by
+ * the same ownership check `asOfRecorded` applies to an anchor, since its
+ * revision is a position on that graph's axis, not this one's.
  */
 export type TransitionPageCursor = string & {
   readonly [TRANSITION_PAGE_CURSOR_BRAND]: "TransitionPageCursor";
@@ -200,13 +210,16 @@ function decodeCursorReference(
 }
 
 /**
- * The revision a cursor names, for a read of `reference`'s lineage. Refuses
- * anything that was not minted as a cursor, and a cursor minted for another
- * reference.
+ * The revision a cursor names, for a read of `reference`'s lineage on the
+ * graph `owner` identifies. Refuses anything that was not minted as a
+ * cursor, a cursor minted for another reference, and one another graph
+ * minted.
  */
 function requireCursorRevision(
   cursor: string,
   reference: PlainNodeRef,
+  owner: GraphAllocationOwner | undefined,
+  graphId: string,
 ): number {
   if (!isTransitionPageCursorShaped(cursor))
     throw invalidCursorError(
@@ -225,13 +238,23 @@ function requireCursorRevision(
     throw invalidCursorError(
       `This cursor pages the lineage of ${cursorReference.kind}/${cursorReference.id}, not ${reference.kind}/${reference.id}.`,
     );
-  return requireTypeGraphRecordedRevision(body.slice(idEnd + 1), "cursor");
+  return requireOwnedTransitionLogRevision(
+    body.slice(idEnd + 1),
+    "cursor",
+    owner,
+    graphId,
+  );
 }
 
-/** A window bound is a recorded instant; a page cursor handed to one is a misuse with a specific remedy. */
+/**
+ * A window bound is a recorded instant this graph allocated; a page cursor
+ * handed to one is a misuse with a specific remedy.
+ */
 function requireWindowRevision(
   value: string,
   surface: "fromRecorded" | "toRecorded",
+  owner: GraphAllocationOwner | undefined,
+  graphId: string,
 ): number {
   if (isTransitionPageCursorShaped(value))
     throw new ValidationError(
@@ -246,7 +269,7 @@ function requireWindowRevision(
         ],
       },
     );
-  return requireTypeGraphRecordedRevision(value, surface);
+  return requireOwnedTransitionLogRevision(value, surface, owner, graphId);
 }
 
 /**
@@ -254,9 +277,17 @@ function requireWindowRevision(
  * the reference it was asked about. Several can hold at once.
  *
  * - `more-pages`: `limit` capped the page; `nextCursor` reads the next one.
- * - `retention-truncated`: a prune (or an archival restore's floor) removed
- *   this graph's history below `before`, and the requested range reaches
- *   below it.
+ * - `retention-truncated`: a prune removed this graph's own history below
+ *   `before`, and the requested range reaches below it. `before` is the
+ *   instant the prune was made at, so passing it as `fromRecorded` reads the
+ *   range the prune left whole.
+ * - `restored-retention-truncated`: an archival restore brought in a log the
+ *   source graph had already pruned below `before`, and the requested range
+ *   reaches below it. `before` is on the SOURCE graph's axis, typed
+ *   {@link RestoredRecordedInstant} like a restored row's `recorded`, and is
+ *   compared against the range by raw revision, the same comparison the
+ *   window applies to restored rows. Graph-wide, like the source graph's own
+ *   watermark: the restore cannot say which lineages the source pruned.
  * - `unattributed-restored`: the graph holds `count` transitions an archival
  *   restore brought in that lineage discovery could neither tie to the
  *   reference nor rule out. Discovery follows this graph's own recorded
@@ -286,6 +317,10 @@ function requireWindowRevision(
 export type IdentityHistoryIncompleteReason =
   | Readonly<{ reason: "more-pages"; nextCursor: TransitionPageCursor }>
   | Readonly<{ reason: "retention-truncated"; before: RecordedInstant }>
+  | Readonly<{
+      reason: "restored-retention-truncated";
+      before: RestoredRecordedInstant;
+    }>
   | Readonly<{ reason: "unattributed-restored"; count: number }>
   | Readonly<{ reason: "uncaptured-members"; count: number }>
   | Readonly<{ reason: "restored-not-reconstructed"; count: number }>
@@ -336,7 +371,10 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
 }>;
 
 /**
- * `fromRecorded` / `toRecorded` bound the recorded window (inclusive).
+ * `fromRecorded` / `toRecorded` bound the recorded window (inclusive). Each
+ * must be an instant this graph allocated, checked by the ownership rule
+ * `asOfRecorded` applies; a restored row's `recorded`, another graph's
+ * instant, or a legacy unowned one is refused.
  * `cursor` continues a paged read from the `nextCursor` a previous page
  * returned. The cursor is a position within the windowed lineage, so it
  * composes with the window by intersection: the page starts at the later of
@@ -345,8 +383,8 @@ export type IdentityTransitionHistory<G extends GraphDef> = Readonly<{
  * defined, never an error.
  */
 export type IdentityReplayOptions = Readonly<{
-  fromRecorded?: string | undefined;
-  toRecorded?: string | undefined;
+  fromRecorded?: RecordedInstant | undefined;
+  toRecorded?: RecordedInstant | undefined;
   cursor?: TransitionPageCursor | undefined;
   limit?: number | undefined;
 }>;
@@ -385,6 +423,20 @@ function recordedTransition<G extends GraphDef>(
   };
 }
 
+/**
+ * A position on a SOURCE graph's recorded axis, in the unowned form no
+ * historical read on this graph accepts.
+ */
+function restoredRecordedInstant(
+  revision: number,
+  recordedAt: string,
+): RestoredRecordedInstant {
+  return createRecordedInstant(
+    revision,
+    recordedAt,
+  ) as string as RestoredRecordedInstant;
+}
+
 function publicTransition<G extends GraphDef>(
   row: IdentityTransitionRow,
   owner: GraphAllocationOwner | undefined,
@@ -392,10 +444,7 @@ function publicTransition<G extends GraphDef>(
   if (!isRestoredTransitionRow(row)) return recordedTransition<G>(row, owner);
   return {
     ...transitionFields<G>(row),
-    recorded: createRecordedInstant(
-      row.recorded_revision,
-      row.recorded_at,
-    ) as string as RestoredRecordedInstant,
+    recorded: restoredRecordedInstant(row.recorded_revision, row.recorded_at),
     restored: { at: row.restored_at },
   };
 }
@@ -1040,7 +1089,7 @@ async function pageMemberBoundaries<G extends GraphDef>(
 function identityReplayHistoryTruncatedError(
   requestedFrom: string | undefined,
   requestedTo: string,
-  prunedBefore: string,
+  prunedBefore: RecordedInstant,
 ): IdentityReplayError {
   return new IdentityReplayError(
     "The requested replay range lies entirely below the retention watermark: its history has been pruned.",
@@ -1065,6 +1114,7 @@ function identityReplayHistoryTruncatedError(
 type HistoryCompletenessFacts = Readonly<{
   nextCursor?: TransitionPageCursor | undefined;
   truncatedBefore?: RecordedInstant | undefined;
+  restoredTruncatedBefore?: RestoredRecordedInstant | undefined;
   unattributedRestored: number;
   uncapturedMembers: number;
   restoredNotReconstructed: number;
@@ -1087,6 +1137,11 @@ function historyCompleteness(
     reasons.push({
       reason: "retention-truncated",
       before: facts.truncatedBefore,
+    });
+  if (facts.restoredTruncatedBefore !== undefined)
+    reasons.push({
+      reason: "restored-retention-truncated",
+      before: facts.restoredTruncatedBefore,
     });
   if (facts.unattributedRestored > 0)
     reasons.push({
@@ -1113,36 +1168,35 @@ function historyCompleteness(
     : { status: "partial", reasons };
 }
 
-type TransitionRetention = Readonly<{
-  prunedBeforeRevision: number;
-  prunedAt: string;
-}>;
-
 /**
- * The retention watermark as a page reports it: the instant below which this
- * graph's history is gone, when the page's range starts below it. A page
- * that starts at or above the watermark (a later cursor page, or a
- * `fromRecorded` above it) is unaffected by it.
+ * Whether a cut removed history the page's range reaches: rows below the cut
+ * are gone, so a range starting below it is affected, and one starting at or
+ * above it (a later cursor page, or a `fromRecorded` there) is not. Nothing
+ * is ever recorded below the first revision, so a cut there removed nothing.
  */
-function truncatedBeforeFor(
-  retention: TransitionRetention,
+function cutReachesRange(
+  cut: IdentityTransitionCut | undefined,
   fromRevision: number | undefined,
+): cut is IdentityTransitionCut {
+  return (
+    cut !== undefined &&
+    cut.revision > (fromRevision ?? RECORDED_FIRST_REVISION)
+  );
+}
+
+/** This graph's own prune cut as the instant it was made at, bound to this graph. */
+function prunedBeforeInstant(
+  cut: IdentityTransitionCut,
   owner: GraphAllocationOwner | undefined,
-): RecordedInstant | undefined {
-  return retention.prunedBeforeRevision > (fromRevision ?? 0) ?
-      createRecordedInstant(
-        retention.prunedBeforeRevision,
-        retention.prunedAt,
-        owner,
-      )
-    : undefined;
+): RecordedInstant {
+  return createRecordedInstant(cut.revision, cut.recordedAt, owner);
 }
 
 type WalkedTransitions = Readonly<{
   /** This graph's allocation owner, which every instant the page reports is bound to. */
   owner: GraphAllocationOwner | undefined;
   toRevision: number | undefined;
-  retention: TransitionRetention;
+  retention: IdentityTransitionRetention;
   boundaries: readonly MemberBoundary[];
   completenessFacts: Omit<HistoryCompletenessFacts, "restoredNotReconstructed">;
 }>;
@@ -1150,7 +1204,8 @@ type WalkedTransitions = Readonly<{
 /**
  * The shared setup both `identityTransitionsOf` and `identityReplay` need
  * before they diverge: enforce `history: true`, resolve the requested limit
- * and revision bounds, seed and run the lineage walk, narrow the converged
+ * and revision bounds (each refused unless this graph allocated it), seed and
+ * run the lineage walk, narrow the converged
  * result to the requested window, cut one page of at most `limit` boundaries
  * of the reference's own history from it, and gather the facts the page's
  * completeness is decided from. Classes are reconstructed against the
@@ -1165,28 +1220,39 @@ async function walkedTransitionsFor<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   ref: IdentityNodeRefInput<G>,
   options: IdentityReplayOptions | undefined,
+  operation: IdentityTransitionLogOperation,
 ): Promise<WalkedTransitions> {
-  requireIdentityTransitionLog(ctx);
+  requireIdentityTransitionLog(ctx, operation);
   const limit = resolveLimit(options?.limit);
   const seed = registeredPlainRef(ctx, ref);
-  const windowFromRevision =
-    options?.fromRecorded === undefined ?
-      undefined
-    : requireWindowRevision(options.fromRecorded, "fromRecorded");
-  const toRevision =
-    options?.toRecorded === undefined ?
-      undefined
-    : requireWindowRevision(options.toRecorded, "toRecorded");
-  const cursorRevision =
-    options?.cursor === undefined ?
-      undefined
-    : requireCursorRevision(options.cursor, seed);
-  const fromRevision = laterRevision(windowFromRevision, cursorRevision);
   const owner = await readGraphAllocationOwner(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
   );
+  const windowFromRevision =
+    options?.fromRecorded === undefined ?
+      undefined
+    : requireWindowRevision(
+        options.fromRecorded,
+        "fromRecorded",
+        owner,
+        ctx.graphId,
+      );
+  const toRevision =
+    options?.toRecorded === undefined ?
+      undefined
+    : requireWindowRevision(
+        options.toRecorded,
+        "toRecorded",
+        owner,
+        ctx.graphId,
+      );
+  const cursorRevision =
+    options?.cursor === undefined ?
+      undefined
+    : requireCursorRevision(options.cursor, seed, owner, ctx.graphId);
+  const fromRevision = laterRevision(windowFromRevision, cursorRevision);
   const start = await lineageWalkStart(ctx, seed);
   const discovered = await walkClassLineage(ctx, start.seeds);
   const unattributedRestored = await unattributedRestoredTransitions(
@@ -1201,7 +1267,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
     limit,
     owner,
   );
-  const retention = await readTransitionRetentionDetails(
+  const retention = await readIdentityTransitionRetention(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
@@ -1213,7 +1279,17 @@ async function walkedTransitionsFor<G extends GraphDef>(
     boundaries: page.boundaries,
     completenessFacts: {
       nextCursor: page.nextCursor,
-      truncatedBefore: truncatedBeforeFor(retention, fromRevision, owner),
+      truncatedBefore:
+        cutReachesRange(retention.pruned, fromRevision) ?
+          prunedBeforeInstant(retention.pruned, owner)
+        : undefined,
+      restoredTruncatedBefore:
+        cutReachesRange(retention.restoredPruned, fromRevision) ?
+          restoredRecordedInstant(
+            retention.restoredPruned.revision,
+            retention.restoredPruned.recordedAt,
+          )
+        : undefined,
       unattributedRestored,
       uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
@@ -1241,6 +1317,7 @@ export async function identityTransitionsOf<G extends GraphDef>(
     ctx,
     ref,
     options,
+    "transitionsOf",
   );
   const { nextCursor } = completenessFacts;
   return {
@@ -1283,18 +1360,24 @@ export async function identityReplay<G extends GraphDef>(
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
   const { owner, toRevision, retention, boundaries, completenessFacts } =
-    await walkedTransitionsFor(ctx, ref, options);
+    await walkedTransitionsFor(ctx, ref, options, "replay");
 
-  const watermark = retention.prunedBeforeRevision;
   // "Entirely below the watermark" is a property of the REQUESTED range, not
   // of what came back: only a range bounded on both ends (`toRecorded` given)
   // can lie wholly in pruned territory — an open-ended range always reaches
-  // up to "now", which the watermark can never exceed.
-  if (watermark > 0 && toRevision !== undefined && toRevision < watermark) {
+  // up to "now", which the watermark can never exceed. Only this graph's own
+  // cut can refuse: a restored cut is about restored rows, which replay never
+  // pairs with a step.
+  const { pruned } = retention;
+  if (
+    pruned !== undefined &&
+    toRevision !== undefined &&
+    toRevision < pruned.revision
+  ) {
     throw identityReplayHistoryTruncatedError(
       options?.fromRecorded,
       requireDefined(options?.toRecorded),
-      createRecordedInstant(watermark, retention.prunedAt, owner),
+      prunedBeforeInstant(pruned, owner),
     );
   }
 

@@ -380,11 +380,35 @@ every replay, so it is not reported per page.
 
 A single call without the loop reads only the first page; a lineage short
 enough to fit in one page returns no `nextCursor`, which is what ends the loop.
-"Oldest first" is by this graph's recorded revision. A transition an
-archival restore brought in keeps the *source* graph's revision, so it can
-list before or after this graph's own rows regardless of when it happened;
-an audit timeline that mixes the two should order by `recorded` and
-`restored.at` rather than by list position.
+`completeness` describes one page and is not a loop condition: a reason such
+as a retention cut or unattributed restored transitions holds on every page
+of the lineage, so a loop that runs "until complete" never ends, and
+re-issuing a call without its `cursor` starts again from the first page.
+
+"Oldest first" is by recorded revision, and the two kinds of transition carry
+revisions from two different clocks. A transition this graph recorded carries
+this graph's revision; one an archival restore brought in keeps the *source*
+graph's, so it can list before or after this graph's own rows regardless of
+when it happened, and no comparison orders a restored `recorded` against a
+native one (`compareRecordedInstants` refuses the pair, and their strings sort
+by format, not time). Native transitions are in recorded order among
+themselves, and restored ones in their source's order among themselves. An
+audit timeline that mixes them places each restored transition by
+`restored.at`, the destination's wall clock when the restore inserted it, and
+each native one by its recorded wall time (`recordedInstantWallTime`, exported
+from the package root):
+
+```typescript
+const timeline = page.transitions.map((transition) => ({
+  transition,
+  at:
+    transition.restored === undefined ?
+      recordedInstantWallTime(transition.recorded)
+    : transition.restored.at,
+}));
+// A stable sort keeps each restored block in its source order.
+timeline.sort((left, right) => left.at.localeCompare(right.at));
+```
 
 A lineage is discovered from the reference itself, not only from the class
 it belongs to now. A member that has left its class — deleted, retracted
@@ -419,9 +443,12 @@ view can label an imported explanation instead of inferring it from a
 revision comparison (see [Archival transitions and the retention
 watermark](#archival-transitions-and-the-retention-watermark)). A restored
 transition's `recorded` is the *source* graph's instant, so it is typed
-`RestoredRecordedInstant` rather than `RecordedInstant`, and
-`store.asOfRecorded` does not accept it: an anchor on this graph at a
-revision the source allocated would read an unrelated state. Narrow on
+`RestoredRecordedInstant` rather than `RecordedInstant`, and neither
+`store.asOfRecorded` nor a transition-log `fromRecorded` / `toRecorded` or
+`pruneIdentityTransitions` accepts it (a type error, and at runtime a
+`ConfigurationError` with `details.code` `RECORDED_ANCHOR_UNBOUND`): an anchor
+on this graph at a revision the source allocated would read an unrelated
+state. Narrow on
 `restored` (the `RecordedIdentityTransition` and `RestoredIdentityTransition`
 variants) to tell the two apart. Its class membership on the source graph
 cannot be reconstructed here either, so a restored transition is returned on
@@ -435,7 +462,7 @@ lineage discovery alone, and counted as `unattributed-restored` in
 | `fold` | A same-ID fold conducted a newly created or resurrected node into a class |
 | `detach` | A class member was deleted (soft or hard), whether it was held by a same-ID fold or by explicit `same` assertions. It therefore also appears on a graph with `sameIdAcrossKinds: "ignore"`, where nothing folds |
 | `restore` | A soft-deleted node's undelete brought it back into visibility |
-| `window-end` | A node's or assertion's validity window closed, ending its contribution |
+| `window-end` | A class member node's own `validTo` was set, moved or cleared by a node update. An assertion's window never produces it: an assertion ends only by retraction (`retract`), and a node `validTo` that would leave an explicit `same` assertion outside its endpoint's window is refused, so in practice it records a member held by a same-ID fold |
 | `kind-drop` | A schema change removed a kind, hard-deleting the identity assertions it touched |
 | `schema-transition` | A schema evolution reinterpreted membership under new `sameIdAcrossKinds` or ontology rules |
 | `reconcile` | A graph merge applied the assertion or retraction; the transition's `decision` names the branch, the branch ancestry, and the plan and review digests when a reviewed plan was applied (see [Graph merge](/graph-merge/#identity-conflicts)) |
@@ -454,7 +481,13 @@ membership immediately before and after it, reconstructed through the exact
 same historical reader, at the same coordinate, as `store.asOfRecorded`
 (`historicalIdentityReconstructionCtes`). A step's `after` is what
 `store.asOfRecorded(step.transition.recorded).identity.membersOf(ref)`
-answers, and its `before` is the same read one revision earlier — replay is
+answers, and its `before` is the read one revision earlier *from the same
+valid instant* — revision − 1 seen from the instant this step was recorded at
+— so the only thing that differs between a step's `before` and `after` is
+that one commit. That is not always `asOfRecorded` of the previous commit:
+that read is seen from the previous commit's own valid instant, so when a
+validity window lapsed between the two commits it can still show the member
+the lapse removed, and the previous step's `after` shows it too. Replay is
 not a second copy of membership. The transition log carries no members of its
 own; it is an explanation layer over the one reconstruction path every
 historical read already goes through.
@@ -485,6 +518,10 @@ for (const step of steps) {
 ```
 
 `options.fromRecorded` / `toRecorded` bound the range by recorded instant.
+Each must be an instant this graph allocated: another graph's instant is
+refused with `GraphAllocationMismatchError`, and a legacy unowned one or a
+restored transition's `recorded` with `RECORDED_ANCHOR_UNBOUND` — the same
+ownership check `store.asOfRecorded` applies.
 Bounding the ANSWER never bounds the LINEAGE SEARCH: discovery always walks
 the whole log, because the note that names an earlier class canonical
 routinely sits above the requested window (the walk starts at the node's
@@ -513,7 +550,9 @@ rather than reading it as a window bound. A `cursor` that is not a page
 cursor is refused the same way. A cursor is bound to the reference whose
 lineage it pages: passing one returned for `alice` to a read of `bob` is
 refused with a `ValidationError` rather than silently skipping every boundary of
-`bob`'s below the revision it names.
+`bob`'s below the revision it names. It is bound to the graph that returned it
+as well: a cursor another graph returned, even for a reference with the same
+kind and id, is refused with `GraphAllocationMismatchError`.
 
 A cursor is a position within the windowed lineage, so it composes with
 `fromRecorded` / `toRecorded` by intersection: the page starts at the later of
@@ -578,7 +617,8 @@ order:
 | `reason` | Carries | Holds when |
 | --- | --- | --- |
 | `more-pages` | `nextCursor` | `limit` capped the page; the same cursor is on the page as `nextCursor` |
-| `retention-truncated` | `before` (a `RecordedInstant`) | The range starts below the [retention watermark](#retention), so history below `before` is gone |
+| `retention-truncated` | `before` (a `RecordedInstant`) | The range starts below this graph's [retention watermark](#retention), so its history below `before` is gone. `before` is the instant the prune was made at: pass it as `fromRecorded` to read the range the prune left whole |
+| `restored-retention-truncated` | `before` (a `RestoredRecordedInstant`) | An [archival restore](#archival-transitions-and-the-retention-watermark) brought in a log its source had already pruned below `before`, and the range starts below it. `before` is on the source's axis and is compared by raw revision, as the range is compared with restored rows; graph-wide, like the source's own watermark |
 | `unattributed-restored` | `count` | The graph holds restored transitions lineage discovery could neither tie to the reference nor rule out; graph-wide, so the same on every page |
 | `uncaptured-members` | `count` | Members of the reference's current class arrived through writes capture never saw (made before `history: true` was enabled, or bypassing capture): the member's node has no recorded version, or no recorded evidence ties it to the reference. Transitions that involved them can be missing from the page. Not reported alongside `pending-transaction-notes` |
 | `restored-not-reconstructed` | `count` | `replay` only: this page's restored transitions, which are in `transitionsOf` but not in `steps` |
@@ -606,7 +646,11 @@ capture recorded.
 ### Retention
 
 Retained transitions are pruned only on explicit operator action — there is
-no automatic retention policy:
+no automatic retention policy. `beforeRecorded` must be an instant this graph
+allocated, such as one `store.recordedNow()` returned or a native
+transition's `recorded`: another graph's instant, a legacy unowned one and a
+restored transition's `recorded` are refused before anything is deleted, by
+the same ownership check `store.asOfRecorded` applies.
 
 ```typescript
 import { pruneIdentityTransitions } from "@nicia-ai/typegraph";
@@ -639,7 +683,9 @@ and installing a higher one would report its later commits as already pruned.
 Once anything has been pruned, both `replay` and `transitionsOf` report the
 gap rather than silently answering from an incomplete log: a page whose range
 starts below the watermark carries a `retention-truncated` reason in its
-`completeness`, naming the watermark as `before`. A page whose range starts
+`completeness`, naming as `before` the instant the prune was made at (the
+watermark revision with that instant's recorded time, never the prune's own
+wall clock), so `fromRecorded: before` reads the retained range as complete. A page whose range starts
 at or above it (a `fromRecorded` there, or a later page's `cursor`) does not.
 `replay` additionally refuses a range that lies entirely below the watermark
 with `IDENTITY_REPLAY_HISTORY_TRUNCATED`, since it has no step to pair;
@@ -782,7 +828,7 @@ const archive = await exportGraph(store, {
   includeDeleted: true,
 });
 archive.identity?.transitions; // every retained transition, verbatim
-archive.identity?.retention; // { prunedBeforeRevision, prunedAt } — absent if nothing was ever pruned
+archive.identity?.retention; // { prunedBeforeRevision, prunedBeforeRecordedAt } — absent if nothing was ever pruned
 ```
 
 State export and working-copy branch cloning carry **no** transitions —
@@ -794,9 +840,10 @@ or a `retention` watermark (`IDENTITY_STATE_IMPORT_RETENTION`) with a
 its header.
 
 Restoring a `transitions` section validates **shape only**: a known cause, a
-well-formed `{ kind, id }` reference on every `class` / `priorClass`, and a
+well-formed `{ kind, id }` reference on every `class` / `priorClass`, a
 non-decreasing `recordedRevision` sequence across the array
-(`IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE`). `importGraph` checks it before
+(`IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE`), and a `transitionId` that names
+one row only (`IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID`). `importGraph` checks it before
 writing anything. `importGraphStream` checks each `identity-transitions` chunk
 when it arrives, against the chunks before it as well as within itself — after
 the stream's node, edge and assertion chunks have committed, since by protocol
@@ -851,26 +898,36 @@ an honest omission rather than a replay that pairs a restored transition
 with a fabricated before/after reconstructed from the destination's own,
 unrelated state.
 
-The restore also sets the destination's retention watermark to the
-**destination's own recorded revision + 1, as it stood before the import
-began**, but only when the graph had recorded no identity transitions of its
-own by then. Both are read once, ahead of the import's first write — at the
-start of `importGraph`'s transaction, and before the first chunk of
-`importGraphStream` — so the two entry points restore one archive to the same
-watermark, and the transitions the import's own node and assertion writes
-record do not make the destination look as if it already had a history. A
-fresh graph has
-nothing of its own for that floor to misclassify, so setting it there is
-safe, and `transitionsOf` and `replay` report it as the
-`retention-truncated` completeness reason — the point below which
-this graph's own timeline carries no retained explanation. What the restore
-itself records sits at or above the floor and stays replayable. A graph that
-already has its own retained transitions keeps its existing watermark
-untouched: advancing it from a restore-time floor would otherwise
-misclassify this graph's own, fully-retained history for classes the
-restore never touched as pruned. Either way, the watermark is a coarser,
-separate signal from the per-row marker above — it is never what decides
-whether one row's transition may appear in `steps`.
+`retention` names the raw `recordedRevision` below which the `transitions`
+section is missing rows that were pruned before the export, with the recorded
+time of the instant the prune was made at. It is carried whenever the source
+had pruned, or had itself restored an archive whose source had: a re-export
+carries the higher of the two cuts, since every row of the section is read on
+the next destination by its raw revision.
+
+A restore records that cut as the destination's **restored** cut and never
+touches the destination's own retention watermark: the restored rows' history
+is what was pruned, on the source's axis, and nothing of the destination's own
+timeline is. `transitionsOf` and `replay` then report it as the
+`restored-retention-truncated` completeness reason, naming the cut as a
+`RestoredRecordedInstant` (the restored form of the instant the source
+reports as its own `retention-truncated` cut), on every page whose range
+starts below it. Like the source's own watermark it is graph-wide: the
+restore cannot say which lineages the source's prune touched. A restore of an
+archive that carries no `retention` reports nothing of the kind, and the
+destination's own history — older or newer than the restore — is never
+reported as pruned by a restore. A later restore can only raise the restored
+cut, never lower it. Either way, the cut is a coarser, separate signal from
+the per-row marker above — it is never what decides whether one row's
+transition may appear in `steps`.
+
+A pruned archive restored into a graph that has its own history therefore
+reads, for the restored lineage, `partial` with `restored-retention-truncated`
+— the same truth the source reports — while the destination's own lineages
+carry no `retention-truncated` for anything the destination did not prune.
+
+Re-importing an archive whose rows are already on the target keeps those
+rows, so a repeated restore is idempotent.
 
 Archival transitions export is always **whole-graph**: unlike assertions,
 `exportGraph`'s `nodeKinds` filter does not scope the transitions section.

@@ -1282,7 +1282,9 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
   "graph_id" TEXT NOT NULL,
   "pruned_before_revision" BIGINT NOT NULL,
-  "pruned_at" TIMESTAMPTZ NOT NULL,
+  "pruned_before_recorded_at" TIMESTAMPTZ,
+  "restored_pruned_before_revision" BIGINT,
+  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -2836,7 +2838,9 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
   "graph_id" TEXT NOT NULL,
   "pruned_before_revision" BIGINT NOT NULL,
-  "pruned_at" TIMESTAMPTZ NOT NULL,
+  "pruned_before_recorded_at" TIMESTAMPTZ,
+  "restored_pruned_before_revision" BIGINT,
+  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -3944,7 +3948,9 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
   "graph_id" TEXT NOT NULL,
   "pruned_before_revision" INTEGER NOT NULL,
-  "pruned_at" TEXT NOT NULL,
+  "pruned_before_recorded_at" TEXT,
+  "restored_pruned_before_revision" INTEGER,
+  "restored_pruned_before_recorded_at" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -5282,7 +5288,9 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
   "graph_id" TEXT NOT NULL,
   "pruned_before_revision" INTEGER NOT NULL,
-  "pruned_at" TEXT NOT NULL,
+  "pruned_before_recorded_at" TEXT,
+  "restored_pruned_before_revision" INTEGER,
+  "restored_pruned_before_recorded_at" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },

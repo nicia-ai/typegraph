@@ -18,20 +18,32 @@ import {
   type RecordedTimeOwnership,
   requireTypeGraphRecordedRevision,
 } from "../backend/capabilities/recorded-time-ownership";
+import { type GraphAllocationOwner } from "../core/allocation-owner";
 import { type GraphDef } from "../core/define-graph";
-import { ConfigurationError, IdentityReplayError } from "../errors";
+import {
+  parseRecordedInstant,
+  type RecordedInstant,
+  recordedInstantWallTime,
+} from "../core/temporal";
+import {
+  ConfigurationError,
+  IdentityReplayError,
+  type IdentityTransitionLogOperation,
+} from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { readGraphAllocationOwner } from "../store/allocation-owner";
+import { assertRecordedAnchorOrigin } from "../store/recorded-anchor-origin";
 import { readNextRecordedRevision } from "../store/recorded-capture";
 import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
-import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { decodeRevisionColumn } from "../utils/revision-column";
+import { withIdentityTransitionRelationsPrecondition } from "../utils/sql-errors";
 import {
   optionalIdentityTimestamp,
   toCanonicalIdentityTimestamp,
@@ -94,18 +106,6 @@ export type IdentityTransitionDraft = Omit<
   IdentityTransitionNote,
   "graphId" | "decision"
 >;
-
-/**
- * What an archival transition restore needs to know about its destination,
- * as the destination stood before the import wrote anything. Read once per
- * import by `readIdentityRestoreBaseline` (`service-interchange-write.ts`).
- */
-export type IdentityRestoreBaseline = Readonly<{
-  /** Whether the graph had recorded identity transitions of its own. */
-  hasOwnHistory: boolean;
-  /** The first recorded revision the import itself could write at. */
-  floorRevision: number;
-}>;
 
 /**
  * One archived transition row as the interchange boundary hands it to
@@ -322,6 +322,66 @@ export const IDENTITY_TRANSITION_COLUMNS: SqlFragment = sql.raw(
   IDENTITY_TRANSITION_COLUMN_NAMES.join(", "),
 );
 
+/**
+ * Where a statement against the transition-log relations runs: the capture
+ * flush that records notes, a read (`transitionsOf`, `replay`, archival
+ * export), a prune, or an archival restore.
+ */
+export type IdentityTransitionLogSurface =
+  | "capture-flush"
+  | "transition-read"
+  | "transition-prune"
+  | "transition-restore";
+
+/**
+ * THE detection seam for a database that lacks the transition-log relations
+ * (base-schema version 9): every statement against either relation runs
+ * through it, so a read, a prune and a write on such a database all refuse
+ * with the same typed `IDENTITY_TRANSITION_RELATIONS_MISSING` error rather
+ * than a raw driver error for whichever statement happened to run first.
+ * Only those statements are wrapped, so a missing relation of any OTHER kind
+ * keeps its own refusal.
+ */
+export function withIdentityTransitionLogRelations<T>(
+  schema: SqlSchema,
+  dialect: string,
+  surface: IdentityTransitionLogSurface,
+  promise: Promise<T>,
+): Promise<T> {
+  return withIdentityTransitionRelationsPrecondition(
+    promise,
+    [
+      schema.tables.identityTransitions,
+      schema.tables.identityTransitionRetention,
+    ],
+    { dialect, surface },
+  );
+}
+
+/**
+ * THE ownership check for a recorded instant addressed to the transition log
+ * (`fromRecorded`, `toRecorded`, a page cursor's position, a prune's
+ * `beforeRecorded`): the same {@link assertRecordedAnchorOrigin} every
+ * `asOfRecorded` read runs, so an instant another graph allocated, a legacy
+ * or restored (unowned) instant, and an engine-native one are refused here
+ * exactly as they are there, instead of being read as a revision on this
+ * graph's axis. Returns the revision the caller came for.
+ */
+export function requireOwnedTransitionLogRevision(
+  instant: string,
+  surface: string,
+  owner: GraphAllocationOwner | undefined,
+  graphId: string,
+): number {
+  const revision = requireTypeGraphRecordedRevision(instant, surface);
+  assertRecordedAnchorOrigin(
+    parseRecordedInstant(instant, surface),
+    owner,
+    graphId,
+  );
+  return revision;
+}
+
 function encodeJsonColumn(value: unknown): SqlFragment {
   return sql`${JSON.stringify(value)}`;
 }
@@ -399,13 +459,16 @@ export function encodeIdentityTransitionRow(
  * `IdentityTarget`, the identity module's own write facet.
  *
  * `ON CONFLICT (graph_id, transition_id) DO NOTHING`: a restore is verbatim
- * (this function never renumbers), so a `transition_id` collision on the
- * same graph can only mean the archival document is being imported again —
+ * (this function never renumbers), so a `transition_id` collision with a row
+ * already on the graph means the archival document is being imported again —
  * `importGraph(..., { onConflict: "skip" })` re-run over the same archive,
- * or two archives sharing history. The colliding row is by construction the
- * same row, so silently keeping the one already there is correct; without
- * this clause the second import throws a raw driver UNIQUE-constraint error
- * that never reaches `ImportResult.errors`.
+ * or two archives sharing history — and keeping the row already there makes
+ * that re-import idempotent; without this clause the second import throws a
+ * raw driver UNIQUE-constraint error that never reaches
+ * `ImportResult.errors`. A collision WITHIN one restore is a malformed
+ * archive, refused before any write by
+ * `assertIdentityTransitionsWellOrdered` (`service-interchange-write.ts`),
+ * so it never reaches this clause to be silently dropped.
  */
 export async function insertIdentityTransitionValues(
   target: IdentityTarget,
@@ -419,13 +482,18 @@ export async function insertIdentityTransitionValues(
     parametersPerItem: IDENTITY_TRANSITION_COLUMN_NAMES.length,
   });
   for (const valueChunk of chunk(values, chunkSize)) {
-    await executeIdentityStatement(
-      target,
-      sql`
-        INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
-        VALUES ${sql.join(valueChunk, sql`, `)}
-        ON CONFLICT (graph_id, transition_id) DO NOTHING
-      `,
+    await withIdentityTransitionLogRelations(
+      schema,
+      target.dialect,
+      "transition-restore",
+      executeIdentityStatement(
+        target,
+        sql`
+          INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
+          VALUES ${sql.join(valueChunk, sql`, `)}
+          ON CONFLICT (graph_id, transition_id) DO NOTHING
+        `,
+      ),
     );
   }
 }
@@ -703,16 +771,21 @@ export async function readIdentityTransitions(
     target,
     scope.after,
   );
-  const rows = await target.execute<RawIdentityTransitionRow>(
-    asCompiledRowsSql(sql`
-      SELECT ${IDENTITY_TRANSITION_COLUMNS}
-      FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId}
-        AND (${classMatches} OR ${priorMatches})
-        ${cursorFilter}
-      ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
-      LIMIT ${scope.limit}
-    `),
+  const rows = await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    "transition-read",
+    target.execute<RawIdentityTransitionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${IDENTITY_TRANSITION_COLUMNS}
+        FROM ${schema.identityTransitionsTable}
+        WHERE graph_id = ${graphId}
+          AND (${classMatches} OR ${priorMatches})
+          ${cursorFilter}
+        ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
+        LIMIT ${scope.limit}
+      `),
+    ),
   );
   return rows.map((row) => normalizeIdentityTransitionRow(row));
 }
@@ -752,15 +825,20 @@ export async function readIdentityTransitionPageForInterchange(
     target,
     options.after,
   );
-  const rows = await target.execute<RawIdentityTransitionRow>(
-    asCompiledRowsSql(sql`
-      SELECT ${IDENTITY_TRANSITION_COLUMNS}
-      FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId}
-        ${cursorFilter}
-      ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
-      LIMIT ${options.limit}
-    `),
+  const rows = await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    "transition-read",
+    target.execute<RawIdentityTransitionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${IDENTITY_TRANSITION_COLUMNS}
+        FROM ${schema.identityTransitionsTable}
+        WHERE graph_id = ${graphId}
+          ${cursorFilter}
+        ORDER BY recorded_revision ASC, ${transitionIdKey} ASC
+        LIMIT ${options.limit}
+      `),
+    ),
   );
   const transitions = rows.map((row) => normalizeIdentityTransitionRow(row));
   const last = transitions.at(-1);
@@ -778,47 +856,6 @@ export async function readIdentityTransitionPageForInterchange(
   };
 }
 
-type RawNativeTransitionExistsRow = Readonly<{ transition_id: unknown }>;
-
-/**
- * Whether `graphId` holds a NATIVE (non-restored) identity transition row
- * recorded below `revision` — history this graph recorded itself, through
- * the live capture flush, before the restore that is asking began.
- *
- * Archival restore (`importIdentityTransitionsIntoTarget`,
- * `service-interchange-write.ts`) consults this BEFORE deciding whether to
- * set the retention watermark, passing the revision its own first commit
- * takes: a graph with earlier history of its own has honest boundaries the
- * restore never touched, and a restore-derived floor over them would
- * misreport the `retention-truncated` completeness reason (or the
- * `IDENTITY_REPLAY_HISTORY_TRUNCATED` refusal) for classes the restore had
- * nothing to do with.
- *
- * The bound is what keeps the restore's OWN notes out of the answer. Importing
- * an archive's nodes and assertions notes ordinary native transitions (a
- * fold, the union an assertion makes); a streamed restore has committed them
- * by the time its transitions arrive, and counting them as "history of its
- * own" would leave every streamed restore without a watermark.
- */
-export async function hasNativeIdentityTransitionsBefore(
-  target: IdentityTarget,
-  schema: SqlSchema,
-  graphId: string,
-  revision: number,
-): Promise<boolean> {
-  const rows = await target.execute<RawNativeTransitionExistsRow>(
-    asCompiledRowsSql(sql`
-      SELECT transition_id
-      FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId}
-        AND restored_at IS NULL
-        AND recorded_revision < ${revision}
-      LIMIT 1
-    `),
-  );
-  return rows.length > 0;
-}
-
 type RawRestoredTransitionCountRow = Readonly<{ restored: unknown }>;
 
 /** How many of `graphId`'s retained transition rows an archival restore inserted. */
@@ -827,67 +864,209 @@ export async function countRestoredIdentityTransitions(
   schema: SqlSchema,
   graphId: string,
 ): Promise<number> {
-  const rows = await target.execute<RawRestoredTransitionCountRow>(
-    asCompiledRowsSql(sql`
-      SELECT COUNT(*) AS restored
-      FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId} AND restored_at IS NOT NULL
-    `),
+  const rows = await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    "transition-read",
+    target.execute<RawRestoredTransitionCountRow>(
+      asCompiledRowsSql(sql`
+        SELECT COUNT(*) AS restored
+        FROM ${schema.identityTransitionsTable}
+        WHERE graph_id = ${graphId} AND restored_at IS NOT NULL
+      `),
+    ),
   );
   return Number(requireDefined(rows[0]).restored);
 }
 
-/** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
-async function readTransitionRetention(
-  target: IdentityTarget,
-  schema: SqlSchema,
-  graphId: string,
-): Promise<number> {
-  const details = await readTransitionRetentionDetails(target, schema, graphId);
-  return details.prunedBeforeRevision;
-}
-
-type RawRetentionDetailsRow = Readonly<{
-  pruned_before_revision: unknown;
-  pruned_at: unknown;
+/**
+ * One retention cut: every transition row below `revision` is gone.
+ * `recordedAt` is the wall time of the recorded instant the cut was made at,
+ * so `revision` and `recordedAt` together re-form that instant — a coordinate
+ * a caller can hand back (as `fromRecorded`, or to `store.asOfRecorded` for a
+ * native cut), never a wall clock no commit carried.
+ */
+export type IdentityTransitionCut = Readonly<{
+  revision: number;
+  recordedAt: string;
 }>;
 
 /**
- * The retention watermark AND the wall time the prune that set it ran at —
- * the latter is the prune operation's own instant, not the original commit
- * time of the pruned revision (which pruning destroys), but is the only
- * wall-time evidence retained once that history is gone. Used only to name a
- * `retention-truncated` / `IDENTITY_REPLAY_HISTORY_TRUNCATED` boundary.
+ * What a graph's transition log no longer holds, as two separate facts on
+ * two separate axes:
+ *
+ * - `pruned`: this graph's own retention watermark, which
+ *   `pruneIdentityTransitions` advances. Its revision is on this graph's
+ *   recorded axis.
+ * - `restoredPruned`: the highest cut an archival restore carried in — the
+ *   source graph's own retention at export time — or that a local prune
+ *   reached among restored rows above this graph's clock. Its revision is on
+ *   the raw revision numbers restored rows keep, which is the SOURCE graph's
+ *   axis, never this one's.
+ *
+ * Either is `undefined` when nothing on its axis was cut.
  */
-export async function readTransitionRetentionDetails(
+export type IdentityTransitionRetention = Readonly<{
+  pruned?: IdentityTransitionCut | undefined;
+  restoredPruned?: IdentityTransitionCut | undefined;
+}>;
+
+/** Which of {@link IdentityTransitionRetention}'s two cuts a write advances. */
+type IdentityTransitionCutAxis = "pruned" | "restored-pruned";
+
+const IDENTITY_TRANSITION_CUT_COLUMNS = {
+  pruned: {
+    revision: "pruned_before_revision",
+    recordedAt: "pruned_before_recorded_at",
+  },
+  "restored-pruned": {
+    revision: "restored_pruned_before_revision",
+    recordedAt: "restored_pruned_before_recorded_at",
+  },
+} as const satisfies Readonly<
+  Record<IdentityTransitionCutAxis, Readonly<Record<string, string>>>
+>;
+
+type RawRetentionRow = Readonly<{
+  pruned_before_revision: unknown;
+  pruned_before_recorded_at: unknown;
+  restored_pruned_before_revision: unknown;
+  restored_pruned_before_recorded_at: unknown;
+}>;
+
+/**
+ * Decodes one cut's column pair. The revision column is `0` (native) or
+ * `NULL` (restored) when nothing was cut on that axis; a revision without its
+ * recorded time is a row no writer produces.
+ *
+ * Both time columns are `timestamp(..., { withTimezone: true })` on
+ * PostgreSQL, which node-postgres decodes to a JS `Date` and a text-returning
+ * driver hands back as non-ISO text, so they decode through the identity
+ * module's one timestamp owner, as `normalizeIdentityTransitionRow` does.
+ */
+function decodeIdentityTransitionCut(
+  revisionValue: unknown,
+  recordedAtValue: unknown,
+  axis: IdentityTransitionCutAxis,
+): IdentityTransitionCut | undefined {
+  if (revisionValue === null || revisionValue === undefined) return undefined;
+  const revision = toRevisionNumber(revisionValue);
+  if (revision === 0) return undefined;
+  if (recordedAtValue === null || recordedAtValue === undefined) {
+    throw new ConfigurationError(
+      "Identity transition retention row carries a cut revision without its recorded time.",
+      { axis, revision },
+    );
+  }
+  return {
+    revision,
+    recordedAt: toCanonicalIdentityTimestamp(recordedAtValue),
+  };
+}
+
+/** Reads a graph's {@link IdentityTransitionRetention}; both cuts `undefined` when nothing has been cut. */
+export async function readIdentityTransitionRetention(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
-): Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>> {
-  const rows = await target.execute<RawRetentionDetailsRow>(
-    asCompiledRowsSql(sql`
-      SELECT pruned_before_revision, pruned_at
-      FROM ${schema.identityTransitionRetentionTable}
-      WHERE graph_id = ${graphId}
-    `),
+  surface: IdentityTransitionLogSurface = "transition-read",
+): Promise<IdentityTransitionRetention> {
+  const rows = await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    surface,
+    target.execute<RawRetentionRow>(
+      asCompiledRowsSql(sql`
+        SELECT pruned_before_revision, pruned_before_recorded_at,
+               restored_pruned_before_revision, restored_pruned_before_recorded_at
+        FROM ${schema.identityTransitionRetentionTable}
+        WHERE graph_id = ${graphId}
+      `),
+    ),
   );
   const row = rows[0];
-  if (row === undefined) return { prunedBeforeRevision: 0, prunedAt: nowIso() };
+  if (row === undefined) return {};
   return {
-    prunedBeforeRevision: toRevisionNumber(row.pruned_before_revision),
-    // `pruned_at` is `timestamp(..., { withTimezone: true }).notNull()` on
-    // PostgreSQL (schema/postgres.ts), the exact column shape
-    // `normalizeIdentityTransitionRow` above decodes `recorded_at`/`valid_at`
-    // through `toCanonicalIdentityTimestamp` for — node-postgres returns a JS
-    // `Date`, and a text-returning driver returns a non-ISO string that must
-    // still be canonicalized. `asRowString` would throw on the former and
-    // pass the latter through uncanonicalized.
-    prunedAt: toCanonicalIdentityTimestamp(row.pruned_at),
+    pruned: decodeIdentityTransitionCut(
+      row.pruned_before_revision,
+      row.pruned_before_recorded_at,
+      "pruned",
+    ),
+    restoredPruned: decodeIdentityTransitionCut(
+      row.restored_pruned_before_revision,
+      row.restored_pruned_before_recorded_at,
+      "restored-pruned",
+    ),
   };
 }
 
 /**
- * The `IdentityReplayError` every replay-family operation raises when the
+ * The cut an archival export carries: the higher of the two. On the graph
+ * the archive is restored into, every row it carries is a restored row read
+ * by its raw revision, native and restored alike, so "rows below this raw
+ * revision may be missing" is the one claim that stays true of the whole
+ * section.
+ */
+export function archivalRetentionCut(
+  retention: IdentityTransitionRetention,
+): IdentityTransitionCut | undefined {
+  const { pruned, restoredPruned } = retention;
+  if (pruned === undefined || restoredPruned === undefined)
+    return pruned ?? restoredPruned;
+  return restoredPruned.revision > pruned.revision ? restoredPruned : pruned;
+}
+
+/**
+ * Advances one of a graph's two retention cuts — the ONE owner of the
+ * retention relation's writes, shared by `pruneIdentityTransitionsForContext`
+ * (both axes) and archival restore (`importIdentityTransitionsIntoTarget`,
+ * `service-interchange-write.ts`, the restored axis only). The `WHERE` guard
+ * makes the write itself monotonic per axis: a cut at or below the one
+ * already stored is a no-op that keeps the stored cut and its recorded time,
+ * and a write to one axis never touches the other.
+ */
+export async function advanceIdentityTransitionCut(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+  axis: IdentityTransitionCutAxis,
+  cut: IdentityTransitionCut,
+  surface: IdentityTransitionLogSurface,
+): Promise<void> {
+  const table = schema.identityTransitionRetentionTable;
+  const columns = IDENTITY_TRANSITION_CUT_COLUMNS[axis];
+  const revisionColumn = sql.raw(columns.revision);
+  const recordedAtColumn = sql.raw(columns.recordedAt);
+  // A row first created by a restore records that nothing was pruned locally.
+  const insert =
+    axis === "pruned" ?
+      {
+        columns: sql`graph_id, ${revisionColumn}, ${recordedAtColumn}`,
+        values: sql`${graphId}, ${cut.revision}, ${cut.recordedAt}`,
+      }
+    : {
+        columns: sql`graph_id, pruned_before_revision, ${revisionColumn}, ${recordedAtColumn}`,
+        values: sql`${graphId}, ${0}, ${cut.revision}, ${cut.recordedAt}`,
+      };
+  await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    surface,
+    executeIdentityStatement(
+      target,
+      sql`
+        INSERT INTO ${table} (${insert.columns}) VALUES (${insert.values})
+        ON CONFLICT (graph_id) DO UPDATE
+        SET ${revisionColumn} = excluded.${revisionColumn},
+            ${recordedAtColumn} = excluded.${recordedAtColumn}
+        WHERE COALESCE(${table}.${revisionColumn}, 0) < excluded.${revisionColumn}
+      `,
+    ),
+  );
+}
+
+/**
+ * The `IdentityReplayError` every transition-log operation raises when the
  * store keeps no TypeGraph transition log. Two states reach it: a store opened
  * without `history: true`, and a backend that owns recorded time itself
  * (engine-native), where TypeGraph performs no recorded capture — and so
@@ -897,20 +1076,21 @@ export async function readTransitionRetentionDetails(
 export function identityTransitionLogUnavailableError(
   graphId: string,
   recordedTimeOwnership: RecordedTimeOwnership,
+  operation: IdentityTransitionLogOperation,
 ): IdentityReplayError {
   if (recordedTimeOwnership === "engine-native") {
     return new IdentityReplayError(
-      "Identity replay is not supported under engine-native recorded time.",
-      { code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED", graphId },
+      `${operation} is not supported under engine-native recorded time.`,
+      { code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED", graphId, operation },
       {
         suggestion:
-          "This backend declares recordedTime, so it owns recorded history itself and TypeGraph keeps no identity transition log for it, with or without history: true. Replay needs a backend whose recorded time TypeGraph captures in its own relations.",
+          "This backend declares recordedTime, so it owns recorded history itself and TypeGraph keeps no identity transition log for it, with or without history: true. The transition log needs a backend whose recorded time TypeGraph captures in its own relations.",
       },
     );
   }
   return new IdentityReplayError(
-    "Identity replay requires the store to be opened with history: true.",
-    { code: "IDENTITY_REPLAY_REQUIRES_HISTORY", graphId },
+    `${operation} requires the store to be opened with history: true.`,
+    { code: "IDENTITY_REPLAY_REQUIRES_HISTORY", graphId, operation },
     {
       suggestion:
         "Open the store with createStore(graph, backend, { history: true }); the transition log annotates the recorded axis and has nothing to annotate without it.",
@@ -918,52 +1098,21 @@ export function identityTransitionLogUnavailableError(
   );
 }
 
-/** Refuses a replay-family operation on a context whose store keeps no TypeGraph transition log — see {@link identityTransitionLogUnavailableError}. */
+/** Refuses a transition-log operation on a context whose store keeps no TypeGraph transition log — see {@link identityTransitionLogUnavailableError}. */
 export function requireIdentityTransitionLog(
   ctx: Pick<
     IdentityServiceContext<GraphDef>,
     "graphId" | "historyEnabled" | "recordedTimeOwnership"
   >,
+  operation: IdentityTransitionLogOperation,
 ): void {
   if (!ctx.historyEnabled) {
     throw identityTransitionLogUnavailableError(
       ctx.graphId,
       ctx.recordedTimeOwnership,
+      operation,
     );
   }
-}
-
-/**
- * Writes a graph's transition-retention watermark — the ONE owner of this
- * INSERT ... ON CONFLICT, shared by `pruneIdentityTransitionsForContext`
- * (which pairs it with deleting the rows it now covers) and archival restore
- * (`importIdentityTransitionsIntoTarget`, `service-interchange-write.ts`,
- * which sets it to the revision the restore's first commit takes, without
- * deleting anything — a restore into a fresh graph has nothing there to delete). The
- * `WHERE` guard makes the write itself monotonic: a `resolvedWatermark` at or
- * below what is already stored is a no-op, so neither caller needs its own
- * read-compare-write race guard beyond the one each already has for its own
- * return value (prune's `pruned` count, restore's `retention-truncated` honesty).
- */
-export async function writeIdentityTransitionRetentionWatermark(
-  target: IdentityTarget,
-  schema: SqlSchema,
-  graphId: string,
-  resolvedWatermark: number,
-  at: string,
-): Promise<void> {
-  await executeIdentityStatement(
-    target,
-    sql`
-      INSERT INTO ${schema.identityTransitionRetentionTable} (
-        graph_id, pruned_before_revision, pruned_at
-      ) VALUES (${graphId}, ${resolvedWatermark}, ${at})
-      ON CONFLICT (graph_id) DO UPDATE
-      SET pruned_before_revision = excluded.pruned_before_revision,
-          pruned_at = excluded.pruned_at
-      WHERE ${schema.identityTransitionRetentionTable}.pruned_before_revision < excluded.pruned_before_revision
-    `,
-  );
 }
 
 async function readHighestRetainedTransitionRevision(
@@ -971,18 +1120,29 @@ async function readHighestRetainedTransitionRevision(
   schema: SqlSchema,
   graphId: string,
 ): Promise<number | undefined> {
-  const rows = await target.execute<Readonly<{ highest: unknown }>>(
-    asCompiledRowsSql(sql`
-      SELECT MAX(recorded_revision) AS highest
-      FROM ${schema.identityTransitionsTable}
-      WHERE graph_id = ${graphId}
-    `),
+  const rows = await withIdentityTransitionLogRelations(
+    schema,
+    target.dialect,
+    "transition-prune",
+    target.execute<Readonly<{ highest: unknown }>>(
+      asCompiledRowsSql(sql`
+        SELECT MAX(recorded_revision) AS highest
+        FROM ${schema.identityTransitionsTable}
+        WHERE graph_id = ${graphId}
+      `),
+    ),
   );
   const highest = rows[0]?.highest;
   return highest === null || highest === undefined ?
       undefined
     : toRevisionNumber(highest);
 }
+
+/** What `pruneIdentityTransitions` reports. */
+export type IdentityTransitionPruneResult = Readonly<{
+  pruned: number;
+  prunedBeforeRevision: number;
+}>;
 
 /**
  * Prunes retained explanation: deletes every transition row strictly below
@@ -993,7 +1153,17 @@ async function readHighestRetainedTransitionRevision(
  * revisions in from another graph — is refused: it would claim history the
  * graph has yet to record as already pruned. The watermark itself is clamped to
  * the next commit's revision, because restored revisions are not on this
- * graph's axis.
+ * graph's axis; when the prune deleted restored rows above that clamp, the
+ * restored cut records how far it reached among them.
+ *
+ * `beforeRecorded` must be an instant this graph allocated: it is checked by
+ * the same ownership rule every `asOfRecorded` read applies
+ * ({@link requireOwnedTransitionLogRevision}), inside the prune's own
+ * mutation and before it reads or deletes anything, so another graph's
+ * instant, a legacy or restored instant, and an engine-native one delete
+ * nothing and leave the watermark where it was. The watermark keeps that
+ * instant's recorded time, so the `retention-truncated` cut a read reports
+ * is the instant the caller pruned at.
  *
  * Explicit operator action only — no automatic retention policy exists.
  * Deliberately, a prune does NOT advance the content revision (the
@@ -1003,19 +1173,26 @@ async function readHighestRetainedTransitionRevision(
  */
 export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
-  options: Readonly<{ beforeRecorded: string }>,
-): Promise<Readonly<{ pruned: number; prunedBeforeRevision: number }>> {
-  requireIdentityTransitionLog(ctx);
-  const targetRevision = requireTypeGraphRecordedRevision(
-    options.beforeRecorded,
-    "beforeRecorded",
-  );
+  options: Readonly<{ beforeRecorded: RecordedInstant }>,
+): Promise<IdentityTransitionPruneResult> {
+  requireIdentityTransitionLog(ctx, "pruneIdentityTransitions");
+  // Form first: a malformed or engine-native instant is refused before the
+  // mutation opens.
+  requireTypeGraphRecordedRevision(options.beforeRecorded, "beforeRecorded");
   return runIdentityMutation(ctx, async (rawTarget) => {
-    const existingWatermark = await readTransitionRetention(
+    const targetRevision = requireOwnedTransitionLogRevision(
+      options.beforeRecorded,
+      "beforeRecorded",
+      await readGraphAllocationOwner(rawTarget, ctx.schema, ctx.graphId),
+      ctx.graphId,
+    );
+    const retention = await readIdentityTransitionRetention(
       rawTarget,
       ctx.schema,
       ctx.graphId,
+      "transition-prune",
     );
+    const existingWatermark = retention.pruned?.revision ?? 0;
     const nextRevision = await readNextRecordedRevision(
       rawTarget,
       ctx.schema,
@@ -1053,23 +1230,48 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
       existingWatermark,
       Math.min(targetRevision, nextRevision),
     );
-    const deleted = await rawTarget.execute<
-      Readonly<{ transition_id: unknown }>
-    >(
-      asCompiledRowsSql(sql`
-        DELETE FROM ${ctx.schema.identityTransitionsTable}
-        WHERE graph_id = ${ctx.graphId}
-          AND recorded_revision < ${targetRevision}
-        RETURNING transition_id
-      `),
+    const deleted = await withIdentityTransitionLogRelations(
+      ctx.schema,
+      rawTarget.dialect,
+      "transition-prune",
+      rawTarget.execute<
+        Readonly<{ recorded_revision: unknown; restored_at: unknown }>
+      >(
+        asCompiledRowsSql(sql`
+          DELETE FROM ${ctx.schema.identityTransitionsTable}
+          WHERE graph_id = ${ctx.graphId}
+            AND recorded_revision < ${targetRevision}
+          RETURNING recorded_revision, restored_at
+        `),
+      ),
     );
-    await writeIdentityTransitionRetentionWatermark(
+    const cutRecordedAt = recordedInstantWallTime(options.beforeRecorded);
+    await advanceIdentityTransitionCut(
       rawTarget,
       ctx.schema,
       ctx.graphId,
-      resolvedWatermark,
-      nowIso(),
+      "pruned",
+      { revision: resolvedWatermark, recordedAt: cutRecordedAt },
+      "transition-prune",
     );
+    // A deleted restored row the native watermark does not cover (one at or
+    // above it) is history the restored cut must now report.
+    const deletedRestoredAboveWatermark = deleted.some(
+      (row) =>
+        row.restored_at !== null &&
+        row.restored_at !== undefined &&
+        toRevisionNumber(row.recorded_revision) >= resolvedWatermark,
+    );
+    if (deletedRestoredAboveWatermark) {
+      await advanceIdentityTransitionCut(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        "restored-pruned",
+        { revision: targetRevision, recordedAt: cutRecordedAt },
+        "transition-prune",
+      );
+    }
     return { pruned: deleted.length, prunedBeforeRevision: resolvedWatermark };
   });
 }
@@ -1079,12 +1281,12 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
  *
  * An explicit operator action with no automatic retention policy — see
  * "Retention" in the identity documentation. Requires the store to be opened
- * with `history: true`.
+ * with `history: true`, and a `beforeRecorded` this graph allocated.
  */
 export async function pruneIdentityTransitions<G extends GraphDef>(
   store: Store<G>,
-  options: Readonly<{ beforeRecorded: string }>,
-): Promise<Readonly<{ pruned: number; prunedBeforeRevision: number }>> {
+  options: Readonly<{ beforeRecorded: RecordedInstant }>,
+): Promise<IdentityTransitionPruneResult> {
   const ctx = storeRuntime(store).identityContext();
   return pruneIdentityTransitionsForContext(ctx, options);
 }

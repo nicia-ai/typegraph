@@ -266,7 +266,12 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
-      index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
     ],
   );
 
@@ -280,7 +285,9 @@ export function createSqliteTables(
       operationDigest: text("operation_digest").notNull(),
       evidence: text("evidence").notNull(),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = sqliteTable(
@@ -303,7 +310,12 @@ export function createSqliteTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
@@ -507,15 +519,22 @@ export function createSqliteTables(
     ],
   );
 
-  // One row per graph: the transition-retention high-water mark
-  // `pruneIdentityTransitions` advances. `0` (absent row) means nothing has
-  // been pruned.
+  // One row per graph, holding two retention cuts on two axes: the
+  // watermark `pruneIdentityTransitions` advances on this graph's own
+  // recorded axis (`0` means nothing has been pruned), and the highest cut an
+  // archival restore carried in on the raw revisions restored rows keep
+  // (`NULL` means none). Each cut keeps the recorded time of the instant it
+  // was made at. An absent row means neither.
   const identityTransitionRetention = sqliteTable(
     n.identityTransitionRetention,
     {
       graphId: text("graph_id").notNull(),
       prunedBeforeRevision: integer("pruned_before_revision").notNull(),
-      prunedAt: text("pruned_at").notNull(),
+      prunedBeforeRecordedAt: text("pruned_before_recorded_at"),
+      restoredPrunedBeforeRevision: integer("restored_pruned_before_revision"),
+      restoredPrunedBeforeRecordedAt: text(
+        "restored_pruned_before_recorded_at",
+      ),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );

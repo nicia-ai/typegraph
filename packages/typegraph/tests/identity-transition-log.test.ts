@@ -35,14 +35,14 @@ import { applyIdentityChangesForContext } from "../src/identity/service-intercha
 import { type IdentityServiceContext } from "../src/identity/service-types";
 import { type PlainNodeRef } from "../src/identity/sql-target";
 import {
+  advanceIdentityTransitionCut,
   diffClosureTransitions,
   type IdentityTransitionRow,
   pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
+  readIdentityTransitionRetention,
   readIdentityTransitions,
-  readTransitionRetentionDetails,
   transitionAssertionIds,
-  writeIdentityTransitionRetentionWatermark,
 } from "../src/identity/transition-log";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
@@ -625,7 +625,7 @@ describe("identity transition log", () => {
     expect(afterPrune.length).toBe(0);
   });
 
-  it("the retention watermark writer ignores a watermark at or below the stored one", async () => {
+  it("the retention cut writer ignores a cut at or below the stored one, per axis, and never touches the other axis", async () => {
     // Prune raises its own request to the stored watermark under the graph
     // lock, so only this writer's guard stands between a lower write from any
     // other caller (archival restore, a racing session) and a lowered cut.
@@ -635,44 +635,47 @@ describe("identity transition log", () => {
     });
     const ctx = storeRuntime(store).identityContext();
     const stored = () =>
-      readTransitionRetentionDetails(backend, ctx.schema, ctx.graphId);
+      readIdentityTransitionRetention(backend, ctx.schema, ctx.graphId);
+    const advance = (
+      axis: "pruned" | "restored-pruned",
+      revision: number,
+      recordedAt: string,
+    ) =>
+      advanceIdentityTransitionCut(
+        backend,
+        ctx.schema,
+        ctx.graphId,
+        axis,
+        { revision, recordedAt },
+        "transition-prune",
+      );
 
-    await writeIdentityTransitionRetentionWatermark(
-      backend,
-      ctx.schema,
-      ctx.graphId,
-      7,
-      "2026-01-01T00:00:00.000Z",
-    );
-    await writeIdentityTransitionRetentionWatermark(
-      backend,
-      ctx.schema,
-      ctx.graphId,
-      3,
-      "2026-02-01T00:00:00.000Z",
-    );
-    await writeIdentityTransitionRetentionWatermark(
-      backend,
-      ctx.schema,
-      ctx.graphId,
-      7,
-      "2026-03-01T00:00:00.000Z",
-    );
+    expect(await stored()).toEqual({});
+
+    // A restore creates the row: nothing was pruned locally.
+    await advance("restored-pruned", 5, "2025-12-01T00:00:00.000Z");
     expect(await stored()).toEqual({
-      prunedBeforeRevision: 7,
-      prunedAt: "2026-01-01T00:00:00.000Z",
+      pruned: undefined,
+      restoredPruned: { revision: 5, recordedAt: "2025-12-01T00:00:00.000Z" },
     });
 
-    await writeIdentityTransitionRetentionWatermark(
-      backend,
-      ctx.schema,
-      ctx.graphId,
-      9,
-      "2026-04-01T00:00:00.000Z",
-    );
+    await advance("pruned", 7, "2026-01-01T00:00:00.000Z");
+    await advance("pruned", 3, "2026-02-01T00:00:00.000Z");
+    await advance("pruned", 7, "2026-03-01T00:00:00.000Z");
+    await advance("restored-pruned", 4, "2026-03-01T00:00:00.000Z");
     expect(await stored()).toEqual({
-      prunedBeforeRevision: 9,
-      prunedAt: "2026-04-01T00:00:00.000Z",
+      pruned: { revision: 7, recordedAt: "2026-01-01T00:00:00.000Z" },
+      restoredPruned: { revision: 5, recordedAt: "2025-12-01T00:00:00.000Z" },
+    });
+
+    await advance("pruned", 9, "2026-04-01T00:00:00.000Z");
+    await advance("restored-pruned", 12, "2026-05-01T00:00:00.000Z");
+    expect(await stored()).toEqual({
+      pruned: { revision: 9, recordedAt: "2026-04-01T00:00:00.000Z" },
+      restoredPruned: {
+        revision: 12,
+        recordedAt: "2026-05-01T00:00:00.000Z",
+      },
     });
   });
 

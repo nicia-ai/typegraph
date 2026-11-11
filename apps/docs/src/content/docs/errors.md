@@ -336,7 +336,10 @@ cannot answer a request. Its code names the reason:
 
 - `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
   `history: true`; there is no transition log to annotate reads with. Open
-  with `createStore(graph, backend, { history: true })`. Also thrown by
+  with `createStore(graph, backend, { history: true })`. `details.operation`
+  names what was refused (`transitionsOf`, `replay`,
+  `pruneIdentityTransitions` or `archival transition restore`), and so does
+  the message. Also thrown by
   `importGraph`/`importGraphStream` when an archival document's `transitions`
   section targets a history-off store: without `history: true` those rows
   could never be read back through `transitionsOf` / `replay` either, so the
@@ -350,7 +353,8 @@ cannot answer a request. Its code names the reason:
 - `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
   below the graph's retention watermark (see
   [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
-  names the watermark.
+  is the instant the prune was made at, which `fromRecorded` accepts to read
+  the range the prune left whole.
 - `IDENTITY_REPLAY_WALK_INCOMPLETE` — the lineage walk keyset-pages through
   every matching row with no per-round limit, so ordinary lineages — however
   many rows they hold — never hit this refusal; it fires only when a single
@@ -369,6 +373,15 @@ cannot answer a request. Its code names the reason:
   does not exist yet as already pruned, so it is refused and nothing is
   deleted. Pass an instant
   the graph has reached, such as `store.recordedNow()`.
+
+A `fromRecorded`, `toRecorded`, page `cursor` or prune `beforeRecorded` that
+this graph did not allocate is refused before anything is read or deleted, by
+the same ownership check `store.asOfRecorded` applies: another graph's instant
+or cursor raises `GraphAllocationMismatchError`
+(`GRAPH_ALLOCATION_OWNER_MISMATCH`), and a legacy unowned instant — the form a
+restored transition's `recorded` takes — raises `ConfigurationError` with
+`details.code` `RECORDED_ANCHOR_UNBOUND` (see [Recorded allocation ownership
+and lookup](#recorded-allocation-ownership-and-lookup)).
 
 A range with more boundaries than the requested `limit` is not an error —
 `replay` and `transitionsOf` page, returning a `nextCursor` on the
@@ -1543,7 +1556,7 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
-Archival transitions carry four `ValidationError` codes of their own, each a
+Archival transitions carry five `ValidationError` codes of their own, each a
 precondition failure on the identity section as a whole rather than a per-row
 outcome — unlike the table above, these THROW uncaught and are never recorded
 in `result.errors`:
@@ -1553,14 +1566,18 @@ in `result.errors`:
 | `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. Refused before any write. |
 | `IDENTITY_STATE_IMPORT_RETENTION` | A `state`-mode document carries a `retention` watermark; only archival exports carry one. Refused before any write. |
 | `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` are not ordered by non-decreasing `recordedRevision` — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. |
+| `IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID` | An archival document's `transitions` name one `transitionId` more than once — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. An export never writes two rows under one id. Re-importing the same archive is not this error: a row already on the target is kept, so the re-import is idempotent. |
 | `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
 
-A write that records an identity transition on a database whose transition-log
-relations were never created (base-schema version 9 not yet adopted; see
+A write that records an identity transition, a `transitionsOf` or `replay`
+read, a `pruneIdentityTransitions` call or an archival transition restore on a
+database whose transition-log relations were never created (base-schema
+version 9 not yet adopted; see
 [Base-schema version 9](/backend-setup/#base-schema-version-9-the-identity-transition-log))
 throws a `ConfigurationError` whose `details.code` is
-`IDENTITY_TRANSITION_RELATIONS_MISSING` and whose `details.relations` names
-both relations.
+`IDENTITY_TRANSITION_RELATIONS_MISSING`, whose `details.relations` names
+both relations, and whose `details.surface` is `capture-flush`,
+`transition-read`, `transition-prune` or `transition-restore`.
 
 #### Merge provenance sidecar codes
 
@@ -1762,7 +1779,7 @@ a retry against the same retired owner cannot repair it.
 
 | `details.code` | Meaning |
 | --- | --- |
-| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. Also raised when a restored identity transition's `recorded`, which takes that unowned form, is passed to `asOfRecorded` or to a transition-log window, cursor or prune. |
 | `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
 | `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
 | `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
@@ -2214,8 +2231,8 @@ try {
 | `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
-| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
-| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store whose backend owns recorded time (engine-native) |
+| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` / `pruneIdentityTransitions` / an archival transition restore on a store opened without `history: true` |
+| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | The same operations on a store whose backend owns recorded time (engine-native) |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
 | `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond every revision the graph holds |

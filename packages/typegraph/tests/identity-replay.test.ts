@@ -80,7 +80,24 @@ describe("identity replay", () => {
     await expect(
       identityReplay(ctx, { kind: "Person", id: "a" }),
     ).rejects.toMatchObject({
-      details: { code: "IDENTITY_REPLAY_REQUIRES_HISTORY" },
+      message: "replay requires the store to be opened with history: true.",
+      details: {
+        code: "IDENTITY_REPLAY_REQUIRES_HISTORY",
+        operation: "replay",
+      },
+    });
+    // The prune shares the refusal, under its own name rather than replay's.
+    await expect(
+      pruneIdentityTransitionsForContext(ctx, {
+        beforeRecorded: createRecordedInstant(1, nowIso()),
+      }),
+    ).rejects.toMatchObject({
+      message:
+        "pruneIdentityTransitions requires the store to be opened with history: true.",
+      details: {
+        code: "IDENTITY_REPLAY_REQUIRES_HISTORY",
+        operation: "pruneIdentityTransitions",
+      },
     });
   });
 
@@ -399,11 +416,19 @@ describe("identity replay", () => {
       beforeRecorded: watermarkRecorded,
     });
 
-    // Open-ended range: partial truncation is reported, not thrown.
+    // Open-ended range: partial truncation is reported, not thrown. The cut
+    // is named as the instant the prune was made at — the prune's own wall
+    // clock is a coordinate no commit carried — so it reads back as a window
+    // bound that leaves the page whole.
     const partial = await identityReplay(ctx, a);
-    expect(truncatedBeforeOf(partial)).toBeDefined();
+    console.info("pruned replay completeness", partial.completeness);
+    expect(truncatedBeforeOf(partial)).toBe(watermarkRecorded);
+    const fromCut = await identityReplay(ctx, a, {
+      fromRecorded: requireDefined(truncatedBeforeOf(partial)),
+    });
+    expect(fromCut.completeness).toEqual({ status: "complete" });
 
-    // Bounded entirely below the watermark: refused.
+    // Bounded entirely below the watermark: refused, naming the same cut.
     await expect(
       identityReplay(ctx, a, {
         fromRecorded: beforePruneRecorded,
@@ -414,6 +439,7 @@ describe("identity replay", () => {
         code: "IDENTITY_REPLAY_HISTORY_TRUNCATED",
         requestedFrom: beforePruneRecorded,
         requestedTo: beforePruneRecorded,
+        prunedBefore: watermarkRecorded,
       },
     });
 
@@ -480,6 +506,10 @@ describe("identity replay", () => {
     ): void {
       // @ts-expect-error a restored transition's instant is not this graph's recorded instant
       target.asOfRecorded(transition.recorded);
+      void target.identity.transitionsOf(transition.class, {
+        // @ts-expect-error nor is it a transition-log window bound on this graph
+        fromRecorded: transition.recorded,
+      });
     }
     void anchorOnRestored;
   });

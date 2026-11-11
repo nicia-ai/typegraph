@@ -1051,11 +1051,23 @@ export class IdentitySeparationViolationError extends TypeGraphError {
   }
 }
 
+/** The transition-log operation a store without a TypeGraph transition log refused. */
+export type IdentityTransitionLogOperation =
+  | "transitionsOf"
+  | "replay"
+  | "pruneIdentityTransitions"
+  | "archival transition restore";
+
 export type IdentityReplayErrorDetails =
-  | Readonly<{ code: "IDENTITY_REPLAY_REQUIRES_HISTORY"; graphId: string }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_REQUIRES_HISTORY";
+      graphId: string;
+      operation: IdentityTransitionLogOperation;
+    }>
   | Readonly<{
       code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED";
       graphId: string;
+      operation: IdentityTransitionLogOperation;
     }>
   | Readonly<{
       code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
@@ -1069,6 +1081,7 @@ export type IdentityReplayErrorDetails =
        */
       requestedFrom?: string;
       requestedTo: string;
+      /** The instant the prune that set the watermark was made at, on this graph's axis: pass it as `fromRecorded` to read the retained range. */
       prunedBefore: string;
     }>
   | Readonly<{
