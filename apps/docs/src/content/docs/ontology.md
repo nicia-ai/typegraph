@@ -463,9 +463,9 @@ That substitutability reaches every consumer of the subsumption closure:
 `expansion: "subclasses"` on a `Company`-scoped query or `search()` call also
 returns `Corporation` rows, an edge endpoint declared `to: [Company]` accepts
 a `Corporation` node, and disjointness declared against `Company` propagates
-to `Corporation` too. A `kindWithSubClasses` uniqueness constraint fences
-across the pair — the two kinds share one claim axis, so a value unique for
-`Company` is now also unique for `Corporation`.
+to `Corporation` too. A `kindWithSubClasses` uniqueness constraint that both
+kinds declare fences across the pair — the two share one claim axis, so a
+value taken by a `Company` is refused for a `Corporation`.
 
 Because subsumption is a strict order (`isSubClassOf(k, k)` is always false,
 and `expandSubClasses` never repeats a kind), a kind that sits strictly
