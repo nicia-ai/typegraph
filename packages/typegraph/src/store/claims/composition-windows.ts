@@ -481,8 +481,12 @@ export async function readCompositionWindowConflict(
   return findCompositionWindowConflict(registry, plan, stored);
 }
 
-/** The typed refusal a conflict raises. */
-function compositionWindowOverlapError(
+/**
+ * The typed refusal a conflict raises: the store's write paths throw it, and
+ * the merge planner carries it as the `cause` of its plan-time conflict, so
+ * both name the part, both edges and both windows the same way.
+ */
+export function compositionWindowOverlapError(
   registry: KindRegistry,
   conflict: CompositionWindowConflict,
 ): CompositionError {

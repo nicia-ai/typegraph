@@ -20,11 +20,13 @@
  * the write gate.
  */
 import { RestrictedDeleteError } from "../errors";
+import { nowIso } from "../utils/date";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import {
   AcyclicityMergeConflictError,
   CardinalityMergeConflictError,
+  CompositionWindowMergeConflictError,
   type MergeConflictEdge,
   MergeError,
   RestrictedDeleteMergeConflictError,
@@ -38,6 +40,8 @@ import {
   claimRefusalFor,
   claimsInProbeOrder,
   compareCodePoints,
+  compositionWindowOverlapError,
+  type CompositionWindowTransition,
   createSqlSchema,
   type EdgeAcyclicityViolation,
   edgeCardinalityClaimTarget,
@@ -49,9 +53,11 @@ import {
   getDialect,
   getEdgeRowsByIds,
   type GraphDef,
+  type InsertEdgeParams,
   judgeNodeDeleteBehavior,
   type NodeDeletePolicy,
   type ProposedRelationEdge,
+  readCompositionWindowConflict,
   readProposedEdgeAcyclicityViolations,
   type Store,
   storeBackend,
@@ -101,6 +107,24 @@ export function statesValidityEnd(
 }
 
 /**
+ * One constrained edge upsert as the row it leaves: its final endpoints and
+ * its window, beside the stored row it replaces.
+ */
+type PlannedEdgeRow = ProposedRelationEdge &
+  Readonly<{
+    /**
+     * The lower bound the row is left with. An in-place update never moves a
+     * stored lower bound, so it keeps the stored row's; an insert or a
+     * resurrection leaves the one it states — `null` an explicit unbounded
+     * start, `undefined` the instant the write itself stamps — or, for a
+     * resurrection that states none, the stored row's.
+     */
+    validFrom: string | null | undefined;
+    /** The stored row this write replaces; absent when the plan inserts it. */
+    stored: EdgeRow | undefined;
+  }>;
+
+/**
  * What every structural check reads: the plan's normalized write view, its
  * constrained edge writes as the rows they leave, and the target's current
  * rows through one cached reader.
@@ -110,11 +134,14 @@ export type PlanStructure<G extends GraphDef> = Readonly<{
   writes: MergePlanWrites;
   /**
    * Every edge upsert of a kind some structural rule constrains (an acyclic
-   * relation or a claim), at its FINAL endpoints and with the window end it
+   * relation or a claim), at its FINAL endpoints and with the window it
    * leaves on its row: the end the write states, or the stored row's when it
-   * states none. A row the target does not hold yet is born open.
+   * states none (a row the target does not hold yet is born open), and the
+   * lower bound {@link PlannedEdgeRow.validFrom} describes.
    */
-  edgeRows: readonly ProposedRelationEdge[];
+  edgeRows: readonly PlannedEdgeRow[];
+  /** The stored rows the plan's edge deletes remove, for a constrained kind. */
+  deletedEdgeRows: readonly EdgeRow[];
   /** Edge ids whose stored state the plan removes or replaces. */
   supersededEdgeIds: ReadonlySet<string>;
   /**
@@ -157,26 +184,29 @@ async function capturePlanStructure<G extends GraphDef>(
   const constrained = writes.edgeUpserts.filter((upsert) =>
     edgeKindIsStructurallyConstrained(target, upsert.kind),
   );
+  const constrainedDeletes = writes.edgeDeletes.filter((deletion) =>
+    edgeKindIsStructurallyConstrained(target, deletion.kind),
+  );
   const storedRows = await getEdgeRowsByIds(
     backend,
     batchPointReadVerdict(backend),
     target.graphId,
-    constrained
-      .filter((upsert) => !statesValidityEnd(upsert))
-      .map((upsert) => upsert.id),
+    [
+      ...constrained.map((upsert) => upsert.id),
+      ...constrainedDeletes.map((deletion) => deletion.id),
+    ],
   );
   const connected = new Map<MergeKey, readonly EdgeRow[]>();
   return {
     target,
     writes,
     edgeRows: constrained.map((upsert) =>
-      plannedEdgeRow(
-        upsert,
-        statesValidityEnd(upsert) ?
-          upsert.validTo
-        : storedRows.get(upsert.id)?.valid_to,
-      ),
+      plannedEdgeRow(upsert, storedRows.get(upsert.id)),
     ),
+    deletedEdgeRows: constrainedDeletes.flatMap((deletion) => {
+      const stored = storedRows.get(deletion.id);
+      return stored === undefined ? [] : [stored];
+    }),
     supersededEdgeIds: new Set([
       ...writes.edgeDeletes.map((deletion) => deletion.id),
       ...writes.edgeUpserts.map((upsert) => upsert.id),
@@ -217,8 +247,10 @@ function edgeKindIsStructurallyConstrained<G extends GraphDef>(
 
 function plannedEdgeRow(
   upsert: MergePlanEdgeUpsert,
-  validTo: string | undefined,
-): ProposedRelationEdge {
+  stored: EdgeRow | undefined,
+): PlannedEdgeRow {
+  const appliesStatedValidFrom =
+    stored === undefined || stored.deleted_at !== undefined;
   return {
     edgeId: upsert.id,
     edgeKind: upsert.kind,
@@ -226,7 +258,12 @@ function plannedEdgeRow(
     fromId: upsert.from.id,
     toKind: upsert.to.kind,
     toId: upsert.to.id,
-    validTo,
+    validTo: statesValidityEnd(upsert) ? upsert.validTo : stored?.valid_to,
+    validFrom:
+      appliesStatedValidFrom && upsert.validFrom !== undefined ?
+        upsert.validFrom
+      : stored?.valid_from,
+    stored,
   };
 }
 
@@ -497,4 +534,83 @@ export async function restrictedDeleteConflict<G extends GraphDef>(
     }
   }
   return undefined;
+}
+
+/**
+ * Whether the plan leaves one part of a `population: "oneActive"` pair with
+ * two composition windows that share an instant — history two sides
+ * contributed, or a side's history overlapping the target's. The verdict is
+ * the composition lane's own ({@link readCompositionWindowConflict}), given
+ * every composition-row write of the plan in ONE call so it judges the state
+ * the plan leaves: each upsert as an insert or a revision of its stored row,
+ * each edge delete as a revision whose row is deleted. The refusal carries
+ * the store's own `CompositionError` (`"windowOverlap"`) as its `cause`.
+ */
+export async function compositionWindowConflict<G extends GraphDef>(
+  structure: PlanStructure<G>,
+): Promise<MergeError | undefined> {
+  const { target } = structure;
+  const { registry } = target;
+  const inserts: InsertEdgeParams[] = [];
+  const revisions: CompositionWindowTransition[] = [];
+  for (const row of structure.edgeRows) {
+    if (!registry.isCompositionEdge(row.edgeKind)) continue;
+    if (row.stored === undefined) {
+      inserts.push({
+        graphId: target.graphId,
+        id: row.edgeId,
+        kind: row.edgeKind,
+        fromKind: row.fromKind,
+        fromId: row.fromId,
+        toKind: row.toKind,
+        toId: row.toId,
+        props: {},
+        ...(row.validFrom === undefined ? {} : { validFrom: row.validFrom }),
+        ...(row.validTo === undefined ? {} : { validTo: row.validTo }),
+      });
+      continue;
+    }
+    revisions.push({
+      before: row.stored,
+      after: {
+        id: row.edgeId,
+        kind: row.edgeKind,
+        from_kind: row.fromKind,
+        from_id: row.fromId,
+        to_kind: row.toKind,
+        to_id: row.toId,
+        valid_from: row.validFrom ?? undefined,
+        valid_to: row.validTo,
+        deleted_at: undefined,
+      },
+    });
+  }
+  const operationInstant = nowIso();
+  for (const stored of structure.deletedEdgeRows) {
+    if (!registry.isCompositionEdge(stored.kind)) continue;
+    revisions.push({
+      before: stored,
+      after: { ...stored, deleted_at: stored.deleted_at ?? operationInstant },
+    });
+  }
+  if (inserts.length === 0 && revisions.length === 0) return undefined;
+  const conflict = await readCompositionWindowConflict(
+    registry,
+    storeBackend(target),
+    target.graphId,
+    { inserts, revisions },
+    { operationInstant },
+  );
+  if (conflict === undefined) return undefined;
+  return new CompositionWindowMergeConflictError(
+    compositionWindowOverlapError(registry, conflict),
+    [conflict.incumbent, conflict.proposed].map((edge) => ({
+      edgeId: edge.id,
+      edgeKind: edge.kind,
+      fromKind: edge.from_kind,
+      fromId: edge.from_id,
+      toKind: edge.to_kind,
+      toId: edge.to_id,
+    })),
+  );
 }

@@ -92,11 +92,11 @@ export {
 export { DURABLE_OPERATION_KEY_MAX_BYTES } from "./durable-operation";
 export type {
   AcyclicityMergeConflictDetails,
-  CardinalityMergeConflictDetails,
   IdentityMergeConflictCode,
   MergeConflictEdge,
   MergeConstraintConflictErrorDetails,
   MergeErrorOptions,
+  StructuralMergeConflictDetails,
 } from "./errors";
 export {
   AcyclicityMergeConflictError,
@@ -106,6 +106,7 @@ export {
   CandidateSourceError,
   CandidateWriteSetError,
   CardinalityMergeConflictError,
+  CompositionWindowMergeConflictError,
   DurableEvidenceUndeliveredError,
   DurableOperationConflictError,
   DurableOperationError,

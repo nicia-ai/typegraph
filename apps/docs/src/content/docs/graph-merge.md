@@ -1153,18 +1153,23 @@ built, so a plan they return is never one that cannot be applied:
 | Composition orphan | `MergeCompositionOrphanError` | The plan would separate a part from its whole (see [Composition orphans](#composition-orphans)) |
 | Restricted delete | `RestrictedDeleteMergeConflictError` | The plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete, such as one the incremental target added after the fork |
 | Occupied whole or cardinality slot | `CardinalityMergeConflictError` | The plan leaves two live edges holding one reservation: a part's one whole, or a declared `cardinality` / `targetCardinality` slot |
+| Overlapping composition windows | `CompositionWindowMergeConflictError` | The plan leaves one part of a `oneActive` composition pair with two composition windows that share an instant — history two branches contributed, or a branch's history overlapping the target's (see [One whole at every instant](/ontology#one-whole-at-every-instant)) |
 
 Each refusal is reached through the store's own decision, applied to the
 state the plan would leave: the claim set an edge write takes, the
-delete-behavior verdict a node delete reaches, the acyclicity walk. The
+delete-behavior verdict a node delete reaches, the acyclicity walk, the
+composition-window decision over every composition row the plan writes. The
 plan's deletions and rewrites are applied first, so a move (`reparent`) or a
-reversal is judged by the graph it produces. `CardinalityMergeConflictError`
-and `RestrictedDeleteMergeConflictError` carry the store refusal the apply
-would raise as `cause` (`CompositionError` with `COMPOSITION_WHOLE_OCCUPIED`,
+reversal is judged by the graph it produces. `CardinalityMergeConflictError`,
+`CompositionWindowMergeConflictError` and `RestrictedDeleteMergeConflictError`
+carry the store refusal the apply would raise as `cause` (`CompositionError`
+with `COMPOSITION_WHOLE_OCCUPIED` or `COMPOSITION_WINDOW_OVERLAP`,
 `CardinalityError` or `RestrictedDeleteError`), and copy its code, name and
 details into their own `details` like `MergeConstraintConflictError` does.
-`CardinalityMergeConflictError.details.edges` names the incumbent and the
-edge that collides with it.
+The `details.edges` of the first two name the incumbent and the edge that
+conflicts with it; a window conflict's copied fields also give both windows.
+Composition windows that only touch (one ends where the next begins) share no
+instant and merge.
 
 The incremental target's changes since the fork count like a branch's here.
 Two branches that reparent one part to different wholes, or a branch and the
@@ -3351,6 +3356,7 @@ caller-owned transaction callback rejects by default:
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, opposing relations, and retract/reassert races — see [Identity conflicts](#identity-conflicts) and the [identity guide](/identity/#interchange-and-branch-merge). One related code on the same error class names a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a definitional match or a transitive cluster crosses a class-lifted `different` assertion — see [Identity separation veto](#identity-separation-veto)). |
 | `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
 | `CardinalityMergeConflictError` | Code `GRAPH_MERGE_CARDINALITY_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave two live edges holding one part's whole or one declared `cardinality` / `targetCardinality` slot — two branches reparenting one part to different wholes, or a branch and the incremental target each adding an edge to a `targetCardinality: "one"` endpoint. Its `cause` is the `CompositionError` or `CardinalityError` apply would raise and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |
+| `CompositionWindowMergeConflictError` | Code `GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave one part of a `oneActive` composition pair with two composition windows that share an instant. Its `cause` is the `CompositionError` (`situation: "windowOverlap"`) apply would raise; `details` copies the part, both edges, both wholes and both windows, and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |
 | `RestrictedDeleteMergeConflictError` | Code `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`. Returned at plan time when the plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete, such as one the incremental target added after the fork. Its `cause` is the `RestrictedDeleteError` apply would raise. |
 | `MergeCompositionOrphanError` | Code `GRAPH_MERGE_COMPOSITION_ORPHAN`. Returned at plan time, and by apply's in-transaction re-verification, when the plan would separate a composition part from its whole. See [Composition orphans](#composition-orphans). |
 | `MergeConstraintConflictError` | Code `GRAPH_MERGE_CONSTRAINT_CONFLICT`. Applying the plan violated a deterministic store constraint, such as node uniqueness, or a cardinality or restrict rule an artifact no longer agreeing with the target runs into; the conflicts the planner can see are refused at plan time instead (see [Structural conflicts](#structural-conflicts)). Its category is `constraint`, its `cause` is the original typed store error (a `CardinalityError` with `details.direction` for a cardinality conflict), and its details expose the original constraint fields. No graph or provenance writes commit. |

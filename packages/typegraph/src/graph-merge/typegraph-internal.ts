@@ -23,6 +23,7 @@ export { sharesSerializedTransactionResource } from "../backend/transaction-reso
 export type {
   ClaimEdgeCardinalityParams,
   EdgeRow,
+  InsertEdgeParams,
   EngineRevision,
   EntityKey,
   GraphBackend,
@@ -107,6 +108,11 @@ export {
   readProposedEdgeAcyclicityViolations,
 } from "../store/acyclicity";
 export { targetIdentity } from "../store/claims/axis";
+export {
+  type CompositionWindowTransition,
+  compositionWindowOverlapError,
+  readCompositionWindowConflict,
+} from "../store/claims/composition-windows";
 export {
   edgeInsertClaims,
   edgeKindOwesAnyClaim,

@@ -206,6 +206,7 @@ import { MERGE_PLAN_FORMAT_VERSION } from "./plan-schema";
 import {
   acyclicityConflict,
   assertPlanStructurallySound,
+  compositionWindowConflict,
   edgeClaimConflict,
   MERGE_NODE_DELETE_POLICY,
   mergeNodeDeleteSequence,
@@ -3837,6 +3838,7 @@ const PLAN_STRUCTURAL_CHECKS: readonly PlanStructuralCheck[] = [
   compositionOrphanConflict,
   restrictedDeleteConflict,
   edgeClaimConflict,
+  compositionWindowConflict,
 ];
 
 /**

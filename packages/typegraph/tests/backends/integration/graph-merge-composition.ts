@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
   asNodeId,
   CompositionError,
   defineEdge,
@@ -28,7 +29,9 @@ import {
 } from "../../../src";
 import {
   CardinalityMergeConflictError,
+  CompositionWindowMergeConflictError,
   isErr,
+  MergeConstraintConflictError,
   MergeError,
   unwrap,
 } from "../../../src/graph-merge";
@@ -42,6 +45,7 @@ import {
   planMergeIncremental,
 } from "../../../src/graph-merge/merge";
 import { asBranchId, type GraphBranch } from "../../../src/graph-merge/types";
+import { refenceMergePlan } from "../../graph-merge/test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
 const Whole = defineNode("GmcWhole", {
@@ -145,6 +149,94 @@ async function planThenApply(
   const plan = unwrap(await planMerge(target, [source]));
   const applied = await applyMergePlan(target, plan);
   if (isErr(applied)) throw applied.error;
+}
+
+const NODE_SINCE = "2018-01-01T00:00:00.000Z";
+const Y2019 = "2019-01-01T00:00:00.000Z";
+const Y2020 = "2020-01-01T00:00:00.000Z";
+const Y2021 = "2021-01-01T00:00:00.000Z";
+const Y2022 = "2022-01-01T00:00:00.000Z";
+const Y2023 = "2023-01-01T00:00:00.000Z";
+
+/** Ends p1's membership of w1 at 2020 and adds a history row under `whole`. */
+async function moveThroughHistory(
+  store: TestStore,
+  edgeId: string,
+  whole: string,
+  window: Readonly<{ validFrom: string; validTo: string }>,
+): Promise<void> {
+  await store.edges.gmcHolds.update(
+    asEdgeId<typeof holds>("e0"),
+    {},
+    { validTo: Y2020 },
+  );
+  await store.edges.gmcHolds.create(
+    { kind: "GmcPart", id: "p1" },
+    wholeRef(whole),
+    {},
+    { id: edgeId, ...window },
+  );
+}
+
+async function windows(store: TestStore): Promise<readonly string[]> {
+  const rows = await store.edges.gmcHolds.find(
+    {},
+    { temporalMode: "includeEnded" },
+  );
+  return rows
+    .map(
+      (edge) =>
+        `${edge.id}:${edge.toId} [${edge.meta.validFrom ?? "-"},${edge.meta.validTo ?? "-"})`,
+    )
+    .toSorted();
+}
+
+function expectWindowConflict(
+  error: MergeError,
+  proposed: string,
+  incumbent: string,
+): void {
+  expect(error).toBeInstanceOf(CompositionWindowMergeConflictError);
+  expect(error.cause).toBeInstanceOf(CompositionError);
+  expect(error.details).toMatchObject({
+    constraintCode: "COMPOSITION_WINDOW_OVERLAP",
+    situation: "windowOverlap",
+    partKind: "GmcPart",
+    partId: "p1",
+    edgeId: proposed,
+    incumbentEdgeId: incumbent,
+  });
+  const { edges } = error.details as Readonly<{
+    edges: readonly Readonly<{ edgeId: string }>[];
+  }>;
+  expect(edges.map((edge) => edge.edgeId)).toEqual([incumbent, proposed]);
+}
+
+/** p1 under w1 from 2019, on an optional `oneActive` pair that keeps history. */
+async function historyTarget(
+  context: IntegrationTestContext,
+): Promise<TestStore> {
+  const target = await context.createStore(
+    compositionGraph("optional", "oneActive"),
+    { revisionTracking: true },
+  );
+  for (const id of ["w1", "w2", "w3"]) {
+    await target.nodes.GmcWhole.create(
+      { label: id },
+      { id, validFrom: NODE_SINCE },
+    );
+  }
+  await target.nodes.GmcPart.create(
+    { label: "p1" },
+    { id: "p1", validFrom: NODE_SINCE },
+  );
+  await target.edges.gmcHolds.create(
+    { kind: "GmcPart", id: "p1" },
+    wholeRef("w1"),
+    {},
+    { id: "e0", validFrom: Y2019 },
+  );
+  return target;
 }
 
 export function registerGraphMergeCompositionIntegrationTests(
@@ -479,5 +571,120 @@ export function registerGraphMergeCompositionIntegrationTests(
         });
       },
     );
+  });
+
+  describe("composition windows replayed by graph merge", () => {
+    it("refuses at plan time two branches whose history windows for one part overlap", async () => {
+      const target = await historyTarget(context);
+      const left = await fork(context, target, "branch-a");
+      const right = await fork(context, target, "branch-b");
+      await moveThroughHistory(left.store, "e1", "w2", {
+        validFrom: Y2020,
+        validTo: Y2022,
+      });
+      await moveThroughHistory(right.store, "e2", "w3", {
+        validFrom: Y2021,
+        validTo: Y2023,
+      });
+      const before = await windows(target);
+
+      const planned = await planMerge(target, [left, right]);
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expectWindowConflict(planned.error, "e2", "e1");
+      expect(planned.error.details).toMatchObject({
+        validFrom: Y2021,
+        validTo: Y2023,
+        incumbentValidFrom: Y2020,
+        incumbentValidTo: Y2022,
+      });
+
+      const merged = await merge(target, [right, left]);
+      if (!isErr(merged)) throw new Error("expected a merge refusal");
+      expect(merged.error).toBeInstanceOf(CompositionWindowMergeConflictError);
+      expect(await windows(target)).toEqual(before);
+    });
+
+    it("refuses at plan time a branch history window overlapping the target's", async () => {
+      const forkPoint = await historyTarget(context);
+      const source = await fork(context, forkPoint, "branch-a");
+      const { store: target } = await fork(context, forkPoint, "target-clone");
+      await moveThroughHistory(target, "e2", "w3", {
+        validFrom: Y2021,
+        validTo: Y2023,
+      });
+      await moveThroughHistory(source.store, "e1", "w2", {
+        validFrom: Y2020,
+        validTo: Y2022,
+      });
+
+      const planned = await planMergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+      });
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(CompositionWindowMergeConflictError);
+      expect(planned.error.details).toMatchObject({ partId: "p1" });
+      const { edges } = planned.error.details as Readonly<{
+        edges: readonly Readonly<{ edgeId: string }>[];
+      }>;
+      expect(edges.map((edge) => edge.edgeId).toSorted()).toEqual(["e1", "e2"]);
+    });
+
+    it("plans and applies history windows that only touch", async () => {
+      const target = await historyTarget(context);
+      const left = await fork(context, target, "branch-a");
+      const right = await fork(context, target, "branch-b");
+      await moveThroughHistory(left.store, "e1", "w2", {
+        validFrom: Y2020,
+        validTo: Y2022,
+      });
+      await moveThroughHistory(right.store, "e2", "w3", {
+        validFrom: Y2022,
+        validTo: Y2023,
+      });
+
+      const plan = unwrap(await planMerge(target, [left, right]));
+      unwrap(await applyMergePlan(target, plan));
+
+      expect(await windows(target)).toEqual(
+        [
+          `e0:w1 [${Y2019},${Y2020})`,
+          `e1:w2 [${Y2020},${Y2022})`,
+          `e2:w3 [${Y2022},${Y2023})`,
+        ].toSorted(),
+      );
+      expect(await target.verifyConstraintFences()).toEqual([]);
+    });
+
+    it("refuses at apply time, through the store's write path, a re-fenced plan whose window the target has since overlapped", async () => {
+      const target = await historyTarget(context);
+      const source = await fork(context, target, "branch-a");
+      await moveThroughHistory(source.store, "e1", "w2", {
+        validFrom: Y2020,
+        validTo: Y2022,
+      });
+      const cleanPlan = unwrap(await planMerge(target, [source]));
+      await moveThroughHistory(target, "e2", "w3", {
+        validFrom: Y2021,
+        validTo: Y2023,
+      });
+      const before = await windows(target);
+
+      const applied = await applyMergePlan(
+        target,
+        await refenceMergePlan(target, cleanPlan),
+      );
+
+      if (!isErr(applied)) throw new Error("expected apply to be refused");
+      expect(applied.error).toBeInstanceOf(MergeConstraintConflictError);
+      expect(applied.error.cause).toBeInstanceOf(CompositionError);
+      expect(applied.error.details).toMatchObject({
+        constraintCode: "COMPOSITION_WINDOW_OVERLAP",
+        situation: "windowOverlap",
+        partId: "p1",
+      });
+      expect(await windows(target)).toEqual(before);
+    });
   });
 }

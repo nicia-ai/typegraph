@@ -464,7 +464,9 @@ Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
 refusals share this surface when they arise from node or edge application.
 Those the plan's own writes are certain to meet against the target's current
 rows are refused while the plan is built instead — two edges holding one
-cardinality slot or one part's whole as `CardinalityMergeConflictError`, a
+cardinality slot or one part's whole as `CardinalityMergeConflictError`, two
+overlapping composition windows of one part as
+`CompositionWindowMergeConflictError`, a
 restricted node the plan deletes as `RestrictedDeleteMergeConflictError` — so
 this error is the apply-time re-verification for an artifact whose rows no
 longer agree with the target.
@@ -534,6 +536,23 @@ Like `MergeConstraintConflictError`, `details` copies the store refusal's own
 fields beside `constraintCode`, `constraintErrorName` and `constraintDetails`.
 Reconcile the branches (or the branch with the target) and plan again. See
 [Structural conflicts](/graph-merge#structural-conflicts).
+
+### `CompositionWindowMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan would leave one part of a `population: "oneActive"`
+composition pair with two composition windows that share an instant —
+history rows two branches contributed, or a branch's history overlapping the
+target's. A part holds exactly one whole at every valid-time coordinate (see
+[One whole at every instant](/ontology#one-whole-at-every-instant)), so the
+apply's refusal is certain and no plan is returned. `code` is
+`GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT`, `cause` is the `CompositionError`
+(`COMPOSITION_WINDOW_OVERLAP`, `situation: "windowOverlap"`) the store would
+raise, and `details` copies its fields — the part, both edges, both wholes
+and both windows (`validFrom` / `validTo`, `incumbentValidFrom` /
+`incumbentValidTo`) — beside `constraintCode`, `constraintErrorName`,
+`constraintDetails` and `edges` (the incumbent, then the overlapping edge).
+End one of the windows in its branch so the two only touch, then plan again.
 
 ### `RestrictedDeleteMergeConflictError`
 
@@ -2343,6 +2362,7 @@ try {
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
 | `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | The plan would delete a whole while a live part of it is not among the plan's deletions, delete a part the target holds under a live whole the plan keeps, or leave a required part with no whole; or one branch's composition attachment loses its part or whole to another branch's deletion |
 | `GRAPH_MERGE_CARDINALITY_CONFLICT` | `CardinalityMergeConflictError` | constraint | The plan would leave two live edges holding one part's whole or one declared cardinality slot |
+| `GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT` | `CompositionWindowMergeConflictError` | constraint | The plan would leave one part of a `oneActive` composition pair with two composition windows that share an instant |
 | `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT` | `RestrictedDeleteMergeConflictError` | constraint | The plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete |
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
