@@ -1406,6 +1406,15 @@ rows cannot be read without:
 | --- | --- |
 | `ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An export explicitly set `includeTemporal: false` on a graph with an edge kind whose `cardinality` or `targetCardinality` is `"oneActive"` (a `oneActive` composition pair included). Those kinds count a row only while its window is open, so an ended row exported without its `validTo` would re-import as current. `details.edgeKinds` lists them. Remove `includeTemporal` (such exports default it to `true`) or set it to `true`. |
 
+#### Interchange option codes
+
+The interchange entry points refuse an option key they do not declare rather
+than dropping it, as `ConfigurationError`:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `INTERCHANGE_OPTION_UNKNOWN` | `importGraph()`, `importGraphStream()`, `exportGraph()` or `exportGraphStream()` was given an option key it does not declare. `details.operation` names the entry point and `details.option` the first unknown key; nothing is read or written. A misspelled option is refused rather than dropped, so check the spelling against the options type. `batchSize` and `idleTimeoutMs` are `exportGraphStream()` options; `exportGraph()` refuses them. |
+
 #### Durable edge match identity guard codes
 
 Durable edge match identity uses stable `ConfigurationError` detail codes:

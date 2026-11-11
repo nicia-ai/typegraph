@@ -30,9 +30,11 @@ import { compareStrings } from "../utils/compare";
 import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { serializedStreamRefusal } from "./import";
+import { parseInterchangeOptions } from "./options";
 import { markExportStreamBackend } from "./stream-source";
 import {
   type ExportOptionsInput,
+  ExportOptionsSchema,
   type ExportStreamOptionsInput,
   ExportStreamOptionsSchema,
   FORMAT_VERSION,
@@ -71,6 +73,7 @@ export async function exportGraph<G extends GraphDef>(
   store: Store<G>,
   options?: ExportOptionsInput,
 ): Promise<GraphData> {
+  parseInterchangeOptions("exportGraph", ExportOptionsSchema, options ?? {});
   const nodes: InterchangeNode[] = [];
   const edges: InterchangeEdge[] = [];
   const identityAssertions: InterchangeIdentityAssertion[] = [];
@@ -271,7 +274,11 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   backend: GraphBackend,
   options?: ExportStreamOptionsInput,
 ): AsyncIterable<GraphInterchangeChunk> {
-  const parsed = ExportStreamOptionsSchema.parse(options ?? {});
+  const parsed = parseInterchangeOptions(
+    "exportGraphStream",
+    ExportStreamOptionsSchema,
+    options ?? {},
+  );
   const temporalFieldsRequirement = requiredTemporalFields(store.graph);
   if (
     temporalFieldsRequirement !== undefined &&
