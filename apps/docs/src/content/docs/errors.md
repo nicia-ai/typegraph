@@ -708,6 +708,7 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
 | `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -731,6 +732,33 @@ try {
     // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
     //  move the part — it retires the incumbent attachment and creates the
     //  new one in one transaction. ..."
+  }
+}
+```
+
+On a `population: "oneActive"` pair the rule holds at every valid-time
+coordinate: the windows of one part's composition edges never overlap
+([One whole at every instant](/ontology#one-whole-at-every-instant)). A
+`"windowOverlap"` refusal names the edge being written and the one it would
+overlap, with both windows (an omitted bound is unbounded):
+
+```typescript
+// Chapter is attached to `book` from 2020, open-ended.
+try {
+  await store.edges.includedIn.create(chapter, anthology, {}, {
+    validFrom: "2019-01-01T00:00:00.000Z",
+    validTo: "2021-01-01T00:00:00.000Z",
+  });
+} catch (error) {
+  if (error instanceof CompositionError && error.code === "COMPOSITION_WINDOW_OVERLAP") {
+    console.log(error.details);
+    // { situation: "windowOverlap", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", edgeId: "<new edge id>",
+    //   validFrom: "2019-01-01T00:00:00.000Z", validTo: "2021-01-01T00:00:00.000Z",
+    //   incumbentEdgeKind: "chapterOf", incumbentEdgeId: "<the chapterOf edge's id>",
+    //   incumbentWholeKind: "Book", incumbentWholeId: "<book-id>",
+    //   incumbentValidFrom: "2020-01-01T00:00:00.000Z" }
   }
 }
 ```
@@ -1727,7 +1755,9 @@ exactly the shape `store.verifyConstraintFences()` returns — including
 pair finds a part already holding two live wholes, or a cycle in the
 proposed composition relation, and `family: "compositionFutureWindow"`
 entries when the pair's realizing edge kind already holds a row whose
-window starts or ends later than the commit. Resolve those rows (delete them, change
+window starts or ends later than the commit, and `family:
+"compositionWindowOverlap"` entries when a part's rows would have
+overlapping valid-time windows under the pair. Resolve those rows (delete them, change
 their kind, or narrow the ontology change) and retry. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each meta-edge checks.
@@ -2117,6 +2147,7 @@ try {
 | `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
 | `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |

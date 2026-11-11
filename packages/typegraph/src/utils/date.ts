@@ -312,6 +312,62 @@ export function validityWindowContainsInstant(
   );
 }
 
+/** A half-open validity interval `[validFrom, validTo)`; an omitted bound is unbounded. */
+export type ValidityWindow = Readonly<{
+  validFrom?: string | undefined;
+  validTo?: string | undefined;
+}>;
+
+/**
+ * Whether some canonical instant belongs to both half-open windows — the
+ * interval reading of {@link validityWindowContainsInstant}. Windows that only
+ * touch (`left.validTo === right.validFrom`) share no instant, and an empty
+ * window ({@link isEmptyValidityWindow}: zero width or inverted) shares none
+ * with anything.
+ *
+ * PRECONDITION: as {@link isInvertedValidityWindow} — every bound canonical
+ * fixed-width UTC ISO 8601.
+ */
+export function validityWindowsOverlap(
+  left: ValidityWindow,
+  right: ValidityWindow,
+): boolean {
+  if (
+    isEmptyValidityWindow(left.validFrom, left.validTo) ||
+    isEmptyValidityWindow(right.validFrom, right.validTo)
+  ) {
+    return false;
+  }
+  return (
+    (left.validFrom === undefined ||
+      right.validTo === undefined ||
+      left.validFrom < right.validTo) &&
+    (right.validFrom === undefined ||
+      left.validTo === undefined ||
+      right.validFrom < left.validTo)
+  );
+}
+
+/**
+ * Whether every instant of `inner` belongs to `outer`. An empty `inner`
+ * belongs to every window.
+ *
+ * PRECONDITION: as {@link validityWindowsOverlap}.
+ */
+export function validityWindowCovers(
+  outer: ValidityWindow,
+  inner: ValidityWindow,
+): boolean {
+  if (isEmptyValidityWindow(inner.validFrom, inner.validTo)) return true;
+  const startsInside =
+    outer.validFrom === undefined ||
+    (inner.validFrom !== undefined && outer.validFrom <= inner.validFrom);
+  const endsInside =
+    outer.validTo === undefined ||
+    (inner.validTo !== undefined && inner.validTo <= outer.validTo);
+  return startsInside && endsInside;
+}
+
 /**
  * THE lower bound a write that STAMPS its own start stores, decided against the
  * instant it is about to stamp. One owner for every such write, so no two of them

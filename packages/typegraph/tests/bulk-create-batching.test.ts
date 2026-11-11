@@ -651,8 +651,8 @@ describe("bulkCreate composition attach batching", () => {
     });
   });
   // MUTATION CHECK: restore the per-item probe (prepare with
-  // `validateAcyclicity: true` and drop the single
-  // `assertPreparedEdgeCreatesAcyclic` call) — the probe is then entered 8
+  // `validateRelations: true` and drop the single
+  // `assertPreparedEdgeCreateRelations` call) — the probe is then entered 8
   // times, once per attaching item, each with a single proposed edge.
 
   it("attaches every item of the batch", async () => {

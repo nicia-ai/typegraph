@@ -31,10 +31,14 @@ describe("public contract seams", () => {
       "composition",
       "edgeAcyclicity",
       "compositionFutureWindow",
+      "compositionWindowOverlap",
     ]);
     expect(probeCoversViolationFamily(probe, "composition")).toBe(true);
     expect(probeCoversViolationFamily(probe, "edgeAcyclicity")).toBe(true);
     expect(probeCoversViolationFamily(probe, "compositionFutureWindow")).toBe(
+      true,
+    );
+    expect(probeCoversViolationFamily(probe, "compositionWindowOverlap")).toBe(
       true,
     );
     expect(probeCoversViolationFamily(probe, "compositionExistence")).toBe(

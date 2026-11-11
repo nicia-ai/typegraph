@@ -160,6 +160,11 @@ import {
   edgeKindOwesAnyClaim,
 } from "../claims/composition-claims";
 import {
+  assertCompositionWindowsDisjoint,
+  type CompositionWindowTransition,
+  type CompositionWindowWrites,
+} from "../claims/composition-windows";
+import {
   activeOnlyAxisReferences,
   claimEdgeCardinalities,
   claimRefusalFor,
@@ -188,6 +193,7 @@ import {
   edgeDetachNeedsConstraintFence,
   edgeKindCardinalityDeclarations,
   edgeKindFenceReason,
+  edgeWindowEndNeedsConstraintFence,
 } from "../constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../durable-edge-batch";
 import { getEdgeRowsByIds } from "../edge-fetch";
@@ -440,15 +446,19 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     validateEndpoints?: boolean;
     validateCardinality?: boolean;
     /**
-     * Whether this call owes the acyclicity probe when the edge kind
-     * declares `acyclic: true`. Defaults to `true`; callers that already
-     * covered it earlier in the same write frame (or that probe the whole
-     * prepared set once before inserting, as batch create does) pass `false` so the
-     * relation is not walked twice for one write. `lock` is required
-     * whenever the probe actually runs — see
-     * `assertEdgeRelationsAcyclic`'s isolation-freshness guard.
+     * Whether this call owes the two lock-only decisions a row makes about
+     * the relations it joins: the acyclicity probe when the edge kind is in
+     * an acyclic relation, and the composition window decision
+     * (`assertCompositionWindowsDisjoint`) when it realizes a composition
+     * pair. Defaults to `true`; callers that already covered both earlier in
+     * the same write frame (or that decide the whole prepared set once before
+     * inserting, as batch create does — {@link assertBatchEdgeRelations},
+     * {@link assertPreparedEdgeCreateRelations}) pass `false` so neither is
+     * decided twice for one write. `lock` is required whenever either
+     * decision actually runs — see `fenceLockOnlyDecision`'s
+     * isolation-freshness guard.
      */
-    validateAcyclicity?: boolean;
+    validateRelations?: boolean;
     lock?: GraphWriteLock;
     /** A `reparent`'s instant; see {@link assertCompositionEdgeWindowCurrent}. */
     moveInstant?: ResolvedCompositionMoveInstant | undefined;
@@ -557,7 +567,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   // relation (`edgeAcyclic`, the one owner of this decision — not this
   // registration's own `acyclic` key, which a composed member can lack
   // while still belonging to the relation).
-  if ((options?.validateAcyclicity ?? true) && edgeAcyclic(ctx, kind)) {
+  if ((options?.validateRelations ?? true) && edgeAcyclic(ctx, kind)) {
     const lock = requireDefined(
       options?.lock,
       "an acyclic edge create reached validateAndPrepareEdgeCreate with no write lock",
@@ -578,22 +588,35 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     );
   }
 
-  return {
-    declarations,
-    insertParams: buildInsertEdgeParams(
-      ctx.graphId,
-      id,
-      kind,
-      fromKind,
-      input.fromId,
-      toKind,
-      input.toId,
-      validatedProps,
-      validFrom,
-      validTo,
-      matchIdentity,
-    ),
-  };
+  const insertParams = buildInsertEdgeParams(
+    ctx.graphId,
+    id,
+    kind,
+    fromKind,
+    input.fromId,
+    toKind,
+    input.toId,
+    validatedProps,
+    validFrom,
+    validTo,
+    matchIdentity,
+  );
+  if (
+    (options?.validateRelations ?? true) &&
+    ctx.registry.isCompositionEdge(kind)
+  ) {
+    await assertFrameCompositionWindows(
+      ctx,
+      backend,
+      requireDefined(
+        options?.lock,
+        "a composition edge create reached validateAndPrepareEdgeCreate with no write lock",
+      ),
+      { inserts: [insertParams] },
+    );
+  }
+
+  return { declarations, insertParams };
 }
 
 /**
@@ -724,6 +747,36 @@ function assertCompositionEdgeWindowCurrent<G extends GraphDef>(
 }
 
 /**
+ * The composition window decision of one write frame
+ * (`assertCompositionWindowsDisjoint`), read off this module's context:
+ * `writes` is every composition-row write the frame makes, decided together
+ * before its first statement. A frame writing no composition row decides
+ * nothing and reads nothing.
+ */
+function assertFrameCompositionWindows<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  target: WriteTarget,
+  lock: GraphWriteLock,
+  writes: CompositionWindowWrites,
+): Promise<void> {
+  return assertCompositionWindowsDisjoint(
+    { graphId: ctx.graphId, registry: ctx.registry, lock },
+    target,
+    writes,
+  );
+}
+
+/** The window transitions a prepared update set leaves, in write order. */
+function edgeUpdateTransitions(
+  entries: readonly Readonly<{ prepared: EdgeUpdatePrepared }>[],
+): readonly CompositionWindowTransition[] {
+  return entries.map(({ prepared }) => ({
+    before: prepared.rowBefore,
+    after: prepared.rowAfter,
+  }));
+}
+
+/**
  * Whether clearing an ended row's `validTo` puts an edge of this kind back
  * into the acyclic relation its writes are probed against: true exactly when
  * that relation counts only open rows of the kind (a composition kind's
@@ -783,11 +836,12 @@ function edgeWriteFenceReason<G extends GraphDef>(
 }
 
 /**
- * The detach probe ({@link file://../constraints.ts edgeDetachNeedsConstraintFence})
- * an edge update owes for the window end it states. A plan reads nothing, so
- * whether that end closes a currently OPEN window (`edgeWriteEndsOpenWindow`)
- * is unknown here: any stated end of a fenced kind pays, a restated one
- * included.
+ * The fence ({@link file://../constraints.ts edgeWindowEndNeedsConstraintFence})
+ * an edge update owes for the window end it states: the detach probe, and on
+ * a `oneActive` composition pair the window decision. A plan reads nothing,
+ * so whether that end closes a currently OPEN window
+ * (`edgeWriteEndsOpenWindow`) or widens an ended one is unknown here: any
+ * stated end of a fenced kind pays, a restated one included.
  */
 function edgeWindowEndFenceReason<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
@@ -795,7 +849,7 @@ function edgeWindowEndFenceReason<G extends GraphDef>(
   validTo: string | undefined,
 ): ConstraintFenceReason | undefined {
   return validTo === undefined ? undefined : (
-      edgeDetachNeedsConstraintFence(ctx.registry, kind)
+      edgeWindowEndNeedsConstraintFence(ctx.registry, kind)
     );
 }
 
@@ -1048,7 +1102,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
             // Already probed by the always-run first call below, under the
             // same lock this diagnostic reruns after; a second probe here
             // would just repeat the same read.
-            validateAcyclicity: false,
+            validateRelations: false,
           },
         );
         if (transactionMode === "none") {
@@ -1062,7 +1116,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       return validateAndPrepareEdgeCreate(ctx, input, id, target, {
         validateEndpoints: true,
         validateCardinality,
-        validateAcyclicity: false,
+        validateRelations: false,
       });
     };
 
@@ -1111,7 +1165,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       // plain), and acyclicity has no database key that could enforce it
       // the way a guarded cardinality claim or a durable-identity command
       // does. Every later re-validate call in this frame passes `false`.
-      validateAcyclicity: true,
+      validateRelations: true,
       lock,
     });
 
@@ -1159,7 +1213,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           validateEndpoints: !canFuseEndpointCheck,
           validateCardinality: true,
-          validateAcyclicity: false,
+          validateRelations: false,
         });
       }
       const work = edgeInsertWork(ctx, prepared);
@@ -1294,7 +1348,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               // insert follows, so an acyclicity probe would be pure waste
               // and could even mask the identity conflict with a cycle
               // refusal.
-              validateAcyclicity: false,
+              validateRelations: false,
             });
             throw identityConflict;
           }
@@ -1326,7 +1380,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           validateEndpoints: !canFuseEndpointCheck,
           validateCardinality: true,
-          validateAcyclicity: false,
+          validateRelations: false,
         });
       }
     }
@@ -1550,7 +1604,7 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
       // two rows of this batch close through each other. The batch create
       // callers below probe the whole prepared set once, as an overlay on
       // the stored relation, before their insert.
-      { validateAcyclicity: false },
+      { validateRelations: false },
     );
     preparedCreates.push(prepared);
     registerPendingEdgeForCardinality(
@@ -1605,7 +1659,7 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
         // native-program preparation never sees one. Stated explicitly
         // rather than left to the `true` default, which would need a lock
         // this preparation does not have.
-        validateAcyclicity: false,
+        validateRelations: false,
       },
     );
     preparedCreates.push(prepared);
@@ -1994,12 +2048,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           // The row-by-row legs below probe each row against stored state
           // only, so the batch is probed whole first: a refusal must precede
           // the first row written, not follow it.
-          await assertBatchEdgesRelationsAcyclic(
-            ctx,
-            target,
-            lock,
-            batchInsertWork,
-          );
+          await assertBatchEdgeRelations(ctx, target, lock, batchInsertWork);
           for (const input of inputs) {
             await executeEdgeCreateInternal(
               ctx,
@@ -2013,24 +2062,14 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
           }
           return;
         }
-        await assertBatchEdgesRelationsAcyclic(
-          ctx,
-          target,
-          lock,
-          batchInsertWork,
-        );
+        await assertBatchEdgeRelations(ctx, target, lock, batchInsertWork);
         const rows = await withAlreadyExistsTranslation("edge", () =>
           requireDefined(session.createEdgesDurable)(batchInsertWork),
         );
         assertDurableBatchRows(batchInsertWork, rows);
         return;
       }
-      await assertBatchEdgesRelationsAcyclic(
-        ctx,
-        target,
-        lock,
-        batchInsertWork,
-      );
+      await assertBatchEdgeRelations(ctx, target, lock, batchInsertWork);
       await withAlreadyExistsTranslation("edge", () =>
         session.createEdgesNoReturn(batchInsertWork),
       );
@@ -2107,12 +2146,18 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         inputs,
         target,
       );
-      if (pairedUpdates.length > 0) {
-        await prepareEdgeUpdateSet(ctx, pairedUpdates, target, lock, {
-          storedRows: storedRowsOfUpdateEntries(pairedUpdates),
-          pendingCreates: batchInsertWork.map((work) => work.params),
-        });
-      }
+      const paired = {
+        updates: pairedUpdates,
+        transitions:
+          pairedUpdates.length === 0 ?
+            []
+          : edgeUpdateTransitions(
+              await prepareEdgeUpdateSet(ctx, pairedUpdates, target, lock, {
+                storedRows: storedRowsOfUpdateEntries(pairedUpdates),
+                pendingCreates: batchInsertWork.map((work) => work.params),
+              }),
+            ),
+      };
 
       const durableWork = batchInsertWork.filter(
         (item) => item.params.matchIdentity !== undefined,
@@ -2124,12 +2169,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         ) {
           // See the non-returning fallback: probe the whole batch (and the
           // updates paired with it) before its first row is written.
-          await assertBatchEdgesRelationsAcyclic(
+          await assertBatchEdgeRelations(
             ctx,
             target,
             lock,
             batchInsertWork,
-            options?.pairedUpdates,
+            paired,
           );
           const fallbackRows: Edge[] = [];
           for (const input of inputs) {
@@ -2155,12 +2200,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
           }
           return fallbackRows;
         }
-        await assertBatchEdgesRelationsAcyclic(
+        await assertBatchEdgeRelations(
           ctx,
           target,
           lock,
           batchInsertWork,
-          options?.pairedUpdates,
+          paired,
         );
         const rows = await withAlreadyExistsTranslation("edge", () =>
           requireDefined(session.createEdgesDurable)(batchInsertWork),
@@ -2169,12 +2214,12 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         return rows.map((row) => rowToEdge(row));
       }
 
-      await assertBatchEdgesRelationsAcyclic(
+      await assertBatchEdgeRelations(
         ctx,
         target,
         lock,
         batchInsertWork,
-        options?.pairedUpdates,
+        paired,
       );
       const rows = await withAlreadyExistsTranslation("edge", () =>
         session.createEdges(batchInsertWork),
@@ -2189,7 +2234,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
  * One insert's row params as the acyclicity probe's proposed edge — the one
  * spelling shared by every batch probe, whether its rows arrive as a
  * batch's insert units ({@link proposedRelationEdgesFromInsertWork}) or as
- * prepared creates ({@link assertPreparedEdgeCreatesAcyclic}).
+ * prepared creates ({@link assertPreparedEdgeCreateRelations}).
  */
 function proposedRelationEdgeFromInsertParams(
   params: InsertEdgeParams,
@@ -2215,36 +2260,50 @@ function proposedRelationEdgesFromInsertWork(
 }
 
 /**
- * ONE acyclicity probe for a set of prepared edge creates, run BEFORE any of
- * them is inserted, for a caller outside this module that issues its own
- * inserts: the node batch create's composition preparation
- * (`prepareBatchCompositionCreateEdges`, `node-operations.ts`), which prepares
- * each item's composition edge with `validateAcyclicity: false` and reaches
- * this once for the whole batch, ahead of the batch's first statement.
+ * The relation decisions for a set of prepared edge creates — ONE acyclicity
+ * probe and ONE composition window decision — run BEFORE any of them is
+ * inserted, for a caller outside this module that issues its own inserts: the
+ * node batch create's composition preparation
+ * (`prepareBatchCompositionCreateEdges`, `node-operations.ts`) and a
+ * reparent's moves (`prepareCompositionAttachmentMoves`), which prepare each
+ * composition edge with `validateRelations: false` and reach this once for
+ * the whole set, ahead of the frame's first statement.
  *
  * Probes the prepared set as an overlay on the stored relation
  * (`assertUnwrittenEdgeRelationsAcyclic`), so a cycle closed entirely by the
- * batch's own rows is refused before anything is written. The probe drops
+ * set's own rows is refused before anything is written. The probe drops
  * rows whose kind is in no acyclic relation and issues no statement for an
  * empty remainder, so a batch of composition edges is probed in exactly one
  * walk per relation, and a graph that declares no acyclic relation pays
  * nothing.
+ *
+ * `retiring` names the stored rows the same frame retires first (a move's
+ * incumbents): `edgeIds` leaves the acyclic relation, and `transitions`
+ * states each one's after-state for the window decision, which judges the
+ * inserts and the retires as the state the frame leaves.
  */
-export async function assertPreparedEdgeCreatesAcyclic<G extends GraphDef>(
+export async function assertPreparedEdgeCreateRelations<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   target: WriteTarget,
   lock: GraphWriteLock,
   operation: string,
   prepared: readonly EdgeCreatePrepared[],
-  retiringEdgeIds: readonly string[] = [],
+  retiring?: Readonly<{
+    acyclicRelationExits: readonly string[];
+    transitions: readonly CompositionWindowTransition[];
+  }>,
 ): Promise<void> {
   await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, operation),
     prepared.map((create) =>
       proposedRelationEdgeFromInsertParams(create.insertParams),
     ),
-    retiringEdgeIds,
+    retiring?.acyclicRelationExits ?? [],
   );
+  await assertFrameCompositionWindows(ctx, target, lock, {
+    inserts: prepared.map((create) => create.insertParams),
+    revisions: retiring?.transitions ?? [],
+  });
 }
 
 /**
@@ -2302,30 +2361,41 @@ function proposedRelationEdgesFromReentries<G extends GraphDef>(
 }
 
 /**
- * The batch acyclicity probe: one combined recursive walk over the stored
- * relation overlaid with every row this batch is about to insert, and with
- * the resurrections of `pairedUpdates` the caller writes right after it.
+ * The batch relation decisions: one combined recursive acyclicity walk over
+ * the stored relation overlaid with every row this batch is about to insert,
+ * and with the resurrections of `pairedUpdates` the caller writes right after
+ * it; and one composition window decision over the same inserts and the
+ * after-state `pairedTransitions` of those updates (`prepareEdgeUpdateSet`'s
+ * projections), so the batch is judged as the state the frame leaves.
  *
  * Run BEFORE the insert, so a refusal precedes the batch's first write: a
- * caller that catches the `EdgeAcyclicityError` inside an enclosing
- * transaction and commits has written none of the refused rows. The overlay
- * is what makes an in-batch cycle (`a→b` and `b→a` in one `bulkCreate`)
- * visible without the rows being stored.
+ * caller that catches the refusal inside an enclosing transaction and commits
+ * has written none of the refused rows. The overlay is what makes an in-batch
+ * cycle (`a→b` and `b→a` in one `bulkCreate`), or two overlapping history
+ * rows of one part in one `bulkInsert`, visible without the rows being
+ * stored.
  */
-async function assertBatchEdgesRelationsAcyclic<G extends GraphDef>(
+async function assertBatchEdgeRelations<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   target: WriteTarget,
   lock: GraphWriteLock,
   batchInsertWork: readonly EdgeInsertWork[],
-  pairedUpdates: readonly EdgeUpsertUpdateBatchEntry[] = [],
+  paired?: Readonly<{
+    updates: readonly EdgeUpsertUpdateBatchEntry[];
+    transitions: readonly CompositionWindowTransition[];
+  }>,
 ): Promise<void> {
   await assertUnwrittenEdgeRelationsAcyclic(
     acyclicityProbeContext(ctx, target, lock, "edges.bulkCreate"),
     [
       ...proposedRelationEdgesFromInsertWork(batchInsertWork),
-      ...proposedRelationEdgesFromReentries(ctx, pairedUpdates),
+      ...proposedRelationEdgesFromReentries(ctx, paired?.updates ?? []),
     ],
   );
+  await assertFrameCompositionWindows(ctx, target, lock, {
+    inserts: batchInsertWork.map((work) => work.params),
+    revisions: paired?.transitions ?? [],
+  });
 }
 
 /**
@@ -2483,6 +2553,14 @@ type EdgeUpdateOptions = Readonly<{
   reattachedPart?: CompositionNodeRef;
   /** A `reparent`'s window end; see {@link assertCompositionEdgeWindowCurrent}. */
   moveInstant?: ResolvedCompositionMoveInstant;
+  /**
+   * The write frame already reached the composition window decision for this
+   * update together with every other write it makes (an update set's
+   * re-prepared entry, {@link writeEdgeUpdateSet}), so judging the row alone
+   * against stored rows its siblings have not written yet would decide a
+   * state the frame never leaves.
+   */
+  compositionWindowsDecidedByFrame?: true;
 }>;
 
 /**
@@ -2496,6 +2574,8 @@ type EdgeUpdateOptions = Readonly<{
 type EdgeUpdatePrepared = Readonly<{
   work: EdgeUpdateWork;
   fences: EdgeUpdateFences;
+  /** The row the update was judged against: stored, or an earlier write's projection. */
+  rowBefore: BackendEdgeRow;
   rowAfter: BackendEdgeRow;
 }>;
 
@@ -2805,7 +2885,7 @@ async function prepareEdgeUpdate<G extends GraphDef>(
       options?.clearDeleted === true ? undefined : existing.deleted_at,
   };
 
-  return { work, fences, rowAfter };
+  return { work, fences, rowBefore: existing, rowAfter };
 }
 
 async function performEdgeUpdate<G extends GraphDef>(
@@ -2825,6 +2905,20 @@ async function performEdgeUpdate<G extends GraphDef>(
     resolvedExisting,
     lock,
   );
+  if (
+    options?.compositionWindowsDecidedByFrame !== true &&
+    ctx.registry.isCompositionEdge(prepared.rowAfter.kind)
+  ) {
+    await assertFrameCompositionWindows(
+      ctx,
+      target,
+      requireDefined(
+        lock,
+        "a composition edge update reached performEdgeUpdate with no write lock",
+      ),
+      { revisions: edgeUpdateTransitions([{ prepared }]) },
+    );
+  }
   return writePreparedEdgeUpdate(ctx, input, prepared, session, target);
 }
 
@@ -3080,6 +3174,9 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
     const prepared = await prepareEdgeUpdateSet(ctx, remaining, target, lock, {
       ...(rows === undefined ? {} : { storedRows: rows }),
     });
+    await assertFrameCompositionWindows(ctx, target, lock, {
+      revisions: edgeUpdateTransitions(prepared),
+    });
     try {
       for (const [offset, entry] of remaining.entries()) {
         const { prepared: update, preparedAgainstStoredRow } = requireDefined(
@@ -3099,7 +3196,10 @@ async function writeEdgeUpdateSet<G extends GraphDef>(
               entry.input,
               session,
               target,
-              edgeUpdateBatchEntryOptions(entry),
+              {
+                ...edgeUpdateBatchEntryOptions(entry),
+                compositionWindowsDecidedByFrame: true,
+              },
               undefined,
               lock,
             ),
@@ -5354,8 +5454,15 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           // set before the first (the create batch already did, when step 4
           // ran), and probe their resurrections and reopens as one set.
           if (toCreate.length === 0 && owedUpdates.length > 1) {
-            await prepareEdgeUpdateSet(ctx, owedUpdates, target, lock, {
-              storedRows: storedRowsOfUpdateEntries(owedUpdates),
+            const owedSet = await prepareEdgeUpdateSet(
+              ctx,
+              owedUpdates,
+              target,
+              lock,
+              { storedRows: storedRowsOfUpdateEntries(owedUpdates) },
+            );
+            await assertFrameCompositionWindows(ctx, target, lock, {
+              revisions: edgeUpdateTransitions(owedSet),
             });
           }
           await assertResurrectionsAcyclic(

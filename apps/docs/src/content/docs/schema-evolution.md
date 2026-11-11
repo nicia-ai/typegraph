@@ -229,8 +229,15 @@ a `differentFrom` relation exactly like the always-safe row.
   or end later than its write, the commit also refuses when a non-deleted row
   of the realizing edge kind already has a `validFrom` or `validTo` later
   than the commit (`compositionFutureWindow`). This includes an edge kind
-  re-added over rows a discarded drop left behind. End or delete those rows,
-  then retry.
+  re-added over rows a discarded drop left behind. On a `oneActive` pair a
+  part's composition edges may never have overlapping valid-time windows, so
+  the commit also refuses when a part holds a row of the realizing edge kind
+  whose window overlaps another of its rows under the proposed relation —
+  any realizing edge kind, the pair's own or one declared earlier
+  (`compositionWindowOverlap`, naming the part and the overlapping edges).
+  This applies to an upgrade from the three-part `partOf(part, whole)` with
+  no `via` too: declaring the `via` adds the pair and runs every one of these
+  checks. End or delete those rows, then retry.
 - **Making a realizing edge's ended rows count** is checked the same way.
   Redeclaring a `oneActive` realizing edge `one` refuses the commit when a
   part's ended row would become a second whole beside its live row under

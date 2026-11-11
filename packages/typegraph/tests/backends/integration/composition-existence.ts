@@ -416,11 +416,11 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.nodes.EeFolder.count()).toBe(1);
       expect(await store.edges.eeFolderOf.find({})).toHaveLength(0);
     });
-    // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call at the
+    // MUTATION CHECK: drop the `assertPreparedEdgeCreateRelations` call at the
     // end of `prepareBatchCompositionCreateEdges`
     // (src/store/operations/node-operations.ts) — nothing probes a batch's
     // composition edges at all (each item prepares with
-    // `validateAcyclicity: false`), so this batch commits the self-attaching
+    // `validateRelations: false`), so this batch commits the self-attaching
     // folder and `count()` reads 3.
 
     it("case 6d: an in-batch composition cycle spanning two items is refused, and no row of the batch survives", async () => {

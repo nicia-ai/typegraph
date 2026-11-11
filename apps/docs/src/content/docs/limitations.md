@@ -255,10 +255,21 @@ are not what happens:
   no opt-in to cascade a resurrection back onto them. To make a delete
   undoable, capture the parts it removes first; see
   [Undoing a cascading delete](/ontology#undoing-a-cascading-delete).
-- **Ending a whole's validity window is still not a cascade.** Closing an
-  `oneActive` composition edge's currency leaves the part node itself
-  untouched — it is not deleted, and a later reattach of the SAME part to a
-  different whole is a reparent, not a resurrection.
+- **Ending a validity window is not a cascade.** Two different windows can
+  end, and neither deletes anything:
+  - Ending a `oneActive` composition **edge**'s window detaches the part and
+    leaves the part node untouched — it is not deleted, and a later reattach
+    of the SAME part to a different whole is a reparent, not a resurrection.
+    Its windows still may not overlap another of the part's composition
+    edges ([One whole at every instant](/ontology#one-whole-at-every-instant)).
+  - Ending a **whole node**'s own window (`update(id, {}, { validTo })`) is
+    accepted even when the whole has required parts, and leaves its parts
+    and their composition edges as they are. Navigation then follows the
+    read filter for nodes: a current `wholes()` from such a part returns
+    nothing (the part is live and its edge open, but its whole is not
+    current), and `parts()` does not start from the ended whole. Read at an
+    `asOf` inside the whole's window to see the unit, or delete the whole to
+    remove its parts.
 - **A belief-status close DOES close the whole's required parts, and it is
   not this cascade that does it.** A [provenance](/provenance) retraction
   that closes a whole's currency closes its required parts in the same

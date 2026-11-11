@@ -159,6 +159,7 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import { acyclicRelationCountsRow } from "../acyclicity";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
+import { type CompositionWindowTransition } from "../claims/composition-windows";
 import {
   assertNodeClaimTransitionsAvailable,
   checkUniquenessConstraints,
@@ -296,7 +297,7 @@ import {
 } from "./edge-batch-validation";
 import {
   assertCompositionEdgeWindowEndable,
-  assertPreparedEdgeCreatesAcyclic,
+  assertPreparedEdgeCreateRelations,
   type EdgeCreatePrepared,
   edgeInsertWork,
   endCompositionEdgeWindow,
@@ -3605,7 +3606,7 @@ type CompositionEndpointEvidence =
  * frame's first statement.
  *
  * `endpoints` says what this call still owes on the endpoint rows, and
- * `validateAcyclicity` whether it owes the relation walk — see
+ * `validateRelations` whether it owes the relation walk — see
  * {@link CompositionEndpointEvidence} and
  * {@link prepareBatchCompositionCreateEdges}.
  */
@@ -3618,7 +3619,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   temporal: Readonly<{ validFrom?: string | null; validTo?: string }>,
   options: Readonly<{
     endpoints: CompositionEndpointEvidence;
-    validateAcyclicity: boolean;
+    validateRelations: boolean;
     /** A `reparent`'s instant; see `assertCompositionEdgeWindowCurrent`. */
     moveInstant?: ResolvedCompositionMoveInstant | undefined;
   }>,
@@ -3630,7 +3631,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
     validateEndpoints: options.endpoints.source === "read",
     validateCardinality: true,
-    validateAcyclicity: options.validateAcyclicity,
+    validateRelations: options.validateRelations,
     lock,
     moveInstant: options.moveInstant,
   });
@@ -3766,7 +3767,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
               work.whole.id,
             ),
           },
-      validateAcyclicity: true,
+      validateRelations: true,
     },
   );
 }
@@ -3792,7 +3793,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
  *   batch uses ({@link createEdgeBatchValidationBackend}), so a later item's
  *   probe counts the earlier items' edges although none is inserted yet.
  * - ACYCLICITY is probed ONCE for the whole batch
- *   ({@link assertPreparedEdgeCreatesAcyclic}), as an overlay of the prepared
+ *   ({@link assertPreparedEdgeCreateRelations}), as an overlay of the prepared
  *   edges on the stored relation, so a cycle that runs through more than one
  *   of the batch's own edges (an item naming another item as its whole, or
  *   restoring a tombstone that still carries edges of its own) is refused
@@ -3854,7 +3855,7 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
               source: "primedWhole",
               wholeRow: wholeRows.get(nodeRefKey(work.whole)),
             },
-        validateAcyclicity: false,
+        validateRelations: false,
       },
     );
     registerPendingEdgeForCardinality(
@@ -3863,7 +3864,7 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
     );
     preparedEdges.push(preparedEdge);
   }
-  await assertPreparedEdgeCreatesAcyclic(
+  await assertPreparedEdgeCreateRelations(
     ctx,
     target,
     lock,
@@ -4014,9 +4015,13 @@ type PreparedAttachmentMove = Readonly<{
  *   replacement already present ({@link createEdgeBatchValidationBackend}).
  * - ACYCLICITY is probed once, as an overlay of every replacement on the
  *   stored relation less the retired incumbents
- *   ({@link assertPreparedEdgeCreatesAcyclic}), so two moves that close a
+ *   ({@link assertPreparedEdgeCreateRelations}), so two moves that close a
  *   cycle between them are refused, and a move under a part that the same
  *   set moves out of the way is not.
+ * - The composition WINDOWS are judged once too, over every replacement and
+ *   every retire's after-state (`retireTransition`), so a backdated `at` on a
+ *   part with no incumbent is refused when it lands inside the part's
+ *   history, while a move that splits its incumbent's window reads nothing.
  * - Each RETIRE's own verdict is reached here too: a `oneActive` incumbent's
  *   window end ({@link assertCompositionEdgeWindowEndable}) and a `one`
  *   incumbent's delete ({@link assertCompositionExistencePreserved}).
@@ -4074,7 +4079,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       attachmentWindow(work, moveInstant),
       {
         endpoints,
-        validateAcyclicity: false,
+        validateRelations: false,
         moveInstant,
       },
     );
@@ -4115,7 +4120,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     prepared.push({ partId, decided, replacement, retire });
   }
 
-  await assertPreparedEdgeCreatesAcyclic(
+  await assertPreparedEdgeCreateRelations(
     ctx,
     target,
     lock,
@@ -4123,11 +4128,16 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     prepared.flatMap((move) =>
       move.replacement === undefined ? [] : [move.replacement],
     ),
-    retires.flatMap((retire) =>
-      retire !== undefined && retireRemovesFromAcyclicRelation(ctx, retire) ?
-        [retire.incumbent.id]
-      : [],
-    ),
+    {
+      acyclicRelationExits: retires.flatMap((retire) =>
+        retire !== undefined && retireRemovesFromAcyclicRelation(ctx, retire) ?
+          [retire.incumbent.id]
+        : [],
+      ),
+      transitions: retires.flatMap((retire) =>
+        retire === undefined ? [] : [retireTransition(retire)],
+      ),
+    },
   );
   return prepared;
 }
@@ -4189,6 +4199,23 @@ function unretiringMoveInstant(
     },
     undefined,
   );
+}
+
+/**
+ * The composition window transition one retire makes: the incumbent's window
+ * ended at the move instant, or the row deleted. The instant a deleted row
+ * carries is never read — a deleted row counts at no coordinate.
+ */
+function retireTransition(
+  retire: IncumbentRetire,
+): CompositionWindowTransition {
+  return {
+    before: retire.incumbent,
+    after:
+      retire.population === "oneActive" ?
+        { ...retire.incumbent, valid_to: retire.moveInstant }
+      : { ...retire.incumbent, deleted_at: retire.moveInstant },
+  };
 }
 
 /** The incumbent's row and the state its retire leaves it in. */
@@ -4346,7 +4373,7 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
             options.partRowRestoredByUpdate ?
               { source: "restoredByUpdate" }
             : { source: "read" },
-          validateAcyclicity: true,
+          validateRelations: true,
         },
       );
     }

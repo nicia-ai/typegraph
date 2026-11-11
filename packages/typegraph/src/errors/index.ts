@@ -1275,6 +1275,13 @@ export class NodeDeletePlanMismatchError extends TypeGraphError {
  *   the `population: "oneActive"` attachment the move would end, so the
  *   ended window would close before it opened. `incumbentEdgeKind` /
  *   `incumbentEdgeId` name that attachment's realizing edge.
+ * - `"windowOverlap"` (`COMPOSITION_WINDOW_OVERLAP`): on a
+ *   `population: "oneActive"` pair, the write would leave two composition
+ *   edges of one part whose valid-time windows share an instant, so
+ *   `store.asOf(t)` would show the part with two wholes. `edgeKind` /
+ *   `edgeId` / `validFrom` / `validTo` are the written edge's window as the
+ *   write leaves it, and the `incumbent*` fields the other edge's — the one
+ *   the write would overlap. An omitted bound is unbounded on that side.
  *
  * Composition membership is a fact of a row, not of an instant: a row with
  * no `validTo` is the part's current attachment and an ended row is history,
@@ -1323,7 +1330,31 @@ export type CompositionErrorDetails =
       incumbentEdgeId: string;
       incumbentValidFrom: string;
       at: string;
+    }>
+  | Readonly<{
+      situation: "windowOverlap";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      edgeId: string;
+      validFrom?: string;
+      validTo?: string;
+      incumbentEdgeKind: string;
+      incumbentEdgeId: string;
+      incumbentWholeKind: string;
+      incumbentWholeId: string;
+      incumbentValidFrom?: string;
+      incumbentValidTo?: string;
     }>;
+
+function compositionWindowLabel(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): string {
+  return `[${validFrom ?? "unbounded"}, ${validTo ?? "unbounded"})`;
+}
 
 function compositionPartLabel(
   details: Readonly<{ partKind: string; partId?: string | undefined }>,
@@ -1394,6 +1425,14 @@ function describeCompositionRefusal(
           "Pass an `at` at or after the current attachment's validFrom, or omit `at` to move the part at the later of the current time and that validFrom.",
       };
     }
+    case "windowOverlap": {
+      return {
+        code: "COMPOSITION_WINDOW_OVERLAP",
+        message: `Cannot write composition edge "${details.edgeKind}" ${details.edgeId} between ${partLabel} and ${wholeLabel} with window ${compositionWindowLabel(details.validFrom, details.validTo)}: it overlaps the window ${compositionWindowLabel(details.incumbentValidFrom, details.incumbentValidTo)} of edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which attaches the part to ${details.incumbentWholeKind}/${details.incumbentWholeId}. A part holds one whole at every valid-time instant.`,
+        suggestion:
+          "Give the edge a window that ends at or before the other edge's validFrom, or starts at or after its validTo (windows are half-open, so touching windows do not overlap). To move the part, call `store.nodes.<PartKind>.reparent(partId, { whole, at? })`, which ends the current window at the instant the new one opens. To correct recorded history, end or delete the overlapping edge first.",
+      };
+    }
   }
 }
 
@@ -1402,8 +1441,9 @@ function describeCompositionRefusal(
  * rules that keep a part's attachment a fact of the row: a part holds exactly
  * one whole across every declared composition relation (enforced by one
  * claim row per part — `typegraph_edge_claims`, the reserved composition
- * axis), and an attachment's window never starts or ends later than the
- * write that states it.
+ * axis), at every valid-time instant on a `oneActive` pair (no two of a
+ * part's composition windows overlap), and an attachment's window never
+ * starts or ends later than the write that states it.
  *
  * One class, one code per situation ({@link CompositionErrorDetails}), so a
  * caller that routes on `code` can tell a second whole from a scheduled

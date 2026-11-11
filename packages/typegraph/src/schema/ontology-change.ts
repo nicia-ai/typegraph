@@ -62,9 +62,10 @@
  * composition pair can make an already-live part's second whole a violation
  * of one whole per part (relation-wide) it never was before, so it is
  * `warning`, probed by `compositionSingleWhole` — the single-whole audit, the
- * composition acyclicity check over the PROPOSED composition relation, and
- * the check that no row of the realizing edge kind starts or ends later than
- * the commit, all run against the proposed registry in
+ * composition acyclicity check over the PROPOSED composition relation, the
+ * check that no row of the realizing edge kind starts or ends later than the
+ * commit, and the check that no part's rows have overlapping valid-time
+ * windows under the pair, all run against the proposed registry in
  * `prepareSchemaTighteningPreflight`.
  * REMOVED is `breaking`: dropping a composition declaration is a
  * read/write-semantics change (parts stop being deletable-with-their-whole,
@@ -217,9 +218,10 @@ type OntologyDataProbeBody =
 
 /**
  * The violation families each probe can produce. `compositionSingleWhole`
- * fans out into `composition`, `edgeAcyclicity` and `compositionFutureWindow`
+ * fans out into `composition`, `edgeAcyclicity`, `compositionFutureWindow`
  * (a row of the pair's realizing edge kind whose window starts or ends later
- * than the commit); every other probe
+ * than the commit) and `compositionWindowOverlap` (a part whose rows' windows
+ * would overlap under the pair); every other probe
  * names the family a `verifyConstraintFences()` row uses for the same fact.
  * `edgeCardinality` has no ontology probe — it is a write-time fence, not a
  * schema-commit check. {@link probeCoversViolationFamily} is the join.
@@ -229,7 +231,12 @@ export const PROBE_VIOLATION_FAMILIES = {
   nodeUniqueness: ["nodeUniqueness"],
   edgeEndpointAssignability: ["edgeEndpointAssignability"],
   edgeAcyclicity: ["edgeAcyclicity"],
-  composition: ["composition", "edgeAcyclicity", "compositionFutureWindow"],
+  composition: [
+    "composition",
+    "edgeAcyclicity",
+    "compositionFutureWindow",
+    "compositionWindowOverlap",
+  ],
   compositionExistence: ["compositionExistence"],
 } as const satisfies Record<OntologyDataProbeBody["kind"], readonly string[]>;
 

@@ -648,6 +648,12 @@ leaves nothing of the refused create behind.
   `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): the edge
   it would write attaches nothing. Record a past membership as history with
   `store.edges.<via>.create(...)` and a `validTo` at or before now instead.
+  That history row must not overlap any other composition edge of the same
+  part on a `"oneActive"` pair: windows are half-open (`[validFrom,
+  validTo)`, so one that ends where another starts shares no instant), and a
+  write that would leave two of them sharing an instant is refused with
+  `CompositionError` (`COMPOSITION_WINDOW_OVERLAP`, see
+  [One whole at every instant](#one-whole-at-every-instant)).
   No composition window may start or end later than the write that states
   it (see [Choosing a containment tier](#choosing-a-containment-tier)): a
   later `validFrom` or `validTo` refuses with `CompositionError`
@@ -716,7 +722,7 @@ population, which is also what decides how the old attachment is retired:
 | population | retire | valid-time read at any instant before the move |
 | --- | --- | --- |
 | `"one"` | the composition edge is deleted | the attachment is gone from every `store.asOf(t)` read, at every coordinate — a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
-| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two |
+| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two. A part with no current whole has no window to split: a backdated `at` that lands inside one of its history rows is refused with `CompositionError` (`COMPOSITION_WINDOW_OVERLAP`) |
 
 A `"oneActive"` window cannot end before it starts, so the move instant is
 judged against the incumbent's `validFrom`. An `at` equal to it retires a
@@ -752,6 +758,61 @@ A kind that
 declares no `partOf`/`hasPart` pair at all raises
 `ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
+
+#### One whole at every instant
+
+On a `population: "oneActive"` pair a part keeps its history: every ended
+realizing edge is a past membership, and `store.asOf(t)` with `parts()`,
+`wholes()` or `subgraph({ composition })` returns each edge whose window
+holds `t`. The one-whole rule therefore holds at every valid-time coordinate,
+not only now: **for one part, the windows of its composition edges never
+overlap.**
+
+- A window is half-open, `[validFrom, validTo)`. Two windows that only touch
+  — one ends where the next starts, as a `reparent` leaves them — share no
+  instant. A zero-width window (`validFrom` equal to `validTo`) reads at no
+  instant and overlaps nothing. A row stored with no `validFrom` (a history
+  row born ended without one) reads at every instant before its `validTo`.
+- The rows judged are the ones a valid-time read can return for the part:
+  every non-deleted edge of every realizing edge kind that has the node on
+  its part side, in either orientation — the same scope as the one-whole
+  claim. A soft-deleted edge reads at no coordinate and holds no window, so
+  resurrecting it is judged like a create.
+- Every write that adds or widens a window is judged as the state it leaves,
+  before its first statement: `store.edges.<via>.create`, `bulkCreate`,
+  `bulkInsert`, `bulkUpsertById`, `getOrCreateByEndpoints` and its bulk
+  form, an edge `update` that states a later `validTo` or `clearValidTo`, a
+  resurrection, `partOf` on a node create or get-or-create, `reparent` and
+  `bulkReparent`, and `importGraph`. A batch is judged as a whole, so it may
+  end one row and add the next in the same call. A write that would leave two
+  windows sharing an instant is refused with `CompositionError`
+  (`COMPOSITION_WINDOW_OVERLAP`, `situation: "windowOverlap"`). Its details
+  name the written edge's kind, id and window, and the other edge's kind, id,
+  whole and window (`incumbentEdgeKind`, `incumbentEdgeId`,
+  `incumbentWholeKind`, `incumbentWholeId`, `incumbentValidFrom`,
+  `incumbentValidTo`; an omitted bound is unbounded). An import reports it
+  as that row's per-row error, so an archive whose history does not overlap
+  restores in any row order.
+- The ordinary attach and move cost nothing extra. An attach whose
+  `validFrom` the write stamps starts at or after every stored window's end,
+  because no composition window ends later than the write that stated it,
+  and a `reparent` splits its incumbent's window at the move instant. Any
+  other write — a backdated attach, a history row, a widened or reopened
+  window, a resurrection, a `reparent` of a part with no current whole —
+  reads the part's stored edges under the same per-graph write fence every
+  composition write already takes, so two concurrent writers of one part's
+  history are serialized.
+- `population: "one"` is unchanged: its claim already holds a part to one
+  row for the row's whole life.
+
+`store.verifyConstraintFences()` reports a part whose stored windows overlap
+as `compositionWindowOverlap` (`partKind`, `partId` and the overlapping
+`edgeIds`) — a state only a write beneath the store, or rows written before
+their edge kind realized a pair, can leave. A schema commit that declares a
+pair over such rows is refused until they are repaired
+([`compositionWindowOverlap`](/schema-evolution#ontology-tightenings-are-checked-against-your-data)).
+To repair one, end or delete one of the overlapping edges so the windows
+abut.
 
 #### `partOf` on get-or-create is a postcondition
 
@@ -1135,6 +1196,11 @@ Tier 1 is enforced, in full, at write time:
   history row created, imported or restored still ended is no member and
   closes no cycle, while reopening an ended row (`clearValidTo`) puts it back
   and is probed like a create.
+- **One whole at every instant.** On a `population: "oneActive"` pair, the
+  valid-time windows of one part's composition edges never overlap — across
+  every realizing edge kind and both orientations, the same scope as the
+  one-whole claim — so no `store.asOf(t)` read shows the part with two
+  wholes. See [One whole at every instant](#one-whole-at-every-instant).
 - **One row, one fact.** A composition edge's window never starts or ends
   later than the write that states it — every write path refuses one with
   `CompositionError` (`COMPOSITION_VALIDITY_FUTURE_START`,

@@ -438,9 +438,12 @@ describe.each(backendMatrix())(
       const graph = buildGraph(orientation, "oneActive");
 
       /**
-       * The fork point holds `p1` under `w1` through an open row, and an ENDED
-       * row from an earlier attachment to `w2`. The attaching branch moves `p1`
-       * back to `w2` by ending the `w1` row and reopening the `w2` row.
+       * The fork point holds `p1` with no current whole: an ENDED row from an
+       * earlier attachment to `w1`, then an ENDED row to `w2` that took over
+       * where it ended. The attaching branch re-attaches `p1` to `w2` by
+       * reopening the `w2` row. (Reopening the `w1` row instead would extend
+       * its window over the `w2` one, and the store refuses that as two
+       * wholes at one valid-time instant.)
        */
       async function makeReopenForkPoint(): Promise<
         Readonly<{
@@ -458,11 +461,21 @@ describe.each(backendMatrix())(
         await forkPoint.nodes.Whole.create({}, { id: W2 });
         await forkPoint.nodes.Part.create(
           {},
-          { id: P1, partOf: { whole: { kind: "Whole", id: W2 } } },
+          { id: P1, partOf: { whole: { kind: "Whole", id: W1 } } },
         );
         await forkPoint.nodes.Part.reparent(P1, {
-          whole: { kind: "Whole", id: W1 },
+          whole: { kind: "Whole", id: W2 },
         });
+        const current = await forkPoint.edges.attach.find({});
+        const [attachedToW2] = current;
+        if (current.length !== 1 || attachedToW2 === undefined) {
+          throw new Error("expected p1 to hold exactly one current whole");
+        }
+        await forkPoint.edges.attach.update(
+          attachedToW2.id,
+          {},
+          { validTo: new Date().toISOString() },
+        );
         const rows = await forkPoint.edges.attach.find(
           {},
           { temporalMode: "includeEnded" },
@@ -482,11 +495,6 @@ describe.each(backendMatrix())(
         attacher: GraphBranch<G>,
         rows: Readonly<{ toW1: AttachEdgeId; toW2: AttachEdgeId }>,
       ): Promise<void> {
-        await attacher.store.edges.attach.update(
-          rows.toW1,
-          {},
-          { validTo: new Date().toISOString() },
-        );
         await attacher.store.edges.attach.update(
           rows.toW2,
           {},
@@ -513,7 +521,7 @@ describe.each(backendMatrix())(
               left.wholeId.localeCompare(right.wholeId),
             ),
         ).toEqual([
-          { wholeId: W1, open: true },
+          { wholeId: W1, open: false },
           { wholeId: W2, open: false },
         ]);
       }

@@ -915,7 +915,7 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaFolder", id: child.id } } },
       );
 
-      // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call in
+      // MUTATION CHECK: drop the `assertPreparedEdgeCreateRelations` call in
       // `prepareCompositionAttachmentMoves`
       // (src/store/operations/node-operations.ts) — the move then succeeds and leaves a three-node composition ring
       // that no ordinary delete can unwind (`CompositionCycleError`).
@@ -1162,8 +1162,17 @@ export function registerCompositionAttachmentIntegrationTests(
         {},
         history,
       );
+      // A later history row of the same part: windows touching at
+      // `history.validTo` share no instant, so the part's history stays one
+      // whole per instant.
       await store.edges.caUnitUnder.bulkCreate([
-        { from: part, to: whole, props: {}, ...history },
+        {
+          from: part,
+          to: whole,
+          props: {},
+          validFrom: history.validTo,
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
       ]);
       await store.edges.caUnitUnder.delete(created.id);
       const [revived] = await store.edges.caUnitUnder.bulkUpsertById([

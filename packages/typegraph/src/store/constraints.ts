@@ -282,6 +282,28 @@ export function edgeDetachNeedsConstraintFence(
 }
 
 /**
+ * WHICH constraint makes an edge update that STATES a `validTo` a constrained
+ * write. Everything {@link edgeDetachNeedsConstraintFence} names, since a
+ * stated end can detach; and, on a `population: "oneActive"` composition
+ * pair, every stated end — a later `validTo` on an already-ended row widens
+ * its window, and whether that window now overlaps another of the part's
+ * composition edges is a decision from rows no claim records
+ * (`assertCompositionWindowsDisjoint`). A plan reads no row, so it cannot
+ * tell a widening end from a shrinking one and fences both.
+ */
+export function edgeWindowEndNeedsConstraintFence(
+  registry: KindRegistry,
+  edgeKind: string,
+): ConstraintFenceReason | undefined {
+  return (
+    edgeDetachNeedsConstraintFence(registry, edgeKind) ??
+    (registry.compositionEdgePopulation(edgeKind) === "oneActive" ?
+      "edgeComposition"
+    : undefined)
+  );
+}
+
+/**
  * THE graph-level answer to "does writing into this graph owe a claim that must
  * precede the row it gates?", folded over the SAME per-kind functions the write
  * paths consult — a node kind any of whose claim sites is `pre-insert` under

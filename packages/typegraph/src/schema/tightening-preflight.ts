@@ -36,6 +36,7 @@ import {
 import {
   auditConstraintFences,
   compositionFutureWindowViolations,
+  compositionWindowOverlapViolations,
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
@@ -665,11 +666,24 @@ export function prepareSchemaTighteningPreflight(
       grouped.composition?.edgeKinds ?? [],
     );
 
+    // Fifth composition check: does a part already hold composition edges —
+    // a row of an edge kind that realizes a pair THIS commit adds, against
+    // any of the part's rows under the PROPOSED relation — whose valid-time
+    // windows overlap? Once the pair is declared, `store.asOf(t)` would show
+    // that part with two wholes, a state no composition write may leave.
+    const windowOverlapViolations = await compositionWindowOverlapViolations(
+      proposedRegistry,
+      target,
+      params.graphId,
+      grouped.composition?.edgeKinds ?? [],
+    );
+
     const violations = [
       ...claimBackedViolations,
       ...acyclicityViolations,
       ...compositionExistenceViolations,
       ...futureWindowViolations,
+      ...windowOverlapViolations,
     ];
     if (violations.length === 0) return;
 
