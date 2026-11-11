@@ -772,6 +772,46 @@ declares no `partOf`/`hasPart` pair at all raises
 `CompositionConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
 
+#### Reading a part's whole, and detaching an optional part
+
+There is no dedicated `wholeOf` or `detach` verb: both are one call on
+surfaces that already exist. The whole a part holds now — through whichever
+realizing edge holds it — is a one-hop `wholes()`:
+
+```typescript
+const [held] = await store
+  .query()
+  .from("Chapter", "chapter")
+  .whereNode("chapter", (chapter) => chapter.id.eq(chapterId))
+  .wholes("whole", { maxHops: 1 })
+  .select((ctx) => ({
+    whole: { kind: ctx.whole.kind, id: ctx.whole.id },
+    edgeKind: ctx.whole_edge.kind,
+    edgeId: ctx.whole_edge.id,
+  }))
+  .execute();
+// `held` is undefined when the chapter has no current whole.
+```
+
+Read it through `store.asOf(t)` for the whole the part held at `t`. To
+detach an **optional** part, retire the realizing edge that holds it the way
+its population retires one, which is the rule `reparent` applies to an
+incumbent:
+
+```typescript
+// population "oneActive": end the window, keeping the membership as history.
+await store.edges.chapterOf.update(edgeId, {}, {
+  validTo: new Date().toISOString(),
+});
+// population "one": delete the edge (an ended row would still bind).
+await store.edges.chapterOf.delete(edgeId);
+```
+
+A `validTo` later than the store's clock is refused
+(`COMPOSITION_VALIDITY_FUTURE_END`), so state the current time or earlier. A
+part declared `existence: "required"` cannot be detached at all
+(`COMPOSITION_DETACH_REFUSED`): move it with `reparent`, or delete the part.
+
 #### One whole at every instant
 
 On a `population: "oneActive"` pair a part keeps its history: every ended
