@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 A graph merge now plans its identity changes against the same temporal ledger its commit validates them against, so a contradiction with the target's history is refused at plan time, typed, instead of being committed or failing inside the commit.

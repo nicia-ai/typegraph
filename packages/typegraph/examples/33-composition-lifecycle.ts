@@ -1,5 +1,5 @@
 /**
- * Example 28: Composition Lifecycle
+ * Example 33: Composition Lifecycle
  *
  * A podcast publishes episodes, and each episode is cut into segments. A
  * segment has no meaning outside the episode it belongs to: delete the

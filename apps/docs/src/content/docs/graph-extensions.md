@@ -337,6 +337,30 @@ Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
 
+A `partOf` or `hasPart` relation also carries `via`, the edge kind that
+realizes the composition, and may carry `partSide` (`"from"` or `"to"`) and
+`existence` (`"optional"` or `"required"`):
+`{ metaEdge: "partOf", from: "Section", to: "Chapter", via: "inChapter" }`.
+`via` is required, so a document that carries `{ metaEdge: "partOf", from,
+to }` is refused with `GraphExtensionValidationError`; add the realizing edge
+kind (declared in the document or already in the host graph) or drop the
+relation. `via`, `partSide` and `existence` on any other meta-edge are refused
+as well. `GRAPH_EXTENSION_ISSUE_CODES` names each refusal on the issue's
+`code`, and [Errors](/errors#composition-declaration-codes) says what to do
+about it:
+
+| Issue `code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` | A `partOf` / `hasPart` relation has no `via`. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `existence`. |
+
+The checks that need the merged graph (the `via` edge exists, admits the
+pair, and bounds each part to one whole) run when `evolve()` builds the merged
+registry and raise `ConfigurationError` with the codes in
+[Errors](/errors#composition-declaration-codes).
+
 A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
 checked against the same structural contract a compile-time declaration
 gets — the child's schema must extend the parent's — at `evolve()`, before
