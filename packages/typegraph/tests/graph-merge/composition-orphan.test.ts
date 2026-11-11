@@ -206,7 +206,7 @@ describe.each(backendMatrix())(
       ).resolves.toBeDefined();
     });
 
-    it("refuses at plan time deleting a part the target moved to a whole the plan keeps", async () => {
+    it("refuses at plan time deleting a part the target moved to a whole the plan keeps, and apply re-verifies it", async () => {
       cleanups = [];
       const forkPoint = await makeStore();
       await forkPoint.nodes.Whole.create({}, { id: "w1" });
@@ -225,8 +225,16 @@ describe.each(backendMatrix())(
       ).resolves.toBe(undefined);
 
       // The target is a clone of the fork point that moves the part to the
-      // second whole — an edge the branch never saw.
+      // second whole — an edge the branch never saw. Planned before that
+      // move, the plan is clean.
       const target = (await makeBranchOf(forkPoint, TARGET_CLONE)).store;
+      const cleanPlan = unwrap(
+        await planMergeIncremental<G>({
+          forkPoint,
+          target,
+          branches: [branchA],
+        }),
+      );
       await target.nodes.Part.reparent(asNodeId("p1"), {
         whole: { kind: "Whole", id: "w2" },
       });
@@ -236,6 +244,16 @@ describe.each(backendMatrix())(
         viaEdgeKind: "holds",
         cause: "moved",
       };
+
+      // Apply's own re-verification refuses the clean plan fenced to the
+      // target's current state, through the same predicate.
+      const applyResult = await applyMergePlan(
+        target,
+        await refenceMergePlan(target, cleanPlan),
+      );
+      if (!isErr(applyResult)) throw new Error("expected apply to be refused");
+      expect(applyResult.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(applyResult.error.details).toEqual(orphan);
 
       const planned = await planMergeIncremental<G>({
         forkPoint,
