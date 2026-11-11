@@ -14,8 +14,9 @@ concurrency:
 permissions:
   contents: read
 
-# Declaration bundling traverses the full public backend and store type graph.
-# Keep its worker above Node's default old-space ceiling as that API grows.
+# scripts/build.ts gives its tsc and tsup children their own declaration heap
+# (DECLARATION_HEAP_MB); this workflow-wide ceiling covers the remaining steps
+# and must not fall below it (see tests/ci-workflow-contract.test.ts).
 env:
   NODE_OPTIONS: --max-old-space-size=8192
 
@@ -105,7 +106,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/4", "2/4", "3/4", "4/4"]
+        shard: ["1/5", "2/5", "3/5", "4/5", "5/5"]
     steps:
       - uses: actions/checkout@v7
 

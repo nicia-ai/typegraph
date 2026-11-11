@@ -250,6 +250,18 @@ This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration
 surfaces as the engine's own failure — neither is reshaped into this error.
 
+#### Composition attachment window codes
+
+A `ValidationError` raised for a `partOf` attachment whose stated window cannot
+be applied carries one of these issue codes, under the path of the stated
+option (for example `partOf.validTo`). `details.kind` names the part kind and
+`details.id` the part when it is known:
+
+| Issue `code` | Raised when |
+| --- | --- |
+| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A create states a `partOf.validTo` on a `oneActive` composition pair. Only an open-ended edge counts as a membership there, so a bounded window would write an edge that does not attach the part. Omit `validTo` to attach the part, or write the bounded edge as history with `store.edges.<via>.create(...)`. |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A `partOf` on a part that already holds this whole through the realizing edge, or a reparent `at` that restates the incumbent's window, states a bound that differs from the edge's stored `validFrom` / `validTo`. An already-satisfied attachment only asserts placement: omit the option or restate the stored bound, and change the window on the realizing edge itself. |
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.
@@ -1336,6 +1348,88 @@ declared the pair or the hierarchy implies it:
 | `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a `subClassOf` pair. |
 | `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | A pair an equivalence class relates (`equivalentTo` or `sameAs`) fails in one direction. |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a pair an equivalence class relates. |
+
+#### Composition declaration codes
+
+A `partOf` / `hasPart` declaration is judged twice. The factories and the
+ontology shape check refuse a malformed declaration at the call or on load;
+registry build then checks each declaration against the edge kinds that realize
+it. Either refusal is a `ConfigurationError` whose `details.code` is the code
+below and whose `details.issues` lists every problem found; the declarative
+graph-extension validator reports the four shape codes marked (extension) as
+issue codes on `GraphExtensionValidationError` instead (see
+[Graph Extensions ▸ Ontology](/graph-extensions#ontology)). See
+[Composition](/ontology#composition) for the declarations themselves.
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_OPTION_UNKNOWN` | `partOf()` / `hasPart()` was given an option key other than `via`, `partSide` and `existence`. `details.unknownKeys` names them. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_INVALID` | `existence` is not `"optional"` or `"required"`, on a factory or on a persisted relation. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_INVALID` | `partSide` is not `"from"` or `"to"`, or contradicts the endpoints the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` (extension) | A `partOf` / `hasPart` relation has no `via`. Name the realizing edge kind, or delete the relation. A persisted schema that carries one is refused on load until it is rewritten. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `existence`. |
+| `ONTOLOGY_COMPOSITION_VIA_UNKNOWN` | `via` names an edge kind the graph does not register. |
+| `ONTOLOGY_COMPOSITION_VIA_ENDPOINTS` | Neither orientation of the part and whole kinds is an endpoint pair the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED` | The `via` edge admits both orientations between the two kinds, so `partSide` must say which end is the part. |
+| `ONTOLOGY_COMPOSITION_CARDINALITY` | The `via` edge does not declare `"one"` or `"oneActive"` on the part's side: `cardinality` when the part is the `from` end, `targetCardinality` when it is the `to` end. Without it a part could have several wholes. |
+| `ONTOLOGY_COMPOSITION_VIA_MIXED` | One edge kind realizes composition in two orientations, or admits an endpoint pair that is not a declared composition pair. Split the edge so it is exclusively a composition edge. |
+| `ONTOLOGY_COMPOSITION_POPULATION_MIXED` | The pairs that can hold one part kind declare different part-side cardinalities (`"one"` against `"oneActive"`). The claim is relation-wide, so every such edge must agree. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` | A `partOf` and its mirrored `hasPart` state different `existence`, or the pairs that can hold one part kind disagree on it. State the same `existence` everywhere. |
+
+#### Ontology and query expansion codes
+
+Alias expansion (`expansion: "exact" | "subclasses" | "narrower"`, see
+[Query Source ▸ Subclass Expansion](/queries/source#subclass-expansion)) and the
+ontology checks around it raise these `ConfigurationError` codes:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_EQUIVALENCE_INVALID_CLASS` | An `equivalentTo` class mixes node kinds and edge kinds, or holds more than one registered edge kind. `details.reason` says which, with `details.members`, `details.nodeKinds` and `details.edgeKinds`. Raised when the merged graph's registry is built, never by the extension validator on its own. |
+| `QUERY_ALIAS_EXPANSION_INVALID` | `expansion` is not one the surface offers (`store.search()` offers `"exact"` and `"subclasses"` only, and a store-wide default cannot be `"narrower"`), or the removed `includeSubClasses` option was stated. `details.surface` names the call. Pass `expansion: "exact"` where `includeSubClasses` was `false` and `"subclasses"` where it was `true`. |
+| `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES` | An alias typed from the compile-time graph would expand to subclass kinds only the live schema (a persisted extension) declares, so its static row type would be wrong. `details.kind` and `details.extraKinds` name them. State `expansion: "subclasses"` or `"exact"`, or use `fromDynamic()` / `toDynamic()`. |
+| `ONTOLOGY_NARROWER_KIND_NOT_REGISTERED` | `expansion: "narrower"` expands `details.rootKind` to `details.narrowerKind`, which is not a registered node kind. Register it or remove its `broader` / `narrower` relation. |
+| `ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED` | `expansion: "narrower"` on a traversal target expands to a kind the traversed edge does not admit as an endpoint (`details.rootKind`, `details.narrowerKind`, `details.edgeKind`). Widen the edge's endpoints or drop the relation. |
+| `SEARCH_EXPANSION_KIND_UNINDEXED` | A `store.search()` expansion would silently skip rows of some expanded kinds: fulltext, because they declare no `searchable()` field the index covers; vector, because they declare the field with a different `embedding()` tag. `details.capability` says which, `details.kinds` lists them. Declare the field identically on them, search the kinds separately, or pass `expansion: "exact"`. |
+| `SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED` | The candidate query of `updateWhere()` selects more than one concrete node kind (`details.candidateKinds`), typically because its source expands through subclasses. Pass `{ expansion: "exact" }` to `from()` or run one `updateWhere()` per kind. |
+| `EMPTY_KIND_SET` | `toKindSet()` was given no kinds. An empty set would compile to a filter nothing matches. |
+
+#### Composition read and write guard codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `COMPOSITION_NO_PARTS_DECLARED` | `subgraph({ composition: true })` on a graph that declares no `partOf` / `hasPart` relation, or `parts()` on an alias whose kinds are the whole of no composition pair. Declare the relation, or omit the option. |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `wholes()` on an alias whose kinds are the part of no composition pair. |
+| `COMPOSITION_UNKNOWN_ALIAS` | `parts()` / `wholes()` was given `{ from }` naming an alias the query does not have. `details.knownAliases` lists the aliases it does. |
+| `COMPOSITION_UNIT_INDETERMINATE` | The database cut the composition closure of a `subgraph({ composition: true })` read short (a statement timeout, for example), so the owned unit is unknown. The read never returns a prefix of it: retry with a higher timeout. `details.rootKind` and `details.rootId` name the root. |
+| `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
+| `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
+| `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
+
+#### Fresh-snapshot guard codes
+
+A decision protected only by the per-graph write fence (no claim row behind the
+read) is only as good as the snapshot it reads. A backend whose fence cannot
+advance a `typegraph_fences` row, such as one built on an advisory lock alone,
+cannot show a `REPEATABLE READ` or `SERIALIZABLE` session that it observed the
+writers it waited on, so those isolation levels are refused; `READ COMMITTED`
+is the level such a backend supports. The refusal is a `ConfigurationError`
+whose `details` carry `graphId`, `isolation` and `fenceRow`:
+
+| `details.code` | Decision it protects |
+| --- | --- |
+| `EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT` | The cycle probe of a write to a declared-acyclic edge kind. |
+| `COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT` | The parts closure a delete of a composition whole reads. |
+| `COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT` | Whether an `existence: "required"` part still holds a whole when its attachment is detached or deleted. |
+
+#### Store view and schema registry codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `STORE_VIEW_SEALED_COORDINATE` | A read on a `StoreView` stated its own temporal option (`temporalMode`, `asOf` or `recordedAsOf`; `details.stated` names them). The view's coordinate is sealed: read at another coordinate through the live store or `store.view(...)`. |
+| `GRAPH_TEMPLATE_CONTENT_CONFLICT` | Registering a graph template under an id that already holds a template with different schema content (`details.templateId`). Pick another template id, or register the same definition. |
+| `IDENTITY_ROLLBACK_REQUIRES_MIGRATION` | `rollbackSchema()` targeted a version whose identity configuration, ontology relations or node kinds differ from the active one, so the identity closure cannot be rebuilt in place (`details.fromVersion`, `details.toVersion`). Commit the target version's graph definition forward with `migrateSchema()`. |
 
 #### Unique constraint option codes
 

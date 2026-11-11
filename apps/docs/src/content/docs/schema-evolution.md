@@ -585,7 +585,7 @@ version 9, and a release that knows only version 8 refuses a database stamped
 [Base-schema version 9](/backend-setup#base-schema-version-9-the-identity-transition-log)).
 The narrowed `SerializedMetaEdge` shape adds no constraint of its own,
 because a document is only rewritten into it on a database already stamped
-6, though an older release's `parseSerializedSchema` could not read it
+9, though an older release's `parseSerializedSchema` could not read it
 either: the pre-change `serializedSchemaZod` required
 `transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry. In a mixed-version fleet, upgrade every
 application instance sharing a database before any of them opens it with this
