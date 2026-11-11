@@ -87,9 +87,9 @@ export const BASE_SCHEMA_RELEASES = [
     id: "identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "a54e3a3e630a761ae69a2c0e2d74a81f5940306970b93fb977cce1736c630a6e",
+        "1b3caa52175c0d09383cc01ac96c9695140569cd1893906a844c014c30a008d6",
       sqlite:
-        "39a3ac60b95bb7e109289d9af54721d6a85cd908181fd5db9cc3a29339d8dfa4",
+        "606188336c70bb143b083c95f709c7c36f16b1236936e3a2cb5804d0fc8be1ff",
     },
   },
 ] as const;
