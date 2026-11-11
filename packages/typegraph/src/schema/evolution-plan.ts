@@ -37,12 +37,24 @@ export type EvolutionRequirement =
     }>
   | Readonly<{
       /**
-       * Existing rows must satisfy an ontology axiom or edge cardinality this
-       * delta newly declares; apply refuses with the same `MigrationError`
-       * `Store.evolve()` raises when they do not.
+       * Existing rows must satisfy an ontology axiom this delta newly
+       * declares; apply refuses with the same `MigrationError`
+       * `Store.evolve()` raises when they do not. Never empty: present only
+       * when a relation change owes the check.
        */
       kind: "ontology-tightening";
       changes: readonly OntologyChange[];
+    }>
+  | Readonly<{
+      /**
+       * Existing rows must satisfy a constraint this delta newly declares on
+       * an edge kind's own registration: a cardinality or `targetCardinality`
+       * (named in `edgeCardinalityAxes`), `acyclic: true`, or an endpoint
+       * pair it stops admitting. Apply refuses with the same `MigrationError`
+       * `Store.evolve()` raises when they do not. `edgeKinds` is never empty.
+       */
+      kind: "edge-tightening";
+      edgeKinds: readonly string[];
       edgeCardinalityAxes: readonly EdgeCardinalityDeclaration[];
     }>
   | Readonly<{
@@ -113,6 +125,35 @@ function mintEvolutionPlan(
         Readonly<{ status: "change"; requirements: EvolutionRequirements }>),
 ): EvolutionPlan {
   return Object.freeze(fields) as EvolutionPlan;
+}
+
+/** One requirement per family the preflight owes, each present only when non-empty. */
+function tighteningRequirementsOf(
+  tightening: SchemaTighteningPreflight | undefined,
+): readonly Extract<
+  EvolutionRequirement,
+  { kind: "ontology-tightening" | "edge-tightening" }
+>[] {
+  if (tightening === undefined) return [];
+  return [
+    ...(tightening.probedChanges.length > 0 ?
+      [
+        freezeDeep({
+          kind: "ontology-tightening" as const,
+          changes: tightening.probedChanges,
+        }),
+      ]
+    : []),
+    ...(tightening.tightenedEdgeKinds.length > 0 ?
+      [
+        freezeDeep({
+          kind: "edge-tightening" as const,
+          edgeKinds: tightening.tightenedEdgeKinds,
+          edgeCardinalityAxes: tightening.newlyConstrainedAxes,
+        }),
+      ]
+    : []),
+  ];
 }
 
 function newlyAddedKinds(
@@ -286,10 +327,7 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
       (schemaTightening?.uniquenessClaimGates ?? []).map((gate) => gate.kind),
     ),
   ].filter((kindName) => !classifiedEmptyNodeKinds.has(kindName));
-  const tightensOntologyOrCardinality =
-    schemaTightening !== undefined &&
-    (schemaTightening.probedChanges.length > 0 ||
-      schemaTightening.newlyConstrainedAxes.length > 0);
+  const tighteningRequirements = tighteningRequirementsOf(schemaTightening);
   const requirements: EvolutionRequirements = Object.freeze([
     ...groupedRequirements.requireEmpty,
     ...uniquenessGatedKinds.map((kindName) =>
@@ -301,15 +339,7 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     ),
     ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
-    ...(tightensOntologyOrCardinality ?
-      [
-        freezeDeep({
-          kind: "ontology-tightening" as const,
-          changes: schemaTightening.probedChanges,
-          edgeCardinalityAxes: schemaTightening.newlyConstrainedAxes,
-        }),
-      ]
-    : []),
+    ...tighteningRequirements,
     ...(groupedRequirements.identityAffectedKinds.length > 0 ?
       [
         Object.freeze({

@@ -651,7 +651,7 @@ try {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1 }
+    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1, incumbentEdgeId: "<first-edge-id>" }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
@@ -661,7 +661,11 @@ try {
 `details.direction` names which endpoint's population was overrun —
 `"source"` for a `cardinality` violation, `"target"` for a
 `targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
-name both endpoints, regardless of direction.
+name both endpoints, regardless of direction. `details.incumbentEdgeId` is the
+id of the stored edge occupying the slot, so you can delete or update it
+without a second lookup; it comes from the claim row's holder, from a stored
+edge read the portable probe makes only once its count has refused, or from the
+earlier edge of the same batch. It is absent when no stored edge could be named.
 
 ### `EdgeAcyclicityError`
 
@@ -1809,20 +1813,34 @@ try {
 }
 ```
 
-The `details.reason` value `"ontology-tightening-violated"` means an ontology
-change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or
-`partOf`/`hasPart`, or removing `subClassOf` or `equivalentTo` — is false
-against rows that already exist. `details.changes` carries only the ontology
-changes in this diff that required a data check (a `safe` or `breaking`
-change in the same commit is never included, even one alongside the change
-that was refused); `details.violations` carries the offending rows in
-exactly the shape `store.verifyConstraintFences()` returns — including
-`family: "composition"` entries when a newly-declared `partOf`/`hasPart`
-pair finds a part already holding two live wholes, or a cycle in the
-proposed composition relation, and `family: "compositionFutureWindow"`
-entries when the pair's realizing edge kind already holds a row whose
-window starts or ends later than the commit. Resolve those rows (delete them, change
-their kind, or narrow the ontology change) and retry. See
+The `details.reason` value `"ontology-tightening-violated"` means a schema
+tightening other than an edge cardinality is false against rows that already
+exist. It is raised for:
+
+- adding `disjointWith`, `subClassOf`, `equivalentTo`, `sameAs`, or
+  `partOf`/`hasPart`, or removing `subClassOf`, `equivalentTo` or `sameAs`;
+- declaring `acyclic: true` over an existing cycle;
+- narrowing an edge kind's `from`/`to` (or its source-dependent target map)
+  out from under an edge it admitted, whatever that edge's validity window;
+- `store.removeKinds()` of a mid-chain kind that a surviving subclass's live
+  edge relied on;
+- re-adding an edge kind over rows a discarded drop left in its table.
+
+Every refusal of this kind and of `"edge-cardinality-tightening-violated"`
+below carries the same four details fields:
+
+| Field | What it holds |
+| --- | --- |
+| `changes` | The ontology changes in this diff that owed a data check (a `safe` or `breaking` change in the same commit is never included, even one alongside the change that was refused). Empty when only an edge kind's own registration tightened. |
+| `edgeKinds` | The edge kinds whose own registration tightened: a newly constrained `cardinality` or `targetCardinality`, `acyclic: true`, or an endpoint pair no longer admitted. Empty when only ontology relations tightened. |
+| `axes` | The edge-cardinality axes this commit newly constrains, each an `{direction, cardinality, edgeKind}` triple. |
+| `violations` | The offending rows, in exactly the shape `store.verifyConstraintFences()` returns for the proposed schema, **every violated family included**: `nodeDisjointness`, `nodeUniqueness`, `edgeEndpointAssignability`, `edgeAcyclicity`, `edgeCardinality`, and for composition `composition`, `compositionExistence` and `compositionFutureWindow` (a realizing edge kind that already holds a row whose window starts or ends later than the commit). |
+
+One refusal reports every family the commit violates, so repair the listed
+rows once and retry: delete them, change their kind, or narrow the change.
+The `reason` only names the headline family: `"edge-cardinality-tightening-violated"`
+whenever at least one cardinality row violates, `"ontology-tightening-violated"`
+otherwise. A refused commit publishes nothing. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each meta-edge checks.
 
@@ -1870,7 +1888,11 @@ or `targetCardinality` on an edge kind is false against rows that already
 exist. `details.axes` names the axes this commit newly constrains (each an
 `{direction, cardinality, edgeKind}` triple); `details.violations` carries
 the offending rows in exactly the shape `store.verifyConstraintFences()`
-returns. An axis is probed whenever the proposed value is constrained and
+returns, and also lists any other family the same commit violates. A
+cardinality violation names its `edgeKind`, `direction`, `cardinality` and the
+node(s) it is keyed on (`keyedOn.from` and/or `keyedOn.to`, each a kind name
+and id) as plain values; `target` is the claim row's storage address. An
+axis is probed whenever the proposed value is constrained and
 differs from the stored one — including a genuine loosening, which costs one
 read of an already-clean population rather than risk missing a tightening.
 
@@ -1890,8 +1912,9 @@ The `details.reason` value `"custom-relation-removal"` means
 `store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would drop a
 stored relation that names a custom meta-edge from the removed `metaEdge()`
 factory. The stored schema holds the last copy of that relation, so these verbs
-refuse before writing anything. `details.relations` names each relation as
-written, such as `governs(Team, Project)`. Move them into
+refuse before writing anything. `details.relations` lists each relation as a
+`{ metaEdge, from, to }` object, such as
+`{ metaEdge: "governs", from: "Team", to: "Project" }`. Move them into
 `defineGraph({ annotations })`, commit once with `migrateSchema()`, then retry.
 See
 [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis).

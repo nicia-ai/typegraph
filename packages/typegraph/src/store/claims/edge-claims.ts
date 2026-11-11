@@ -450,6 +450,7 @@ export function edgeCardinalityViolation(
   ref: EdgeCardinalityAxisRef,
   subject: EdgeCardinalityViolationSubject,
   existingCount: number,
+  incumbentEdgeId?: string,
 ): CardinalityError | undefined {
   if (existingCount <= 0) return undefined;
   return new CardinalityError({
@@ -461,6 +462,7 @@ export function edgeCardinalityViolation(
     toId: subject.toId,
     cardinality: ref.cardinality,
     existingCount,
+    ...(incumbentEdgeId === undefined ? {} : { incumbentEdgeId }),
   });
 }
 
@@ -483,9 +485,10 @@ export type EdgeCardinalityViolationSubject = Readonly<{
  */
 function edgeCardinalityClaimRefusal(
   params: ClaimEdgeCardinalityParams,
+  incumbentEdgeId?: string,
 ): CardinalityError {
   return requireDefined(
-    edgeCardinalityViolation(params, params, 1),
+    edgeCardinalityViolation(params, params, 1, incumbentEdgeId),
     "An incumbent count of one violates every constrained cardinality.",
   );
 }
@@ -572,17 +575,17 @@ export function claimsInProbeOrder(
  * inline `claim.scope !== undefined` spelling could.
  *
  * `incumbentEdgeId` (when the caller has one — a claim statement's returned
- * holder, or an in-batch collision's earlier claim) is forwarded only to the
- * composition arm: `CardinalityError` names no such field, and inventing one
- * here would be exactly the fabricated-value-a-reader-has-to-check-is-unread
- * shape this module's own `EdgeClaimSubject` docblock warns against.
+ * holder, an in-batch collision's earlier claim, or the stored edge a probe
+ * named after its count refused) is forwarded to both arms, so either
+ * refusal names the edge a caller must resolve. A caller that has none
+ * passes nothing rather than a placeholder.
  */
 export function claimRefusalFor(
   params: ClaimEdgeCardinalityParams,
   incumbentEdgeId?: string,
 ): CardinalityError | CompositionError {
   return params.scope === undefined ?
-      edgeCardinalityClaimRefusal(params)
+      edgeCardinalityClaimRefusal(params, incumbentEdgeId)
     : compositionClaimRefusal(params, incumbentEdgeId);
 }
 

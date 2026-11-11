@@ -115,6 +115,40 @@ export function registerEdgeTargetCardinalityIntegrationTests(
     // `src/store/claims/edge-claims.ts`. Bob's create then succeeds (the
     // claim keys on the SOURCE instead of the target) and this test fails.
 
+    it("names the stored edge that occupies the slot, on both axes", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const alice = await store.nodes.TgcPerson.create({});
+      const bob = await store.nodes.TgcPerson.create({});
+      const target = await store.nodes.TgcTarget.create({});
+      const otherTarget = await store.nodes.TgcTarget.create({});
+
+      const holder = await store.edges.tgcAssignedTo.create(alice, target, {});
+      const targetRefusal = await store.edges.tgcAssignedTo
+        .create(bob, target, {})
+        .catch((error_: unknown) => error_);
+      expect(targetRefusal).toBeInstanceOf(CardinalityError);
+      expect((targetRefusal as CardinalityError).details).toMatchObject({
+        direction: "target",
+        incumbentEdgeId: holder.id,
+      });
+
+      const owned = await store.edges.tgcOwnsAsset.create(alice, target, {});
+      const sourceRefusal = await store.edges.tgcOwnsAsset
+        .create(alice, otherTarget, {})
+        .catch((error_: unknown) => error_);
+      expect(sourceRefusal).toBeInstanceOf(CardinalityError);
+      expect((sourceRefusal as CardinalityError).details).toMatchObject({
+        direction: "source",
+        incumbentEdgeId: owned.id,
+      });
+    });
+    // MUTATION CHECK: dropping `incumbentEdgeId` from
+    // `edgeCardinalityViolation` (`src/store/claims/edge-claims.ts`) leaves
+    // the field undefined on the claim path, and dropping the
+    // `namedIncumbentEdgeId` argument in `checkEdgeCardinalityConstraints`
+    // (`src/store/constraints.ts`) does the same on a backend that takes the
+    // portable probe.
+
     it("refuses a second distinct edge from the SAME source to the same target (count, not distinct neighbours)", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const alice = await store.nodes.TgcPerson.create({});

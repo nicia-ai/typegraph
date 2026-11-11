@@ -8,9 +8,13 @@ import { describe, expect, it } from "vitest";
 
 import { ConfigurationError } from "../src/errors";
 import {
+  classifyOntology,
   classifyOntologyChanges,
+  type OntologyChange,
   type OntologyDataProbe,
   type OntologySnapshot,
+  PROBE_VIOLATION_FAMILIES,
+  probeCoversViolationFamily,
 } from "../src/schema/ontology-change";
 import {
   type SerializedClosures,
@@ -110,8 +114,25 @@ function compositionRelation(
   };
 }
 
+/** A relation change as the preflight sees it: the public change plus the probes it carries. */
+type ProbedChange = OntologyChange &
+  Readonly<{ probes?: readonly OntologyDataProbe[] | undefined }>;
+
+/** The relation changes of a diff, each with the probes it owes (`undefined` when none). */
+function classify(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): readonly ProbedChange[] {
+  return classifyOntology(before, after).relationChanges.map(
+    ({ change, probes }) => ({
+      ...change,
+      probes: probes.length > 0 ? probes : undefined,
+    }),
+  );
+}
+
 function relationChangeOf(
-  changes: ReturnType<typeof classifyOntologyChanges>,
+  changes: readonly ProbedChange[],
   type: "added" | "removed",
 ) {
   return requireDefined(
@@ -131,11 +152,17 @@ function probeOfKind<K extends OntologyDataProbe["kind"]>(
   return requireDefined(found, `expected a "${kind}" probe`);
 }
 
-function admissionLossOf(changes: ReturnType<typeof classifyOntologyChanges>) {
-  return requireDefined(
-    changes.find((change) => change.entity === "edgeRegistration"),
-    "expected an edgeRegistration change",
-  );
+/**
+ * The endpoint probe an edge kind's own registration owes — the loss no
+ * relation change carries — with the edge kinds the classifier names.
+ */
+function admissionLossOf(before: OntologySnapshot, after: OntologySnapshot) {
+  const classification = classifyOntology(before, after);
+  return {
+    edgeKinds: classification.tightenedEdgeKinds,
+    allowances: probeOfKind(classification.probes, "edgeEndpointAssignability")
+      .allowances,
+  };
 }
 
 /** `implies` only requires same-side assignability, so a same-shape pair is valid. */
@@ -435,7 +462,7 @@ describe("classifyOntologyChanges", () => {
         row.direction === "added" ? [relationUnderTest] : [],
       );
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const change = relationChangeOf(changes, row.direction);
 
       expect(change.severity).toBe(row.expectedSeverity);
@@ -472,7 +499,7 @@ describe("classifyOntologyChanges", () => {
           relation(metaEdge, "Alpha", "Gamma"),
         ]);
 
-        expect(classifyOntologyChanges(before, after)).toEqual([]);
+        expect(classify(before, after)).toEqual([]);
       },
     );
 
@@ -488,7 +515,7 @@ describe("classifyOntologyChanges", () => {
         relation("inverseOf", "followedBy", "follows"),
       ]);
 
-      expect(classifyOntologyChanges(before, after)).toEqual([]);
+      expect(classify(before, after)).toEqual([]);
     });
 
     it("still reads a swapped subClassOf as a removal and an addition", () => {
@@ -499,9 +526,10 @@ describe("classifyOntologyChanges", () => {
         relation("subClassOf", "Alpha", "Gamma"),
       ]);
 
-      expect(
-        classifyOntologyChanges(before, after).map((change) => change.type),
-      ).toEqual(["removed", "added"]);
+      expect(classify(before, after).map((change) => change.type)).toEqual([
+        "removed",
+        "added",
+      ]);
     });
   });
   // MUTATION CHECK (verified): keying `keyedRelations` by
@@ -517,7 +545,7 @@ describe("classifyOntologyChanges", () => {
       );
       const after = snapshot({ Organization: nodeDef("Organization") }, {}, []);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const change = relationChangeOf(changes, "removed");
 
       expect(change.severity).toBe("safe");
@@ -536,7 +564,7 @@ describe("classifyOntologyChanges", () => {
         [],
       );
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const change = relationChangeOf(changes, "removed");
 
       expect(change.severity).toBe("warning");
@@ -560,7 +588,7 @@ describe("classifyOntologyChanges", () => {
         relation("disjointWith", "Person", "Organization"),
       ]);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const added = changes.find(
         (change) =>
           change.type === "added" && change.name.startsWith("disjointWith"),
@@ -599,7 +627,7 @@ describe("classifyOntologyChanges", () => {
         relation("subClassOf", "Contractor", "Worker"),
       ]);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const added = relationChangeOf(changes, "added");
       const probe = probeOfKind(added.probes, "nodeUniqueness");
 
@@ -618,7 +646,7 @@ describe("classifyOntologyChanges", () => {
       ]);
       const after = snapshot({}, { worksFor }, []);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const removed = relationChangeOf(changes, "removed");
       const probe = probeOfKind(removed.probes, "edgeEndpointAssignability");
 
@@ -642,7 +670,7 @@ describe("classifyOntologyChanges", () => {
         relation("subClassOf", "Shop", "Organization"),
       ]);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
       const removed = relationChangeOf(changes, "removed");
       const probe = probeOfKind(removed.probes, "edgeEndpointAssignability");
 
@@ -688,27 +716,17 @@ describe("classifyOntologyChanges", () => {
         [],
       );
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
 
-      expect(
-        changes
-          .filter((change) => change.entity === "relation")
-          .map((change) => [change.severity, change.probes]),
-      ).toEqual([
-        ["safe", undefined],
-        ["safe", undefined],
-      ]);
-      const loss = admissionLossOf(changes);
-      expect(loss).toMatchObject({
-        type: "modified",
-        name: "likes",
-        severity: "warning",
-        details:
-          'Edge "likes" no longer admits endpoint pairs: (Person -> Dog)',
-      });
-      expect(
-        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
-      ).toEqual([
+      expect(changes.map((change) => [change.severity, change.probes])).toEqual(
+        [
+          ["safe", undefined],
+          ["safe", undefined],
+        ],
+      );
+      const loss = admissionLossOf(before, after);
+      expect(loss.edgeKinds).toEqual(["likes"]);
+      expect(loss.allowances).toEqual([
         {
           edgeKind: "likes",
           allowedPairs: [
@@ -736,7 +754,7 @@ describe("classifyOntologyChanges", () => {
         [],
       );
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
 
       expect(changes.flatMap((change) => change.probes ?? [])).toEqual([]);
       expect(changes.map((change) => change.entity)).toEqual(["relation"]);
@@ -751,14 +769,12 @@ describe("classifyOntologyChanges", () => {
       );
       const after = snapshot(nodes, { e: edgeDef("e", ["A"], ["B"]) }, []);
 
-      const loss = admissionLossOf(classifyOntologyChanges(before, after));
+      const loss = admissionLossOf(before, after);
 
-      expect(loss.details).toBe(
-        'Edge "e" no longer admits endpoint pairs: (A -> C)',
-      );
-      expect(
-        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
-      ).toEqual([{ edgeKind: "e", allowedPairs: [["A", "B"]] }]);
+      expect(loss.edgeKinds).toEqual(["e"]);
+      expect(loss.allowances).toEqual([
+        { edgeKind: "e", allowedPairs: [["A", "B"]] },
+      ]);
     });
 
     it("probes a narrowed source-dependent target map", () => {
@@ -779,11 +795,12 @@ describe("classifyOntologyChanges", () => {
         [],
       );
 
-      const loss = admissionLossOf(classifyOntologyChanges(before, after));
+      const loss = admissionLossOf(before, after);
 
-      expect(
-        probeOfKind(loss.probes, "edgeEndpointAssignability").allowances,
-      ).toEqual([{ edgeKind: "e", allowedPairs: [["A", "B"]] }]);
+      expect(loss.edgeKinds).toEqual(["e"]);
+      expect(loss.allowances).toEqual([
+        { edgeKind: "e", allowedPairs: [["A", "B"]] },
+      ]);
     });
 
     it("owes nothing when a dropped declared endpoint is still admitted through subsumption", () => {
@@ -800,7 +817,7 @@ describe("classifyOntologyChanges", () => {
         relations,
       );
 
-      expect(classifyOntologyChanges(before, after)).toEqual([]);
+      expect(classify(before, after)).toEqual([]);
     });
 
     it("reports the loss once, on the relation change, when one already carries the diff-wide probe", () => {
@@ -821,7 +838,7 @@ describe("classifyOntologyChanges", () => {
         [],
       );
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
 
       expect(changes.map((change) => change.entity)).toEqual(["relation"]);
       expect(
@@ -847,7 +864,7 @@ describe("classifyOntologyChanges", () => {
         incoherentRelations,
       );
 
-      expect(classifyOntologyChanges(before, after)).toEqual([]);
+      expect(classify(before, after)).toEqual([]);
     });
   });
 
@@ -895,7 +912,7 @@ describe("classifyOntologyChanges", () => {
         compositionRelation("partOf", "X", "Y", "edgeA", "required"),
       ]);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
 
       // The bug this guards: folding `existence` into the identity key made
       // this diff as remove (breaking) + add (warning), which both defeats
@@ -926,7 +943,7 @@ describe("classifyOntologyChanges", () => {
         compositionRelation("partOf", "X", "Y", "edgeA"),
       ]);
 
-      const changes = classifyOntologyChanges(before, after);
+      const changes = classify(before, after);
 
       expect(changes).toHaveLength(1);
       const change = requireDefined(changes[0], "expected one change");
@@ -945,7 +962,111 @@ describe("classifyOntologyChanges", () => {
       const before = snapshot({}, EDGES_FOR_COMPOSITION, relations);
       const after = snapshot({}, EDGES_FOR_COMPOSITION, relations);
 
-      expect(classifyOntologyChanges(before, after)).toEqual([]);
+      expect(classify(before, after)).toEqual([]);
     });
+  });
+});
+
+describe("an edge kind's own registration is not an ontology change", () => {
+  const nodes = { Task: nodeDef("Task") };
+  const plain = edgeDef("dependsOn", ["Task"], ["Task"]);
+  const acyclic: SerializedEdgeDef = { ...plain, acyclic: true };
+
+  it("reports acyclic: true as an edge-registration tightening, with no ontology change", () => {
+    const before = snapshot(nodes, { dependsOn: plain }, []);
+    const after = snapshot(nodes, { dependsOn: acyclic }, []);
+
+    const classification = classifyOntology(before, after);
+
+    expect(classification.changes).toEqual([]);
+    expect(classification.probedChanges).toEqual([]);
+    expect(classification.tightenedEdgeKinds).toEqual(["dependsOn"]);
+    expect(classification.probes.map((probe) => probe.kind)).toEqual([
+      "edgeAcyclicity",
+    ]);
+  });
+  // MUTATION CHECK: emitting an `OntologyChange` for the flag again (the
+  // previous `entity: "edgeRegistration"` arm) makes `changes` non-empty.
+
+  it("owes nothing when acyclic: true is dropped", () => {
+    const before = snapshot(nodes, { dependsOn: acyclic }, []);
+    const after = snapshot(nodes, { dependsOn: plain }, []);
+
+    const classification = classifyOntology(before, after);
+
+    expect(classification.changes).toEqual([]);
+    expect(classification.tightenedEdgeKinds).toEqual([]);
+    expect(classification.probes).toEqual([]);
+  });
+});
+
+describe("a removed relation naming an external IRI", () => {
+  const iri = "https://schema.org/Person";
+  const nodes = { Person: nodeDef("Person") };
+
+  it("is safe and owes no probe when no kind reaches the IRI's equivalence class", () => {
+    const worksFor = edgeDef("knows", ["Person"], ["Person"]);
+    const before = snapshot(nodes, { knows: worksFor }, [
+      relation("sameAs", "Person", iri),
+    ]);
+    const after = snapshot(nodes, { knows: worksFor }, []);
+
+    const classification = classifyOntology(before, after);
+
+    expect(classification.changes.map((change) => change.severity)).toEqual([
+      "safe",
+    ]);
+    expect(classification.probedChanges).toEqual([]);
+    expect(classification.probes).toEqual([]);
+    expect(classification.tightenedEdgeKinds).toEqual([]);
+  });
+  // MUTATION CHECK: dropping `severityOfRelationRemoval`'s IRI arm reports
+  // the removal as a `warning` that owes nothing.
+
+  it("still owes the endpoint probe when a second kind reaches the same IRI", () => {
+    const kinds = { Person: nodeDef("Person"), Human: nodeDef("Human") };
+    const edges = { knows: edgeDef("knows", ["Person"], ["Person"]) };
+    const before = snapshot(kinds, edges, [
+      relation("sameAs", "Person", iri),
+      relation("sameAs", "Human", iri),
+    ]);
+    const after = snapshot(kinds, edges, [relation("sameAs", "Human", iri)]);
+
+    const classification = classifyOntology(before, after);
+
+    expect(
+      classification.probedChanges.map((change) => change.severity),
+    ).toEqual(["warning"]);
+    expect(classification.probes.map((probe) => probe.kind)).toEqual([
+      "edgeEndpointAssignability",
+    ]);
+  });
+});
+
+describe("the violation families each probe can produce", () => {
+  it("names the families a fence row uses", () => {
+    const probe = { families: PROBE_VIOLATION_FAMILIES.composition };
+    expect(probe.families).toEqual([
+      "composition",
+      "edgeAcyclicity",
+      "compositionFutureWindow",
+    ]);
+    expect(probeCoversViolationFamily(probe, "composition")).toBe(true);
+    expect(probeCoversViolationFamily(probe, "edgeAcyclicity")).toBe(true);
+    expect(probeCoversViolationFamily(probe, "compositionFutureWindow")).toBe(
+      true,
+    );
+    expect(probeCoversViolationFamily(probe, "compositionExistence")).toBe(
+      false,
+    );
+    expect(PROBE_VIOLATION_FAMILIES.compositionExistence).toEqual([
+      "compositionExistence",
+    ]);
+    expect(PROBE_VIOLATION_FAMILIES.nodeUniqueness).toEqual(["nodeUniqueness"]);
+    expect(
+      (
+        Object.values(PROBE_VIOLATION_FAMILIES).flat() as readonly string[]
+      ).includes("edgeCardinality"),
+    ).toBe(false);
   });
 });

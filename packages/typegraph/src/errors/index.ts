@@ -734,6 +734,14 @@ export type CardinalityErrorDetails = Readonly<{
   toId: string;
   cardinality: string;
   existingCount: number;
+  /**
+   * The id of a stored edge that occupies the slot the write overran, so a
+   * caller can act on it without a second query: the claim holder, the edge
+   * a stored-edge read named, or the earlier edge of the same batch. Absent
+   * when the refusing check counted the population but no stored edge could
+   * be named (a pending row a backend overlay holds).
+   */
+  incumbentEdgeId?: string;
 }>;
 
 /**
@@ -1724,19 +1732,24 @@ export const MIGRATION_FAILURE_REASONS = [
   /** A declared edge match identity changed while its edge kind held rows. */
   "edge-match-identity-rekey",
   /**
-   * An ontology tightening (`disjointWith` / `subClassOf` / `equivalentTo` /
-   * `sameAs` addition, or a `subClassOf` / `equivalentTo` / `sameAs`
-   * removal) is false against existing rows. Inspect `details.violations`
-   * — in exactly the shape `store.verifyConstraintFences()` returns — for
-   * the rows that must be resolved before retrying.
+   * A schema tightening other than an edge cardinality is false against
+   * existing rows: an ontology axiom (`disjointWith` / `subClassOf` /
+   * `equivalentTo` / `sameAs` / `partOf` / `hasPart` added, or a
+   * `subClassOf` / `equivalentTo` / `sameAs` removed), `acyclic: true`, a
+   * narrowed edge endpoint declaration, a mid-chain kind removal, or an edge
+   * kind re-added over leftover rows. Inspect `details.violations` — in
+   * exactly the shape `store.verifyConstraintFences()` returns, every
+   * violated family included — for the rows that must be resolved before
+   * retrying.
    */
   "ontology-tightening-violated",
   /**
    * An edge cardinality tightening (`cardinality` or `targetCardinality`
    * newly constrained, or moved to a stricter constrained value) is false
    * against existing rows. Inspect `details.violations` — in exactly the
-   * shape `store.verifyConstraintFences()` returns — for the rows that must
-   * be resolved before retrying.
+   * shape `store.verifyConstraintFences()` returns, every violated family
+   * included, not only the cardinality rows — for the rows that must be
+   * resolved before retrying.
    */
   "edge-cardinality-tightening-violated",
   /**
@@ -1759,6 +1772,36 @@ export const MIGRATION_FAILURE_REASONS = [
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
+
+/**
+ * The facts every schema-tightening refusal reports, whichever family
+ * refused first, so a caller repairs the rows once.
+ */
+export type SchemaTighteningRefusalDetails = Readonly<{
+  /**
+   * The ontology changes that required a data check — every classified
+   * relation change in the diff that owes one. A change that owes none (a
+   * `safe` or `breaking` one) never appears here. Empty when only an edge
+   * kind's own registration tightened.
+   */
+  changes: readonly OntologyChange[];
+  /**
+   * The edge kinds whose own registration this commit tightens: a newly
+   * constrained `cardinality` / `targetCardinality`, `acyclic: true`, or an
+   * endpoint pair no longer admitted. Sorted. Empty when only ontology
+   * relations tightened.
+   */
+  edgeKinds: readonly string[];
+  /** The edge-cardinality axes this commit newly constrains. */
+  axes: readonly EdgeCardinalityDeclaration[];
+  /**
+   * The rows that make the proposed schema false, in exactly the shape
+   * `store.verifyConstraintFences()` returns for it, EVERY violated family
+   * included — so the same rows that block the migration can be listed,
+   * resolved, and the migration retried once.
+   */
+  violations: readonly ConstraintFenceViolation[];
+}>;
 
 /**
  * Structured context for a {@link MigrationError}, discriminated on `reason`.
@@ -1829,41 +1872,31 @@ export type MigrationErrorDetails =
        */
       constraints: readonly UniquenessClaimGate[];
     }>
-  | Readonly<{
-      graphId: string;
-      fromVersion: number;
-      toVersion: number;
-      reason: "ontology-tightening-violated";
-      /**
-       * The ontology changes that required a data check — every classified
-       * change in the diff whose `probes` is non-empty. A change classified
-       * `safe` or `breaking` (which carries no `probes`) never appears here,
-       * even when the same diff also contains one.
-       */
-      changes: readonly OntologyChange[];
-      /**
-       * The rows that make the proposed ontology false, in exactly the
-       * shape `store.verifyConstraintFences()` returns — so the same rows
-       * that block the migration can be listed, resolved, and the
-       * migration retried.
-       */
-      violations: readonly ConstraintFenceViolation[];
-    }>
-  | Readonly<{
-      graphId: string;
-      fromVersion: number;
-      toVersion: number;
-      reason: "edge-cardinality-tightening-violated";
-      /** The axes this commit newly constrains — those that owed the data check. */
-      axes: readonly EdgeCardinalityDeclaration[];
-      /**
-       * The rows that make the proposed cardinality false, in exactly the
-       * shape `store.verifyConstraintFences()` returns — so the same rows
-       * that block the migration can be listed, resolved, and the
-       * migration retried.
-       */
-      violations: readonly ConstraintFenceViolation[];
-    }>
+  | (SchemaTighteningRefusalDetails &
+      Readonly<{
+        graphId: string;
+        fromVersion: number;
+        toVersion: number;
+        /**
+         * Existing rows violate the proposed schema and NO edge-cardinality
+         * row does: an ontology axiom, an `acyclic: true`, an endpoint
+         * narrowing, a composition declaration, or an edge kind re-added over
+         * leftover rows.
+         */
+        reason: "ontology-tightening-violated";
+      }>)
+  | (SchemaTighteningRefusalDetails &
+      Readonly<{
+        graphId: string;
+        fromVersion: number;
+        toVersion: number;
+        /**
+         * At least one existing row violates a cardinality this commit newly
+         * constrains. `violations` still lists EVERY family the commit
+         * violates, so one repair covers the whole refusal.
+         */
+        reason: "edge-cardinality-tightening-violated";
+      }>)
   | Readonly<{
       graphId: string;
       fromVersion: number;
@@ -1876,10 +1909,17 @@ export type MigrationErrorDetails =
        */
       reason: "custom-relation-removal";
       /**
-       * Each such relation as written, such as `governs(Team, Project)`: the
-       * `removedCustomRelation` of every change that drops one.
+       * Each such relation as `{ metaEdge, from, to }`, such as
+       * `governs(Team, Project)` as `{ metaEdge: "governs", from: "Team",
+       * to: "Project" }`: the `removedCustomRelation` of every change that
+       * drops one, ready to move into `defineGraph({ annotations })`
+       * without parsing text.
        */
-      relations: readonly string[];
+      relations: readonly Readonly<{
+        metaEdge: string;
+        from: string;
+        to: string;
+      }>[];
     }>;
 
 /**

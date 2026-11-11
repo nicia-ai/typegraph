@@ -41,6 +41,7 @@ import {
 } from "../store/claims/verify";
 import { readCompositionUnattachedParts } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
+import { compareStrings } from "../utils/compare";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
   type EdgeCardinalityDeclaration,
@@ -51,11 +52,11 @@ import {
   type AddedEdgeKindProbes,
   addedEdgeKindProbes,
   buildSchemaBaselineRegistry,
-  classifyOntologyChanges,
+  classifyOntology,
   type OntologyChange,
+  type OntologyClassification,
   type OntologyDataProbe,
   type OntologySnapshot,
-  ontologyTighteningProbes,
   requiredPartKindsByViaEdgeKind,
   snapshotKindDelta,
 } from "./ontology-change";
@@ -139,14 +140,13 @@ export type SchemaTighteningPreflightParams = SchemaCommitTransition &
     before: OntologySnapshot;
     after: OntologySnapshot;
     /**
-     * The already-classified diff, when a caller computed one (`ensureSchema`
-     * and `Store.evolve` both diff `before`/`after` before reaching this
-     * preflight). Reusing it avoids reclassifying the identical
-     * `before`/`after` pair a second time in the same commit; `migrateSchema`
-     * and `evolve`'s dropped-kinds branch, which never compute a diff, omit
-     * this and classification runs internally, once.
+     * The classification of this exact `before`/`after` pair, when the caller
+     * already computed one (the store verbs classify once to refuse a
+     * custom-relation drop and to plan the preflight). Omitted, the preflight
+     * classifies once itself. A diff's `SchemaDiff.ontology` is not accepted
+     * here: it is the public report and does not carry the probe plan.
      */
-    changes?: readonly OntologyChange[];
+    classification?: OntologyClassification;
   }>;
 
 /**
@@ -354,42 +354,56 @@ function acyclicRelationsToProbe(
   );
 }
 
-function buildOntologyTighteningViolatedError(
-  params: SchemaTighteningPreflightParams,
-  probedChanges: readonly OntologyChange[],
+/** What a data-preflight refusal reports, whichever family refused first. */
+type TighteningRefusalFacts = Readonly<{
+  changes: readonly OntologyChange[];
+  edgeKinds: readonly string[];
+  axes: readonly EdgeCardinalityDeclaration[];
+  violations: readonly ConstraintFenceViolation[];
+}>;
+
+/** The violation families present, in first-seen order, for a refusal message. */
+function violationFamilies(
   violations: readonly ConstraintFenceViolation[],
-): MigrationError {
-  const shown = previewViolations(violations);
-  return new MigrationError(
-    `Ontology tightening refused: ${String(violations.length)} existing row(s) violate the proposed ontology. ` +
-      `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
-    {
-      graphId: params.graphId,
-      fromVersion: params.fromVersion,
-      toVersion: params.toVersion,
-      reason: "ontology-tightening-violated",
-      changes: probedChanges,
-      violations,
-    },
+): string {
+  return [...new Set(violations.map((violation) => violation.family))].join(
+    ", ",
   );
 }
 
-function buildEdgeCardinalityTighteningViolatedError(
+/**
+ * THE refusal for a schema commit whose proposed schema existing rows
+ * violate. One error reports every violated family, so a caller repairs the
+ * rows once rather than once per gate; the `reason` names the headline
+ * family — an edge-cardinality violation when any is present, else an
+ * ontology (or edge-registration) one — and the details are the same four
+ * fields either way.
+ */
+function buildTighteningViolatedError(
   params: SchemaTighteningPreflightParams,
-  axes: readonly EdgeCardinalityDeclaration[],
-  violations: readonly ConstraintFenceViolation[],
+  facts: TighteningRefusalFacts,
 ): MigrationError {
-  const shown = previewViolations(violations);
+  const cardinalityHeadline = facts.violations.some(
+    (violation) => violation.family === "edgeCardinality",
+  );
+  const shown = previewViolations(facts.violations);
+  const subject =
+    cardinalityHeadline ?
+      "Edge cardinality tightening refused"
+    : "Ontology tightening refused";
   return new MigrationError(
-    `Edge cardinality tightening refused: ${String(violations.length)} existing row(s) violate the proposed cardinality. ` +
+    `${subject}: ${String(facts.violations.length)} existing row(s) violate the proposed schema ` +
+      `(${violationFamilies(facts.violations)}). ` +
       `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
     {
       graphId: params.graphId,
       fromVersion: params.fromVersion,
       toVersion: params.toVersion,
-      reason: "edge-cardinality-tightening-violated",
-      axes,
-      violations,
+      reason:
+        cardinalityHeadline ?
+          "edge-cardinality-tightening-violated"
+        : "ontology-tightening-violated",
+      ...facts,
     },
   );
 }
@@ -408,6 +422,12 @@ export type SchemaTighteningPreflight = Readonly<{
    * `MigrationErrorDetails`'s `"ontology-tightening-violated"` docblock.
    */
   probedChanges: readonly OntologyChange[];
+  /**
+   * The edge kinds whose own registration this transition tightens and owes
+   * a data check: a newly constrained cardinality axis, `acyclic` turned on,
+   * or an endpoint pair no longer admitted. Sorted.
+   */
+  tightenedEdgeKinds: readonly string[];
   /** The edge-cardinality axes this transition newly constrains. */
   newlyConstrainedAxes: readonly EdgeCardinalityDeclaration[];
   /**
@@ -446,17 +466,20 @@ export function prepareStoreVerbSchemaTighteningPreflight(
   params: SchemaTighteningPreflightParams & Readonly<{ verb: string }>,
 ): SchemaTighteningPreflight | undefined {
   const { verb, ...preflightParams } = params;
-  const changes =
-    preflightParams.changes ??
-    classifyOntologyChanges(preflightParams.before, preflightParams.after);
+  const classification =
+    preflightParams.classification ??
+    classifyOntology(preflightParams.before, preflightParams.after);
   assertNoRemovedCustomRelations({
     verb,
     graphId: preflightParams.graphId,
     fromVersion: preflightParams.fromVersion,
     toVersion: preflightParams.toVersion,
-    changes,
+    changes: classification.changes,
   });
-  return prepareSchemaTighteningPreflight({ ...preflightParams, changes });
+  return prepareSchemaTighteningPreflight({
+    ...preflightParams,
+    classification,
+  });
 }
 
 /**
@@ -481,32 +504,39 @@ export function prepareStoreVerbSchemaTighteningPreflight(
  * `store.verifyConstraintFences()` remains the post-hoc detector for exactly
  * that window.
  *
- * When BOTH halves have violations, the edge-cardinality refusal wins: it is
- * the more specific diagnosis, and the two reasons are mutually exclusive
- * gates on the same commit (fixing one leaves the other still refusing on
- * retry). The same preference governs `capabilityError`.
+ * When more than one family has violations, ONE refusal reports all of them
+ * (`details.violations` is exactly what `store.verifyConstraintFences()`
+ * returns for the proposed schema), so a caller repairs the rows once. The
+ * `reason` is the headline: edge-cardinality when any cardinality row
+ * violates, else ontology. The same preference governs `capabilityError`.
  *
  * @throws ConfigurationError if either `params.before` or `params.after`
- *   cannot be interpreted as a coherent ontology and `params.changes` was
- *   not supplied (propagates from `classifyOntologyChanges`).
+ *   cannot be interpreted as a coherent ontology and `params.classification`
+ *   was not supplied (propagates from `classifyOntology`).
  */
 export function prepareSchemaTighteningPreflight(
   params: SchemaTighteningPreflightParams,
 ): SchemaTighteningPreflight | undefined {
-  const changes =
-    params.changes ?? classifyOntologyChanges(params.before, params.after);
-  const probes = ontologyTighteningProbes(changes);
+  const classification =
+    params.classification ?? classifyOntology(params.before, params.after);
+  const { probes, probedChanges } = classification;
   const newlyConstrainedAxes = newlyConstrainedEdgeAxes(
     params.before,
     params.after,
   );
+  const tightenedEdgeKinds = [
+    ...new Set([
+      ...classification.tightenedEdgeKinds,
+      ...newlyConstrainedAxes.map(({ edgeKind }) => edgeKind),
+    ]),
+  ].toSorted(compareStrings);
   const uniqueConstraints = declaredKindUniqueConstraints(
     params.before,
     params.after,
   );
   const mayGateUniqueness = mayGateUniquenessClaims(
     uniqueConstraints,
-    changes.length > 0,
+    classification.changes.length > 0,
   );
   const kindDelta = snapshotKindDelta(params.before, params.after);
   const addsEdgeKind = kindDelta.addedEdgeKinds.length > 0;
@@ -518,10 +548,6 @@ export function prepareSchemaTighteningPreflight(
   ) {
     return undefined;
   }
-  const probedChanges = changes.filter(
-    (change) => (change.probes ?? []).length > 0,
-  );
-
   // Built once, outside the returned closure: every commit path already ran
   // `buildKindRegistry` on the target graph before reaching the preflight, so
   // this cannot throw here for a reason the commit has not already surfaced.
@@ -673,26 +699,18 @@ export function prepareSchemaTighteningPreflight(
     ];
     if (violations.length === 0) return;
 
-    const cardinalityViolations = violations.filter(
-      (violation) => violation.family === "edgeCardinality",
-    );
-    if (cardinalityViolations.length > 0) {
-      throw buildEdgeCardinalityTighteningViolatedError(
-        params,
-        newlyConstrainedAxes,
-        cardinalityViolations,
-      );
-    }
-    throw buildOntologyTighteningViolatedError(
-      params,
-      probedChanges,
+    throw buildTighteningViolatedError(params, {
+      changes: probedChanges,
+      edgeKinds: tightenedEdgeKinds,
+      axes: newlyConstrainedAxes,
       violations,
-    );
+    });
   };
 
   return {
     run,
     probedChanges,
+    tightenedEdgeKinds,
     newlyConstrainedAxes,
     uniquenessClaimGates: gates,
     capabilityError:

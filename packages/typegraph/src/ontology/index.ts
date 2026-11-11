@@ -44,10 +44,7 @@ export type {
   CompositionExistence,
   CompositionPartSide,
 } from "../registry/composition-relation";
-export {
-  compositionViaKind,
-  type CompositionViaRef,
-} from "../registry/composition-relation";
+export { type CompositionViaRef } from "../registry/composition-relation";
 export {
   type EquivalentToCheck,
   getTypeName,

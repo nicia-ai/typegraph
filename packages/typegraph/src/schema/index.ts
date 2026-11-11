@@ -122,12 +122,7 @@ export {
 
 export {
   classifyOntologyChanges,
-  type OntologyDataProbe,
   type OntologySnapshot,
-  ontologyTighteningProbes,
-  PROBE_VIOLATION_FAMILIES,
-  probeCoversViolationFamily,
-  type UniquenessComponentProbeGroup,
 } from "./ontology-change";
 
 // ============================================================

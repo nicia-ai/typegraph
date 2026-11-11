@@ -2551,6 +2551,8 @@ for (const violation of await store.verifyConstraintFences()) {
     case "edgeCardinality":
     case "composition": {
       // violation.target names the claim row two claimants contend for
+      // (axis and key are storage encodings). `edgeCardinality` also carries
+      // plain `edgeKind`, `direction` and `keyedOn`; `composition` carries `part`.
       console.warn(violation.family, violation.target.axis, violation.target.key);
       break;
     }
