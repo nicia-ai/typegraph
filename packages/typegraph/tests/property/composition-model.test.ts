@@ -249,6 +249,73 @@ function edgeCounts(edge: ModelEdge): boolean {
   return PAIRS[edge.kind].population === "one" || edge.validTo === undefined;
 }
 
+/**
+ * The half-open window `[validFrom, validTo)` over which a row is its part's
+ * membership at a valid-time coordinate: a `oneActive` row while its own
+ * window holds, a `one` row from its start on, ended or not. `undefined` for
+ * a deleted row, which reads at no coordinate.
+ */
+function membershipWindow(
+  edge: ModelEdge,
+): Readonly<{ from: number; to: number }> | undefined {
+  if (edge.deleted) return undefined;
+  return {
+    from: edge.validFrom,
+    to:
+      PAIRS[edge.kind].population === "oneActive" ?
+        (edge.validTo ?? Number.POSITIVE_INFINITY)
+      : Number.POSITIVE_INFINITY,
+  };
+}
+
+/** Whether the row is its part's membership at `instant`. */
+function countsAt(edge: ModelEdge, instant: number): boolean {
+  const window = membershipWindow(edge);
+  return window !== undefined && window.from <= instant && instant < window.to;
+}
+
+/**
+ * The window rule: on a `oneActive` pair, one part's composition rows never
+ * share a valid-time instant. Windows are half-open, so rows that only touch
+ * share none, and an empty (zero-width or inverted) window shares nothing. The
+ * rows judged are every non-deleted row of the part across both realizing
+ * edge kinds — the rows a valid-time read can return for it.
+ */
+function hasWindowOverlap(model: Model): boolean {
+  const windowsByPart = new Map<string, { from: number; to: number }[]>();
+  for (const edge of model.edges.values()) {
+    if (PAIRS[edge.kind].population !== "oneActive") continue;
+    const window = membershipWindow(edge);
+    if (window === undefined || window.from >= window.to) continue;
+    const windows = windowsByPart.get(edge.partId) ?? [];
+    windows.push(window);
+    windowsByPart.set(edge.partId, windows);
+  }
+  return [...windowsByPart.values()].some((windows) =>
+    windows.some((window, index) =>
+      windows
+        .slice(index + 1)
+        .some((other) => window.from < other.to && other.from < window.to),
+    ),
+  );
+}
+
+/**
+ * `step`, with the window rule's refusal added when the state it would leave
+ * breaks the rule. Judged on the state itself — `step.apply` run on a copy of
+ * the model — so every command, whichever surface it writes through, is held
+ * to the rule by one oracle rather than by a prediction per command.
+ */
+function withWindowRule(model: Model, step: Step): Step {
+  if (step.apply === undefined) return step;
+  const after = structuredClone(model);
+  step.apply(after);
+  if (!hasWindowOverlap(after) || step.refusals.includes(CompositionError)) {
+    return step;
+  }
+  return { ...step, refusals: [...step.refusals, CompositionError] };
+}
+
 function attachmentOf(
   model: Model,
   partId: string,
@@ -481,6 +548,7 @@ type DynamicEdgeCollection = Readonly<{
     from: NodeRefInput,
     to: NodeRefInput,
     props: object,
+    options?: Readonly<{ validFrom: string; validTo: string }>,
   ) => Promise<unknown>;
   update: (
     id: string,
@@ -657,6 +725,60 @@ function createEdgeStep(
   };
 }
 
+/**
+ * Records a past membership of a `oneActive` part as history: a row of
+ * `edgeKind` written already ended, its window `[clock - startBack, clock -
+ * endBack)`. It takes no claim and joins no acyclic relation, so the window
+ * rule ({@link withWindowRule}) is what decides it: refused where it would
+ * overlap another of the part's rows, admitted where it abuts or misses them.
+ */
+function historyEdgeStep(
+  edgeKind: "cpMidOf" | "cpWholeHasMid",
+  partPick: number,
+  wholePick: number,
+  startBack: number,
+  endBack: number,
+): StepFactory {
+  return (model) => {
+    const pair = PAIRS[edgeKind];
+    const partId = requireDefined(pickNodeId(model, pair.partKind, partPick));
+    const wholeId = requireDefined(
+      pickNodeId(model, pair.wholeKind, wholePick),
+    );
+    const validFrom = model.clock - startBack;
+    const validTo = model.clock - endBack;
+    const refusals: ErrorClass[] = [];
+    if (!isLive(model, partId) || !isLive(model, wholeId)) {
+      refusals.push(EndpointNotFoundError);
+    }
+    const part = { kind: pair.partKind, id: partId };
+    const whole = { kind: pair.wholeKind, id: wholeId };
+    return {
+      label: `edge ${edgeKind} history ${partId} -> ${wholeId} [${iso(validFrom)}, ${iso(validTo)})`,
+      refusals,
+      perform: async (surface) => {
+        const [from, to] =
+          pair.partSide === "from" ? [part, whole] : [whole, part];
+        await surface.edges[edgeKind].create(
+          from,
+          to,
+          {},
+          { validFrom: iso(validFrom), validTo: iso(validTo) },
+        );
+      },
+      apply: (next) => {
+        addEdge(next, {
+          kind: edgeKind,
+          partId,
+          wholeId,
+          validFrom,
+          validTo,
+        });
+      },
+    };
+  };
+}
+
 type AtMode = "omit" | "now" | "past" | "beforeIncumbent" | "future";
 type MoveSpec = Readonly<{
   partPick: number;
@@ -721,7 +843,7 @@ function resolveMove(
   // A no-op move cannot honor a stated instant other than the held edge's
   // own start, so it refuses it rather than dropping it.
   if (noop && at !== undefined && at !== incumbent.edge.validFrom) {
-    refusals.push(ValidationError);
+    refusals.push(CompositionExistenceError);
   }
   if (
     !noop &&
@@ -1576,6 +1698,84 @@ async function assertStoreMatchesModel(
     expectedFenceViolations(model),
   );
   await assertNavigationMatches(real, model);
+  await assertAsOfWholesMatch(real, model);
+}
+
+/**
+ * Every valid-time coordinate at which the model's rows can change a part's
+ * whole: each row's start, the last instant before its end and its end, and
+ * the clock.
+ */
+function asOfInstants(model: Model): readonly number[] {
+  const instants = new Set<number>([model.clock]);
+  for (const edge of model.edges.values()) {
+    if (edge.deleted) continue;
+    instants.add(edge.validFrom);
+    if (edge.validTo !== undefined) {
+      instants.add(edge.validTo - 1);
+      instants.add(edge.validTo);
+    }
+  }
+  return [...instants].toSorted((left, right) => left - right);
+}
+
+/**
+ * `store.asOf(t)` one-hop `wholes()` from every part, at every coordinate of
+ * {@link asOfInstants}, against the model: the rows whose membership window
+ * holds `t` ({@link countsAt}), between nodes live and valid at `t`. Node
+ * windows are not composition state, so they are read from the rows. The
+ * window rule is what makes this at most one whole per part at each `t`.
+ */
+async function assertAsOfWholesMatch(real: Real, model: Model): Promise<void> {
+  const nodeRows = await Promise.all(
+    NODE_KINDS.map((kind) =>
+      real.backend.findNodesByKind({
+        graphId: real.graphId,
+        kind,
+        excludeDeleted: true,
+        temporalMode: "includeEnded",
+      }),
+    ),
+  );
+  const nodeWindows = new Map(
+    nodeRows.flat().map((row) => [
+      row.id,
+      {
+        from: instantOf(row.valid_from) ?? Number.NEGATIVE_INFINITY,
+        to: instantOf(row.valid_to) ?? Number.POSITIVE_INFINITY,
+      },
+    ]),
+  );
+  const validAt = (id: string, instant: number): boolean => {
+    const window = nodeWindows.get(id);
+    return (
+      isLive(model, id) &&
+      window !== undefined &&
+      window.from <= instant &&
+      instant < window.to
+    );
+  };
+  for (const instant of asOfInstants(model)) {
+    const actual = await real.store
+      .asOf(iso(instant))
+      .query()
+      .from(["CpMid", "CpLeaf", "CpTag", "CpFolder"], "part")
+      .wholes("whole", { maxHops: 1 })
+      .select((ctx) => ({ root: ctx.part.id, node: ctx.whole.id }))
+      .execute();
+    const expected = [...model.edges.values()]
+      .filter(
+        (edge) =>
+          countsAt(edge, instant) &&
+          validAt(edge.partId, instant) &&
+          validAt(edge.wholeId, instant),
+      )
+      .map((edge) => ({ root: edge.partId, node: edge.wholeId }));
+    expect({ asOf: iso(instant), wholes: navigationPairs(actual) }).toEqual({
+      asOf: iso(instant),
+      wholes: navigationPairs(expected),
+    });
+  }
 }
 
 // ============================================================
@@ -1597,8 +1797,9 @@ class StepsCommand implements fc.AsyncCommand<Model, Real> {
     advanceClock(model, this.tick);
     const surface = surfaceOf(real.store);
     for (const factory of this.factories) {
-      const step = factory(model);
-      if (step === undefined) continue;
+      const built = factory(model);
+      if (built === undefined) continue;
+      const step = withWindowRule(model, built);
       const before =
         step.refusals.length === 0 ? undefined : await readRows(real);
       const error = await outcomeOf(step.perform(surface, real));
@@ -1635,8 +1836,9 @@ class TransactionCommand implements fc.AsyncCommand<Model, Real> {
     await real.store.transaction(async (tx) => {
       const surface = surfaceOf(tx);
       for (const factory of this.factories) {
-        const step = factory(model);
-        if (step === undefined) continue;
+        const built = factory(model);
+        if (built === undefined) continue;
+        const step = withWindowRule(model, built);
         const before =
           step.refusals.length === 0 ? undefined : await rowsThrough(surface);
         const error = await outcomeOf(step.perform(surface, real));
@@ -1770,6 +1972,33 @@ const growArb = fc
         via: "omit",
         whole: "latest",
       }),
+    ],
+  }));
+
+/**
+ * History rows of a `oneActive` part, at offsets spanning the steps' ticks,
+ * so they land before, inside, across and abutting the part's other rows —
+ * including rows ended "later" than a clock that has since stepped back.
+ */
+const historyBackArb = fc.constantFrom(0, 30_000, 60_000, 90_000, 180_000);
+const historyEdgeArb = fc
+  .tuple(
+    fc.constantFrom("cpMidOf" as const, "cpWholeHasMid" as const),
+    pickArb,
+    pickArb,
+    historyBackArb,
+    historyBackArb,
+  )
+  .map(([edgeKind, partPick, wholePick, first, second]) => ({
+    name: `edge ${edgeKind} history`,
+    factories: [
+      historyEdgeStep(
+        edgeKind,
+        partPick,
+        wholePick,
+        Math.max(first, second),
+        Math.min(first, second),
+      ),
     ],
   }));
 
@@ -1931,6 +2160,7 @@ const transactionalArb = fc.oneof(
   { weight: 2, arbitrary: reparentArb },
   { weight: 3, arbitrary: nodeDeleteArb },
   { weight: 3, arbitrary: edgeWriteArb },
+  { weight: 2, arbitrary: historyEdgeArb },
   { weight: 1, arbitrary: restoreArb },
 );
 
