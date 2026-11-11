@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import {
   createAdapterStoreWithSchema,
+  createStore,
   defineEdge,
   defineGraph,
   defineGraphExtension,
@@ -208,6 +209,192 @@ export function registerEdgeCardinalityTighteningIntegrationTests(
           `expected edge-cardinality-tightening-violated, got ${details.reason}`,
         );
       }
+    });
+
+    it("plans a cardinality-only tightening as an edge-tightening requirement, never an empty ontology one", async () => {
+      const id = "edge_cardinality_tightening_plan_requirement";
+      const store = await context.createStore(
+        defineGraph({
+          id,
+          nodes: { TighteningPerson: { type: Person } },
+          edges: {},
+        }),
+      );
+      const evolved = await store.evolve(
+        defineGraphExtension({
+          nodes: {
+            TighteningTag: { properties: { label: { type: "string" } } },
+          },
+          edges: {
+            tighteningTagged: {
+              from: ["TighteningTag"],
+              to: ["TighteningPerson"],
+              properties: {},
+            },
+          },
+        }),
+      );
+
+      const plan = await evolved.planEvolution(
+        defineGraphExtension({
+          edges: {
+            tighteningTagged: {
+              from: ["TighteningTag"],
+              to: ["TighteningPerson"],
+              properties: {},
+              targetCardinality: "one",
+            },
+          },
+        }),
+      );
+
+      if (plan.status !== "change") throw new Error("Expected a change plan.");
+      expect(
+        plan.requirements.filter(
+          (requirement) =>
+            requirement.kind === "ontology-tightening" ||
+            requirement.kind === "edge-tightening",
+        ),
+      ).toEqual([
+        {
+          kind: "edge-tightening",
+          edgeKinds: ["tighteningTagged"],
+          edgeCardinalityAxes: [
+            {
+              direction: "target",
+              cardinality: "one",
+              edgeKind: "tighteningTagged",
+            },
+          ],
+        },
+      ]);
+    });
+    // MUTATION CHECK: emitting the requirement as `ontology-tightening`
+    // again (empty `changes`, the axes beside it) fails the equality.
+
+    describe("a commit that tightens an edge kind two ways at once", () => {
+      const linkedTo = defineEdge("tighteningLinkedTo", {
+        schema: z.object({}),
+      });
+
+      function buildLinkGraph(
+        id: string,
+        options: Readonly<{ acyclic?: true; targetCardinality?: "one" }>,
+      ) {
+        return defineGraph({
+          id,
+          nodes: { TighteningPerson: { type: Person } },
+          edges: {
+            tighteningLinkedTo: {
+              type: linkedTo,
+              from: [Person],
+              to: [Person],
+              ...options,
+            },
+          },
+        });
+      }
+
+      async function seedCycleWithTwoIncoming(id: string): Promise<void> {
+        const store = await context.createStore(buildLinkGraph(id, {}));
+        const first = await store.nodes.TighteningPerson.create({});
+        const second = await store.nodes.TighteningPerson.create({});
+        const third = await store.nodes.TighteningPerson.create({});
+        await store.edges.tighteningLinkedTo.create(first, second, {});
+        await store.edges.tighteningLinkedTo.create(second, first, {});
+        await store.edges.tighteningLinkedTo.create(third, first, {});
+      }
+
+      it("refuses once, reporting every violated family, so one repair covers both", async () => {
+        const id = "edge_cardinality_tightening_combined";
+        await seedCycleWithTwoIncoming(id);
+        const proposed = buildLinkGraph(id, {
+          acyclic: true,
+          targetCardinality: "one",
+        });
+
+        const error = await migrateSchema(
+          context.getBackend(),
+          proposed,
+          await activeVersion(context, id),
+        ).catch((error_: unknown) => error_);
+
+        expect(error).toBeInstanceOf(MigrationError);
+        const details = (error as MigrationError).details;
+        if (details.reason !== "edge-cardinality-tightening-violated") {
+          throw new Error(
+            `expected edge-cardinality-tightening-violated, got ${details.reason}`,
+          );
+        }
+        expect(
+          details.violations.map((violation) => violation.family).toSorted(),
+        ).toEqual(["edgeAcyclicity", "edgeCardinality"]);
+        expect(details.edgeKinds).toEqual(["tighteningLinkedTo"]);
+        expect(details.changes).toEqual([]);
+        const audited = await createStore(
+          proposed,
+          context.getBackend(),
+        ).verifyConstraintFences();
+        expect(audited.map((violation) => violation.family).toSorted()).toEqual(
+          ["edgeAcyclicity", "edgeCardinality"],
+        );
+        expect(await activeVersion(context, id)).toBe(1);
+      });
+      // MUTATION CHECK: filtering `details.violations` back down to the
+      // `edgeCardinality` rows (the previous refusal) drops `edgeAcyclicity`
+      // from the first assertion.
+
+      it("names the keyed nodes and edge kind of a cardinality violation in plain values", async () => {
+        const id = "edge_cardinality_tightening_plain_values";
+        await seedCycleWithTwoIncoming(id);
+
+        const error = await migrateSchema(
+          context.getBackend(),
+          buildLinkGraph(id, { targetCardinality: "one" }),
+          await activeVersion(context, id),
+        ).catch((error_: unknown) => error_);
+
+        const details = (error as MigrationError).details;
+        if (details.reason !== "edge-cardinality-tightening-violated") {
+          throw new Error(
+            `expected edge-cardinality-tightening-violated, got ${details.reason}`,
+          );
+        }
+        expect(details.violations).toEqual([
+          expect.objectContaining({
+            family: "edgeCardinality",
+            edgeKind: "tighteningLinkedTo",
+            direction: "target",
+            cardinality: "one",
+            keyedOn: {
+              to: {
+                kind: "TighteningPerson",
+                id: expect.any(String) as string,
+              },
+            },
+          }),
+        ]);
+      });
+      // MUTATION CHECK: dropping `plainContention`'s plain fields from the
+      // `edgeCardinality` violation (`src/store/claims/verify.ts`) leaves
+      // only `target`, whose `axis` and `key` are storage encodings.
+
+      it("reports acyclic in the edge diff, never in the ontology diff", async () => {
+        const id = "edge_cardinality_tightening_diff_placement";
+        await context.createStore(buildLinkGraph(id, {}));
+
+        const diff = await getSchemaChanges(
+          context.getBackend(),
+          buildLinkGraph(id, { acyclic: true }),
+        );
+
+        expect(diff?.ontology).toEqual([]);
+        expect(diff?.edges.map((change) => change.details)).toEqual([
+          'Edge "tighteningLinkedTo" declared acyclic: true',
+        ]);
+      });
+      // MUTATION CHECK: removing the `acyclicFlagTransition` arm from
+      // `diffEdgeDef` (`src/schema/migration.ts`) leaves `diff.edges` empty.
     });
 
     it("applies the same data probe to a source-side tightening (many -> one)", async () => {

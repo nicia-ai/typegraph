@@ -215,14 +215,23 @@ async function assertAdoptedTighteningRefusedLikeEvolve<
   if (plan.status !== "change") throw new Error("Expected tightening plan.");
   expect(
     plan.requirements.filter(
-      (requirement) => requirement.kind === "ontology-tightening",
+      (requirement) =>
+        requirement.kind === "ontology-tightening" ||
+        requirement.kind === "edge-tightening",
     ),
   ).toEqual([
-    {
-      kind: "ontology-tightening",
-      changes: evolveDetails.changes,
-      edgeCardinalityAxes: [],
-    },
+    ...(evolveDetails.changes.length > 0 ?
+      [{ kind: "ontology-tightening", changes: evolveDetails.changes }]
+    : []),
+    ...(evolveDetails.edgeKinds.length > 0 ?
+      [
+        {
+          kind: "edge-tightening",
+          edgeKinds: evolveDetails.edgeKinds,
+          edgeCardinalityAxes: evolveDetails.axes,
+        },
+      ]
+    : []),
   ]);
   if (backend.adoptSchemaWriteTransaction === undefined) {
     await assertUnsupportedAdoption(() =>

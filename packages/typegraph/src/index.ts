@@ -394,7 +394,6 @@ export type {
 export {
   // Individual relation factories (for convenience)
   broader,
-  compositionViaKind,
   // Transitive-closure utilities (reason over subClassOf/equivalentTo hierarchies)
   computeTransitiveClosure,
   // Core ontology module
@@ -457,6 +456,7 @@ export type {
   RuntimeKindTokenFailure,
   SchemaContentConflictErrorDetails,
   SchemaMismatchErrorDetails,
+  SchemaTighteningRefusalDetails,
   StaleVersionErrorDetails,
   StoreNotInitializedErrorDetails,
   StoreNotInitializedReason,
@@ -714,16 +714,6 @@ export {
   isSchemaInitialized,
   registerGraphTemplate,
 } from "./schema";
-// The data checks a schema commit's ontology tightening owes. Named here so
-// a consumer narrowing `MigrationErrorDetails.changes[n].probes` or a
-// `ConstraintFenceViolation`'s `edgeEndpointAssignability` member (below)
-// can name every field's type without a subpath import. Also available from
-// the "./schema" subpath.
-export type {
-  OntologyDataProbe,
-  UniquenessComponentProbeGroup,
-} from "./schema";
-export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
 // The constraints a schema commit refuses to strand, for a consumer
 // narrowing `MigrationErrorDetails` on
 // `reason: "unique-constraint-requires-empty-kind"`. Also available from the
@@ -731,8 +721,9 @@ export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
 export type { UniquenessClaimGate } from "./schema";
 // The axes a schema commit's edge-cardinality tightening owes, for a
 // consumer narrowing `MigrationErrorDetails` on
-// `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
-// ontology probe types above. Also available from the "./backend" subpath.
+// `reason: "edge-cardinality-tightening-violated"` or
+// `"ontology-tightening-violated"`. Also available from the "./backend"
+// subpath.
 // `CompositionClaimScope` is exported alongside it: it is `EdgeCardinalityDeclaration.scope`'s
 // only non-`undefined` member, so a consumer narrowing that field needs it
 // too, without reaching into `./backend/types` directly.

@@ -617,8 +617,6 @@ export async function ensureSchemaInternal<G extends GraphDef>(
         toVersion: activeSchema.version + 1,
         before: storedSchema,
         after: currentSchema,
-        // `diff` above already classified this exact before/after pair.
-        changes: diff.ontology,
       });
       const preflight = planSchemaCommitPreflight({
         structural: undefined,

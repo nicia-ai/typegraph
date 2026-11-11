@@ -1166,13 +1166,8 @@ export function registerOntologyTighteningIntegrationTests(
             `expected ontology-tightening-violated, got ${details.reason}`,
           );
         }
-        expect(details.changes).toEqual([
-          matchingObject({
-            entity: "edgeRegistration",
-            name: "worksFor",
-            severity: "warning",
-          }),
-        ]);
+        expect(details.changes).toEqual([]);
+        expect(details.edgeKinds).toEqual(["worksFor"]);
         expect(details.violations).toEqual([
           {
             family: "edgeEndpointAssignability",

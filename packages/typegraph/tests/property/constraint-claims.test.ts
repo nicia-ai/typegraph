@@ -1614,6 +1614,13 @@ function expectedViolations(model: ClaimModel): readonly unknown[] {
             toKind: sample.toKind,
             toId: sample.toId,
           }),
+          edgeKind,
+          direction: ref.direction,
+          cardinality: ref.cardinality,
+          keyedOn:
+            ref.direction === "source" ?
+              { from: { kind: sample.fromKind, id: sample.fromId } }
+            : { to: { kind: sample.toKind, id: sample.toId } },
           edgeIds: group.map((edge) => edge.id),
         });
       }
@@ -1636,6 +1643,7 @@ function expectedViolations(model: ClaimModel): readonly unknown[] {
         axis: COMPOSITION_RELATION_NAME,
         key: encodeTupleKey([requireDefined(partKind), requireDefined(partId)]),
       },
+      part: { kind: requireDefined(partKind), id: requireDefined(partId) },
       edgeIds: group.map((edge) => edge.id),
     });
   }

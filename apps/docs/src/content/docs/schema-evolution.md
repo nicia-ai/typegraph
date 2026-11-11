@@ -186,6 +186,17 @@ transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
 | an edge's admitted endpoint pair              | Safe                                                | Warning — checked against live edges               |
 
+Where a change is reported follows one rule: `SchemaDiff.ontology` carries
+ontology relations (the meta-edge rows above), and `SchemaDiff.edges` carries
+everything about an edge kind's own registration — its endpoints, `cardinality`,
+`targetCardinality`, `endpointExistence` and `acyclic`. A tightening that
+needs a data check never appears under a category whose list is empty:
+declaring `acyclic: true` shows as a `warning` entry in `diff.edges` and
+leaves `diff.ontology` empty, and a narrowed `from`/`to` is the one existing
+`fromKinds`/`toKinds` entry in `diff.edges`. A removed `sameAs` or
+`equivalentTo` that names an external IRI and strands no kind's endpoint pair
+is `safe`: an IRI is never a kind.
+
 `sameAs` and `differentFrom` no longer have a public factory to author them
 with (see
 [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
@@ -278,6 +289,13 @@ try {
 }
 ```
 
+The refusal lists every violated family at once: `details.violations`
+holds the ontology, `acyclic`, endpoint and edge-cardinality rows together,
+`details.changes` the ontology changes that owed a check and
+`details.edgeKinds` the edge kinds whose own registration tightened. When a
+cardinality row violates, `details.reason` is
+`"edge-cardinality-tightening-violated"` instead, with the same fields — see
+[Edge cardinality tightenings](#edge-cardinality-tightenings-are-checked-against-your-data).
 Resolve the offending rows (delete them, change their kind, or narrow the
 ontology change), then retry. `store.verifyConstraintFences()` lists the same
 rows on demand at any time — run it against a live store to find conflicts
@@ -313,7 +331,10 @@ against the live population before the version is published:
 - An edge kind that tightens **both axes in the same commit** is checked
   independently for each; either violation refuses the whole commit, and the
   thrown error reports every newly-constrained axis, not just the first one
-  found.
+  found. The same holds across families: a commit that also declares
+  `acyclic: true` or adds an ontology axiom is refused once, with the
+  `edgeAcyclicity` or ontology rows beside the `edgeCardinality` rows in
+  `details.violations`, so one repair covers the whole commit.
 - Moving an axis from `one` to `oneActive` is a **loosening**: `one` counts
   every edge for its whole life and `oneActive` only edges whose `validTo` is
   open, so data that satisfies `one` already satisfies `oneActive`. That move
@@ -351,6 +372,12 @@ try {
   }
 }
 ```
+
+A cardinality violation names its edge kind, direction and the node(s) it is
+keyed on as plain values (`violation.edgeKind`, `violation.direction`,
+`violation.keyedOn.from` / `violation.keyedOn.to`), and the write-time
+`CardinalityError` carries `details.incumbentEdgeId`, the stored edge occupying
+the slot, so neither needs a second query to act on.
 
 Resolve the offending rows (delete the excess edges, or loosen the target
 schema change), then retry. This check has the same residual window as the
@@ -526,7 +553,8 @@ never auto-migrates. The first `ensureSchema`/`createStoreWithSchema` call
 after upgrading throws `MigrationError`, or returns `status: "breaking"` with
 `throwOnBreaking: false`. Its migration actions include one entry naming
 every persisted relation that uses a custom meta-edge, and each such change
-in `diff.ontology` carries the relation in `removedCustomRelation`.
+in `diff.ontology` carries the relation in `removedCustomRelation` as a
+`{ metaEdge, from, to }` object.
 `store.evolve()`, `store.planEvolution()` and `store.removeKinds()` would
 drop the relations too, so each refuses before writing with `MigrationError`
 (`reason: "custom-relation-removal"`, the relations in `details.relations`),

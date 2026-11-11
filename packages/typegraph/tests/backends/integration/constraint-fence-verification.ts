@@ -387,6 +387,10 @@ export function registerConstraintFenceVerificationIntegrationTests(
             axis: "one:verifyManages",
             key: encodeTupleKey(["VerifyEmployee", employee.id]),
           },
+          edgeKind: "verifyManages",
+          direction: "source",
+          cardinality: "one",
+          keyedOn: { from: { kind: "VerifyEmployee", id: employee.id } },
           edgeIds: ["verify-ended-edge", "verify-future-edge"],
         },
       ]);
@@ -438,6 +442,12 @@ export function registerConstraintFenceVerificationIntegrationTests(
         graphId: verifyGraph.id,
         axis: "\u001Eto\u001Eone:verifyAssignedTo",
         key: encodeTupleKey(["VerifyProject", project.id]),
+      });
+      expect(violation).toMatchObject({
+        edgeKind: "verifyAssignedTo",
+        direction: "target",
+        cardinality: "one",
+        keyedOn: { to: { kind: "VerifyProject", id: project.id } },
       });
       expect(violation.edgeIds).toEqual(
         [edge.id, "verify-target-unfenced-edge"].toSorted(),

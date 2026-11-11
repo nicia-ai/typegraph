@@ -259,17 +259,17 @@ describe("dropping a relation that names a custom meta-edge is breaking", () => 
         {
           type: "removed",
           severity: "breaking",
-          removedCustomRelation: "governs(A, B)",
+          removedCustomRelation: { metaEdge: "governs", from: "A", to: "B" },
         },
         {
           type: "removed",
           severity: "breaking",
-          removedCustomRelation: "audits(B, A)",
+          removedCustomRelation: { metaEdge: "audits", from: "B", to: "A" },
         },
       ]),
     );
     const governs = diff.ontology.find(
-      (change) => change.removedCustomRelation === "governs(A, B)",
+      (change) => change.removedCustomRelation?.metaEdge === "governs",
     );
     expect(governs?.details).toContain("governs(A, B)");
     expect(governs?.details).toContain("defineGraph({ annotations })");
@@ -306,7 +306,7 @@ describe("dropping a custom-meta-edge relation alongside a kind it names", () =>
       expect.objectContaining({
         type: "removed",
         severity: "safe",
-        removedCustomRelation: "governs(A, X)",
+        removedCustomRelation: { metaEdge: "governs", from: "A", to: "X" },
       }),
     ]);
     expect(getMigrationActions(diff)).toContainEqual(
@@ -530,7 +530,10 @@ describe("store verbs that commit without ensureSchema refuse to drop a persiste
       fromVersion: 2,
       toVersion: 3,
       reason: "custom-relation-removal",
-      relations: ["governs(A, B)", "audits(B, A)"],
+      relations: [
+        { metaEdge: "governs", from: "A", to: "B" },
+        { metaEdge: "audits", from: "B", to: "A" },
+      ],
     });
     expect(error.message).toContain(
       "MOVE custom ontology relations governs(A, B), audits(B, A)",
@@ -552,7 +555,10 @@ describe("store verbs that commit without ensureSchema refuse to drop a persiste
 
     expect(error.details).toMatchObject({
       reason: "custom-relation-removal",
-      relations: ["governs(A, B)", "audits(B, A)"],
+      relations: [
+        { metaEdge: "governs", from: "A", to: "B" },
+        { metaEdge: "audits", from: "B", to: "A" },
+      ],
     });
     expect(await activeRelations(backend)).toMatchObject({ version: 2 });
   });
@@ -580,7 +586,10 @@ describe("store verbs that commit without ensureSchema refuse to drop a persiste
     expect(error.details).toMatchObject({
       reason: "custom-relation-removal",
       fromVersion: version,
-      relations: ["governs(A, B)", "cites(A, Doc)"],
+      relations: [
+        { metaEdge: "governs", from: "A", to: "B" },
+        { metaEdge: "cites", from: "A", to: "Doc" },
+      ],
     });
     expect(await activeRelations(backend)).toEqual({
       version,

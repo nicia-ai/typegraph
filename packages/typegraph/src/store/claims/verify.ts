@@ -28,6 +28,7 @@
 import type { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import type {
+  ClaimEdgeCardinalityParams,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   ContendedUniqueRow,
@@ -74,8 +75,11 @@ import {
 } from "./axis";
 import { compositionEdgeCardinalityDeclarations } from "./composition-claims";
 import {
+  compositionClaimEndpoints,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimTarget,
+  type EdgeCardinalityDirection,
+  edgeCardinalitySpec,
 } from "./edge-claims";
 
 /**
@@ -99,7 +103,26 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       family: "edgeCardinality";
+      /**
+       * The claim row's address, for a reader who wants to go straight to the
+       * row a writer contends for. `axis` and `key` are storage encodings
+       * (delimiter-joined axis, JSON-encoded key): read the plain fields
+       * below for the edge kind, the direction and the node(s) instead.
+       */
       target: ClaimTarget;
+      edgeKind: string;
+      /** Which endpoint's population overran its declared cardinality. */
+      direction: EdgeCardinalityDirection;
+      /** The declared cardinality the population overran. */
+      cardinality: string;
+      /**
+       * The node(s) the overrun population is keyed on: `from` for a
+       * source-side axis, `to` for a target-side axis, both for `unique`.
+       */
+      keyedOn: Readonly<{
+        from?: Readonly<{ kind: string; id: string }>;
+        to?: Readonly<{ kind: string; id: string }>;
+      }>;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -113,6 +136,8 @@ export type ConstraintFenceViolation =
        */
       family: "composition";
       target: ClaimTarget;
+      /** The part holding more than one whole. */
+      part: Readonly<{ kind: string; id: string }>;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -363,6 +388,52 @@ function disjointnessViolations(
   }));
 }
 
+type EdgeContentionViolation = Extract<
+  ConstraintFenceViolation,
+  { family: "edgeCardinality" | "composition" }
+>;
+
+/** A contended-edge violation before its holder ids are attached. */
+type ContentionWithoutEdges =
+  EdgeContentionViolation extends infer Member ?
+    Member extends EdgeContentionViolation ?
+      Omit<Member, "edgeIds">
+    : never
+  : never;
+
+/**
+ * The plain-valued part of one contended edge axis: the family, the claim
+ * row's address, and the edge kind, direction and node(s) it is keyed on as
+ * kind names and ids. The row already knows which query found it (`scope` is
+ * set only by the composition query), so this never re-derives the family.
+ */
+function plainContention(
+  claim: ClaimEdgeCardinalityParams,
+  target: ClaimTarget,
+): ContentionWithoutEdges {
+  if (claim.scope !== undefined) {
+    return {
+      family: "composition",
+      target,
+      part: compositionClaimEndpoints(claim).part,
+    };
+  }
+  const { keyShape } = edgeCardinalitySpec(claim);
+  const from = { kind: claim.fromKind, id: claim.fromId };
+  const to = { kind: claim.toKind, id: claim.toId };
+  return {
+    family: "edgeCardinality",
+    target,
+    edgeKind: claim.edgeKind,
+    direction: claim.direction,
+    cardinality: claim.cardinality,
+    keyedOn:
+      keyShape === "from" ? { from }
+      : keyShape === "to" ? { to }
+      : { from, to },
+  };
+}
+
 /**
  * Live edges folded onto the cardinality axis each one would claim, reported
  * where an axis carries more than one holder.
@@ -386,7 +457,7 @@ function edgeCardinalityViolations(
     string,
     Readonly<{
       target: ClaimTarget;
-      family: "edgeCardinality" | "composition";
+      violation: ContentionWithoutEdges;
       edgeIds: Set<string>;
     }>
   >();
@@ -397,16 +468,16 @@ function edgeCardinalityViolations(
     // `exactOptionalPropertyTypes` refuses for `ClaimEdgeCardinalityParams`'
     // OPTIONAL `scope`.
     const { scope, ...rest } = row;
-    const target = edgeCardinalityClaimTarget({
+    const claim = {
       ...rest,
       graphId,
       ...(scope === undefined ? {} : { scope }),
-    });
-    const family = row.scope === undefined ? "edgeCardinality" : "composition";
+    };
+    const target = edgeCardinalityClaimTarget(claim);
     const identity = targetIdentity(target);
     const entry = byAxis.get(identity) ?? {
       target,
-      family,
+      violation: plainContention(claim, target),
       edgeIds: new Set<string>(),
     };
     entry.edgeIds.add(row.edgeId);
@@ -415,8 +486,7 @@ function edgeCardinalityViolations(
   return [...byAxis.values()]
     .filter((entry) => entry.edgeIds.size > 1)
     .map((entry) => ({
-      family: entry.family,
-      target: entry.target,
+      ...entry.violation,
       edgeIds: [...entry.edgeIds].toSorted((left, right) =>
         compareStrings(left, right),
       ),
