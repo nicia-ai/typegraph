@@ -142,16 +142,21 @@ expectError(
   ),
 );
 
-store.nodes.Episode.bulkGetOrCreateByConstraint(
-  "episode_title",
-  [{ props: { title: "one" } }],
-  { partOf: { whole: show } },
+store.nodes.Episode.bulkGetOrCreateByConstraint("episode_title", [
+  { props: { title: "one" }, partOf: { whole: show } },
+  { props: { title: "two" } },
+]);
+expectError(
+  store.nodes.Episode.bulkGetOrCreateByConstraint("episode_title", [
+    { props: { title: "one" }, partOf: { whole: album } },
+  ]),
 );
+// The attachment is per item, as on `bulkCreate`: the options take none.
 expectError(
   store.nodes.Episode.bulkGetOrCreateByConstraint(
     "episode_title",
     [{ props: { title: "one" } }],
-    { partOf: { whole: album } },
+    { partOf: { whole: show } },
   ),
 );
 

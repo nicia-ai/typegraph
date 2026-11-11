@@ -1093,13 +1093,41 @@ export type NodeGetOrCreateByConstraintOptions<
    *
    * An attachment this graph cannot resolve at all — an undeclared whole
    * kind, an unknown `via`, an omitted `via` where the part declares more
-   * than one pair toward that whole kind — is a `ConfigurationError` on
-   * every action alike, decided before the match is even read.
+   * than one pair toward that whole kind — is a `CompositionConfigurationError`
+   * on every action alike, decided before the match is even read.
    *
-   * Shared by `bulkGetOrCreateByConstraint`, applying to every item in the
-   * batch. Use `reparent` to MOVE a part that already has a different whole
-   * — this option never silently re-homes one.
+   * `bulkGetOrCreateByConstraint` takes the same attachment per item
+   * ({@link NodeBulkGetOrCreateByConstraintItem}). Use `reparent` to MOVE a
+   * part that already has a different whole — this option never silently
+   * re-homes one.
    */
+  partOf?: CompositionAttachment<Via, Whole>;
+}>;
+
+/**
+ * Options for `bulkGetOrCreateByConstraint`: the batch-wide existing-record
+ * behavior. The attachment is per item
+ * ({@link NodeBulkGetOrCreateByConstraintItem}), as on `bulkCreate`.
+ */
+export type NodeBulkGetOrCreateByConstraintOptions = Readonly<{
+  /** Existing record behavior, for every item. Default: "return" */
+  ifExists?: IfExistsMode;
+}>;
+
+/**
+ * One `bulkGetOrCreateByConstraint` item: the properties to match (and create
+ * or update with) and, optionally, the attachment the resolved node must hold
+ * — the postcondition {@link NodeGetOrCreateByConstraintOptions.partOf}
+ * describes, per item, so one batch can place parts under different wholes.
+ * Two items that resolve to the same constraint key must state the same
+ * attachment (or none); a batch where they differ is refused.
+ */
+export type NodeBulkGetOrCreateByConstraintItem<
+  Props,
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Readonly<{
+  props: Props;
   partOf?: CompositionAttachment<Via, Whole>;
 }>;
 
@@ -1949,10 +1977,12 @@ export type NodeCollection<
       CompositionViaRef | undefined,
   >(
     constraintName: CN,
-    items: readonly Readonly<{
-      props: z.input<N["schema"]>;
-    }>[],
-    options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
+    items: readonly NodeBulkGetOrCreateByConstraintItem<
+      z.input<N["schema"]>,
+      Via,
+      Whole
+    >[],
+    options?: NodeBulkGetOrCreateByConstraintOptions,
   ): Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 

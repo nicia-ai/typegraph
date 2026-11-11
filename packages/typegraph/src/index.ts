@@ -842,6 +842,8 @@ export type {
   MeasurableTransactionContext,
   Node,
   NodeBulkFindByIndexOptions,
+  NodeBulkGetOrCreateByConstraintItem,
+  NodeBulkGetOrCreateByConstraintOptions,
   NodeCollection,
   NodeCreateOptions,
   NodeDeleteOptions,

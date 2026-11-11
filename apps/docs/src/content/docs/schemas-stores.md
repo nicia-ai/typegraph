@@ -1417,6 +1417,8 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
   constraintName: string,
   items: readonly {
     props: { name: string; email?: string };
+    // Per item, as on bulkCreate: see partOf on get-or-create.
+    partOf?: { whole; via?; props?; validFrom?; validTo? };
   }[],
   options?: { ifExists?: "return" | "update" }
 ): Promise<

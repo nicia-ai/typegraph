@@ -588,9 +588,9 @@ for the full order.
 #### Attaching a part: `partOf: { whole, via?, props? }`
 
 Every write that can give a part a whole takes the same attachment value:
-`create`, `bulkCreate` (per item), `getOrCreateByConstraint` /
-`bulkGetOrCreateByConstraint`, and
-[`reparent`](#reparent-moving-a-part-to-a-new-whole).
+`create`, `bulkCreate` (per item), `getOrCreateByConstraint`,
+`bulkGetOrCreateByConstraint` (per item, so one batch can place parts under
+different wholes), and [`reparent`](#reparent-moving-a-part-to-a-new-whole).
 
 ```typescript
 const chapter = await store.nodes.Chapter.create(
@@ -863,7 +863,13 @@ a refused property update (a unique conflict, a validation error) leaves the
 attachment and its history untouched — even for a caller that catches the
 error inside an enclosing `store.transaction(...)`.
 
-`bulkGetOrCreateByConstraint` applies the same rule to the batch as a whole.
+`bulkGetOrCreateByConstraint` takes `partOf` on each item
+(`[{ props, partOf }]`) and applies the same rule to the batch as a whole.
+Two items that resolve to the same constraint key resolve to one node, so
+they must state the same attachment (or none); a batch where they differ is
+refused with `ValidationError` (issue path `items[<i>].partOf`) before it
+reads anything, and a `partOf` passed in the batch options instead of on the
+items is refused (issue path `options.partOf`) rather than ignored.
 Before its first write it reaches, for **every** item whose constraint
 matched an existing node, each verdict a read can decide:
 

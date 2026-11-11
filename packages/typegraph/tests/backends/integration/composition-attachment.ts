@@ -1866,8 +1866,10 @@ export function registerCompositionAttachmentIntegrationTests(
       // `"found"` with no edge written, and the edge count below stays 1.
       const results = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
-        [{ props: { slug: "a" } }, { props: { slug: "b" } }],
-        { partOf: attachment },
+        [
+          { props: { slug: "a" }, partOf: attachment },
+          { props: { slug: "b" }, partOf: attachment },
+        ],
       );
       expect(results.map((entry) => entry.action)).toEqual(["found", "found"]);
 
@@ -2039,14 +2041,24 @@ export function registerCompositionAttachmentIntegrationTests(
       // two `"found"` results and leaves "b" hanging off the anthology.
       const error = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
-        [{ props: { slug: "a" } }, { props: { slug: "b" } }],
-        {
-          partOf: {
-            whole: { kind: "CaBook", id: book.id },
-            via: "caChapterOf",
-            props: { order: 1 },
+        [
+          {
+            props: { slug: "a" },
+            partOf: {
+              whole: { kind: "CaBook", id: book.id },
+              via: "caChapterOf",
+              props: { order: 1 },
+            },
           },
-        },
+          {
+            props: { slug: "b" },
+            partOf: {
+              whole: { kind: "CaBook", id: book.id },
+              via: "caChapterOf",
+              props: { order: 1 },
+            },
+          },
+        ],
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(CompositionExistenceError);
@@ -2063,6 +2075,93 @@ export function registerCompositionAttachmentIntegrationTests(
       // Refused, not moved: "b" keeps the anthology and gains no book edge.
       expect(await store.edges.caIncludedIn.find({})).toHaveLength(1);
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
+    it("bulkGetOrCreateByConstraint takes partOf per item, so one batch places parts under different wholes", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+      const underBook = {
+        whole: { kind: "CaBook", id: book.id },
+        via: "caChapterOf",
+        props: { order: 1 },
+      } as const;
+      const underAnthology = {
+        whole: { kind: "CaAnthology", id: anthology.id },
+      } as const;
+      // "a" already sits under the book, "b" under the anthology; "c" is new.
+      await store.nodes.CaChapter.create({ slug: "a" }, { partOf: underBook });
+      await store.nodes.CaChapter.create(
+        { slug: "b" },
+        { partOf: underAnthology },
+      );
+
+      // MUTATION CHECK: apply item 0's `partOf` to every item in
+      // `executeNodeBulkGetOrCreateByConstraint`
+      // (src/store/operations/node-operations.ts), as the batch-level option
+      // did — "b" is then refused as holding a different whole and nothing
+      // is created.
+      const results = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+        "ca_chapter_slug",
+        [
+          { props: { slug: "a" }, partOf: underBook },
+          { props: { slug: "b" }, partOf: underAnthology },
+          { props: { slug: "c" }, partOf: underAnthology },
+        ],
+      );
+      expect(results.map((entry) => entry.action)).toEqual([
+        "found",
+        "found",
+        "created",
+      ]);
+      const created = requireDefined(results[2]).node;
+      const anthologyParts = await store.edges.caIncludedIn.find({});
+      expect(anthologyParts.map((edge) => edge.fromId).toSorted()).toEqual(
+        [requireDefined(results[1]).node.id, created.id].toSorted(),
+      );
+      expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
+    });
+
+    it("bulkGetOrCreateByConstraint refuses two items of one key that state different attachments, and a batch-level partOf", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const book = await store.nodes.CaBook.create({});
+      const anthology = await store.nodes.CaAnthology.create({});
+
+      // MUTATION CHECK: drop `assertDuplicateKeysStateOneAttachment` from
+      // `executeNodeBulkGetOrCreateByConstraint` — the second item's
+      // attachment is then silently dropped and "a" is created under the
+      // book alone.
+      await expect(
+        store.nodes.CaChapter.bulkGetOrCreateByConstraint("ca_chapter_slug", [
+          {
+            props: { slug: "a" },
+            partOf: { whole: book, via: "caChapterOf", props: { order: 1 } },
+          },
+          { props: { slug: "a" }, partOf: { whole: anthology } },
+        ]),
+      ).rejects.toMatchObject({
+        name: "ValidationError",
+        details: { issues: [{ path: "items[1].partOf" }] },
+      });
+
+      // A caller still passing the attachment as a batch option is refused
+      // rather than having it ignored.
+      const batchLevel: Record<string, unknown> = {
+        partOf: { whole: anthology },
+      };
+      await expect(
+        store.nodes.CaChapter.bulkGetOrCreateByConstraint(
+          "ca_chapter_slug",
+          [{ props: { slug: "a" } }],
+          batchLevel as never,
+        ),
+      ).rejects.toMatchObject({
+        name: "ValidationError",
+        details: {
+          issues: [{ path: "options.partOf", code: "unrecognized_keys" }],
+        },
+      });
+      expect(await store.nodes.CaChapter.find({})).toEqual([]);
     });
 
     it("bulkGetOrCreateByConstraint creates nothing when a matched item's refusal is caught inside an enclosing transaction", async () => {
@@ -2089,14 +2188,24 @@ export function registerCompositionAttachmentIntegrationTests(
         try {
           await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
             "ca_chapter_slug",
-            [{ props: { slug: "fresh" } }, { props: { slug: "held" } }],
-            {
-              partOf: {
-                whole: { kind: "CaBook", id: requested.id },
-                via: "caChapterOf",
-                props: { order: 1 },
+            [
+              {
+                props: { slug: "fresh" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 1 },
+                },
               },
-            },
+              {
+                props: { slug: "held" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 1 },
+                },
+              },
+            ],
           );
         } catch (error) {
           caught = error;
@@ -2142,14 +2251,24 @@ export function registerCompositionAttachmentIntegrationTests(
         try {
           await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
             "ca_chapter_slug",
-            [{ props: { slug: "bare" } }, { props: { slug: "held" } }],
-            {
-              partOf: {
-                whole: { kind: "CaBook", id: requested.id },
-                via: "caChapterOf",
-                props: { order: 2 },
+            [
+              {
+                props: { slug: "bare" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
               },
-            },
+              {
+                props: { slug: "held" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
+              },
+            ],
           );
         } catch (error) {
           caught = error;
@@ -2182,10 +2301,24 @@ export function registerCompositionAttachmentIntegrationTests(
         try {
           await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
             "ca_chapter_slug",
-            [{ props: { slug: "bare" } }, { props: { slug: "attached" } }],
-            {
-              partOf: { whole: book, via: "caChapterOf", props: { order: 2 } },
-            },
+            [
+              {
+                props: { slug: "bare" },
+                partOf: {
+                  whole: book,
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
+              },
+              {
+                props: { slug: "attached" },
+                partOf: {
+                  whole: book,
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
+              },
+            ],
           );
         } catch (error) {
           caught = error;
@@ -2211,11 +2344,10 @@ export function registerCompositionAttachmentIntegrationTests(
       let caught: unknown;
       await store.transaction(async (tx) => {
         try {
-          await tx.nodes.CaNest.bulkGetOrCreateByConstraint(
-            "ca_nest_slug",
-            [{ props: { slug: "inner" } }, { props: { slug: "outer" } }],
-            { partOf: { whole: outer } },
-          );
+          await tx.nodes.CaNest.bulkGetOrCreateByConstraint("ca_nest_slug", [
+            { props: { slug: "inner" }, partOf: { whole: outer } },
+            { props: { slug: "outer" }, partOf: { whole: outer } },
+          ]);
         } catch (error) {
           caught = error;
         }
@@ -2247,15 +2379,25 @@ export function registerCompositionAttachmentIntegrationTests(
         try {
           await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
             "ca_chapter_slug",
-            [{ props: { slug: "bare" } }, { props: { slug: "held" } }],
-            {
-              ifExists: "update",
-              partOf: {
-                whole: { kind: "CaBook", id: requested.id },
-                via: "caChapterOf",
-                props: { order: 2 },
+            [
+              {
+                props: { slug: "bare" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
               },
-            },
+              {
+                props: { slug: "held" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
+              },
+            ],
+            { ifExists: "update" },
           );
         } catch (error) {
           caught = error;
@@ -2294,14 +2436,24 @@ export function registerCompositionAttachmentIntegrationTests(
         try {
           await tx.nodes.CaChapter.bulkGetOrCreateByConstraint(
             "ca_chapter_slug",
-            [{ props: { slug: "gone" } }, { props: { slug: "held" } }],
-            {
-              partOf: {
-                whole: { kind: "CaBook", id: requested.id },
-                via: "caChapterOf",
-                props: { order: 2 },
+            [
+              {
+                props: { slug: "gone" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
               },
-            },
+              {
+                props: { slug: "held" },
+                partOf: {
+                  whole: { kind: "CaBook", id: requested.id },
+                  via: "caChapterOf",
+                  props: { order: 2 },
+                },
+              },
+            ],
           );
         } catch (error) {
           caught = error;
@@ -2445,11 +2597,10 @@ export function registerCompositionAttachmentIntegrationTests(
       let caught: unknown;
       await store.transaction(async (tx) => {
         try {
-          await tx.nodes.CaSlot.bulkGetOrCreateByConstraint(
-            "ca_slot_slug",
-            [{ props: { slug: "a" } }, { props: { slug: "new" } }],
-            { partOf: { whole: rack } },
-          );
+          await tx.nodes.CaSlot.bulkGetOrCreateByConstraint("ca_slot_slug", [
+            { props: { slug: "a" }, partOf: { whole: rack } },
+            { props: { slug: "new" }, partOf: { whole: rack } },
+          ]);
         } catch (error) {
           caught = error;
         }
@@ -2715,8 +2866,8 @@ export function registerCompositionAttachmentIntegrationTests(
 
       const bulk = await store.nodes.CaChapter.bulkGetOrCreateByConstraint(
         "ca_chapter_slug",
-        [{ props: { slug: "bulk" } }],
-        { ifExists: "update", partOf },
+        [{ props: { slug: "bulk" }, partOf: partOf }],
+        { ifExists: "update" },
       );
       expect(bulk.map((entry) => entry.action)).toEqual(["updated"]);
       expect(await windowOf("bulk")).toEqual(window);
@@ -2786,14 +2937,13 @@ export function registerCompositionAttachmentIntegrationTests(
           () =>
             store.nodes.CaChapter.bulkGetOrCreateByConstraint(
               "ca_chapter_slug",
-              [{ props: { slug: "a" } }],
-              { partOf },
+              [{ props: { slug: "a" }, partOf: partOf }],
             ),
           () =>
             store.nodes.CaChapter.bulkGetOrCreateByConstraint(
               "ca_chapter_slug",
-              [{ props: { slug: "a" } }],
-              { ifExists: "update", partOf },
+              [{ props: { slug: "a" }, partOf: partOf }],
+              { ifExists: "update" },
             ),
           () =>
             store.transaction((tx) =>
@@ -2867,8 +3017,7 @@ export function registerCompositionAttachmentIntegrationTests(
           () =>
             store.nodes.CaChapter.bulkGetOrCreateByConstraint(
               "ca_chapter_slug",
-              [{ props: { slug: "a" } }],
-              { partOf },
+              [{ props: { slug: "a" }, partOf: partOf }],
             ),
         ];
         const refusals: unknown[] = [];
@@ -2924,11 +3073,10 @@ export function registerCompositionAttachmentIntegrationTests(
               { partOf },
             ),
           () =>
-            store.nodes.CaReel.bulkGetOrCreateByConstraint(
-              "ca_reel_slug",
-              [{ props: { slug: "bare" } }, { props: { slug: "bulk-get" } }],
-              { partOf },
-            ),
+            store.nodes.CaReel.bulkGetOrCreateByConstraint("ca_reel_slug", [
+              { props: { slug: "bare" }, partOf: partOf },
+              { props: { slug: "bulk-get" }, partOf: partOf },
+            ]),
         ];
         for (const call of calls) {
           const error = await call().catch((error_: unknown) => error_);
@@ -3017,9 +3165,12 @@ export function registerCompositionAttachmentIntegrationTests(
           () =>
             store.nodes.CaChapter.bulkGetOrCreateByConstraint(
               "ca_chapter_slug",
-              [{ props: { slug: "held" } }, { props: { slug: "bulk-get" } }],
-              // @ts-expect-error the flat form does not compile
-              { partOf: flat },
+              [
+                // @ts-expect-error the flat form does not compile
+                { props: { slug: "held" }, partOf: flat },
+                // @ts-expect-error the flat form does not compile
+                { props: { slug: "bulk-get" }, partOf: flat },
+              ],
             ),
         ],
         [

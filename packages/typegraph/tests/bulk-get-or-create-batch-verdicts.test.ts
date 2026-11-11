@@ -150,8 +150,7 @@ describe("bulkGetOrCreateByConstraint batch verdicts", () => {
     attachmentReads.mockClear();
     const results = await store.nodes.Book.bulkGetOrCreateByConstraint(
       "book_slug",
-      slugs.map((slug) => ({ props: { slug } })),
-      { partOf: { whole: shelf } },
+      slugs.map((slug) => ({ props: { slug }, partOf: { whole: shelf } })),
     );
 
     // MUTATION CHECK: have `partitionExistingGetOrCreateLegs` judge each

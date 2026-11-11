@@ -1572,11 +1572,16 @@ export function registerCompositionExistenceIntegrationTests(
       // whole this exact call is about to attach the first occurrence to —
       // the duplicate must be a plain "found" hit, not a refusal.
       const results =
-        await store.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint(
-          "byKey",
-          [{ props: { key: "dup-1" } }, { props: { key: "dup-1" } }],
-          { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
-        );
+        await store.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint("byKey", [
+          {
+            props: { key: "dup-1" },
+            partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+          },
+          {
+            props: { key: "dup-1" },
+            partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+          },
+        ]);
       expect(results[0]?.action).toBe("created");
       expect(results[1]?.action).toBe("found");
       expect(results[1]?.node.id).toBe(results[0]?.node.id);

@@ -55,6 +55,8 @@ import {
   type GetOrCreateAction,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeCollection,
   type NodeCreateOptions,
   type NodeDeleteOptions,
@@ -341,9 +343,11 @@ export type NodeCollectionConfig = Readonly<{
   executeBulkGetOrCreateByConstraint: (
     kind: string,
     constraintName: string,
-    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    items: readonly NodeBulkGetOrCreateByConstraintItem<
+      Record<string, unknown>
+    >[],
     backend: GraphBackend | TransactionBackend,
-    options?: NodeGetOrCreateByConstraintOptions,
+    options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
     kind: string,
@@ -1456,15 +1460,16 @@ export function createNodeCollection<
 
     async bulkGetOrCreateByConstraint(
       constraintName: string,
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-      }>[],
-      options?: NodeGetOrCreateByConstraintOptions,
+      items: readonly NodeBulkGetOrCreateByConstraintItem<
+        z.input<N["schema"]>
+      >[],
+      options?: NodeBulkGetOrCreateByConstraintOptions,
     ): Promise<NodeGetOrCreateByConstraintResult<N>[]> {
       if (items.length === 0) return [];
 
       const mappedItems = items.map((item) => ({
         props: item.props,
+        ...(item.partOf === undefined ? {} : { partOf: item.partOf }),
       }));
 
       // The operation owns its transaction boundary, which its convergence
