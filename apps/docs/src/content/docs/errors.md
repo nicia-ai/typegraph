@@ -784,7 +784,9 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
 | `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
 | `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `"boundedAttachment"` | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A stated `partOf.validTo` on a `oneActive` pair, where only an open window is a membership, so the edge would not attach the part |
 | `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -808,6 +810,33 @@ try {
     // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
     //  move the part — it retires the incumbent attachment and creates the
     //  new one in one transaction. ..."
+  }
+}
+```
+
+On a `population: "oneActive"` pair the rule holds at every valid-time
+coordinate: the windows of one part's composition edges never overlap
+([One whole at every instant](/ontology#one-whole-at-every-instant)). A
+`"windowOverlap"` refusal names the edge being written and the one it would
+overlap, with both windows (an omitted bound is unbounded):
+
+```typescript
+// Chapter is attached to `book` from 2020, open-ended.
+try {
+  await store.edges.includedIn.create(chapter, anthology, {}, {
+    validFrom: "2019-01-01T00:00:00.000Z",
+    validTo: "2021-01-01T00:00:00.000Z",
+  });
+} catch (error) {
+  if (error instanceof CompositionError && error.code === "COMPOSITION_WINDOW_OVERLAP") {
+    console.log(error.details);
+    // { situation: "windowOverlap", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", edgeId: "<new edge id>",
+    //   validFrom: "2019-01-01T00:00:00.000Z", validTo: "2021-01-01T00:00:00.000Z",
+    //   incumbentEdgeKind: "chapterOf", incumbentEdgeId: "<the chapterOf edge's id>",
+    //   incumbentWholeKind: "Book", incumbentWholeId: "<book-id>",
+    //   incumbentValidFrom: "2020-01-01T00:00:00.000Z" }
   }
 }
 ```
@@ -889,11 +918,17 @@ the caller would have to make is visible in the error), and `"props"` (a
 `getOrCreateByConstraint` or `reparent` call resolving to an attachment that
 already holds — same whole, same realizing edge — whose stated `props` are
 schema-valid but canonically different from the edge's live stored props —
-carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
-is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
-present even when the call omitted `via`.
+carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`), and
+`"window"` (the same, for a stated window bound: a `partOf.validFrom` /
+`partOf.validTo` on such a call, or a `reparent` `at` toward the whole the
+part already holds, that differs from the realizing edge's stored bound —
+carries `edgeKind`/`edgeId`, the stated `option`, and `stated`/`stored`).
+`requestedVia` is the RESOLVED realizing edge of the pair the call's `partOf`
+names, so it is present even when the call omitted `via`. `details` is a union
+discriminated by `situation`, so narrowing on it types exactly the fields that
+situation carries.
 
-The error's `code` names the same four shapes, so a handler that routes on
+The error's `code` names the same five shapes, so a handler that routes on
 `code` alone can tell them apart:
 
 | `details.situation` | `code` |
@@ -902,6 +937,7 @@ The error's `code` names the same four shapes, so a handler that routes on
 | `"detach"` | `COMPOSITION_DETACH_REFUSED` |
 | `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
 | `"props"` | `COMPOSITION_PROPS_CONFLICT` |
+| `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` |
 
 Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
@@ -917,14 +953,22 @@ node's live whole, realizing edge, and (when stated) props succeeds and is
 idempotent, and one whose node has no live whole writes the attachment — see
 [`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
 
-A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
-`CompositionExistenceError` — the option is accepted-shaped but names no
+A `partOf` the graph cannot resolve raises `CompositionConfigurationError`
+rather than `CompositionExistenceError` — the option is accepted-shaped but names no
 declared pair, regardless of the part kind's `existence` and regardless of
 whether the call created the node or found it (the attachment is resolved
 before the match is even read, so the refusal cannot depend on what the
 constraint matched):
 
-| `details.code` | when |
+`CompositionConfigurationError` is a `ConfigurationError` whose `code` is the
+composition code itself (also kept on `details.code`), so every composition
+refusal carries its `COMPOSITION_*` code on `error.code`, whichever class
+raised it. The same class reports a composition navigation or export that
+names what the relation does not have (`COMPOSITION_NO_PARTS_DECLARED`,
+`COMPOSITION_NO_WHOLES_DECLARED`, `COMPOSITION_UNKNOWN_ALIAS`) and a
+composition unit an engine cut short (`COMPOSITION_UNIT_INDETERMINATE`).
+
+| `code` | when |
 | --- | --- |
 | `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.whole.kind` |
 | `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
@@ -1908,7 +1952,7 @@ below carries the same four details fields:
 | `changes` | The ontology changes in this diff that owed a data check (a `safe` or `breaking` change in the same commit is never included, even one alongside the change that was refused). Empty when only an edge kind's own registration tightened. |
 | `edgeKinds` | The edge kinds whose own registration tightened: a newly constrained `cardinality` or `targetCardinality`, `acyclic: true`, or an endpoint pair no longer admitted. Empty when only ontology relations tightened. |
 | `axes` | The edge-cardinality axes this commit newly constrains, each an `{direction, cardinality, edgeKind}` triple. |
-| `violations` | The offending rows, in exactly the shape `store.verifyConstraintFences()` returns for the proposed schema, **every violated family included**: `nodeDisjointness`, `nodeUniqueness`, `edgeEndpointAssignability`, `edgeAcyclicity`, `edgeCardinality`, and for composition `composition`, `compositionExistence` and `compositionFutureWindow` (a realizing edge kind that already holds a row whose window starts or ends later than the commit). |
+| `violations` | The offending rows, in exactly the shape `store.verifyConstraintFences()` returns for the proposed schema, **every violated family included**: `nodeDisjointness`, `nodeUniqueness`, `edgeEndpointAssignability`, `edgeAcyclicity`, `edgeCardinality`, and for composition `composition`, `compositionExistence`, `compositionFutureWindow` (a realizing edge kind that already holds a row whose window starts or ends later than the commit) and `compositionWindowOverlap` (a part whose stored rows would have overlapping valid-time windows under the pair). |
 
 One refusal reports every family the commit violates, so repair the listed
 rows once and retry: delete them, change their kind, or narrow the change.
@@ -2310,10 +2354,22 @@ try {
 | `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
 | `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
 | `COMPOSITION_PROPS_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
+| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | `CompositionError` | constraint | A stated `partOf.validTo` on a `oneActive` pair would write an edge that does not attach the part |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | `CompositionConfigurationError` | user | No composition pair is declared between the part's kind and the stated whole's kind |
+| `COMPOSITION_VIA_NOT_DECLARED` | `CompositionConfigurationError` | user | `via` names an edge kind that realizes no declared pair there |
+| `COMPOSITION_VIA_AMBIGUOUS` | `CompositionConfigurationError` | user | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `CompositionConfigurationError` | user | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair |
+| `COMPOSITION_NO_PARTS_DECLARED` | `CompositionConfigurationError` | user | `parts()` or `subgraph({ composition })` from a kind (or graph) that declares no composition parts |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `CompositionConfigurationError` | user | `wholes()` from a kind that declares no composition wholes |
+| `COMPOSITION_UNKNOWN_ALIAS` | `CompositionConfigurationError` | user | `parts()` / `wholes()` names a `from` alias the query does not have |
+| `COMPOSITION_UNIT_INDETERMINATE` | `CompositionConfigurationError` | user | The engine cut a composition closure statement short before it could be read whole |
+| `COMPOSITION_WINDOW_REQUIRES_FRESH_SNAPSHOT` | `ConfigurationError` (`details.code`) | user | A composition window decision ran on a snapshot-isolation session whose fence cannot show the snapshot to be fresh; use `read_committed` |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

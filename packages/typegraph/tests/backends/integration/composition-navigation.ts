@@ -1206,6 +1206,68 @@ export function registerCompositionNavigationIntegrationTests(
       );
     });
 
+    it("parts()/wholes() and subgraph({ composition }) refuse an option key they do not accept", async () => {
+      const store = await context.createStore(compositionViaGraph);
+      const { podcast } = await seedCompositionViaFixtures(store);
+      // Held in variables so TypeScript's excess-property check does not
+      // apply: this is the runtime refusal a dynamic caller reaches.
+      const misspelledMaxHops: Record<string, unknown> = { maxHop: 1 };
+      const expandOption: Record<string, unknown> = { expand: "inverse" };
+      const misspelledVia: Record<string, unknown> = { vai: "vnSegmentOf" };
+
+      // MUTATION CHECK: return early from
+      // `assertCompositionNavigationOptionKeys`
+      // (src/query/builder/query-builder.ts) — the misspelled `maxHop` then
+      // runs the unbounded closure and `expand` is ignored.
+      expect(() =>
+        store
+          .query()
+          .from("VnPodcast", "p")
+          .parts("x", misspelledMaxHops as never),
+      ).toThrow(
+        expect.objectContaining({
+          name: "ValidationError",
+          details: matchingObject({
+            issues: [
+              matchingObject({
+                path: "options.maxHop",
+                code: "unrecognized_keys",
+              }),
+            ],
+          }),
+        }),
+      );
+      expect(() =>
+        store
+          .query()
+          .from("VnSegment", "s")
+          .wholes("w", expandOption as never),
+      ).toThrow(expect.objectContaining({ name: "ValidationError" }));
+
+      // MUTATION CHECK: drop the unknown-key check from
+      // `validateSubgraphTraversalOptions` (src/store/subgraph.ts) — the
+      // misspelled `via` then reads as `composition: true` and widens the
+      // export to every realizing edge.
+      await expect(
+        store.subgraph(podcast, {
+          edges: [],
+          composition: misspelledVia as never,
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          name: "ValidationError",
+          details: matchingObject({
+            issues: [
+              matchingObject({
+                path: "composition.vai",
+                code: "unrecognized_keys",
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+
     it("parts() refuses when the derived edge alias collides with an existing traversal", async () => {
       const store = await context.createStore(compositionNavigationGraph);
       await seedCompositionFixtures(store);
@@ -1248,7 +1310,7 @@ export function registerCompositionNavigationIntegrationTests(
           .parts("x", { from: "pod" as never }),
       ).toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_UNKNOWN_ALIAS",
           details: matchingObject({
             code: "COMPOSITION_UNKNOWN_ALIAS",
             alias: "pod",
@@ -1266,7 +1328,7 @@ export function registerCompositionNavigationIntegrationTests(
       // reverted.
       expect(() => store.query().from("CnSegment", "s").parts("x")).toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_NO_PARTS_DECLARED",
           details: matchingObject({ code: "COMPOSITION_NO_PARTS_DECLARED" }),
         }),
       );
@@ -1277,7 +1339,7 @@ export function registerCompositionNavigationIntegrationTests(
 
       expect(() => store.query().from("CnPodcast", "p").wholes("x")).toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_NO_WHOLES_DECLARED",
           details: matchingObject({ code: "COMPOSITION_NO_WHOLES_DECLARED" }),
         }),
       );
@@ -1744,7 +1806,7 @@ export function registerCompositionNavigationIntegrationTests(
         store.subgraph(node, { edges: [], composition: true }),
       ).rejects.toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_NO_PARTS_DECLARED",
           details: matchingObject({ code: "COMPOSITION_NO_PARTS_DECLARED" }),
         }),
       );

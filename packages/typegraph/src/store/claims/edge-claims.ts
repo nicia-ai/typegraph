@@ -28,6 +28,7 @@ import {
   ConfigurationError,
 } from "../../errors";
 import { type RowMembership } from "../../registry/row-membership";
+import { type ValidityWindow } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { isMissingTableError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -360,6 +361,30 @@ export function membershipCountsRow(
   row: Readonly<{ validTo?: string | undefined }>,
 ): boolean {
   return membership === "allRows" || row.validTo === undefined;
+}
+
+/**
+ * THE valid-time reading of {@link membershipCountsRow}: the half-open window
+ * of `asOf` coordinates at which a non-deleted row with these bounds is a
+ * member of a population whose rule is `membership`. An `"openRows"` row is a
+ * member while its own window holds; an `"allRows"` row from its `validFrom`
+ * on, ended or not.
+ *
+ * The JavaScript rendering of the `asOf` arm of `compileEdgeMembershipFilters`
+ * (`src/query/compiler/temporal.ts`) — `valid_from <= t`, and for an
+ * `"openRows"` kind `valid_to > t` — so a decision taken over these windows
+ * names exactly the rows a valid-time composition read returns at `t`.
+ */
+export function membershipValidityWindow(
+  membership: RowMembership,
+  row: Readonly<{
+    validFrom?: string | undefined;
+    validTo?: string | undefined;
+  }>,
+): ValidityWindow {
+  return membership === "openRows" ?
+      { validFrom: row.validFrom, validTo: row.validTo }
+    : { validFrom: row.validFrom };
 }
 
 /**

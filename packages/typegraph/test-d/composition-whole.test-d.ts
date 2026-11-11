@@ -142,16 +142,21 @@ expectError(
   ),
 );
 
-store.nodes.Episode.bulkGetOrCreateByConstraint(
-  "episode_title",
-  [{ props: { title: "one" } }],
-  { partOf: { whole: show } },
+store.nodes.Episode.bulkGetOrCreateByConstraint("episode_title", [
+  { props: { title: "one" }, partOf: { whole: show } },
+  { props: { title: "two" } },
+]);
+expectError(
+  store.nodes.Episode.bulkGetOrCreateByConstraint("episode_title", [
+    { props: { title: "one" }, partOf: { whole: album } },
+  ]),
 );
+// The attachment is per item, as on `bulkCreate`: the options take none.
 expectError(
   store.nodes.Episode.bulkGetOrCreateByConstraint(
     "episode_title",
     [{ props: { title: "one" } }],
-    { partOf: { whole: album } },
+    { partOf: { whole: show } },
   ),
 );
 
@@ -299,11 +304,26 @@ expectError(
 );
 expectError(projection.nodes.Episode.reparent(episodeId, { whole: album }));
 
-// A collection named without its whole reference is still the graph's own: the
-// default leaves attachments out. Naming the reference keeps them available.
+// A collection named without its whole reference is still the graph's own,
+// and attaches through the default whole input: a helper typed the natural
+// way both accepts `store.nodes.Episode` and can attach a part with it. The
+// whole's kind is then checked at runtime only.
 expectAssignable<NodeCollection<typeof Episode, "episode_title">>(
   store.nodes.Episode,
 );
+async function attachEpisode(
+  episodes: NodeCollection<typeof Episode, "episode_title">,
+  whole: Readonly<{ kind: "Show"; id: string }>,
+): Promise<void> {
+  await episodes.create({ title: "helper" }, { partOf: { whole } });
+  await episodes.reparent(episodeId, { whole });
+  await episodes.getOrCreateByConstraint(
+    "episode_title",
+    { title: "helper" },
+    { partOf: { whole } },
+  );
+}
+void attachEpisode(store.nodes.Episode, show);
 expectAssignable<
   NodeCollection<
     typeof Episode,

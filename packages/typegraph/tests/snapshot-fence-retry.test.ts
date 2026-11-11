@@ -226,8 +226,12 @@ describe("a stale-snapshot refusal at the per-graph write fence", () => {
 
     const results = await store.nodes.Component.bulkGetOrCreateByConstraint(
       "component_slug",
-      [{ props: { slug: "bolt" } }],
-      { partOf: { whole: { kind: "Assembly", id: whole.id } } },
+      [
+        {
+          props: { slug: "bolt" },
+          partOf: { whole: { kind: "Assembly", id: whole.id } },
+        },
+      ],
     );
 
     expect(results.map((result) => result.action)).toEqual(["created"]);

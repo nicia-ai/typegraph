@@ -124,6 +124,7 @@ import {
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
 import { edgeInsertClaims } from "../store/claims/composition-claims";
+import { assertCompositionWindowsDisjoint } from "../store/claims/composition-windows";
 import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
@@ -2863,6 +2864,24 @@ async function updateImportedEdge(
       return `${error.code}: ${error.message}`;
     }
   }
+  // A document's later `validTo` on an already-ended row widens its window.
+  try {
+    await assertCompositionWindowsDisjoint(
+      { graphId, registry, lock: frame.lock },
+      frame.target,
+      {
+        revisions: [
+          {
+            before: existing,
+            after: { ...existing, valid_to: edge.validTo ?? existing.valid_to },
+          },
+        ],
+      },
+    );
+  } catch (error) {
+    if (!(error instanceof CompositionError)) throw error;
+    return `${error.code}: ${error.message}`;
+  }
   const { session } = frame;
   try {
     // Both halves of the predicate are stated as FENCES — required keys of the
@@ -4505,6 +4524,21 @@ async function processEdge(
   );
   if (!cardinalityResult.ok) {
     return { status: "error", error: cardinalityResult.error };
+  }
+
+  // The composition window decision, against the rows already stored — this
+  // path writes each edge as it goes, so a document's earlier history rows of
+  // the same part are among them, and an archive whose history does not
+  // overlap restores whatever order it lists the rows in.
+  try {
+    await assertCompositionWindowsDisjoint(
+      { graphId, registry, lock: frame.lock },
+      frame.target,
+      { inserts: [params] },
+    );
+  } catch (error) {
+    if (!(error instanceof CompositionError)) throw error;
+    return { status: "error", error: `${error.code}: ${error.message}` };
   }
 
   // Acyclicity is checked AFTER the row lands, inside the same

@@ -26,6 +26,7 @@ import {
   importGraph,
 } from "../../src/interchange";
 import { compareStrings } from "../../src/utils/compare";
+import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 
 const ChShow = defineNode("ChShow", { schema: z.object({}) });
@@ -206,5 +207,105 @@ describe("composition history through export and import", () => {
     expect(
       await target.edges.chSectionOf.find({}, { temporalMode: "includeEnded" }),
     ).toEqual([]);
+  });
+
+  it("reports an archive row whose window overlaps another composition row of its part as a per-row error, in either row order", async () => {
+    const since = "2018-01-01T00:00:00.000Z";
+    const document: GraphData = {
+      formatVersion: FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "overlapping history" },
+      nodes: [
+        { kind: "ChSection", id: "whole-a", properties: {}, validFrom: since },
+        { kind: "ChSection", id: "whole-b", properties: {}, validFrom: since },
+        { kind: "ChSection", id: "part", properties: {}, validFrom: since },
+      ],
+      edges: [
+        {
+          kind: "chSectionOf",
+          id: "part-in-a",
+          from: { kind: "ChSection", id: "part" },
+          to: { kind: "ChSection", id: "whole-a" },
+          properties: {},
+          validFrom: "2020-01-01T00:00:00.000Z",
+        },
+        {
+          kind: "chSectionOf",
+          id: "part-in-b",
+          from: { kind: "ChSection", id: "part" },
+          to: { kind: "ChSection", id: "whole-b" },
+          properties: {},
+          validFrom: "2019-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+
+    // MUTATION CHECK: drop the composition window decision from `processEdge`
+    // (src/interchange/import.ts) — both rows then import, and the clip reads
+    // under both wholes in 2020.
+    for (const edges of [document.edges, [...document.edges].toReversed()]) {
+      const [target] = await createStoreWithSchema(graph, createTestBackend());
+      const result = await importGraph(
+        target,
+        { ...document, edges },
+        { onConflict: "error" },
+      );
+      const refused = requireDefined(edges.at(-1)).id;
+      expect(
+        result.errors.map((error) => [error.id, error.error.split(":")[0]]),
+      ).toEqual([[refused, "COMPOSITION_WINDOW_OVERLAP"]]);
+      expect(await target.verifyConstraintFences()).toEqual([]);
+    }
+  });
+
+  it('reports an `onConflict: "update"` row whose later end widens its window over another row of its part', async () => {
+    const [target] = await createStoreWithSchema(graph, createTestBackend());
+    const since = { validFrom: "2018-01-01T00:00:00.000Z" };
+    const showA = await target.nodes.ChShow.create(
+      {},
+      { id: "show-a", ...since },
+    );
+    const showB = await target.nodes.ChShow.create(
+      {},
+      { id: "show-b", ...since },
+    );
+    const clip = await target.nodes.ChClip.create(
+      {},
+      {
+        id: "clip",
+        ...since,
+        partOf: { whole: showB, validFrom: "2021-01-01T00:00:00.000Z" },
+      },
+    );
+    const early = await target.edges.chClipOf.create(
+      clip,
+      showA,
+      {},
+      {
+        validFrom: "2019-01-01T00:00:00.000Z",
+        validTo: "2020-01-01T00:00:00.000Z",
+      },
+    );
+    const exported = await exportGraph(target);
+    const widened = exported.edges.map((edge) =>
+      edge.id === early.id ?
+        { ...edge, validTo: "2022-01-01T00:00:00.000Z" }
+      : edge,
+    );
+
+    const result = await importGraph(
+      target,
+      { ...exported, edges: widened },
+      { onConflict: "update" },
+    );
+    expect(
+      result.errors.map((error) => [error.id, error.error.split(":")[0]]),
+    ).toEqual([[early.id, "COMPOSITION_WINDOW_OVERLAP"]]);
+    const kept = await target.edges.chClipOf.getById(early.id, {
+      temporalMode: "includeEnded",
+    });
+    expect(kept?.meta.validTo).toBe("2020-01-01T00:00:00.000Z");
+    expect(await target.verifyConstraintFences()).toEqual([]);
   });
 });

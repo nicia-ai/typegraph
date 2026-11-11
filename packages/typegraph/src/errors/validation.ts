@@ -41,6 +41,34 @@ export type ValidationContext = Readonly<{
 // ============================================================
 
 /**
+ * The code an option object's unrecognized key is reported under — Zod's
+ * own code for the same fault, so a caller routing on `issue.code` reads one
+ * spelling whether the refusal came from a schema or an option surface.
+ */
+const UNRECOGNIZED_OPTION_KEY_CODE = "unrecognized_keys";
+
+/**
+ * THE issue list for an option object's keys that `acceptedKeys` does not
+ * name, one issue per key at `${path}.${key}`. Every option surface that
+ * refuses rather than ignores an unknown key (a composition attachment, a
+ * `reparent`, `parts()` / `wholes()`, `subgraph({ composition })`) builds its
+ * `ValidationError` from this, so a typo is reported the same way on each.
+ */
+export function unrecognizedOptionKeyIssues(
+  value: Readonly<Record<string, unknown>>,
+  path: string,
+  acceptedKeys: readonly string[],
+): readonly ValidationIssue[] {
+  return Object.keys(value)
+    .filter((key) => !acceptedKeys.includes(key))
+    .map((key) => ({
+      path: `${path}.${key}`,
+      message: `Unknown key. Accepted keys: ${acceptedKeys.join(", ")}.`,
+      code: UNRECOGNIZED_OPTION_KEY_CODE,
+    }));
+}
+
+/**
  * Converts Zod issues to ValidationIssue format.
  */
 export function zodIssuesToValidationIssues(

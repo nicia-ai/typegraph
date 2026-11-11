@@ -1050,10 +1050,14 @@ describe("the violation families each probe can produce", () => {
       "composition",
       "edgeAcyclicity",
       "compositionFutureWindow",
+      "compositionWindowOverlap",
     ]);
     expect(probeCoversViolationFamily(probe, "composition")).toBe(true);
     expect(probeCoversViolationFamily(probe, "edgeAcyclicity")).toBe(true);
     expect(probeCoversViolationFamily(probe, "compositionFutureWindow")).toBe(
+      true,
+    );
+    expect(probeCoversViolationFamily(probe, "compositionWindowOverlap")).toBe(
       true,
     );
     expect(probeCoversViolationFamily(probe, "compositionExistence")).toBe(

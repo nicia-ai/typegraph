@@ -52,6 +52,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { groupBy } from "../../utils/array";
 import { compareStrings } from "../../utils/compare";
 import { nowIso } from "../../utils/date";
+import { nodeRefKey } from "../../utils/tuple-key";
 import {
   acyclicEdgeRelations,
   type EdgeAcyclicityViolation,
@@ -74,6 +75,7 @@ import {
   uniquenessClaimTarget,
 } from "./axis";
 import { compositionEdgeCardinalityDeclarations } from "./composition-claims";
+import { readCompositionWindowOverlaps } from "./composition-windows";
 import {
   compositionClaimEndpoints,
   edgeCardinalityAxisReferences,
@@ -166,6 +168,20 @@ export type ConstraintFenceViolation =
        */
       family: "compositionFutureWindow";
       edgeKind: string;
+      edgeIds: readonly string[];
+    }>
+  | Readonly<{
+      /**
+       * One part holding two or more non-deleted composition edges of a
+       * `population: "oneActive"` pair whose valid-time windows share an
+       * instant, so `store.asOf(t)` shows the part with two wholes — a state
+       * no write may leave (`COMPOSITION_WINDOW_OVERLAP`). `edgeIds` names
+       * every edge of the part that overlaps another. Untargeted like
+       * `compositionExistence`: no claim row records a window.
+       */
+      family: "compositionWindowOverlap";
+      partKind: string;
+      partId: string;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -523,6 +539,7 @@ const UNTARGETED_FAMILY_ORDER = [
   "edgeAcyclicity",
   "compositionExistence",
   "compositionFutureWindow",
+  "compositionWindowOverlap",
 ] as const;
 
 type ClaimTargetedViolation = Extract<
@@ -552,6 +569,9 @@ function untargetedOrderKey(violation: UntargetedViolation): string {
     case "compositionExistence": {
       return violation.partKind;
     }
+    case "compositionWindowOverlap": {
+      return nodeRefKey({ kind: violation.partKind, id: violation.partId });
+    }
     case "edgeAcyclicity": {
       return violation.relation;
     }
@@ -563,7 +583,8 @@ function untargetedOrderKey(violation: UntargetedViolation): string {
  * (their existing {@link compareClaimTargets} order), then the untargeted
  * families in {@link UNTARGETED_FAMILY_ORDER}, each ordered by its own key
  * (`edgeEndpointAssignability` and `compositionFutureWindow` by edge kind,
- * `compositionExistence` by part kind, `edgeAcyclicity` by relation).
+ * `compositionExistence` by part kind, `compositionWindowOverlap` by part,
+ * `edgeAcyclicity` by relation).
  */
 function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
@@ -716,8 +737,9 @@ export async function auditConstraintFences(
  * THE fence audit. Reads only; reports every claim axis whose population
  * already carries more than one live claimant, every edge kind whose live
  * rows sit outside every declared endpoint pair, every acyclic relation
- * already carrying a cycle, every live required part with no live whole, and
- * every composition row whose window starts or ends later than now.
+ * already carrying a cycle, every live required part with no live whole,
+ * every composition row whose window starts or ends later than now, and every
+ * part whose composition edges' valid-time windows overlap.
  *
  * The `edgeAcyclicity` family does NOT go through
  * `readConstraintFenceViolations` (the backend port every other family
@@ -777,12 +799,49 @@ export async function verifyConstraintFences(
     context.registry.compositionEdgeKinds(),
   );
 
+  const compositionWindowOverlap = await compositionWindowOverlapViolations(
+    context.registry,
+    context.backend,
+    context.graphId,
+    context.registry.compositionEdgeKinds(),
+  );
+
   return [
     ...claimBacked,
     ...acyclicity,
     ...compositionExistence,
     ...compositionFutureWindow,
+    ...compositionWindowOverlap,
   ].toSorted(compareConstraintFenceViolations);
+}
+
+/**
+ * The `compositionWindowOverlap` family: one violation per part whose
+ * composition edges' valid-time windows overlap, where one of the overlapping
+ * rows is of `edgeKinds` ({@link readCompositionWindowOverlaps} — the same
+ * window and the same holder scope the write path judges). Shared by this
+ * audit (every realizing edge kind) and the schema-commit preflight (the edge
+ * kinds of the pairs a commit adds), against the registry each one reads.
+ */
+export async function compositionWindowOverlapViolations(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  if (edgeKinds.length === 0) return [];
+  const overlaps = await readCompositionWindowOverlaps(
+    registry,
+    backend,
+    graphId,
+    edgeKinds,
+  );
+  return overlaps.map((overlap) => ({
+    family: "compositionWindowOverlap" as const,
+    partKind: overlap.part.kind,
+    partId: overlap.part.id,
+    edgeIds: overlap.edgeIds,
+  }));
 }
 
 /**

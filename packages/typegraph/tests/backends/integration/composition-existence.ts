@@ -16,6 +16,7 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   defineEdge,
@@ -416,11 +417,11 @@ export function registerCompositionExistenceIntegrationTests(
       expect(await store.nodes.EeFolder.count()).toBe(1);
       expect(await store.edges.eeFolderOf.find({})).toHaveLength(0);
     });
-    // MUTATION CHECK: drop the `assertPreparedEdgeCreatesAcyclic` call at the
+    // MUTATION CHECK: drop the `assertPreparedEdgeCreateRelations` call at the
     // end of `prepareBatchCompositionCreateEdges`
     // (src/store/operations/node-operations.ts) — nothing probes a batch's
     // composition edges at all (each item prepares with
-    // `validateAcyclicity: false`), so this batch commits the self-attaching
+    // `validateRelations: false`), so this batch commits the self-attaching
     // folder and `count()` reads 3.
 
     it("case 6d: an in-batch composition cycle spanning two items is refused, and no row of the batch survives", async () => {
@@ -1071,13 +1072,16 @@ export function registerCompositionExistenceIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(ValidationError);
-      expect((error as ValidationError).details.issues).toEqual([
-        expect.objectContaining({
-          path: "partOf.validTo",
-          code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
-        }),
-      ]);
+      expect(error).toBeInstanceOf(CompositionError);
+      expect(error).toMatchObject({
+        code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        details: {
+          situation: "boundedAttachment",
+          wholeKind: "EeShow",
+          wholeId: show.id,
+          validTo: "2000-01-01T00:00:00.000Z",
+        },
+      });
 
       // No node row, and no composition edge row, survive the refused
       // create — the whole write plan (node + composition edge) is one
@@ -1521,12 +1525,10 @@ export function registerCompositionExistenceIntegrationTests(
           { partOf: { whole: { kind: "EeEpisode", id: episodeB.id } } },
         ).catch((error_: unknown) => error_);
       expect(foundError).toBeInstanceOf(CompositionExistenceError);
-      expect((foundError as CompositionExistenceError).details.situation).toBe(
-        "existing",
-      );
-      expect(
-        (foundError as CompositionExistenceError).details.currentWhole,
-      ).toEqual({ kind: "EeEpisode", id: episodeA.id });
+      expect((foundError as CompositionExistenceError).details).toMatchObject({
+        situation: "existing",
+        currentWhole: { kind: "EeEpisode", id: episodeA.id },
+      });
 
       const updatedError =
         await store.nodes.EeKeyedSegment.getOrCreateByConstraint(
@@ -1570,11 +1572,16 @@ export function registerCompositionExistenceIntegrationTests(
       // whole this exact call is about to attach the first occurrence to —
       // the duplicate must be a plain "found" hit, not a refusal.
       const results =
-        await store.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint(
-          "byKey",
-          [{ props: { key: "dup-1" } }, { props: { key: "dup-1" } }],
-          { partOf: { whole: { kind: "EeEpisode", id: episode.id } } },
-        );
+        await store.nodes.EeKeyedSegment.bulkGetOrCreateByConstraint("byKey", [
+          {
+            props: { key: "dup-1" },
+            partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+          },
+          {
+            props: { key: "dup-1" },
+            partOf: { whole: { kind: "EeEpisode", id: episode.id } },
+          },
+        ]);
       expect(results[0]?.action).toBe("created");
       expect(results[1]?.action).toBe("found");
       expect(results[1]?.node.id).toBe(results[0]?.node.id);

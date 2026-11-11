@@ -231,6 +231,38 @@ function buildReAddedVolumeGraph(
   });
 }
 
+// Fixture for a pair added beside an already-declared one whose realizing
+// edges both keep history (`oneActive`).
+const CtCut = defineNode("CtCut", { schema: z.object({}) });
+const CtReel = defineNode("CtReel", { schema: z.object({}) });
+const ctCutOf = defineEdge("ctCutOf", { schema: z.object({}) });
+const ctCutIn = defineEdge("ctCutIn", { schema: z.object({}) });
+
+function buildCutGraph(id: string, cutInComposed: boolean) {
+  return defineGraph({
+    id,
+    nodes: { CtCut: { type: CtCut }, CtReel: { type: CtReel } },
+    edges: {
+      ctCutOf: {
+        type: ctCutOf,
+        from: [CtCut],
+        to: [CtReel],
+        cardinality: "oneActive",
+      },
+      ctCutIn: {
+        type: ctCutIn,
+        from: [CtCut],
+        to: [CtReel],
+        cardinality: "oneActive",
+      },
+    },
+    ontology: [
+      partOf(CtCut, CtReel, { via: ctCutOf }),
+      ...(cutInComposed ? [partOf(CtCut, CtReel, { via: ctCutIn })] : []),
+    ],
+  });
+}
+
 /** A bound no test run reaches: later than any commit's clock. */
 const FUTURE_INSTANT = "2999-01-01T00:00:00.000Z";
 
@@ -812,6 +844,71 @@ export function registerCompositionTighteningIntegrationTests(
       expect(result.status).toBe("migrated");
       expect(await upgradedStore.verifyConstraintFences()).toEqual([]);
     });
+
+    it("refuses declaring a pair whose rows overlap the part's history under an already-declared pair", async () => {
+      const id = "composition_tightening_window_overlap";
+      const store = await context.createStore(buildCutGraph(id, false));
+      const since = { validFrom: "2018-01-01T00:00:00.000Z" };
+      const cut = await store.nodes.CtCut.create({}, since);
+      const reel = await store.nodes.CtReel.create({}, since);
+      const otherReel = await store.nodes.CtReel.create({}, since);
+      const composed = await store.edges.ctCutOf.create(
+        cut,
+        reel,
+        {},
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2022-01-01T00:00:00.000Z",
+        },
+      );
+      // Legal while `ctCutIn` realizes no pair: only a composition edge is
+      // held to one whole per instant.
+      const plain = await store.edges.ctCutIn.create(
+        cut,
+        otherReel,
+        {},
+        {
+          validFrom: "2021-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+      );
+
+      const error = await createAdapterStoreWithSchema(
+        buildCutGraph(id, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(futureWindowViolations(error)).toEqual([
+        {
+          family: "compositionWindowOverlap",
+          partKind: "CtCut",
+          partId: cut.id,
+          edgeIds: [composed.id, plain.id].toSorted(),
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+
+      // Ending the plain row where the composed one begins repairs it.
+      await store.edges.ctCutIn.delete(plain.id);
+      await store.edges.ctCutIn.create(
+        cut,
+        otherReel,
+        {},
+        {
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        },
+      );
+      const [upgraded, result] = await createAdapterStoreWithSchema(
+        buildCutGraph(id, true),
+        context.getBackend(),
+      );
+      expect(result.status).toBe("migrated");
+      expect(await upgraded.verifyConstraintFences()).toEqual([]);
+    });
+    // MUTATION CHECK: drop `windowOverlapViolations` from the preflight's
+    // violation list (src/schema/tightening-preflight.ts) — the first commit
+    // then lands and the cut reads under both reels in 2021.
 
     it("refuses declaring partOf/hasPart over edge kinds whose stored rows start or end later than the commit", async () => {
       const id = "composition_tightening_future_window";
