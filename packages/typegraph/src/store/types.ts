@@ -1367,17 +1367,26 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
  * Provides ergonomic CRUD operations for a single node type.
  *
  * `Whole` is what `partOf.whole` accepts on this collection's attachment
- * surfaces: `store.nodes.<K>` binds {@link CompositionWholeReference}, the
- * runtime-kind collections bind {@link CompositionWholeInput}. It defaults to
- * `never`, which every typed collection is assignable to, so naming a
- * collection by its node type and constraint names alone still describes
- * `store.nodes.<K>`; only an attachment made through such a type needs the
- * whole reference spelled out.
+ * surfaces: `store.nodes.<K>` binds {@link CompositionWholeReference} — only
+ * the whole kinds the ontology declares for `K` — and the runtime-kind
+ * collections bind {@link CompositionWholeInput}. It defaults to
+ * {@link CompositionWholeInput}, so a helper typed by the node type and
+ * constraint names alone (`NodeCollection<typeof Section, "title">`) both
+ * accepts `store.nodes.Section` and can attach through it; the compile-time
+ * narrowing to declared whole kinds is then the caller's to restate, and the
+ * runtime refusal (`COMPOSITION_WHOLE_NOT_DECLARED`) stays authoritative.
+ *
+ * The attachment-taking members (`create`, `bulkCreate`, `reparent`,
+ * `bulkReparent`, `getOrCreateByConstraint`, `bulkGetOrCreateByConstraint`)
+ * are declared as methods, not function-valued properties, so their
+ * parameters compare bivariantly: that is what lets a collection bound to the
+ * narrow {@link CompositionWholeReference} be passed where the default wide
+ * `Whole` is expected.
  */
 export type NodeCollection<
   N extends NodeType,
   CN extends string = string,
-  Whole extends CompositionWholeInput = never,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Readonly<{
   /**
    * Create a new node.
@@ -1388,13 +1397,13 @@ export type NodeCollection<
    * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
    * `undefined`. A future `validTo` is unaffected.
    */
-  create: <
+  create<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
     props: z.input<N["schema"]>,
     options?: NodeCreateOptions<Via, Whole>,
-  ) => Promise<Node<N>>;
+  ): Promise<Node<N>>;
 
   /** Get a node by ID */
   getById: (
@@ -1501,13 +1510,13 @@ export type NodeCollection<
    * unresolvable `via`, and with `NodeNotFoundError` when the part is
    * missing or already deleted.
    */
-  reparent: <
+  reparent<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
     id: NodeId<N>,
     options: NodeReparentOptions<Via, Whole>,
-  ) => Promise<NodeReparentResult<Via>>;
+  ): Promise<NodeReparentResult<Via>>;
 
   /**
    * Moves several parts in one transaction. Every item's verdict is reached
@@ -1519,7 +1528,7 @@ export type NodeCollection<
    * listed twice is refused with a `ValidationError`. Each item is
    * {@link NodeReparentOptions} plus the part id.
    */
-  bulkReparent: <
+  bulkReparent<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
@@ -1527,7 +1536,7 @@ export type NodeCollection<
       id: NodeId<N>;
       options: NodeReparentOptions<Via, Whole>;
     }>[],
-  ) => Promise<readonly NodeReparentResult<Via>[]>;
+  ): Promise<readonly NodeReparentResult<Via>[]>;
 
   /**
    * Delete a node (soft delete - sets deletedAt timestamp). A no-op for a
@@ -1749,13 +1758,13 @@ export type NodeCollection<
    * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
    * `undefined`. A future `validTo` is unaffected.
    */
-  bulkCreate: <
+  bulkCreate<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
     items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
       NodeCreateOptions<Via, Whole>)[],
-  ) => Promise<Node<N>[]>;
+  ): Promise<Node<N>[]>;
 
   /**
    * Create or update multiple nodes in a batch.
@@ -1920,14 +1929,14 @@ export type NodeCollection<
    * @param props - Full properties for create, or merge source for update
    * @param options - Existing record behavior (default: "return")
    */
-  getOrCreateByConstraint: <
+  getOrCreateByConstraint<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
     constraintName: CN,
     props: z.input<N["schema"]>,
     options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
-  ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
+  ): Promise<NodeGetOrCreateByConstraintResult<N>>;
 
   /**
    * Batch version of getOrCreateByConstraint.
@@ -1935,7 +1944,7 @@ export type NodeCollection<
    * Results are returned in the same order as the input items.
    * Atomic when the backend supports transactions.
    */
-  bulkGetOrCreateByConstraint: <
+  bulkGetOrCreateByConstraint<
     const Via extends CompositionViaRef | undefined =
       CompositionViaRef | undefined,
   >(
@@ -1944,7 +1953,7 @@ export type NodeCollection<
       props: z.input<N["schema"]>;
     }>[],
     options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
-  ) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
+  ): Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
 /**
@@ -2658,7 +2667,7 @@ export type NodeCurrentReads<
 export type NodeWrites<
   N extends NodeType,
   CN extends string = string,
-  Whole extends CompositionWholeInput = never,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Pick<NodeCollection<N, CN, Whole>, (typeof NODE_WRITE_NAMES)[number]>;
 
 /** Temporal-aware edge reads — a {@link StoreView} pins these. */

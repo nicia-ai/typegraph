@@ -632,7 +632,15 @@ leaves nothing of the refused create behind.
   `error.code`.
   `store.getNodeCollection(kind)` takes any kind string, and a
   `StoreProjection` carries the same whole kinds its graph declares for each
-  projected kind.
+  projected kind. A helper typed by the node type alone,
+  `NodeCollection<typeof Section, "section_title">`, accepts
+  `store.nodes.Section` and attaches through it with any `{ kind, id }`
+  whole — the narrowing is the third type parameter's, so spell
+  `NodeCollection<typeof Section, "section_title", CompositionWholeReference<typeof graph, "Section">>`
+  to keep it. A standalone `CompositionAttachment<typeof paragraphOf>` value
+  defaults its whole to any `{ kind, id }`, so to pass it to a typed
+  collection's `partOf`, type its second parameter as
+  `CompositionWholeReference<typeof graph, "Paragraph">` too.
 - **`via`** names the realizing edge. Pass the edge's type when you have it
   (a typo is a compile error, the same check `partOf`/`hasPart` apply) or its
   kind string when the edge is chosen at runtime. It is required only when the
