@@ -14,7 +14,7 @@ import { ConfigurationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry/builders";
 import { serializeSchemaProperties } from "../src/schema/serializer";
 import {
-  isStructuralSubtype,
+  isProjectedSchemaSubtype,
   type StructuralSubtypeResult,
   ZOD_ONLY_CONSTRAINT_KEYWORD,
   ZOD_ONLY_PARENT_CONSTRAINT_KEYWORD,
@@ -186,7 +186,7 @@ function liveVerdict(
   child: z.ZodType,
   parent: z.ZodType,
 ): StructuralSubtypeResult {
-  return isStructuralSubtype(
+  return isProjectedSchemaSubtype(
     structuralSubtypeProjection(z.object({ field: child })),
     structuralSubtypeProjection(z.object({ field: parent })),
   );
@@ -819,7 +819,7 @@ describe("structural subsumption over what a node stores beyond its projection",
       false,
     );
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         structuralSubtypeProjection(childSchema),
         structuralSubtypeProjection(parentSchema),
       ).verdict,

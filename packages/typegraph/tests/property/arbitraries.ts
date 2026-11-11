@@ -291,7 +291,7 @@ const jsonSchemaLetrec = fc.letrec<{
 }));
 
 /**
- * A JSON Schema drawn from the fragment `isStructuralSubtype` actually
+ * A JSON Schema drawn from the fragment `isProjectedSchemaSubtype` actually
  * compares: scalars (string with optional length bounds, `pattern` and
  * `format`; number or integer with optional inclusive and exclusive bounds
  * and `multipleOf`; a `type` token array; integer, boolean, null), `enum` /

@@ -198,10 +198,14 @@ definition. A `subClassOf` an [extension](/graph-extensions) adds through
 live: `createStoreWithSchema(graph, backend)` folds the persisted extension
 back in on every later boot. Neither changes the compile-time `G`, so
 `from("Media", "m")` would type `m` as exact `Media` while a row could come
-back as the extension's `Podcast`. An alias that states no `expansion` over
-such a kind is therefore refused with `ConfigurationError`
+back as the extension's `Podcast`. A query whose alias states no `expansion`
+over such a kind is therefore refused with `ConfigurationError`
 (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`, naming the kind and the extra
-kinds) on `from()`, a list source, and `to()`. A list source is refused only
+kinds) on `from()`, a list source, and `to()`, by every terminal that returns
+rows: `execute()`, `first()`, `paginate()`, `stream()`, `prepare()`,
+`compile()`, and an `aggregate()`, whose result can carry the alias's `kind`
+or id. `count()` and `exists()` type no row, so they answer the unstated
+expansion, extension subclasses included. A list source is refused only
 for an extra kind no member of its type admits: a kind the list itself names
 is typed exactly by the list, and so is a kind in the expansion of a listed
 kind the compile-time graph already types polymorphically. State the axis to
@@ -215,6 +219,18 @@ store.query().from("Media", "m", { expansion: "exact" });
 // Or reach the kind as a runtime kind.
 store.query().fromDynamic("Media", "m");
 ```
+
+**The refusal reaches every deployment that shares the database.** An
+extension is persisted, so once one service calls `store.evolve(...)`, every
+other service running the same code graph folds it back in on its next
+`createStoreWithSchema(...)` boot, and its unchanged unstated-expansion
+queries over the subclassed kind start refusing too. Those services opt out
+without a code change per query by passing
+`queryDefaults: { expansion: "exact" }` in the options of `createStore` or
+`createStoreWithSchema` (an exact default never expands, so it never outgrows
+the alias type), or by
+redeploying with the relation declared in the code graph, which types the
+alias polymorphically.
 
 A kind the compile-time graph's ontology affects (it has a compile-time
 subclass, say) is not refused when an extension adds another one.
@@ -242,6 +258,8 @@ aliases as `string`-kinded anyway, so state `expansion` on the call or use
 | Node collection reads (`find`, `count`, `updateWhere`, `compareAndSet`) | The exact kind | No option; query instead | No | The literal |
 | [`store.search`](/fulltext-search) (`fulltext`, `vector`, `hybrid`) | The exact kind | `expansion: "exact" \| "subclasses"` | No | The literal; `"subclasses"` widens, as a stated `from(kind, alias, { expansion: "subclasses" })` does |
 | [`subgraph({ includeKinds })`](/schemas-stores#storesubgraphroot-options) | Exactly the listed kinds | List every kind to include | No | Not applicable |
+| [`store.getNodeByRef({ kind, id })`](/schemas-stores#storegetnodebyrefreference) | The exact kind | No option; name the row's own kind | No | The literal for a literal `kind`, else the graph's node union |
+| [Graph algorithms' `nodeKinds`](/graph-algorithms) (`pageRank`, `personalizedPageRank`, `labelPropagation`, `weaklyConnectedComponents`) | Exactly the listed kinds | List every kind to include | No | Not applicable |
 
 An omitted `expansion` means the store default everywhere in the query
 builder, and nowhere else. A kind whose subclasses only a persisted extension
@@ -253,10 +271,13 @@ restore the exact-kind rows everywhere. The store default changes which rows
 come back, not how an alias is typed: an alias over an affected kind keeps the
 widened `kind` and `NodeId` types whatever the default, so state
 `{ expansion: "exact" }` on the call to keep the literal alias type. `search()`, the collection
-APIs (`find`, `count`, `updateWhere`, `compareAndSet`), and
-`subgraph({ includeKinds })` are unaffected by this default and stay
-exact-kind. An `updateWhere()` `candidates` query is an ordinary query, though:
-it follows this default, and it must resolve to exactly one kind, so pass
+APIs (`find`, `count`, `updateWhere`, `compareAndSet`), `getNodeByRef()`,
+`subgraph({ includeKinds })` and the graph algorithms' `nodeKinds` are
+unaffected by this default and stay exact-kind: `pageRank({ nodeKinds:
+["Party"] })` ranks `Party` nodes only, not the `Person` rows a polymorphic
+`from("Party", "p")` returns, so list the subclasses to include them. An
+`updateWhere()` `candidates` query is an ordinary query, though: it follows
+this default, and it must resolve to exactly one kind, so pass
 `{ expansion: "exact" }` when the candidate kind has subclasses or equivalents
 (see [`updateWhere`](/schemas-stores#updatewhereparams)).
 
@@ -289,11 +310,27 @@ caller can reach.
 Omitting `options` entirely, passing `{}`, or passing an explicit `undefined`
 all mean the same thing — take the store default — so an options bag can be
 forwarded through your own helper without special-casing the empty case. A bag
-whose `expansion` is not one literal — `{ expansion?: "exact" }` from a
-wrapper that only ever narrows, say — forwards too; since the axis is not
-known at compile time, that alias is typed conservatively (untyped, the same
-way `"narrower"` is). State a literal axis at the call site to keep the
-precise alias type.
+whose `expansion` is not one literal forwards too, typed by every axis it can
+carry: the alias takes the narrowest type all of them admit. A bag that can
+only say `"exact"` keeps the exact type; one that may say `"subclasses"`, or
+leave the store default for an affected kind, gives the polymorphic type (an
+exact row is assignable to it); only a bag that can carry `"narrower"` is
+untyped, as `"narrower"` itself is. Type the parameter with the exported
+`AliasExpansionOptions`, or narrower:
+
+```typescript
+import { type AliasExpansionOptions } from "@nicia-ai/typegraph";
+
+function people(options?: { expansion?: "exact" | "subclasses" }) {
+  // p keeps Person's properties; its kind is string and its id the widened brand
+  return store.query().from("Person", "p", options).select((ctx) => ctx.p.name);
+}
+
+function anyAxis(options: AliasExpansionOptions) {
+  // may be "narrower", so the alias is untyped: no static property access
+  return store.query().from("Person", "p", options);
+}
+```
 
 ## Runtime-declared kinds
 

@@ -27,7 +27,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { embedding } from "../../src";
-import { isStructuralSubtype } from "../../src/schema/structural-subtype";
+import { isProjectedSchemaSubtype } from "../../src/schema/structural-subtype";
 import { structuralSubtypeProjection } from "../../src/schema/structural-subtype-projection";
 import { propertyRuns } from "./run-budget";
 
@@ -1184,7 +1184,7 @@ function expectSoundVerdict(
   const cache: InstanceCache = new Map();
   const childSchema = z.object({ field: build(child, cache) });
   const parentSchema = z.object({ field: build(parent, cache) });
-  const verdict = isStructuralSubtype(
+  const verdict = isProjectedSchemaSubtype(
     structuralSubtypeProjection(childSchema),
     structuralSubtypeProjection(parentSchema),
   );

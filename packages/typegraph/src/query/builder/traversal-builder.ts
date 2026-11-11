@@ -39,6 +39,7 @@ import {
   type AliasStaticTyping,
   INDEPENDENT_ALIAS_TYPING,
   resolveAliasKinds,
+  type ResolvedAliasKinds,
 } from "./alias-expansion";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
 import {
@@ -58,6 +59,8 @@ import {
   type EdgeAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ExpansionAliasNodeType,
+  type ForwardedExpansionAxes,
   type NodeAlias,
   type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
@@ -590,7 +593,8 @@ export class TraversalBuilder<
    * resolved through the same owner (`./alias-expansion.ts`): `expansion`,
    * taking the store default when the option is omitted, `{}`, or an
    * explicit `undefined`, and accepting a forwarded bag whose axis is not
-   * one literal (the axis-unknown overload). A `"narrower"` expansion
+   * one literal (the forwarded-bag overload, typed by
+   * `ExpansionAliasNodeType`). A `"narrower"` expansion
    * additionally admits each expanded kind as an endpoint of this edge.
    *
    * @param kind - The target node kind
@@ -636,14 +640,30 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
-  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
-  to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  to<
+    K extends ValidEdgeTargets<G, EK, Dir>,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: AliasExpansionOptions,
+    options: O,
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            G["nodes"][K]["type"],
+            AliasNodeType<G, K & string>,
+            PolymorphicNodeType<G["nodes"][K]["type"]>
+          >,
+          Optional
+        >
+      >,
     EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
@@ -688,13 +708,13 @@ export class TraversalBuilder<
       > {
     validateSqlIdentifier(alias);
 
-    const kinds = this.#resolveTargetKinds(
+    const resolved = this.#resolveTargetKinds(
       kind,
       options,
       aliasOverloadTyping(options, "to()"),
     );
 
-    const newState = this.#stateWithTraversal(alias, kinds);
+    const newState = this.#stateWithTraversal(alias, resolved);
 
     // Cast is safe because the overloads provide compile-time type safety
     // The runtime QueryBuilderClass is the correct implementation
@@ -744,14 +764,30 @@ export class TraversalBuilder<
     CoordinateState
   >;
 
-  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
-  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  toDynamic<
+    T extends string | RuntimeNodeKind,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: AliasExpansionOptions,
+    options: O,
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            DynamicNodeTypeFor<T>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>
+          >,
+          Optional
+        >
+      >,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>,
     CoordinateState
@@ -781,13 +817,13 @@ export class TraversalBuilder<
     }
     this.#assertValidEndpoint(kindName);
 
-    const kinds = this.#resolveTargetKinds(
+    const resolved = this.#resolveTargetKinds(
       kindName,
       options,
       INDEPENDENT_ALIAS_TYPING,
     );
 
-    const baseState = this.#stateWithTraversal(alias, kinds);
+    const baseState = this.#stateWithTraversal(alias, resolved);
     const newState: QueryBuilderState = {
       ...baseState,
       dynamicNodeAliases: new Set([...baseState.dynamicNodeAliases, alias]),
@@ -806,18 +842,18 @@ export class TraversalBuilder<
     kind: string,
     options: AliasExpansionOptions | undefined,
     typing: AliasStaticTyping,
-  ): readonly string[] {
-    const { expansion, kinds } = resolveAliasKinds(
+  ): ResolvedAliasKinds {
+    const resolved = resolveAliasKinds(
       options,
       this.#config.defaultExpansion,
       [kind],
       this.#config.registry,
       typing,
     );
-    if (expansion === "narrower") {
-      this.#assertNarrowerEndpointsAdmitted(kind, kinds);
+    if (resolved.expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kind, resolved.kinds);
     }
-    return kinds;
+    return resolved;
   }
 
   /**
@@ -917,7 +953,10 @@ export class TraversalBuilder<
       this.#assertValidEndpoint(kind);
     }
 
-    const baseState = this.#stateWithTraversal(alias, kinds);
+    const baseState = this.#stateWithTraversal(alias, {
+      kinds,
+      rowTypeRefusal: undefined,
+    });
     const newState: QueryBuilderState = {
       ...baseState,
       dynamicNodeAliases: new Set([...baseState.dynamicNodeAliases, alias]),
@@ -938,7 +977,10 @@ export class TraversalBuilder<
    */
   #stateWithTraversal(
     alias: string,
-    kinds: readonly string[],
+    {
+      kinds,
+      rowTypeRefusal,
+    }: Pick<ResolvedAliasKinds, "kinds" | "rowTypeRefusal">,
   ): QueryBuilderState {
     // The `direction` ternaries here and in the compiler's traversal emitters
     // test for `"out"` and treat everything else as inbound. That is exhaustive
@@ -999,6 +1041,7 @@ export class TraversalBuilder<
       traversals: [...this.#state.traversals, traversal],
       predicates: [...this.#state.predicates, ...this.#pendingEdgePredicates],
       currentAlias: alias,
+      rowTypeRefusal: this.#state.rowTypeRefusal ?? rowTypeRefusal,
     };
   }
 

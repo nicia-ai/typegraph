@@ -213,6 +213,76 @@ declare `broader(child, parent)` instead; see
 [Hierarchical (Concept Hierarchy)](#hierarchical-concept-hierarchy) below and
 `expansion: "narrower"` in [Source](/queries/source#expansion-narrower--kind-level-taxonomies).
 
+**What the compile-time check sees.** It compares each property's `z.infer`
+output type, so it catches every mismatch in shape, optionality and literal
+values, and none in length bounds, patterns, numeric bounds or refinements.
+Facts a value carries only in its type are not mismatches: a plain
+`z.string()` child extends a `z.string().brand<"Email">()` parent, a
+`z.array(z.string()).readonly()` child extends a `z.array(z.string())`
+parent, and `embedding(n)` and a plain number array extend each other, as the
+registry check accepts them. A refused `equivalentTo` names the direction that
+fails (`equivalentTo(A, B): each kind's schema must extend the other's, and
+the first named here does not extend the second`) and suggests declaring
+`subClassOf` in the direction that holds.
+
+**Predicting the verdict from tooling.** `isStructuralSubtype(childSchema,
+parentSchema)` and `isTypeLevelSubtype(childSchema, parentSchema)`, from
+`@nicia-ai/typegraph/schema`, take two Zod schemas (a kind's `schema`, or any
+two fields):
+
+```typescript
+import { isStructuralSubtype, isTypeLevelSubtype } from "@nicia-ai/typegraph/schema";
+
+isTypeLevelSubtype(Employee.schema, Person.schema); // will subClassOf(Employee, Person) compile?
+isStructuralSubtype(Employee.schema, Person.schema); // will the registry build it?
+```
+
+`isStructuralSubtype` is the registry's own verdict on the pair, computed the
+way a registry build computes it, so it sees what a JSON Schema document
+cannot (a strict or refined parent, a regex flag, a `.trim()`).
+`isTypeLevelSubtype` is the same comparison over only what the type checker
+sees. Whatever the first accepts, the second accepts too; the converse does
+not hold (`z.string()` under `z.string().min(3)` compiles and is refused at
+registry build). Both return one of four verdicts:
+
+| `verdict` | meaning |
+| --- | --- |
+| `"subtype"` | every value the child stores satisfies the parent |
+| `"not-subtype"` | a comparable pair that fails; `reason` and `path` name the field |
+| `"incomparable"` | the pair cannot be judged (`reason`, `path`); the registry refuses it like `"not-subtype"` |
+| `"unchecked"` | a side has no JSON Schema projection at all, so nothing was compared; the registry builds the pair unjudged |
+
+**Declaring relations through a generic helper.** `subClassOf` and
+`equivalentTo` check a pair whose types are known at the call. Inside a helper
+generic over its node types, the types are not known yet, so forward the check
+as the helper's own parameter constraint and pass the type arguments
+explicitly; the helper's callers are then checked as direct callers are, and
+its result keeps the endpoint literals that keep aliases exact:
+
+```typescript
+import {
+  equivalentTo,
+  type EquivalentToCheck,
+  type NodeType,
+  subClassOf,
+  type SubClassOfCheck,
+} from "@nicia-ai/typegraph";
+
+function declareSubclass<C extends NodeType, P extends NodeType>(
+  child: C,
+  parent: P & SubClassOfCheck<C, P>,
+) {
+  return subClassOf<C, P>(child, parent);
+}
+
+function declareEquivalent<A extends NodeType, B extends NodeType>(
+  first: A,
+  second: B & EquivalentToCheck<A, B>,
+) {
+  return equivalentTo<A, B>(first, second);
+}
+```
+
 **Query behavior — polymorphic by default:**
 
 A query against a kind other kinds declare themselves `subClassOf` returns

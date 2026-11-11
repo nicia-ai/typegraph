@@ -24,8 +24,8 @@
  * `from()` (a single kind or a list) / `to()` / `fromDynamic()` /
  * `toDynamic()` and `store.search()` all resolve their expansion through
  * this module and nothing else re-derives it — including the refusal of an
- * expansion the alias's static type does not admit
- * (`expandKindsForAxis`).
+ * expansion the alias's static type does not admit (`resolveAliasKinds`'s
+ * `rowTypeRefusal`, raised by `buildRowQueryAst` in `./ast-builder.ts`).
  */
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
@@ -206,6 +206,23 @@ function resolveAliasExpansion(
 }
 
 /**
+ * An alias's resolved expansion: its axis, the kinds it scans, and the
+ * refusal its rows owe when the alias's static type does not admit every
+ * kind it scans (`undefined` when it does).
+ *
+ * The refusal is carried, not thrown, because only a terminal that hands
+ * the caller typed rows can mistype them. `count()` and `exists()` answer a
+ * number about the same row set and type no row, so they answer it; every
+ * row-returning terminal raises the refusal (`buildRowQueryAst`,
+ * `./ast-builder.ts`).
+ */
+export type ResolvedAliasKinds = Readonly<{
+  expansion: AliasExpansionAxis;
+  kinds: readonly string[];
+  rowTypeRefusal: ConfigurationError | undefined;
+}>;
+
+/**
  * Resolves an alias's expansion axis and the kind list it expands `sourceKinds`
  * to: {@link resolveAliasExpansion} then {@link expandKindListForAxis}, the
  * pair every `from()` / `fromDynamic()` / `to()` / `toDynamic()` runs.
@@ -216,11 +233,11 @@ export function resolveAliasKinds(
   sourceKinds: readonly string[],
   registry: ExpansionRegistry,
   typing: AliasStaticTyping,
-): Readonly<{ expansion: AliasExpansionAxis; kinds: readonly string[] }> {
+): ResolvedAliasKinds {
   const expansion = resolveAliasExpansion(options, storeDefaultExpansion);
   return {
     expansion,
-    kinds: expandKindListForAxis(expansion, sourceKinds, registry, typing),
+    ...expandKindListForAxis(expansion, sourceKinds, registry, typing),
   };
 }
 
@@ -308,7 +325,7 @@ const compileTimeExactAliasKindsByRegistry = new WeakMap<
  * `AliasNodeType` the compile-time graph keeps exact: every kind of
  * `compileTimeGraph` its ontology does not affect. The live registry may
  * have grown past that graph through a persisted extension (`store.evolve()`,
- * or `createStoreWithSchema` reloading one); {@link expandKindsForAxis}
+ * or `createStoreWithSchema` reloading one); {@link staticTypeRefusal}
  * reads this to tell when it has.
  *
  * A registry with no record — one built straight from a graph by a caller —
@@ -333,28 +350,27 @@ type KindExpansion = Readonly<{
 }>;
 
 /**
- * Refuses an expansion that returns rows its alias type does not admit: the
- * alias is typed from the compile-time graph, that graph keeps a source
- * `kind` exact, and the live registry expands it to further kinds a
- * persisted extension declared. Answering would hand the caller rows whose
- * `kind` and `NodeId` contradict their static type, and narrowing silently
- * to the exact kind would be a partial answer presented as complete.
+ * The refusal an expansion owes its rows when they are not all of a kind its
+ * alias type admits: the alias is typed from the compile-time graph, that
+ * graph keeps a source `kind` exact, and the live registry expands it to
+ * further kinds a persisted extension declared. Returning such rows would
+ * hand the caller rows whose `kind` and `NodeId` contradict their static
+ * type, and narrowing silently to the exact kind would be a partial answer
+ * presented as complete. `undefined` when the alias type admits every kind.
  *
  * For a list source, an extra kind another member of the list's static type
  * admits is not refused: a kind the list names itself (typed exactly), or one
  * in the expansion of a listed kind the compile-time graph already types
  * polymorphically.
- *
- * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`)
  */
-function assertExpansionWithinStaticType(
+function staticTypeRefusal(
   expansions: readonly KindExpansion[],
   typing: AliasStaticTyping,
   registry: object,
-): void {
-  if (typing.typedFrom !== "compileTimeGraph") return;
+): ConfigurationError | undefined {
+  if (typing.typedFrom !== "compileTimeGraph") return undefined;
   const exactKinds = compileTimeExactAliasKindsByRegistry.get(registry);
-  if (exactKinds === undefined) return;
+  if (exactKinds === undefined) return undefined;
   const admittedKinds = new Set(
     expansions.flatMap(({ kind, kinds }) =>
       exactKinds.has(kind) ? [kind] : kinds,
@@ -366,13 +382,14 @@ function assertExpansionWithinStaticType(
       (expandedKind) => !admittedKinds.has(expandedKind),
     );
     if (extraKinds.length === 0) continue;
-    throw untypedSubclassesError(
+    return untypedSubclassesError(
       kind,
       extraKinds,
       typing.surface,
       expansions.length > 1,
     );
   }
+  return undefined;
 }
 
 function untypedSubclassesError(
@@ -391,10 +408,10 @@ function untypedSubclassesError(
   const dynamicSurface = surface === "from()" ? "fromDynamic()" : "toDynamic()";
   const suggestion =
     isListSource ?
-      `State the expansion explicitly: expansion: "subclasses" on ${surface} types every listed kind polymorphically, and expansion: "exact" returns rows of the listed kinds only.`
-    : `State the expansion explicitly: expansion: "subclasses" on ${surface} types the rows polymorphically, and expansion: "exact" returns "${kind}" rows only. Or use ${dynamicSurface}.`;
+      `State the expansion explicitly: expansion: "subclasses" on ${surface} types every listed kind polymorphically, and expansion: "exact" returns rows of the listed kinds only. Or set queryDefaults: { expansion: "exact" } on the store.`
+    : `State the expansion explicitly: expansion: "subclasses" on ${surface} types the rows polymorphically, and expansion: "exact" returns "${kind}" rows only. Or use ${dynamicSurface}, or set queryDefaults: { expansion: "exact" } on the store.`;
   return new ConfigurationError(
-    `Expanding "${kind}" through its subclasses would return rows of ${extraKindList}, which the live schema declares under "${kind}" but the compile-time graph does not, so the static type of these rows (${staticType}) would be wrong.`,
+    `Expanding "${kind}" through its subclasses would return rows of ${extraKindList}, which the live schema declares under "${kind}" (a persisted graph extension added them) but the compile-time graph does not, so the static type of these rows (${staticType}) would be wrong. count() and exists() still answer; a query that returns rows is refused.`,
     {
       code: "QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES",
       kind,
@@ -410,9 +427,28 @@ type ExpansionRegistry = Pick<
 >;
 
 /**
- * The concrete kind list an alias resolves to under `axis` — the one place
- * `from`/`fromDynamic`/`to`/`toDynamic` and `store.search()` turn an axis
- * into `QueryStart.kinds` / `Traversal.kinds` / searched kinds.
+ * The concrete kind list a search resolves to under `axis` — with
+ * {@link resolveAliasKinds}, the one place `from`/`fromDynamic`/`to`/
+ * `toDynamic` and `store.search()` turn an axis into `QueryStart.kinds` /
+ * `Traversal.kinds` / searched kinds. A search hit's type never consults the
+ * compile-time graph's ontology, so no expansion can outgrow it.
+ *
+ * @throws ConfigurationError (`ONTOLOGY_NARROWER_KIND_NOT_REGISTERED`) when
+ *   `axis === "narrower"` and the expansion names an unregistered kind.
+ */
+export function expandKindsForAxis(
+  axis: AliasExpansionAxis,
+  kind: string,
+  registry: ExpansionRegistry,
+): readonly string[] {
+  return kindsForAxis(axis, kind, registry);
+}
+
+/**
+ * The deduplicated union of every source kind's expansion under `axis`, and
+ * the {@link staticTypeRefusal} its rows owe for an extra kind no member of
+ * the source's static type admits. `typing` states how the caller typed the
+ * alias, so the decision is the same for every surface.
  *
  * The `"narrower"` axis additionally REFUSES (never silently narrows) when
  * the expansion names a kind this registry does not recognize as a node
@@ -421,41 +457,26 @@ type ExpansionRegistry = Pick<
  * endpoint-admission check on top of this list; see
  * `TraversalBuilder`'s own narrower handling.
  *
- * `typing` states how the caller typed the alias, so an expansion past what
- * that type admits is refused here, for every surface alike.
- *
  * @throws ConfigurationError (`ONTOLOGY_NARROWER_KIND_NOT_REGISTERED`) when
  *   `axis === "narrower"` and the expansion names an unregistered kind.
- * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`)
- *   when `typing.typedFrom` is `"compileTimeGraph"`, the compile-time graph
- *   types `kind` exactly, and the live registry expands it to further kinds.
- */
-export function expandKindsForAxis(
-  axis: AliasExpansionAxis,
-  kind: string,
-  registry: ExpansionRegistry,
-  typing: AliasStaticTyping,
-): readonly string[] {
-  return expandKindListForAxis(axis, [kind], registry, typing);
-}
-
-/**
- * {@link expandKindsForAxis} for a list source: the deduplicated union of
- * every listed kind's expansion, refused only for an extra kind no member of
- * the list's static type admits.
  */
 function expandKindListForAxis(
   axis: AliasExpansionAxis,
   sourceKinds: readonly string[],
   registry: ExpansionRegistry,
   typing: AliasStaticTyping,
-): readonly string[] {
+): Readonly<{
+  kinds: readonly string[];
+  rowTypeRefusal: ConfigurationError | undefined;
+}> {
   const expansions = sourceKinds.map((kind) => ({
     kind,
     kinds: kindsForAxis(axis, kind, registry),
   }));
-  assertExpansionWithinStaticType(expansions, typing, registry);
-  return [...new Set(expansions.flatMap(({ kinds }) => kinds))];
+  return {
+    kinds: [...new Set(expansions.flatMap(({ kinds }) => kinds))],
+    rowTypeRefusal: staticTypeRefusal(expansions, typing, registry),
+  };
 }
 
 function kindsForAxis(

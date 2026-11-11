@@ -7,6 +7,7 @@ export { defineEdge, type DefineEdgeOptions } from "./edge";
 // Embedding type for vector search
 export {
   embedding,
+  type EmbeddingBrand,
   type EmbeddingSchema,
   type EmbeddingValue,
   getEmbeddingDimensions,

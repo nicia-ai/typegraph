@@ -3,13 +3,14 @@
  *
  * The compile-time rule is the `SubClassOfCheck` conditional type
  * (`src/ontology/types.ts`); `isTypeLevelSubtype` is its runtime
- * prediction, `isStructuralSubtype` over each side's `projectTypeVisible`
+ * prediction, the registry's comparison over each side's `projectTypeVisible`
  * projection. Two things are pinned here:
  *
  * 1. A table of node pairs whose expected verdict the TYPE CHECKER holds to
  *    the real conditional type (`agreementRow`), and the runtime holds to
  *    `isTypeLevelSubtype`. A row whose prediction drifts from the type fails
- *    one side or the other, and a registry-accepted row must compile.
+ *    one side or the other, and a registry-accepted row
+ *    (`isStructuralSubtype`) must compile.
  * 2. A property of the comparison engine itself, not of TypeScript:
  *    projecting value-level keywords away never turns a `subtype` verdict
  *    into a refusal, so whatever the registry accepts, the prediction
@@ -24,13 +25,17 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { embedding } from "../../src/core/embedding";
 import { defineNode } from "../../src/core/node";
 import { type NodeType } from "../../src/core/types";
 import { type SubClassOfCheck } from "../../src/ontology/types";
-import { serializeSchemaProperties } from "../../src/schema/serializer";
 import {
   isStructuralSubtype,
   isTypeLevelSubtype,
+} from "../../src/schema/structural-subsumption";
+import {
+  isProjectedSchemaSubtype,
+  projectTypeVisible,
 } from "../../src/schema/structural-subtype";
 import { comparableSchemaArb, tightenArb } from "./arbitraries";
 
@@ -66,11 +71,14 @@ describe("compile-time ↔ registry-build agreement", () => {
           tightenArb(parent).map((child) => [child, parent] as const),
         ),
         ([child, parent]) => {
-          const structuralResult = isStructuralSubtype(child, parent);
+          const structuralResult = isProjectedSchemaSubtype(child, parent);
           if (structuralResult.verdict !== "subtype") return;
-          expect(isTypeLevelSubtype(child, parent)).toEqual({
-            verdict: "subtype",
-          });
+          expect(
+            isProjectedSchemaSubtype(
+              projectTypeVisible(child),
+              projectTypeVisible(parent),
+            ),
+          ).toEqual({ verdict: "subtype" });
         },
       ),
     );
@@ -81,9 +89,9 @@ describe("compile-time ↔ registry-build agreement", () => {
     // erase to the SAME type-visible projection (`{ type: "string" }`), so
     // isTypeLevelSubtype says "subtype" — but the child does not actually
     // guarantee the parent's minLength constraint, so isStructuralSubtype
-    // (the authority) correctly refuses it.
-    const looseChild = serializeSchemaProperties(z.string());
-    const tightParent = serializeSchemaProperties(z.string().min(3));
+    // (the registry's verdict) correctly refuses it.
+    const looseChild = z.string();
+    const tightParent = z.string().min(3);
 
     expect(isTypeLevelSubtype(looseChild, tightParent)).toEqual({
       verdict: "subtype",
@@ -195,11 +203,95 @@ describe("compile-time ↔ registry-build agreement", () => {
         }),
         true,
       ),
+      // Type-only facts with no runtime trace: a parent `.brand()`, a child
+      // `.readonly()`, the `embedding()` marker. The registry accepts each,
+      // so each must compile.
+      agreementRow(
+        defineNode("AgreeUnbrandedChild", {
+          schema: z.object({ a: z.string() }),
+        }),
+        defineNode("AgreeBrandedParent", {
+          schema: z.object({ a: z.string().brand<"Email">() }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeReadonlyChild", {
+          schema: z.object({ a: z.array(z.string()).readonly() }),
+        }),
+        defineNode("AgreeMutableParent", {
+          schema: z.object({ a: z.array(z.string()) }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeNestedReadonlyChild", {
+          schema: z.object({
+            a: z.object({ tags: z.array(z.string()).readonly() }),
+          }),
+        }),
+        defineNode("AgreeNestedBrandedParent", {
+          schema: z.object({
+            a: z.object({ tags: z.array(z.string().brand<"Tag">()) }),
+          }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeEmbeddingChild", {
+          schema: z.object({ a: embedding(3) }),
+        }),
+        defineNode("AgreeNumberArrayParent", {
+          schema: z.object({ a: z.array(z.number()) }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeFixedArrayChild", {
+          schema: z.object({ a: z.array(z.number()).length(3) }),
+        }),
+        defineNode("AgreeEmbeddingParent", {
+          schema: z.object({ a: embedding(3) }),
+        }),
+        true,
+      ),
+      agreementRow(
+        defineNode("AgreeBrandedLiteralChild", {
+          schema: z.object({ a: z.string() }),
+        }),
+        defineNode("AgreeBrandedLiteralParent", {
+          schema: z.object({ a: z.literal("x").brand<"X">() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeOptionalUnderBrandChild", {
+          schema: z.object({ a: z.string().optional() }),
+        }),
+        defineNode("AgreeOptionalUnderBrandParent", {
+          schema: z.object({ a: z.string().brand<"Email">() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeStringUnderDateChild", {
+          schema: z.object({ a: z.string() }),
+        }),
+        defineNode("AgreeStringUnderDateParent", {
+          schema: z.object({ a: z.date() }),
+        }),
+        false,
+      ),
+      agreementRow(
+        defineNode("AgreeDateChild", { schema: z.object({ a: z.date() }) }),
+        defineNode("AgreeDateParent", { schema: z.object({ a: z.date() }) }),
+        true,
+      ),
     ];
 
     for (const row of rows) {
-      const child = serializeSchemaProperties(row.child.schema);
-      const parent = serializeSchemaProperties(row.parent.schema);
+      const child = row.child.schema;
+      const parent = row.parent.schema;
       expect({
         row: row.name,
         compiles: isTypeLevelSubtype(child, parent).verdict === "subtype",
