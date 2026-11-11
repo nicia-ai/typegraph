@@ -564,9 +564,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(refusal).toBeInstanceOf(CompositionExistenceError);
         const details = (refusal as CompositionExistenceError).details;
         expect(details.situation).toBe("existing");
+        if (details.situation !== "existing")
+          throw new Error("expected an existing-whole conflict");
         expect(details.requestedVia).toBe("shelvedIn");
         expect(details.currentWhole).toEqual({ kind: "Shelf", id: shelfA.id });
-        expect(details.requestedWhole?.id).toBe(shelfB.id);
+        expect(details.requestedWhole.id).toBe(shelfB.id);
 
         // The part holds the holder's whole, through exactly one edge, with no
         // retired window: a move would leave two rows, one of them ended.

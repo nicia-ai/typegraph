@@ -51,13 +51,17 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import {
+  CompositionConfigurationError,
   CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   EndpointNotFoundError,
   ValidationError,
 } from "../../errors";
-import { validateEdgeProps } from "../../errors/validation";
+import {
+  unrecognizedOptionKeyIssues,
+  validateEdgeProps,
+} from "../../errors/validation";
 import {
   type CompositionPair,
   compositionViaKind,
@@ -98,13 +102,6 @@ import {
 
 const ATTACHMENT_KEYS = ["whole", "via", "props", "validFrom", "validTo"];
 const REPARENT_OPTION_KEYS = ["whole", "via", "props", "at"];
-
-/** A stated window bound differs from the one an already-held attachment stores. */
-const COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE =
-  "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT";
-/** A stated `validTo` would write an edge that does not attach its part. */
-const COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE =
-  "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED";
 
 /**
  * Where an attachment was stated: the argument name its refusals are
@@ -168,15 +165,14 @@ function readStatedAttachment(
 ): StatedCompositionAttachment {
   const stated = isObjectRecord(value) ? value : {};
   const whole = readWholeRef(stated["whole"]);
-  const unknownKeys = Object.keys(stated).filter(
-    (key) => !surface.keys.includes(key),
+  const unknownKeyIssues = unrecognizedOptionKeyIssues(
+    stated,
+    surface.path,
+    surface.keys,
   );
-  if (whole === undefined || unknownKeys.length > 0) {
+  if (whole === undefined || unknownKeyIssues.length > 0) {
     const issues = [
-      ...unknownKeys.map((key) => ({
-        path: `${surface.path}.${key}`,
-        message: `Unknown key. Accepted keys: ${surface.keys.join(", ")}.`,
-      })),
+      ...unknownKeyIssues,
       ...(whole === undefined ?
         [
           {
@@ -581,7 +577,7 @@ function resolveCompositionAttachment(
   const wholeKind = attachment.whole.kind;
   const declared = registry.compositionPairsBetween(partKind, wholeKind);
   if (declared.length === 0) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `Node kind "${partKind}" declares no composition pair to whole kind "${wholeKind}".`,
       {
         code: "COMPOSITION_WHOLE_NOT_DECLARED",
@@ -603,7 +599,7 @@ function resolveCompositionAttachment(
       (candidate) => candidate.viaEdgeKind === viaKind,
     );
     if (pair === undefined) {
-      throw new ConfigurationError(
+      throw new CompositionConfigurationError(
         `Edge kind "${viaKind}" realizes no declared composition pair between "${partKind}" and "${wholeKind}".`,
         {
           code: "COMPOSITION_VIA_NOT_DECLARED",
@@ -621,7 +617,7 @@ function resolveCompositionAttachment(
   }
 
   if (declared.length > 1) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `Attaching "${partKind}" to "${wholeKind}" is ambiguous: ${declared.length} declared composition pairs realize it.`,
       {
         code: "COMPOSITION_VIA_AMBIGUOUS",
@@ -773,7 +769,8 @@ function compositionCreateWork(
 /**
  * Refuses a stated attachment whose realizing edge would be written already
  * NOT attaching its part: a `validTo` on a `population: "oneActive"` pair,
- * where only an open-ended row is a membership.
+ * where only an open-ended row is a membership — `CompositionError`
+ * (`situation: "boundedAttachment"`, `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`).
  *
  * `partOf` asks for an attachment, and an edge
  * {@link compositionEdgeAttachesPart} does not count is not one: no later call
@@ -799,24 +796,18 @@ function assertStatedWindowAttachesPart(
   ) {
     return;
   }
-  throw new ValidationError(
-    `Invalid composition attachment for ${part.kind}: a bounded window does not attach a part under a "${pair.population}" composition pair.`,
-    {
-      entityType: "node",
-      kind: part.kind,
-      ...(part.id === undefined ? {} : { id: part.id }),
-      issues: [
-        {
-          path: `${PART_OF_SURFACE.path}.validTo`,
-          code: COMPOSITION_ATTACHMENT_WINDOW_BOUNDED_CODE,
-          message: `"${pair.viaEdgeKind}" counts as a membership only while its window is open, so an attachment stated with validTo "${validTo}" would not attach the part.`,
-        },
-      ],
-    },
-    {
-      suggestion: `Omit \`${PART_OF_SURFACE.path}.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${pair.viaEdgeKind}.create(...)\`.`,
-    },
-  );
+  throw new CompositionError({
+    situation: "boundedAttachment",
+    partKind: part.kind,
+    ...(part.id === undefined ? {} : { partId: part.id }),
+    wholeKind: attachment.whole.kind,
+    wholeId: attachment.whole.id,
+    edgeKind: pair.viaEdgeKind,
+    validTo: requireDefined(
+      validTo,
+      "an attachment with no validTo was judged not to attach its part",
+    ),
+  });
 }
 
 /**
@@ -1251,9 +1242,8 @@ function judgeSatisfiedAttachment(
  * whole, or a differing realizing edge).
  *
  * Disagreeing `props` refuse with `CompositionExistenceError`
- * (`situation: "props"`) naming both sides. A disagreeing window bound
- * refuses with `ValidationError` under `partOf.<bound>`, the shape an
- * in-place edge write gives a lower bound it cannot apply. Neither is
+ * (`situation: "props"`) naming both sides, and a disagreeing window bound
+ * with its `"window"` sibling naming the stated option. Neither is
  * rewritten here: this call resolves an attachment, and changing the
  * realizing edge is `store.edges.<via>.update(...)`'s.
  */
@@ -1319,36 +1309,27 @@ export function assertSatisfiedMoveInstantHonored(
 
 /**
  * The one shape of a stated window bound an already-held attachment cannot
- * apply: `ValidationError` under the stated option's own path, with
- * `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` naming both instants.
+ * apply: `CompositionExistenceError` (`situation: "window"`,
+ * `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`) naming the stated option and both
+ * instants — the window sibling of the `"props"` refusal.
  */
 function attachmentWindowConflict(
-  path: string,
+  option: string,
   partKind: string,
   partId: string,
   bound: Readonly<{ stated: string | null; stored: string | undefined }>,
   currentEdge: Pick<EdgeRow, "id" | "kind">,
-): ValidationError {
-  const storedDescription =
-    bound.stored === undefined ? "no such bound" : `"${bound.stored}"`;
-  return new ValidationError(
-    `Unappliable ${path} for ${partKind} "${partId}": it already holds this whole via "${currentEdge.kind}" (edge ${currentEdge.id}) with a different window.`,
-    {
-      entityType: "node",
-      kind: partKind,
-      id: partId,
-      issues: [
-        {
-          path,
-          code: COMPOSITION_ATTACHMENT_WINDOW_CONFLICT_CODE,
-          message: `Stated ${bound.stated === null ? "no lower bound" : `"${bound.stated}"`}, but the realizing edge stores ${storedDescription}.`,
-        },
-      ],
-    },
-    {
-      suggestion: `Omit \`${path}\` or restate the stored bound; an already-satisfied attachment only asserts placement. Change the window on the realizing edge with \`store.edges.${currentEdge.kind}.update(${JSON.stringify(currentEdge.id)}, ...)\`.`,
-    },
-  );
+): CompositionExistenceError {
+  return new CompositionExistenceError({
+    situation: "window",
+    partKind,
+    partId,
+    edgeKind: currentEdge.kind,
+    edgeId: currentEdge.id,
+    option,
+    stated: bound.stated,
+    ...(bound.stored === undefined ? {} : { stored: bound.stored }),
+  });
 }
 
 /**

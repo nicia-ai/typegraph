@@ -16,6 +16,7 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   defineEdge,
@@ -1071,13 +1072,16 @@ export function registerCompositionExistenceIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(ValidationError);
-      expect((error as ValidationError).details.issues).toEqual([
-        expect.objectContaining({
-          path: "partOf.validTo",
-          code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
-        }),
-      ]);
+      expect(error).toBeInstanceOf(CompositionError);
+      expect(error).toMatchObject({
+        code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        details: {
+          situation: "boundedAttachment",
+          wholeKind: "EeShow",
+          wholeId: show.id,
+          validTo: "2000-01-01T00:00:00.000Z",
+        },
+      });
 
       // No node row, and no composition edge row, survive the refused
       // create — the whole write plan (node + composition edge) is one
@@ -1521,12 +1525,10 @@ export function registerCompositionExistenceIntegrationTests(
           { partOf: { whole: { kind: "EeEpisode", id: episodeB.id } } },
         ).catch((error_: unknown) => error_);
       expect(foundError).toBeInstanceOf(CompositionExistenceError);
-      expect((foundError as CompositionExistenceError).details.situation).toBe(
-        "existing",
-      );
-      expect(
-        (foundError as CompositionExistenceError).details.currentWhole,
-      ).toEqual({ kind: "EeEpisode", id: episodeA.id });
+      expect((foundError as CompositionExistenceError).details).toMatchObject({
+        situation: "existing",
+        currentWhole: { kind: "EeEpisode", id: episodeA.id },
+      });
 
       const updatedError =
         await store.nodes.EeKeyedSegment.getOrCreateByConstraint(

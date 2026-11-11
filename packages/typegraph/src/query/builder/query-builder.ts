@@ -24,7 +24,13 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError, KindNotFoundError } from "../../errors";
+import {
+  CompositionConfigurationError,
+  ConfigurationError,
+  KindNotFoundError,
+  ValidationError,
+} from "../../errors";
+import { unrecognizedOptionKeyIssues } from "../../errors/validation";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import {
   compositionEdgeKindMembers,
@@ -239,6 +245,41 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
    */
   via?: CompositionViaRef;
 }>;
+
+/** Every key {@link CompositionNavigationOptions} accepts. */
+const COMPOSITION_NAVIGATION_OPTION_KEYS = [
+  "from",
+  "maxHops",
+  "depth",
+  "path",
+  "via",
+] as const satisfies readonly (keyof CompositionNavigationOptions<AliasMap>)[];
+
+/**
+ * Refuses an option `parts()` / `wholes()` does not accept — `expand`, or a
+ * misspelled `maxHops` — rather than walking as if it were absent: a dropped
+ * `maxHop: 1` would silently run the unbounded closure.
+ */
+function assertCompositionNavigationOptionKeys(
+  relation: "parts" | "wholes",
+  nodeAlias: string,
+  options: Readonly<Record<string, unknown>> | undefined,
+): void {
+  if (options === undefined) return;
+  const issues = unrecognizedOptionKeyIssues(
+    options,
+    "options",
+    COMPOSITION_NAVIGATION_OPTION_KEYS,
+  );
+  if (issues.length === 0) return;
+  throw new ValidationError(
+    `.${relation}("${nodeAlias}") does not accept ${issues.map((issue) => issue.path).join(", ")}.`,
+    { issues },
+    {
+      suggestion: `Pass only these keys: ${COMPOSITION_NAVIGATION_OPTION_KEYS.join(", ")}. The composition edge kinds are derived from the registry, so \`expand\` is not accepted.`,
+    },
+  );
+}
 
 type DynamicEdgeTypeFor<T> =
   T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
@@ -1147,6 +1188,7 @@ export class QueryBuilder<
     O
   > {
     validateSqlIdentifier(nodeAlias);
+    assertCompositionNavigationOptionKeys(relation, nodeAlias, options);
     const registry = this.#config.registry;
     const fromAlias = options?.from ?? this.#state.currentAlias;
     const sourceKinds = this.#getKindNamesForAlias(fromAlias);
@@ -1155,7 +1197,7 @@ export class QueryBuilder<
         this.#state.startAlias,
         ...this.#state.traversals.map((traversal) => traversal.nodeAlias),
       ];
-      throw new ConfigurationError(
+      throw new CompositionConfigurationError(
         `.${relation}("${nodeAlias}", { from: "${fromAlias}" }) was called, but this query has no alias "${fromAlias}". ` +
           `Known aliases: ${knownAliases.map((known) => `"${known}"`).join(", ")}.`,
         {
@@ -1192,7 +1234,7 @@ export class QueryBuilder<
         compositionViaReach(registry, relation, sourceKinds, viaKind)
       );
     if (viaReach?.realized === false) {
-      throw new ConfigurationError(
+      throw new CompositionConfigurationError(
         `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
         {
           code: "COMPOSITION_VIA_NOT_DECLARED",
@@ -1220,7 +1262,7 @@ export class QueryBuilder<
         sourceKinds.length > 0 ?
           sourceKinds.map((kind) => `"${kind}"`).join(", ")
         : "(unknown)";
-      throw new ConfigurationError(
+      throw new CompositionConfigurationError(
         `.${relation}("${nodeAlias}") was called on alias "${fromAlias}" (kind${sourceKinds.length === 1 ? "" : "s"} ${kindsLabel}), which declares no composition ${relation}.`,
         {
           code:

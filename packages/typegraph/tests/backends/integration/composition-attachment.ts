@@ -366,7 +366,7 @@ export function registerCompositionAttachmentIntegrationTests(
         ),
       ).rejects.toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_VIA_AMBIGUOUS",
           details: matchingObject({ code: "COMPOSITION_VIA_AMBIGUOUS" }),
         }),
       );
@@ -392,7 +392,7 @@ export function registerCompositionAttachmentIntegrationTests(
         ),
       ).rejects.toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_VIA_NOT_DECLARED",
           details: matchingObject({ code: "COMPOSITION_VIA_NOT_DECLARED" }),
         }),
       );
@@ -830,13 +830,11 @@ export function registerCompositionAttachmentIntegrationTests(
       ]);
       for (const call of calls) {
         const error = await call().catch((error_: unknown) => error_);
-        expect(error).toBeInstanceOf(ValidationError);
-        expect((error as ValidationError).details.issues).toEqual([
-          expect.objectContaining({
-            path: "options.at",
-            code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
-          }),
-        ]);
+        expect(error).toBeInstanceOf(CompositionExistenceError);
+        expect(error).toMatchObject({
+          code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
+          details: { situation: "window", option: "options.at" },
+        });
       }
 
       const restated = await store.nodes.CaClip.reparent(clip.id, {
@@ -864,7 +862,7 @@ export function registerCompositionAttachmentIntegrationTests(
         }),
       ).rejects.toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_NOT_A_PART",
           details: matchingObject({ code: "COMPOSITION_NOT_A_PART" }),
         }),
       );
@@ -1683,6 +1681,8 @@ export function registerCompositionAttachmentIntegrationTests(
       );
       const details = (error as CompositionExistenceError).details;
       expect(details.situation).toBe("existing");
+      if (details.situation !== "existing")
+        throw new Error("expected an existing-whole conflict");
       expect(details.partId).toBe(chapter.id);
       expect(details.currentWhole).toEqual({
         kind: "CaBook",
@@ -1728,6 +1728,8 @@ export function registerCompositionAttachmentIntegrationTests(
 
       expect(error).toBeInstanceOf(CompositionExistenceError);
       const details = (error as CompositionExistenceError).details;
+      if (details.situation !== "existing")
+        throw new Error("expected an existing-whole conflict");
       expect(details.currentVia).toBe("caChapterOf");
       expect(details.requestedVia).toBe("caDraftChapterOf");
       expect(await store.edges.caDraftChapterOf.find({})).toHaveLength(0);
@@ -1795,7 +1797,7 @@ export function registerCompositionAttachmentIntegrationTests(
         ),
       ).rejects.toThrow(
         expect.objectContaining({
-          code: "CONFIGURATION_ERROR",
+          code: "COMPOSITION_VIA_AMBIGUOUS",
           details: matchingObject({ code: "COMPOSITION_VIA_AMBIGUOUS" }),
         }),
       );
@@ -2050,6 +2052,8 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(error).toBeInstanceOf(CompositionExistenceError);
       const details = (error as CompositionExistenceError).details;
       expect(details.situation).toBe("existing");
+      if (details.situation !== "existing")
+        throw new Error("expected an existing-whole conflict");
       expect(details.partId).toBe(elsewhere.id);
       expect(details.currentWhole).toEqual({
         kind: "CaAnthology",
@@ -2802,13 +2806,11 @@ export function registerCompositionAttachmentIntegrationTests(
         ];
         for (const call of calls) {
           const error = await call().catch((error_: unknown) => error_);
-          expect(error).toBeInstanceOf(ValidationError);
-          expect((error as ValidationError).details.issues).toEqual([
-            expect.objectContaining({
-              path: `partOf.${field}`,
-              code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
-            }),
-          ]);
+          expect(error).toBeInstanceOf(CompositionExistenceError);
+          expect(error).toMatchObject({
+            code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
+            details: { situation: "window", option: `partOf.${field}` },
+          });
           expect(await windows()).toEqual([stored]);
         }
 
@@ -2930,13 +2932,11 @@ export function registerCompositionAttachmentIntegrationTests(
         ];
         for (const call of calls) {
           const error = await call().catch((error_: unknown) => error_);
-          expect(error).toBeInstanceOf(ValidationError);
-          expect((error as ValidationError).details.issues).toEqual([
-            expect.objectContaining({
-              path: "partOf.validTo",
-              code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
-            }),
-          ]);
+          expect(error).toBeInstanceOf(CompositionError);
+          expect(error).toMatchObject({
+            code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+            details: { situation: "boundedAttachment" },
+          });
         }
       }
       const reels = await store.nodes.CaReel.find({});

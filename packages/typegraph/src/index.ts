@@ -421,6 +421,7 @@ export {
 export type {
   BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
+  CompositionConfigurationCode,
   CompositionCycleErrorDetails,
   CompositionErrorDetails,
   CompositionExistenceErrorDetails,
@@ -474,6 +475,7 @@ export {
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
+  CompositionConfigurationError,
   CompositionCycleError,
   CompositionError,
   CompositionExistenceError,

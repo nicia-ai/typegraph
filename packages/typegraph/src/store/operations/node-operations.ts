@@ -109,6 +109,7 @@ import {
 } from "../../core/types";
 import {
   CompilerInvariantError,
+  CompositionConfigurationError,
   ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
@@ -5157,7 +5158,7 @@ async function reparentParts<G extends GraphDef>(
 ): Promise<readonly NodeReparentResult[]> {
   if (items.length === 0) return [];
   if (!ctx.registry.isCompositionPart(kind)) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `Node kind "${kind}" is not a composition part: it declares no partOf/hasPart pair toward any whole.`,
       { code: "COMPOSITION_NOT_A_PART", partKind: kind },
       {

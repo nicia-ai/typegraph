@@ -624,7 +624,12 @@ leaves nothing of the refused create behind.
   a variable annotated `readonly OntologyRelation[]`, the type accepts any
   node kind of the graph instead. The runtime check is authoritative either
   way: a pair that is not declared between the two kinds raises
-  `ConfigurationError` (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+  `CompositionConfigurationError` (`code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+  That class is a `ConfigurationError` whose `code` is the composition code
+  itself (also kept on `details.code`): every composition refusal —
+  `CompositionError`, `CompositionExistenceError` and
+  `CompositionConfigurationError` — carries its `COMPOSITION_*` code on
+  `error.code`.
   `store.getNodeCollection(kind)` takes any kind string, and a
   `StoreProjection` carries the same whole kinds its graph declares for each
   projected kind.
@@ -644,9 +649,9 @@ leaves nothing of the refused create behind.
   bound or an inverted pair is refused with `ValidationError` on every
   surface, including a get-or-create that finds the attachment already held.
   On a `population: "oneActive"` pair only an open-ended edge is a
-  membership, so stating `validTo` there is refused (issue path
-  `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): the edge
-  it would write attaches nothing. Record a past membership as history with
+  membership, so stating `validTo` there is refused with `CompositionError`
+  (`COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`, `situation:
+  "boundedAttachment"`): the edge it would write attaches nothing. Record a past membership as history with
   `store.edges.<via>.create(...)` and a `validTo` at or before now instead.
   That history row must not overlap any other composition edge of the same
   part on a `"oneActive"` pair: windows are half-open (`[validFrom,
@@ -751,12 +756,12 @@ than being silently dropped, since the no-op performs no write to apply it —
 `store.edges.<via>.update(...)` changes the edge directly. A stated `at` is
 checked the same way: the no-op opens no new window, so `at` stands only when
 it equals the realizing edge's stored `validFrom`, and any other instant is
-refused with `ValidationError` under `options.at`
-(`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`), as a differing `partOf.validFrom`
-is on get-or-create. An omitted `at` states nothing and is never refused here.
-A kind that
+refused with `CompositionExistenceError`
+(`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `situation: "window"`, `option:
+"options.at"`), as a differing `partOf.validFrom` is on get-or-create. An
+omitted `at` states nothing and is never refused here. A kind that
 declares no `partOf`/`hasPart` pair at all raises
-`ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
+`CompositionConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
 
 #### One whole at every instant
@@ -827,7 +832,7 @@ optional and required parts alike, and most of its outcomes are successes:
 | a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
 | a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
 | a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
-| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `ValidationError` (issue path `partOf.validFrom` or `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`) — the same rule as `props` | — |
+| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `CompositionExistenceError` (`situation: "window"`, `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `option` naming `partOf.validFrom` or `partOf.validTo`) — the same rule as `props` | — |
 | a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
 | a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
 
@@ -841,7 +846,7 @@ two concurrent calls naming different wholes for one part end with exactly
 one attachment and one `situation: "existing"` refusal, never a silent move.
 
 The attachment is resolved before the match is read, so the
-`ConfigurationError` refusals above (`COMPOSITION_WHOLE_NOT_DECLARED`,
+`CompositionConfigurationError` refusals above (`COMPOSITION_WHOLE_NOT_DECLARED`,
 `COMPOSITION_VIA_NOT_DECLARED`, `COMPOSITION_VIA_AMBIGUOUS`) fire identically
 on a found node and on a created one. On the `ifExists: "update"` and
 resurrection legs every read the attachment owes runs before the property

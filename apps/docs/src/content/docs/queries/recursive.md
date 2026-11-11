@@ -658,7 +658,7 @@ pagination surfaces refuse it as described in [Pagination](#pagination).
 on the Podcast above follows `episodeOf` alone, so it returns the Episodes and
 not their Segments; pass the edge's type or its kind string. A `via` that
 realizes no pair at the source alias itself, such as `segmentOf` on a Podcast,
-is refused with `ConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
+is refused with `CompositionConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
 `details.declaredVia` lists the edges that would work.
 
 **They follow ownership, not validity.** A composition step follows the
@@ -696,7 +696,7 @@ not a silently empty result:
 
 ```typescript
 await store.query().from("Segment", "s").parts("x");
-// throws ConfigurationError, details.code: "COMPOSITION_NO_PARTS_DECLARED"
+// throws CompositionConfigurationError, code: "COMPOSITION_NO_PARTS_DECLARED"
 // (Segment has no partOf/hasPart relation declaring parts of its own)
 ```
 
@@ -704,7 +704,12 @@ await store.query().from("Segment", "s").parts("x");
 kind declaring no composition wholes. `expand` is not accepted on either
 step: it means "same relation, more members" (ontology implying/inverse
 expansion), and the edge-kind set here is derived from the composition
-relation, not from an expansion mode.
+relation, not from an expansion mode. Both steps accept exactly `from`,
+`maxHops`, `depth`, `path` and `via`; any other key — `expand`, or a
+misspelled `maxHop` that would otherwise leave the walk unbounded — is
+refused with `ValidationError` (issue path `options.<key>`, code
+`unrecognized_keys`), including when the options object is built at runtime
+where TypeScript's excess-property check does not reach.
 
 For the whole-plus-parts *export* shape (rather than a query result), see
 [`subgraph({ composition: true })`](/schemas-stores#composition-export).

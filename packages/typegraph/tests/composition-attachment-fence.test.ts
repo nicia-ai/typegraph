@@ -188,6 +188,8 @@ describe("get-or-create's partOf postcondition under the fence", () => {
     expect(refusal).toBeInstanceOf(CompositionExistenceError);
     const details = (refusal as CompositionExistenceError).details;
     expect(details.situation).toBe("existing");
+    if (details.situation !== "existing")
+      throw new Error("expected an existing-whole conflict");
     expect(details.currentWhole).toEqual({ kind: "AfWhole", id: wholeA.id });
     expect(details.requestedWhole).toEqual({ kind: "AfWhole", id: wholeB.id });
     expect(details.requestedVia).toBe("afPartOf");

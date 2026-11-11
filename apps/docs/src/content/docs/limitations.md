@@ -362,7 +362,7 @@ before the affected nodes can be deleted.
   the graph at compile time. `via` is not narrowed from the ontology at all:
   it takes any edge type or kind string. A composition pair added at runtime
   through `store.evolve()` is invisible to the type; reach it through
-  `store.getNodeCollection(kind)`. The runtime check (`ConfigurationError`,
+  `store.getNodeCollection(kind)`. The runtime check (`CompositionConfigurationError`,
   `COMPOSITION_WHOLE_NOT_DECLARED` / `COMPOSITION_VIA_NOT_DECLARED`) is
   authoritative in every case.
 - **Trusted import refuses every declared composition pair, required or
