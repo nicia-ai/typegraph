@@ -50,7 +50,7 @@
  * **A Zod construct `z.toJSONSchema` cannot convert** (`z.set()`, `z.map()`,
  * `z.date()`, `z.bigint()`, a `.transform()`, `embedding()` and any other
  * `z.custom()`) is judged per node in a live graph: the comparison
- * projection marks that node alone, and `isStructuralSubtype` accepts it
+ * projection marks that node alone, and the comparison accepts it
  * only under a parent field that admits every value or beside a node of the
  * same identity (the same Zod instance, or plain `z.date()`s), while every
  * other property of the pair is still compared. An `embedding()` is compared
@@ -75,9 +75,8 @@
  * parents, its children, and its equivalents in one pass. Do not add a
  * second, narrower re-check for the `evolve()` case.
  */
-import { isUnprojectableSchemaProjection } from "../schema/serializer";
+import { judgeStructuralSubsumption } from "../schema/structural-subsumption";
 import {
-  isStructuralSubtype,
   type StructuralIncomparableReason,
   type StructuralSubtypeReason,
 } from "../schema/structural-subtype";
@@ -90,8 +89,8 @@ import { type KindRegistry } from "./kind-registry";
 // ============================================================
 
 /** One `subClassOf`/`equivalentTo` pair whose child does not structurally
- * extend its parent — either verdict `isStructuralSubtype` can return that
- * is not `"subtype"`. */
+ * extend its parent — a `judgeStructuralSubsumption` verdict the registry
+ * refuses (`"not-subtype"` or `"incomparable"`). */
 export type StructuralSubsumptionViolation = Readonly<{
   childKind: string;
   parentKind: string;
@@ -121,7 +120,9 @@ export type DeclaredSubsumptionPair = (
 
 /**
  * Every `(child, parent)` pair in `closures.subClassAncestors`'s transitive
- * closure whose projected schemas are NOT a structural subtype, in stable
+ * closure whose projected schemas are NOT a structural subtype — the
+ * `judgeStructuralSubsumption` verdict public tooling reads through
+ * `isStructuralSubtype` (`/schema`) — in stable
  * `compareCodePoints` order. Empty when every pair the closure produces is
  * either a genuine subtype, unregistered, or unprojectable on either side
  * (both skipped).
@@ -150,15 +151,11 @@ export function findStructuralSubsumptionViolations(
       // Unregistered kind (external IRI, or a parent this document only
       // references) — subsumption does not apply; skip, do not throw.
       if (childSchema === undefined || parentSchema === undefined) continue;
-      if (
-        isUnprojectableSchemaProjection(childSchema) ||
-        isUnprojectableSchemaProjection(parentSchema)
-      ) {
+
+      const result = judgeStructuralSubsumption(childSchema, parentSchema);
+      if (result.verdict === "subtype" || result.verdict === "unchecked") {
         continue;
       }
-
-      const result = isStructuralSubtype(childSchema, parentSchema);
-      if (result.verdict === "subtype") continue;
 
       violations.push({
         childKind,

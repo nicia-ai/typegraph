@@ -294,6 +294,12 @@ iteration but teleports to weighted seed nodes instead of uniformly across the
 graph. Both methods operate on the visible induced graph; `nodeKinds` can narrow
 that graph without allowing transitions through excluded nodes.
 
+Every algorithm's `nodeKinds` matches each listed kind exactly. Unlike a query
+source, which is polymorphic by default, it does not include a kind's
+`subClassOf` or `equivalentTo` kinds: `nodeKinds: ["Party"]` excludes `Person`
+nodes even where `Person` is a subclass of `Party`. List every kind the induced
+graph should hold (see [Scope at a glance](/queries/source#scope-at-a-glance)).
+
 ```typescript
 const globalScores = await store.algorithms.pageRank({
   edges: ["knows", "cites"],

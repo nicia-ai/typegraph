@@ -381,15 +381,26 @@ compile-time `G` it was called on, and a later `createStoreWithSchema(graph,
 backend)` folds the persisted extension back in under the same `G`, so the
 compile-time alias type of a base-graph kind that only becomes polymorphic
 through an extension's `subClassOf` is still the exact kind. Rather than
-return the extension's subclass rows under that type, `from(kind, alias)`, a
-list source and `to(kind, alias)` with no `expansion` throw
-`ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`), on the
-evolved store and after every restart. A list source is refused only for an
-extra kind none of its listed kinds' types admits. `store.search()` with
-`expansion: "subclasses"` is not refused: its hit is typed polymorphically
-whatever the compile-time graph declares. State `{ expansion: "subclasses" }`
-or `{ expansion: "exact" }`, or use `fromDynamic()`; see [Query Source ▸
-Subclass Expansion](/queries/source#subclass-expansion).
+return the extension's subclass rows under that type, a query over
+`from(kind, alias)`, a list source or `to(kind, alias)` with no `expansion`
+throws `ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`) from
+every terminal that returns rows, on the evolved store and after every
+restart; `count()` and `exists()` still answer. A list source is refused only
+for an extra kind none of its listed kinds' types admits. `store.search()`
+with `expansion: "subclasses"` is not refused: its hit is typed
+polymorphically whatever the compile-time graph declares. State
+`{ expansion: "subclasses" }` or `{ expansion: "exact" }`, or use
+`fromDynamic()`; see [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion).
+
+Because the extension is persisted, this reaches **every deployment that
+shares the database**, not only the one that called `evolve()`: another
+service running the same code graph picks the extension up on its next
+`createStoreWithSchema(...)` boot, and its unchanged unstated-expansion
+queries over the subclassed kind start refusing. Such a service opts out with
+`queryDefaults: { expansion: "exact" }` in its `createStore` /
+`createStoreWithSchema` options, or by declaring the relation in its code
+graph.
 
 The refusal reads the graph's ontology **values** at run time, not the type
 the store was declared with, so it also fires for a store typed over a wide

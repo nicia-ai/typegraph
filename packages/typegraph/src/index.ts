@@ -68,6 +68,7 @@ export {
   type EdgeKinds,
   // Embedding type for vector search
   embedding,
+  type EmbeddingBrand,
   type EmbeddingSchema,
   type EmbeddingValue,
   externalRef,
@@ -1013,8 +1014,16 @@ export {
 } from "./query";
 
 // The one expansion axis a `from`/`to` alias, a store-wide default, and
-// `search()` state (the default and search forms exclude `"narrower"`).
-export type { AliasExpansionAxis, DefaultAliasExpansionAxis } from "./query";
+// `search()` state (the default and search forms exclude `"narrower"`), the
+// options bag a `from`/`to` wrapper forwards, and the alias type a forwarded
+// bag resolves to.
+export type {
+  AliasExpansionAxis,
+  AliasExpansionOptions,
+  DefaultAliasExpansionAxis,
+  ExpansionAliasNodeType,
+  ForwardedExpansionAxes,
+} from "./query";
 export {
   DEFAULT_ALIAS_EXPANSION_AXIS,
   SEARCH_EXPANSION_DEFAULT,

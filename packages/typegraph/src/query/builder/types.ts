@@ -21,6 +21,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
+import { type ConfigurationError } from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
@@ -208,23 +209,6 @@ export type NodeAlias<
 }>;
 
 /**
- * True when `G["ontology"]` has lost its `const`-inferred tuple shape — its
- * `length` is the general `number` rather than a tuple's fixed literal
- * count. `defineGraph`'s `const TOntology` normally keeps the array a tuple
- * of positionally typed relations (so {@link SubsumptionAffected} can
- * `Extract` a `to: { kind: K }` literal out of it), but a caller can lose
- * that shape — most commonly by building the relations in a variable
- * annotated `readonly OntologyRelation[]` before passing it to
- * `defineGraph({ ontology })`, the exact pattern the changeset blesses
- * ("code that annotates a relation's result as `OntologyRelation` still
- * compiles unchanged"). `defineGraph`'s own omitted-`ontology` default is
- * the literal empty tuple `readonly []` (`length: 0`), which is NOT erased
- * by this test — only a genuinely unbounded array is.
- */
-type OntologyTypeErased<G extends GraphDef> =
-  number extends G["ontology"]["length"] ? true : false;
-
-/**
  * True when an ontology endpoint carries no `kind` literal for
  * {@link SubsumptionElementNamesKind}'s `Extract` to match or rule out. An
  * endpoint is one of three things:
@@ -372,26 +356,29 @@ type SubsumptionElementNamesKind<Relation, K extends string> =
  * like a two-kind one, so rows of the co-registered kind really can come
  * back.
  *
- * **Two arms widen conservatively rather than answer `false`.** An
- * {@link OntologyTypeErased} ontology has lost its tuple length, so no
- * per-element `Extract` can rule out a `subClassOf` targeting `K`; and a
- * single {@link SubsumptionLiteralsErased} element has lost the very
- * literals the `Extract` matches on — its own annotation erased either the
- * meta-edge name or the endpoint kind the match reads. Either arm answering
- * `false` would be an unsound under-widening: the alias would stay narrow
- * while the runtime alias is genuinely polymorphic.
+ * The test reads the ontology's ELEMENT union (`G["ontology"][number]`), never
+ * its length, so a tuple and a plain array decide alike: an array cannot hold
+ * a value outside its element type, so a separately built
+ * `const ontology = [subClassOf(A, B), disjointWith(C, D)]` (an array, not a
+ * tuple) still names exactly the kinds its elements can name. An empty
+ * array's element type is `never`, which affects nothing.
  *
- * The two arms are conservative, not exhaustive: an element that keeps every
- * literal the `Extract` reads is decided by {@link
- * SubsumptionElementNamesKind}, and that decision is sound for the relations
- * the ontology DECLARES — including one whose endpoint is a UNION of node
- * types, which that helper distributes over so every kind the union can
- * hold is decided. A relation added at runtime is a separate, documented
- * limitation — see {@link AliasNodeType}.
+ * **One arm widens conservatively rather than answer `false`**: an element
+ * {@link SubsumptionLiteralsErased} flags has lost the very literals the
+ * `Extract` matches on — an annotation erased the meta-edge name (the
+ * `readonly OntologyRelation[]` array annotation, and `GraphDef`'s own
+ * default, both do) or the endpoint kind the match reads. Answering `false`
+ * there would be an unsound under-widening: the alias would stay narrow while
+ * the runtime alias is genuinely polymorphic.
+ *
+ * Every other element is decided by {@link SubsumptionElementNamesKind}, and
+ * that decision is sound for the relations the ontology DECLARES — including
+ * one whose endpoint is a UNION of node types, which that helper distributes
+ * over so every kind the union can hold is decided. A relation added at
+ * runtime is a separate, documented limitation — see {@link AliasNodeType}.
  */
 type SubsumptionAffected<G extends GraphDef, K extends string> =
-  OntologyTypeErased<G> extends true ? true
-  : true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
+  true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
   : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true
   : false;
 
@@ -475,16 +462,14 @@ type AssignableKeyClosure<Relation, Reached> =
  * transitive `subClassOf` descendants, and every kind folded into the same
  * class by `equivalentTo`, followed through any mix of the two.
  *
- * Takes the same conservative arms as {@link SubsumptionAffected}: an
- * {@link OntologyTypeErased} ontology, or one element whose literals are
- * {@link SubsumptionLiteralsErased}, admits every node kind of `G` rather
- * than under-admitting a kind the runtime accepts. Kinds mapped to an IRI
+ * Takes the same conservative arm as {@link SubsumptionAffected}: one element
+ * whose literals are {@link SubsumptionLiteralsErased} admits every node kind
+ * of `G` rather than under-admitting a kind the runtime accepts. Kinds mapped to an IRI
  * join one class (see {@link SubsumptionEndpointKeys}). The runtime check
  * stays authoritative for every kind this admits.
  */
 export type AssignableNodeKinds<G extends GraphDef, K extends string> =
-  OntologyTypeErased<G> extends true ? K | (keyof G["nodes"] & string)
-  : true extends SubsumptionLiteralsErased<G["ontology"][number]> ?
+  true extends SubsumptionLiteralsErased<G["ontology"][number]> ?
     K | (keyof G["nodes"] & string)
   : | K
     | Extract<
@@ -566,8 +551,7 @@ type DeclaredCompositionWholeKinds<Relation, K extends string> =
  * that is provable from the ontology tuple; `never` for a kind that is no
  * declared part, so stating an attachment for it does not compile. Falls
  * back to every node kind of `G` whenever the restriction cannot be proven
- * sound: an ontology that lost its tuple shape ({@link OntologyTypeErased}),
- * or any element {@link CompositionWholeKindsUndecidable} flags — notably
+ * sound: any element {@link CompositionWholeKindsUndecidable} flags — notably
  * any subclass or equivalence relation, since a declared pair then admits
  * kinds only the registry's closure can enumerate.
  *
@@ -578,8 +562,7 @@ type DeclaredCompositionWholeKinds<Relation, K extends string> =
  * way.
  */
 export type CompositionWholeKinds<G extends GraphDef, K extends string> =
-  OntologyTypeErased<G> extends true ? keyof G["nodes"] & string
-  : true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ?
+  true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ?
     keyof G["nodes"] & string
   : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
 
@@ -599,9 +582,10 @@ export type CompositionWholeKinds<G extends GraphDef, K extends string> =
  * every later boot) but returns `Store<G>` with the compile-time `G`
  * unchanged, so `SubsumptionAffected<G, K>` still evaluates against the
  * graph as it was declared. When that keeps `K` exact while the live
- * registry expands it to further kinds, `expandKindsForAxis`
- * (`./alias-expansion.ts`) throws `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`
- * rather than return rows whose `kind` and `NodeId` contradict this type.
+ * registry expands it to further kinds, every row-returning
+ * terminal refuses with `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`
+ * (`./alias-expansion.ts`) rather than return rows whose `kind` and `NodeId`
+ * contradict this type; `count()` and `exists()`, which type no row, answer.
  * State `{ expansion: "subclasses" }` (typed {@link PolymorphicNodeType}
  * unconditionally) or `{ expansion: "exact" }`, or use `fromDynamic()`.
  * The refusal reads the graph's ontology values, which cannot show a widened
@@ -629,6 +613,50 @@ export type ListAliasNodeType<G extends GraphDef, K extends string> =
  */
 export type ListPolymorphicNodeType<G extends GraphDef, K extends string> =
   K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
+
+/**
+ * Every axis an options bag of type `O` can carry into `from()` / `to()` /
+ * `fromDynamic()` / `toDynamic()`, with `undefined` standing for "the store
+ * default" wherever the bag, or its `expansion`, may be absent. Distributes
+ * over `O`, so a caller's optional `options?: { expansion?: … }` parameter
+ * contributes both its axes and the default.
+ */
+export type ForwardedExpansionAxes<O> =
+  O extends Readonly<{ expansion: infer Axis }> ? Axis
+  : O extends Readonly<{ expansion?: infer Axis }> ?
+    // `{}` infers `unknown`: a bag that states no axis takes the default.
+    unknown extends Axis ?
+      undefined
+    : Axis | undefined
+  : undefined;
+
+/**
+ * The alias node type for an alias whose expansion is any of `Axes` (an
+ * {@link ForwardedExpansionAxes} result): the narrowest type every one of
+ * those axes' rows is assignable to.
+ *
+ * - any `"narrower"` axis: the untyped `NodeType` — that axis claims no
+ *   schema relationship, so no per-kind type can be promised;
+ * - else any `"subclasses"` axis: `Polymorphic`, which every exact and
+ *   default row is also assignable to;
+ * - else any default (`undefined`) axis: `Default`, the type the call site's
+ *   no-options overload gives (it is `Exact` or `Polymorphic`, so an
+ *   `"exact"` row fits it too);
+ * - else (`"exact"` only): `Exact`.
+ */
+export type ExpansionAliasNodeType<
+  Axes,
+  Exact extends NodeType,
+  Default extends NodeType,
+  Polymorphic extends NodeType,
+> =
+  [Extract<Axes, "narrower">] extends [never] ?
+    [Extract<Axes, "subclasses">] extends [never] ?
+      [Extract<Axes, undefined>] extends [never] ?
+        Exact
+      : Default
+    : Polymorphic
+  : NodeType;
 
 /**
  * A map of alias names to their node aliases.
@@ -1247,6 +1275,12 @@ export type QueryBuilderState = Readonly<{
   currentAlias: string;
   /** The start alias's resolved expansion axis — see `alias-expansion.ts`. */
   startExpansion: AliasExpansionAxis;
+  /**
+   * The first alias's refusal of rows its static type does not admit
+   * (`ResolvedAliasKinds.rowTypeRefusal`, `alias-expansion.ts`), raised by
+   * every row-returning terminal and by no scalar `count()` / `exists()`.
+   */
+  rowTypeRefusal?: ConfigurationError | undefined;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
   /** Filters completed match rows without restricting optional or recursive expansion. */

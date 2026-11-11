@@ -60,7 +60,7 @@ import { parseJsonPointer } from "../json-pointer";
 import { resolveNullOrdering } from "../order";
 import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
-import { buildQueryAst } from "./ast-builder";
+import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { oneStatementBatchOrderColumn } from "./one-statement-batch";
@@ -179,7 +179,7 @@ export class ExecutableQuery<
    * Builds the query AST (memoized — the instance is immutable).
    */
   toAst(): QueryAst {
-    return (this.#cachedAst ??= buildQueryAst(this.#config, this.#state));
+    return (this.#cachedAst ??= buildRowQueryAst(this.#config, this.#state));
   }
 
   /** Whether this query uses `param()` refs (memoized). */

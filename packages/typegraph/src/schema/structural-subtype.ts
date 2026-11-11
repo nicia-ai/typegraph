@@ -1,7 +1,7 @@
 /**
  * Structural subtyping over the projected JSON Schema fragment.
  *
- * `isStructuralSubtype(child, parent)` answers one question: is every value
+ * `isProjectedSchemaSubtype(child, parent)` answers one question: is every value
  * that satisfies `child` guaranteed to also satisfy `parent`, judged
  * ENTIRELY on the projected JSON Schema (`serializeSchemaProperties`,
  * src/schema/serializer.ts) — never on the originating Zod schema and never
@@ -24,6 +24,15 @@
  * through `.extend()` is accepted as identical storage. It also records,
  * per key, whether the node always stores it and whether it refuses to see
  * it missing (`KEY_OPTIONALITY_KEYWORD`), read in place of `required`.
+ *
+ * This JSON-level engine is internal. What answers for a pair of Zod schemas
+ * is `judgeStructuralSubsumption` / the public `isStructuralSubtype`
+ * (./structural-subsumption.ts): the engine over the comparison projection,
+ * which is what the registry decides with. Fed a plain `z.toJSONSchema`
+ * document instead, this engine cannot see the facts the markers above
+ * record, and reads the `additionalProperties: false` every Zod object
+ * projects as stripping (rule 8), so it would accept pairs the registry
+ * refuses.
  *
  * This is a different question from `isBreakingPropertyChange`
  * (./migration.ts), which answers "do rows that were valid before a schema
@@ -236,11 +245,12 @@ export type StructuralSubtypeResult =
     }>;
 
 /**
- * Is every value that satisfies `child` guaranteed to also satisfy `parent`?
- * See the module doc comment above for the complete rule set and its
- * relationship to `isBreakingPropertyChange`.
+ * Is every value that satisfies the projected `child` guaranteed to also
+ * satisfy the projected `parent`? See the module doc comment above for the
+ * complete rule set, the projection it expects, and its relationship to
+ * `isBreakingPropertyChange`.
  */
-export function isStructuralSubtype(
+export function isProjectedSchemaSubtype(
   child: JsonSchema,
   parent: JsonSchema,
 ): StructuralSubtypeResult {
@@ -312,44 +322,20 @@ function projectTypeVisibleValue(key: string, value: unknown): unknown {
 /**
  * `schema`, recursively reduced to only {@link TYPE_VISIBLE_KEYWORDS} — the
  * fragment of a JSON Schema that TypeScript's structural assignability over
- * `z.infer` can actually see. Feeds {@link isTypeLevelSubtype}.
+ * `z.infer` can actually see — plus each unconvertible node's
+ * {@link UNPROJECTABLE_NODE_KEYWORD} identity: a `z.date()` field's type is
+ * `Date`, which a `string` field's is not, and dropping the marker would read
+ * the node as admitting every value. Feeds `isTypeLevelSubtype`
+ * (`./structural-subsumption.ts`).
  */
 export function projectTypeVisible(schema: JsonSchema): JsonSchema {
   const projected = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
-    if (!TYPE_VISIBLE_KEYWORDS.has(key)) continue;
+    if (!TYPE_VISIBLE_KEYWORDS.has(key) && key !== UNPROJECTABLE_NODE_KEYWORD)
+      continue;
     projected[key] = projectTypeVisibleValue(key, value);
   }
   return projected;
-}
-
-/**
- * The RUNTIME prediction of what `subClassOf(child, parent)`'s
- * compile-time conditional-type check resolves to: `isStructuralSubtype` applied to each
- * side's {@link projectTypeVisible} projection, rather than the full schema.
- *
- * One comparison engine (`isStructuralSubtype`), one projection
- * (`projectTypeVisible`) — this is not a second walk of the schema, only a
- * narrower view fed into the same predicate the runtime check uses.
- *
- * `isStructuralSubtype(c, p).verdict === "subtype"` implies
- * `isTypeLevelSubtype(c, p).verdict === "subtype"` — a hierarchy the runtime check accepts
- * always compiles under the compile-time check
- * (`tests/property/typed-subsumption-agreement.test.ts`). The converse does
- * NOT hold: TypeScript cannot see a value-level constraint, so
- * `isTypeLevelSubtype` accepts pairs `isStructuralSubtype` refuses (a bare
- * `z.string()` child under a `z.string().min(3)` parent erases to identical
- * types but is not a runtime subtype) — this is "the compile-time check is a
- * filter, the runtime check is the authority", not a defect in either predicate.
- */
-export function isTypeLevelSubtype(
-  child: JsonSchema,
-  parent: JsonSchema,
-): StructuralSubtypeResult {
-  return isStructuralSubtype(
-    projectTypeVisible(child),
-    projectTypeVisible(parent),
-  );
 }
 
 // ============================================================
@@ -395,7 +381,7 @@ const NULL_TYPE_TOKEN = "null";
  *
  * The remaining entries are standard JSON Schema 2020-12 vocabulary keywords
  * this predicate's rule set does not model at all, even though the Zod
- * projection never emits them today — the public `isStructuralSubtype`
+ * projection never emits them today — the public `isProjectedSchemaSubtype`
  * surface accepts a hand-written `JsonSchema`, and silently treating an
  * unimplemented constraint as decoration would be unsound for that caller
  * the same way it was for `format` before this predicate learned to compare

@@ -117,6 +117,8 @@ import {
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ExpansionAliasNodeType,
+  type ForwardedExpansionAxes,
   type ListAliasNodeType,
   type ListPolymorphicNodeType,
   type NodeAccessor,
@@ -500,8 +502,10 @@ export class QueryBuilder<
    * whole `AliasExpansionAxis` union (it would then also capture the
    * `"exact"` and `"subclasses"` calls the overloads below type). A bag that
    * can carry an axis the call site does not pin — `AliasExpansionOptions`
-   * itself, or a wrapper's `{ expansion?: "exact" }` — goes to the
-   * axis-unknown overload, which types the alias conservatively.
+   * itself, or a wrapper's optional `options?: { expansion?: "exact" |
+   * "subclasses" }` — goes to the forwarded-bag overload, which types the
+   * alias as the narrowest type every axis the bag can carry admits
+   * (`ExpansionAliasNodeType`): untyped when it can carry `"narrower"`.
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
@@ -542,14 +546,29 @@ export class QueryBuilder<
     CoordinateState
   >;
 
-  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
-  from<const Kinds extends SourceKindList<G>, A extends string>(
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  from<
+    const Kinds extends SourceKindList<G>,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
     kinds: Kinds,
     alias: UniqueAlias<A, Aliases>,
-    options: AliasExpansionOptions,
+    options: O,
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias>,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            G["nodes"][Kinds[number]]["type"],
+            ListAliasNodeType<G, Kinds[number]>,
+            ListPolymorphicNodeType<G, Kinds[number]>
+          >
+        >
+      >,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState
@@ -591,14 +610,29 @@ export class QueryBuilder<
     CoordinateState
   >;
 
-  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
-  from<K extends keyof G["nodes"] & string, A extends string>(
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  from<
+    K extends keyof G["nodes"] & string,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: AliasExpansionOptions,
+    options: O,
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias>,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            G["nodes"][K]["type"],
+            AliasNodeType<G, K>,
+            PolymorphicNodeType<G["nodes"][K]["type"]>
+          >
+        >
+      >,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState
@@ -655,7 +689,7 @@ export class QueryBuilder<
         });
       }
     }
-    const { expansion, kinds } = resolveAliasKinds(
+    const { expansion, kinds, rowTypeRefusal } = resolveAliasKinds(
       options,
       this.#config.defaultExpansion,
       requestedKinds,
@@ -670,6 +704,7 @@ export class QueryBuilder<
       startKinds: kinds,
       startRequestedKinds: requestedKinds,
       startExpansion: expansion,
+      rowTypeRefusal,
     };
 
     return new QueryBuilder(this.#config, newState);
@@ -711,14 +746,29 @@ export class QueryBuilder<
     CoordinateState
   >;
 
-  /** The axis-unknown overload. See {@link AliasExpansionOptions}. */
-  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  fromDynamic<
+    T extends string | RuntimeNodeKind,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options: AliasExpansionOptions,
+    options: O,
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias>,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            DynamicNodeTypeFor<T>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>
+          >
+        >
+      >,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState

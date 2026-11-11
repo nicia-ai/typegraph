@@ -70,7 +70,9 @@ export type {
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
   ExecutableOneStatementRead,
+  ExpansionAliasNodeType,
   FieldAccessor,
+  ForwardedExpansionAxes,
   IdentityTraversalOption,
   InitialQueryBuilder,
   NodeAccessor,
@@ -132,6 +134,7 @@ export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
 export {
   type AliasExpansionAxis,
+  type AliasExpansionOptions,
   DEFAULT_ALIAS_EXPANSION_AXIS,
   type DefaultAliasExpansionAxis,
   SEARCH_EXPANSION_DEFAULT,

@@ -153,8 +153,13 @@ describe("subClassOf structural contract", () => {
 
   it("names the message in StructuralSubtypeMismatch", () => {
     expectTypeOf<
-      StructuralSubtypeMismatch<"Person", "Employee", "employeeId">
-    >().toHaveProperty("__typegraphSubClassOfError");
+      StructuralSubtypeMismatch<
+        "subClassOf",
+        "Person",
+        "Employee",
+        "employeeId"
+      >
+    >().toHaveProperty("__typegraphStructuralSubtypeError");
   });
 });
 

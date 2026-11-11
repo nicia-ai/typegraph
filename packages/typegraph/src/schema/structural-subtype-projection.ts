@@ -4,7 +4,7 @@
  * schema constrains values in a way that projection cannot state.
  *
  * `z.toJSONSchema` drops eleven such facts, each of which can make
- * `isStructuralSubtype` answer `subtype` for a pair whose child admits a value
+ * `isProjectedSchemaSubtype` answer `subtype` for a pair whose child admits a value
  * its parent refuses:
  *
  * - A regex's flags, on whichever check carries the pattern (`.regex()`,
@@ -52,7 +52,7 @@
  *
  * A marker's value names the Zod instance that carries the fact, so a child
  * that reuses its parent's schema (or a field schema they share) still
- * compares equal under rule 2 of `isStructuralSubtype`, while two different
+ * compares equal under rule 2 of `isProjectedSchemaSubtype`, while two different
  * refinements never do.
  *
  * A node `z.toJSONSchema` has no spelling for at all (`embedding()` and any
@@ -63,7 +63,7 @@
  * (`embeddingProjection`), and every other such node is replaced by
  * {@link UNPROJECTABLE_NODE_KEYWORD} instead, carrying the
  * node's identity (`stampUnprojectableIdentity`), so every other field of
- * the kind is still compared. `isStructuralSubtype` accepts such a node only
+ * the kind is still compared. `isProjectedSchemaSubtype` accepts such a node only
  * under a parent node that admits every value, or beside a node of the same
  * identity. A node Zod converts only in part (a dynamic `.catch()`
  * keeps its `type`) is marked as carrying a Zod-only constraint instead. The

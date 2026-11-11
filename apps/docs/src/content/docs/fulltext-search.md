@@ -548,11 +548,16 @@ A hit's type follows the stated axis. With `"exact"` (stated or omitted),
 `from(kind, alias, { expansion: "subclasses" })` alias does: the row may be a
 subclass, so its id is not accepted by the searched kind's own `update()`.
 This holds even for a kind no compile-time subsumption relation names, since
-a persisted extension can still subclass it. Narrow on `hit.node.kind` before
-treating the row as one concrete kind. An `expansion` value that is not a
-literal at the call site (a variable typed `"exact" | "subclasses"`, or an
-options value typed `FulltextSearchOptions` that a wrapper forwards) also
-types the hit in the widened form.
+a persisted extension can still subclass it. Narrowing `hit.node.kind` does
+not narrow `hit.node` itself: the hit carries no correlation between its
+`kind` and its id brand, so `hit.node.id` stays unaccepted by the narrowed
+kind's collection. To work with one concrete kind, narrow the kind and resolve
+the hit as a reference with
+[`store.getNodeByRef`](/schemas-stores#storegetnodebyrefreference), which
+types a literal-kind reference as that kind's node. An `expansion` value that
+is not a literal at the call site (a variable typed `"exact" | "subclasses"`,
+or an options value typed `FulltextSearchOptions` that a wrapper forwards)
+also types the hit in the widened form.
 
 ```typescript
 const hits = await store.search.fulltext("Content", {
@@ -564,6 +569,13 @@ const hits = await store.search.fulltext("Content", {
 for (const hit of hits) {
   hit.node.title; // typed: every subclass satisfies Content's properties
   hit.node.kind; // string — "Content", or any of its subclasses
+  if (hit.node.kind === "Article") {
+    // Node<typeof Article> | undefined
+    const article = await store.getNodeByRef({
+      kind: hit.node.kind,
+      id: hit.node.id,
+    });
+  }
 }
 ```
 

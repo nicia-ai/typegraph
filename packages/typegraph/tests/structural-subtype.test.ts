@@ -1,7 +1,7 @@
 /**
  * Structural subtyping predicate tests.
  *
- * `isStructuralSubtype` answers a different question than
+ * `isProjectedSchemaSubtype` answers a different question than
  * `isBreakingPropertyChange` / `computeSchemaDiff` (schema/migration.ts):
  * "is every value satisfying `child` guaranteed to satisfy `parent`", judged
  * purely on the projected JSON Schema. The "divergence from the migration
@@ -12,15 +12,12 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { searchable } from "../src/core/searchable";
-import {
-  computeSchemaDiff,
-  isStructuralSubtype,
-  type StructuralSubtypeResult,
-} from "../src/schema";
+import { computeSchemaDiff, type StructuralSubtypeResult } from "../src/schema";
 import { NON_CONSTRAINING_KEYWORDS } from "../src/schema/migration";
 import { serializeSchemaProperties } from "../src/schema/serializer";
 import {
   COMPARABLE_KEYWORDS,
+  isProjectedSchemaSubtype,
   KNOWN_IGNORED_KEYWORDS,
   UNMODELED_CONSTRAINING_KEYWORDS,
 } from "../src/schema/structural-subtype";
@@ -72,7 +69,7 @@ function collectProjectedKeywords(schema: JsonSchema, into: Set<string>): void {
 }
 
 function verdict(child: z.ZodType, parent: z.ZodType): StructuralSubtypeResult {
-  return isStructuralSubtype(projected(child), projected(parent));
+  return isProjectedSchemaSubtype(projected(child), projected(parent));
 }
 
 type ExpectedVerdict =
@@ -679,7 +676,7 @@ describe("scalars", () => {
     // child (no pattern) is NOT tighter than a parent requiring "^a$", so
     // only the reverse direction is a subtype.
     expect(
-      isStructuralSubtype(withEmailFormat, withSameFormatLooserPattern),
+      isProjectedSchemaSubtype(withEmailFormat, withSameFormatLooserPattern),
     ).toEqual({ verdict: "subtype" });
   });
 });
@@ -866,10 +863,13 @@ describe("finite value sets under bounded parents", () => {
 
   it("judges an untyped const against the parent's type token", () => {
     expect(
-      isStructuralSubtype({ const: "x" }, { type: "string", minLength: 1 }),
+      isProjectedSchemaSubtype(
+        { const: "x" },
+        { type: "string", minLength: 1 },
+      ),
     ).toEqual({ verdict: "subtype" });
     expect(
-      isStructuralSubtype({ enum: ["a", 1] }, { type: "string" }),
+      isProjectedSchemaSubtype({ enum: ["a", 1] }, { type: "string" }),
     ).toMatchObject({
       verdict: "not-subtype",
       reason: "unconstrained-where-parent-constrains",
@@ -880,7 +880,7 @@ describe("finite value sets under bounded parents", () => {
     // `\-` is an identity escape without `u` and a syntax error with it.
     expect(new RegExp(String.raw`^\-$`).test("-")).toBe(true);
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "string", const: "-" },
         { type: "string", pattern: String.raw`^\-$` },
       ),
@@ -890,13 +890,13 @@ describe("finite value sets under bounded parents", () => {
   it("requires a value to match the pattern with and without Unicode semantics", () => {
     // Flagless, `.` is one UTF-16 unit and `😀` is two; with `u` it is one.
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "string", const: "😀" },
         { type: "string", pattern: "^.$" },
       ),
     ).toMatchObject({ verdict: "not-subtype", reason: "pattern-mismatch" });
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "string", const: "😀" },
         { type: "string", pattern: "^..$" },
       ),
@@ -905,7 +905,7 @@ describe("finite value sets under bounded parents", () => {
 
   it("does not judge a value set holding a value of another type than the child's own", () => {
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "string", enum: ["a", 99] },
         { type: "string", maxLength: 1 },
       ),
@@ -917,10 +917,13 @@ describe("finite value sets under bounded parents", () => {
     // eslint-disable-next-line unicorn/no-null -- JSON spells Infinity as null
     const infinityLiteral: JsonSchema = { type: "number", const: null };
     expect(
-      isStructuralSubtype(infinityLiteral, { type: "string", minLength: 5 }),
+      isProjectedSchemaSubtype(infinityLiteral, {
+        type: "string",
+        minLength: 5,
+      }),
     ).toMatchObject({ verdict: "not-subtype", reason: "type-token-mismatch" });
     expect(
-      isStructuralSubtype(infinityLiteral, { type: "number", minimum: 0 }),
+      isProjectedSchemaSubtype(infinityLiteral, { type: "number", minimum: 0 }),
     ).toMatchObject({
       verdict: "not-subtype",
       reason: "numeric-bound-not-tighter",
@@ -939,7 +942,7 @@ describe("finite value sets under bounded parents", () => {
         false,
       );
       expect(
-        isStructuralSubtype(
+        isProjectedSchemaSubtype(
           { type: "number", const: value },
           { type: "number", multipleOf: divisor },
         ),
@@ -952,7 +955,7 @@ describe("finite value sets under bounded parents", () => {
 
   it("never satisfies a keyword vacuously through an empty value set", () => {
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "string", enum: [] },
         { type: "string", minLength: 5 },
       ),
@@ -961,7 +964,7 @@ describe("finite value sets under bounded parents", () => {
       reason: "string-length-not-tighter",
     });
     expect(
-      isStructuralSubtype({ enum: [] }, { type: "boolean" }),
+      isProjectedSchemaSubtype({ enum: [] }, { type: "boolean" }),
     ).toMatchObject({
       verdict: "not-subtype",
       reason: "unconstrained-where-parent-constrains",
@@ -1021,7 +1024,7 @@ describe("a numeric bound stated both inclusively and exclusively", () => {
   ];
 
   it.each(rows)("$name", ({ child, parent, expected }) => {
-    expect(isStructuralSubtype(child, parent).verdict).toBe(expected);
+    expect(isProjectedSchemaSubtype(child, parent).verdict).toBe(expected);
   });
 });
 
@@ -1046,7 +1049,7 @@ describe("arrays and tuples", () => {
 
   it("an array with no items schema is not a subtype of one whose items are typed", () => {
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         { type: "array" },
         { type: "array", items: { type: "string" } },
       ),
@@ -1190,10 +1193,10 @@ describe("unions and nullability", () => {
     const members: JsonSchema = {
       anyOf: [{ type: "string" }, { type: "null" }],
     };
-    expect(isStructuralSubtype(tokens, members)).toEqual({
+    expect(isProjectedSchemaSubtype(tokens, members)).toEqual({
       verdict: "subtype",
     });
-    expect(isStructuralSubtype(members, tokens)).toEqual({
+    expect(isProjectedSchemaSubtype(members, tokens)).toEqual({
       verdict: "subtype",
     });
   });
@@ -1201,8 +1204,10 @@ describe("unions and nullability", () => {
   it("carries a token array's sibling keywords into every member", () => {
     const loose: JsonSchema = { type: ["string", "null"] };
     const tight: JsonSchema = { type: ["string", "null"], minLength: 3 };
-    expect(isStructuralSubtype(tight, loose)).toEqual({ verdict: "subtype" });
-    expect(isStructuralSubtype(loose, tight)).toMatchObject({
+    expect(isProjectedSchemaSubtype(tight, loose)).toEqual({
+      verdict: "subtype",
+    });
+    expect(isProjectedSchemaSubtype(loose, tight)).toMatchObject({
       verdict: "not-subtype",
       reason: "no-matching-union-member",
       path: ["type[0]"],
@@ -1277,10 +1282,12 @@ describe("unions and nullability", () => {
     const parent: JsonSchema = {
       oneOf: [{ type: "integer" }, { type: "number" }],
     };
-    expect(isStructuralSubtype({ type: "integer" }, parent)).toMatchObject({
-      verdict: "incomparable",
-      reason: "unsupported-construct",
-    });
+    expect(isProjectedSchemaSubtype({ type: "integer" }, parent)).toMatchObject(
+      {
+        verdict: "incomparable",
+        reason: "unsupported-construct",
+      },
+    );
   });
 
   it("a parent carrying both anyOf and oneOf is incomparable rather than read through one of them", () => {
@@ -1288,7 +1295,7 @@ describe("unions and nullability", () => {
       anyOf: [{ type: "string" }, { type: "number" }],
       oneOf: [{ type: "string", minLength: 3 }, { type: "number" }],
     };
-    expect(isStructuralSubtype({ type: "string" }, parent)).toMatchObject({
+    expect(isProjectedSchemaSubtype({ type: "string" }, parent)).toMatchObject({
       verdict: "incomparable",
       reason: "unsupported-construct",
     });
@@ -1321,7 +1328,7 @@ describe("unions and nullability", () => {
       type: "string",
       anyOf: [{ const: "a" }, { const: "b" }],
     };
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "no-matching-union-member",
@@ -1351,7 +1358,7 @@ describe("union sibling keywords", () => {
       type: "string",
       anyOf: [{ type: "number" }],
     };
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "type-token-mismatch",
@@ -1366,7 +1373,7 @@ describe("union sibling keywords", () => {
       anyOf: [{ type: "string" }, { type: "number" }],
       minLength: 5,
     };
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "string-length-not-tighter",
@@ -1387,7 +1394,7 @@ describe("union sibling keywords", () => {
       properties: { a: { type: "string" } },
       required: ["a"],
     };
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "missing-required-property",
@@ -1413,8 +1420,8 @@ describe("union sibling keywords", () => {
     const incomparableLast: JsonSchema = {
       anyOf: [{ type: "string" }, { not: {} }],
     };
-    const resultA = isStructuralSubtype(child, incomparableFirst);
-    const resultB = isStructuralSubtype(child, incomparableLast);
+    const resultA = isProjectedSchemaSubtype(child, incomparableFirst);
+    const resultB = isProjectedSchemaSubtype(child, incomparableLast);
     expect(resultA).toEqual(resultB);
     expect(resultA).toEqual({ verdict: "subtype" });
   });
@@ -1443,7 +1450,7 @@ describe("incomparable constructs", () => {
   const nonRecursiveListSchema = z.object({ children: z.array(z.string()) });
 
   it("a self-recursive schema is incomparable via schema-reference (child position)", () => {
-    const result = isStructuralSubtype(
+    const result = isProjectedSchemaSubtype(
       projected(recursiveListSchema()),
       projected(nonRecursiveListSchema),
     );
@@ -1454,7 +1461,7 @@ describe("incomparable constructs", () => {
   });
 
   it("a self-recursive schema is incomparable via schema-reference (parent position)", () => {
-    const result = isStructuralSubtype(
+    const result = isProjectedSchemaSubtype(
       projected(nonRecursiveListSchema),
       projected(recursiveListSchema()),
     );
@@ -1511,7 +1518,7 @@ describe("incomparable constructs", () => {
   it("a hand-written schema nested past MAX_STRUCTURAL_SUBTYPE_DEPTH is incomparable via max-depth-exceeded", () => {
     const child = nestedObjectSchema(70, 2);
     const parent = nestedObjectSchema(70, 1);
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result).toMatchObject({
       verdict: "incomparable",
       reason: "max-depth-exceeded",
@@ -1524,11 +1531,11 @@ describe("incomparable constructs", () => {
     // tag's projected shape.
     const withSearchable = projected(searchable());
     assertVerdict(
-      isStructuralSubtype(withSearchable, withSearchable),
+      isProjectedSchemaSubtype(withSearchable, withSearchable),
       "subtype",
     );
     assertVerdict(
-      isStructuralSubtype(withSearchable, projected(z.string())),
+      isProjectedSchemaSubtype(withSearchable, projected(z.string())),
       "subtype",
     );
   });
@@ -1543,7 +1550,7 @@ describe("incomparable constructs", () => {
   // Standard JSON Schema 2020-12 vocabulary keywords this predicate's
   // rule set does not model must refuse rather than silently accept, even
   // though the Zod projection never emits them — the public
-  // `isStructuralSubtype` surface takes an arbitrary hand-written schema.
+  // `isProjectedSchemaSubtype` surface takes an arbitrary hand-written schema.
   it.each([
     [
       "uniqueItems",
@@ -1561,7 +1568,7 @@ describe("incomparable constructs", () => {
         parent.type === "array" ?
           { type: "array", items: { type: "string" } }
         : { type: "object" };
-      const result = isStructuralSubtype(child, parent);
+      const result = isProjectedSchemaSubtype(child, parent);
       expect(result).toMatchObject({
         verdict: "incomparable",
         reason: "unsupported-keyword",
@@ -1590,7 +1597,9 @@ describe("divergence from the migration predicate", () => {
     expect(change.severity).toBe("breaking");
 
     // The registry check's question: "is every child value a valid parent value?" -> yes
-    expect(isStructuralSubtype(projected(child), projected(parent))).toEqual({
+    expect(
+      isProjectedSchemaSubtype(projected(child), projected(parent)),
+    ).toEqual({
       verdict: "subtype",
     });
   });
@@ -1614,7 +1623,10 @@ describe("divergence from the migration predicate", () => {
 
     // The registry check's question: the parent's guarantee that `nickname` is present no
     // longer holds for every child value -> not a subtype
-    const result = isStructuralSubtype(projected(child), projected(parent));
+    const result = isProjectedSchemaSubtype(
+      projected(child),
+      projected(parent),
+    );
     expect(result).toMatchObject({
       verdict: "not-subtype",
       reason: "optional-in-child-required-in-parent",
@@ -1687,7 +1699,9 @@ describe("projection coverage", () => {
 
   it.each(PROJECTION_CASES)("%s is reflexive", (_label, schema) => {
     const schemaProjection = projected(schema);
-    expect(isStructuralSubtype(schemaProjection, schemaProjection)).toEqual({
+    expect(
+      isProjectedSchemaSubtype(schemaProjection, schemaProjection),
+    ).toEqual({
       verdict: "subtype",
     });
   });
@@ -1781,7 +1795,7 @@ describe("projection coverage", () => {
 
   it.each(INCOMPARABLE_BY_DESIGN)("%s is incomparable", (_label, buildPair) => {
     const [child, parent] = buildPair();
-    const result = isStructuralSubtype(child, parent);
+    const result = isProjectedSchemaSubtype(child, parent);
     expect(result.verdict).toBe("incomparable");
   });
 
@@ -1797,7 +1811,7 @@ describe("projection coverage", () => {
   describe("identical unmodeled constructs are reflexive", () => {
     it("z.never() self-comparison is a subtype", () => {
       const schema = projected(z.never());
-      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+      expect(isProjectedSchemaSubtype(schema, schema).verdict).toBe("subtype");
     });
 
     it("z.intersection(...) self-comparison is a subtype", () => {
@@ -1807,12 +1821,12 @@ describe("projection coverage", () => {
           z.object({ b: z.number() }),
         ),
       );
-      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+      expect(isProjectedSchemaSubtype(schema, schema).verdict).toBe("subtype");
     });
 
     it("z.file() self-comparison is a subtype", () => {
       const schema = projected(z.file());
-      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+      expect(isProjectedSchemaSubtype(schema, schema).verdict).toBe("subtype");
     });
 
     it("a self-recursive (z.lazy) schema self-comparison is a subtype", () => {
@@ -1823,7 +1837,7 @@ describe("projection coverage", () => {
         z.object({ children: z.array(recursive) }),
       );
       const schema = projected(recursive);
-      expect(isStructuralSubtype(schema, schema).verdict).toBe("subtype");
+      expect(isProjectedSchemaSubtype(schema, schema).verdict).toBe("subtype");
     });
 
     it("a child copying a parent's z.intersection property VERBATIM, plus an added field, is a subtype", () => {
@@ -1835,7 +1849,7 @@ describe("projection coverage", () => {
       const child = projected(
         z.object({ x: sharedIntersection, extra: z.string() }),
       );
-      expect(isStructuralSubtype(child, parent).verdict).toBe("subtype");
+      expect(isProjectedSchemaSubtype(child, parent).verdict).toBe("subtype");
     });
   });
 });
@@ -1899,12 +1913,12 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
     expect(childSchema.safeParse(value).success).toBe(true);
     expect(parentSchema.safeParse(value).success).toBe(false);
 
-    expect(isStructuralSubtype(child, parent)).toEqual({
+    expect(isProjectedSchemaSubtype(child, parent)).toEqual({
       verdict: "incomparable",
       reason: "schema-reference",
       path: ["tree"],
     });
-    expect(isStructuralSubtype(parent, child)).toMatchObject({
+    expect(isProjectedSchemaSubtype(parent, child)).toMatchObject({
       verdict: "incomparable",
       reason: "schema-reference",
     });
@@ -1913,7 +1927,9 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
   it("accepts a child copying the parent's recursive property verbatim beside an added field", () => {
     const parent = projected(z.object({ tree: tightTree }));
     const child = projected(z.object({ tree: tightTree, extra: z.string() }));
-    expect(isStructuralSubtype(child, parent)).toEqual({ verdict: "subtype" });
+    expect(isProjectedSchemaSubtype(child, parent)).toEqual({
+      verdict: "subtype",
+    });
   });
 
   it("refuses a root self-reference shared by two different roots", () => {
@@ -1928,7 +1944,7 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
         label: { type: "string", minLength: 3 },
       },
     };
-    expect(isStructuralSubtype(child, parent)).toMatchObject({
+    expect(isProjectedSchemaSubtype(child, parent)).toMatchObject({
       verdict: "incomparable",
       reason: "schema-reference",
       path: ["next"],
@@ -1944,7 +1960,7 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
       ...schema,
       properties: { ...schema.properties, extra: { type: "string" } },
     };
-    expect(isStructuralSubtype(widened, schema)).toMatchObject({
+    expect(isProjectedSchemaSubtype(widened, schema)).toMatchObject({
       verdict: "incomparable",
       reason: "schema-reference",
     });
@@ -1952,26 +1968,26 @@ describe("a `$ref` is identical only when what it resolves to is", () => {
 
   it("compares `propertyNames` by what its reference resolves to, not by its name", () => {
     expect(
-      isStructuralSubtype(recordWithKeyLimit(10), recordWithKeyLimit(3)),
+      isProjectedSchemaSubtype(recordWithKeyLimit(10), recordWithKeyLimit(3)),
     ).toEqual({
       verdict: "incomparable",
       reason: "schema-reference",
       path: ["{propertyNames}"],
     });
     expect(
-      isStructuralSubtype(recordWithKeyLimit(3), recordWithKeyLimit(3)),
+      isProjectedSchemaSubtype(recordWithKeyLimit(3), recordWithKeyLimit(3)),
     ).toEqual({ verdict: "subtype" });
   });
 
   it("follows a definition that references another definition", () => {
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         chainedReferenceSchema(3, true),
         chainedReferenceSchema(3, false),
       ),
     ).toEqual({ verdict: "subtype" });
     expect(
-      isStructuralSubtype(
+      isProjectedSchemaSubtype(
         chainedReferenceSchema(1, true),
         chainedReferenceSchema(3, false),
       ),
