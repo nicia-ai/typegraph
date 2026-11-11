@@ -50,6 +50,7 @@ export const MERGE_ERROR_CODES = {
   compositionOrphan: "GRAPH_MERGE_COMPOSITION_ORPHAN",
   cardinalityConflict: "GRAPH_MERGE_CARDINALITY_CONFLICT",
   restrictedDeleteConflict: "GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT",
+  compositionWindowConflict: "GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT",
 } as const;
 
 /**
@@ -415,11 +416,12 @@ export class AcyclicityMergeConflictError extends MergeError {
 }
 
 /**
- * `details` carried by {@link CardinalityMergeConflictError}: the store
- * refusal apply would raise, in the {@link MergeConstraintConflictError} shape,
- * plus the two `edges` that collide.
+ * `details` carried by {@link CardinalityMergeConflictError} and
+ * {@link CompositionWindowMergeConflictError}: the store refusal apply would
+ * raise, in the {@link MergeConstraintConflictError} shape, plus the two
+ * `edges` that conflict, the incumbent first.
  */
-export type CardinalityMergeConflictDetails =
+export type StructuralMergeConflictDetails =
   MergeConstraintConflictErrorDetails &
     Readonly<{ edges: readonly MergeConflictEdge[] }>;
 
@@ -441,7 +443,7 @@ export class CardinalityMergeConflictError extends MergeError {
   protected static override readonly errorCategory = "constraint";
   override readonly code = MERGE_ERROR_CODES.cardinalityConflict;
   declare readonly cause: TypeGraphError;
-  declare readonly details: CardinalityMergeConflictDetails;
+  declare readonly details: StructuralMergeConflictDetails;
 
   constructor(cause: TypeGraphError, edges: readonly MergeConflictEdge[]) {
     super(`The merge plan would violate ${cause.name}: ${cause.message}`, {
@@ -457,6 +459,40 @@ export class CardinalityMergeConflictError extends MergeError {
         "Drop one of the conflicting edge writes from its branch (or, for an incremental merge, from the branch that disagrees with the target), then plan the merge again.",
     });
     this.name = "CardinalityMergeConflictError";
+  }
+}
+
+/**
+ * Raised at plan time when the resolved plan would leave one part of a
+ * `population: "oneActive"` composition pair with two composition windows that
+ * share an instant: history two branches contributed, or a branch's history
+ * overlapping the target's. A part holds exactly one whole at every
+ * valid-time coordinate, and the store refuses any write that breaks it, so
+ * the apply's refusal is certain. `cause` is the `CompositionError`
+ * (`situation: "windowOverlap"`) the store raises, whose fields `details`
+ * copies — the part, both edges, both wholes and both windows — and
+ * `details.edges` names the incumbent edge, then the one overlapping it.
+ */
+export class CompositionWindowMergeConflictError extends MergeError {
+  protected static override readonly errorCategory = "constraint";
+  override readonly code = MERGE_ERROR_CODES.compositionWindowConflict;
+  declare readonly cause: TypeGraphError;
+  declare readonly details: StructuralMergeConflictDetails;
+
+  constructor(cause: TypeGraphError, edges: readonly MergeConflictEdge[]) {
+    super(`The merge plan would violate ${cause.name}: ${cause.message}`, {
+      cause,
+      details: {
+        ...cause.details,
+        constraintCode: cause.code,
+        constraintErrorName: cause.name,
+        constraintDetails: cause.details,
+        edges,
+      },
+      suggestion:
+        "End one of the overlapping composition windows in its branch so the part's windows only touch, then plan the merge again.",
+    });
+    this.name = "CompositionWindowMergeConflictError";
   }
 }
 

@@ -59,6 +59,7 @@ import {
   type RecordedScanOptions,
   type RecordedScanPage,
   TRANSACTION_RUNTIME,
+  type TransactionEffectsMark,
   type TransactionRuntime,
 } from "./types";
 
@@ -758,6 +759,18 @@ export function transactionBackend(
   transaction: TransactionRuntimePort,
 ): TransactionBackend {
   return requireTransactionRuntime(transaction).backend;
+}
+
+/**
+ * Marks the buffered hook outcomes and receipt counts `transaction` has
+ * recorded so far; `discard(cause)` forgets everything recorded after the
+ * mark. For a savepoint-scoped unit of work that rolled its rows back inside
+ * a transaction that may still commit (an adopted merge apply).
+ */
+export function markTransactionEffects(
+  transaction: TransactionRuntimePort,
+): TransactionEffectsMark {
+  return requireTransactionRuntime(transaction).markEffects();
 }
 
 /**

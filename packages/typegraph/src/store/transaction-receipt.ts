@@ -90,6 +90,12 @@ export type TransactionReceiptRecorder = Readonly<{
    * exists.
    */
   recordCascadedParts: (parts: readonly CompositionCascadedPart[]) => void;
+  /**
+   * Marks the counts recorded so far and returns the restore that puts them
+   * back: for a scope of the transaction whose rows a savepoint rolled back,
+   * so the receipt never counts a write that does not commit.
+   */
+  checkpoint: () => () => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -177,6 +183,17 @@ function increment(
   counts[kind] = (counts[kind] ?? 0) + count;
 }
 
+/** Puts a count bucket back to `saved`, its contents at a checkpoint. */
+function restoreCounts(
+  counts: Record<string, number>,
+  saved: Readonly<Record<string, number>>,
+): void {
+  for (const kind of Object.keys(counts)) {
+    if (!Object.hasOwn(saved, kind)) Reflect.deleteProperty(counts, kind);
+  }
+  for (const [kind, count] of Object.entries(saved)) counts[kind] = count;
+}
+
 /**
  * One receipt's running counts. Each recorder owns exactly one: the outer
  * transaction's receipt, or the sub-receipt of one `tx.measure` scope. Scope
@@ -233,6 +250,21 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
 
     recordCascadedParts(parts): void {
       counters.cascadedParts.push(...parts);
+    },
+
+    checkpoint(): () => void {
+      const nodes = { ...counters.nodes };
+      const edges = { ...counters.edges };
+      const identity = { ...counters.identity };
+      const { total } = counters;
+      const cascadedPartCount = counters.cascadedParts.length;
+      return () => {
+        restoreCounts(counters.nodes, nodes);
+        restoreCounts(counters.edges, edges);
+        Object.assign(counters.identity, identity);
+        counters.total = total;
+        counters.cascadedParts.length = cascadedPartCount;
+      };
     },
 
     snapshot(recorded): TransactionReceipt {

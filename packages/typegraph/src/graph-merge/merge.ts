@@ -206,8 +206,10 @@ import { MERGE_PLAN_FORMAT_VERSION } from "./plan-schema";
 import {
   acyclicityConflict,
   assertPlanStructurallySound,
+  compositionWindowConflict,
   edgeClaimConflict,
   MERGE_NODE_DELETE_POLICY,
+  mergeNodeDeleteSequence,
   type PlanStructuralCheck,
   type PlanStructure,
   restrictedDeleteConflict,
@@ -2439,12 +2441,16 @@ async function applyNodeRows<G extends GraphDef>(
       // ends them at the retraction's instant and still stamps the node as
       // their cause, so the target's history and transition log read as the
       // branch's did.
+      // A recreation deletes the live node before writing it again, resetting
+      // its validity window. It takes the plan deletions' policy, so its own
+      // `restrict` edges still refuse and its parts are not cascaded away;
+      // only a plan deletion carries the assertion ends the plan retracts.
       const deletePolicy: NodeDeletePolicy = MERGE_NODE_DELETE_POLICY;
       const assertionEndsByNode = plannedAssertionEndsByNode(
         deletions,
         identityRetractions,
       );
-      for (const deletion of deletions) {
+      for (const deletion of mergeNodeDeleteSequence(deletions, upserts)) {
         const assertionEnds = assertionEndsByNode.get(
           mergeKey(deletion.kind, deletion.id),
         );
@@ -2454,16 +2460,6 @@ async function applyNodeRows<G extends GraphDef>(
             { ...deletePolicy, identityAssertionEnds: assertionEnds }
           ),
         );
-      }
-      // A recreation deletes the live node before writing it again, resetting
-      // its validity window. It takes the plan deletions' policy, so its own
-      // `restrict` edges still refuse and its parts are not cascaded away.
-      for (const upsert of upserts) {
-        if (upsert.recreate === true)
-          await deleteNodeWithPolicy(
-            { kind: upsert.kind, id: upsert.id },
-            deletePolicy,
-          );
       }
       const committed = new Set<MergeKey>();
       for (const upsert of upserts) {
@@ -3554,7 +3550,7 @@ async function plannedEdgeUpsertAttachesPart(
 }
 
 /**
- * THE "deleted" composition-orphan finding, shared by the plan-time report
+ * THE "deleted" composition-orphan finding, shared by the plan-time refusal
  * and apply's authoritative re-verification: for every whole the write set
  * deletes, re-read its LIVE parts closure (`planCompositionCascade`) and
  * report every member the write set neither deletes nor carries away.
@@ -3623,7 +3619,7 @@ async function compositionOrphansAmong(
 }
 
 /**
- * THE "moved" composition finding, shared by the plan-time report and apply's
+ * THE "moved" composition finding, shared by the plan-time refusal and apply's
  * authoritative re-verification: every part the write set deletes that the
  * target still holds under a live whole the write set neither deletes nor
  * detaches the part from.
@@ -3761,7 +3757,7 @@ function stagedRowAttachesForBranch(
  * branch diffs the plan froze: no target write can resolve it, so a later
  * re-verification would only repeat this verdict. Every planning entry point
  * builds its plan through `buildInternalMergePlan`, so all of them refuse
- * here, ahead of the plan-time report — which is also why a required-existence
+ * here, ahead of the plan-time orphan refusal — which is also why a required-existence
  * part caught here is never additionally reported as `"unattached"`.
  */
 function assertNoLostBranchAttachments(
@@ -3842,17 +3838,32 @@ const PLAN_STRUCTURAL_CHECKS: readonly PlanStructuralCheck[] = [
   compositionOrphanConflict,
   restrictedDeleteConflict,
   edgeClaimConflict,
+  compositionWindowConflict,
 ];
 
 /**
+ * THE plan-time structural gate: throws the first conflict
+ * {@link PLAN_STRUCTURAL_CHECKS} finds in `writes`. Every producer of a plan
+ * artifact runs it over the artifact's FINAL write set — `resolveMerge` for
+ * the merge planners, and a planner that rewrites the resolved writes
+ * afterwards (mutation planning's recreations) again over what it emits.
+ */
+export async function assertMergeWritesStructurallySound<G extends GraphDef>(
+  target: Store<G>,
+  writes: MergePlanWrites,
+): Promise<void> {
+  await assertPlanStructurallySound(target, writes, PLAN_STRUCTURAL_CHECKS);
+}
+
+/**
  * Apply's AUTHORITATIVE re-verification of the "deleted" and "moved" findings
- * {@link planTimeCompositionOrphans} reports at plan time: run inside the
+ * {@link compositionOrphanConflict} refuses at plan time: run inside the
  * apply transaction, under the per-graph write lock `lockRecordedGraphWrite`
  * reentrantly confirms (or newly takes, on a target that had not yet needed
  * it this transaction), so a concurrent attach cannot be missed. Throws
  * `MergeCompositionOrphanError` on the first orphan found — before any row of
  * the plan has been written, which is why it reads the write set as an
- * overlay exactly as the plan-time report does.
+ * overlay exactly as the plan-time refusal does.
  */
 async function assertNoCompositionOrphans<G extends GraphDef>(
   target: Store<G>,
@@ -3923,7 +3934,7 @@ async function refuseFirstOrphan<G extends GraphDef>(
  * ONE walk over ONE view: `writes` is the plan's normalized write view
  * ({@link resolvedMergeWrites}), the same shape the wire artifact carries, so
  * the live-plan apply, the replayed-artifact apply (both through
- * `applyGraphRows`) and the plan-time preview all derive their candidates
+ * `applyGraphRows`) and the plan-time refusal all derive their candidates
  * here. A new source is added to this function and nowhere else.
  *
  * THREE sources, unioned (a part can be newly orphaned without its OWN row
@@ -4596,11 +4607,7 @@ async function resolveMerge<G extends GraphDef, Output>(
     // one-id-one-truth check above: a typed conflict here, before either
     // callback runs, is what keeps `planMerge()` from returning a plan that
     // can never be applied.
-    await assertPlanStructurallySound(
-      target,
-      resolvedMergeWrites(plan),
-      PLAN_STRUCTURAL_CHECKS,
-    );
+    await assertMergeWritesStructurallySound(target, resolvedMergeWrites(plan));
 
     let identityGuard: IdentityPeerProbe | undefined;
     if (identityProbeIds !== undefined && incremental !== undefined) {
@@ -6169,7 +6176,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
       effectiveTarget,
-      txBackend,
+      tx,
       () =>
         applyValidatedMergePlanInTransaction(
           effectiveTarget,

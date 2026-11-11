@@ -4580,6 +4580,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 frame.attempt,
                 backendOptions.accessMode === "read_only",
                 receiptRequested,
+                pending,
               ),
               async (activeContext) => {
                 try {
@@ -5344,6 +5345,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // The transaction was opened with `accessMode: "read_only"`.
     readOnly = false,
     measurable = receiptRecorder !== undefined,
+    // The `onOperationEnd` outcomes `runHooks` buffers until COMMIT, when it
+    // buffers at all (a `store.transaction` callback); `markEffects` needs it.
+    hookBuffer?: PendingOperationOutcome[],
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
@@ -5397,6 +5401,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               work.id,
               txBackend,
             ),
+          markEffects: () => {
+            const restores = receiptRecorders.map((recorder) =>
+              recorder.checkpoint(),
+            );
+            const bufferedCount = hookBuffer?.length ?? 0;
+            return {
+              discard: (cause) => {
+                for (const restore of restores) restore();
+                const failure = asError(cause);
+                for (const outcome of hookBuffer?.splice(bufferedCount) ?? []) {
+                  this.#reportError(outcome.ctx, failure);
+                }
+              },
+            };
+          },
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,

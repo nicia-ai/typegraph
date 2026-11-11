@@ -62,14 +62,17 @@ import type { CanonicalEntity } from "../../src/graph-merge/canonicalize";
 import type { MergedEdge } from "../../src/graph-merge/edge-repoint";
 import { MergeCompositionOrphanError } from "../../src/graph-merge/errors";
 import {
+  applyMergePlan,
   type MergePlan,
+  planMerge,
   planMergeIncremental,
   requiredExistenceOrphanCandidates,
   resolvedMergeWrites,
 } from "../../src/graph-merge/merge";
 import { mergeKey } from "../../src/graph-merge/node-key";
 import { mergePlanArtifactV3Schema } from "../../src/graph-merge/plan-schema";
-import { isErr } from "../../src/graph-merge/result";
+import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
+import { isErr, unwrap } from "../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../src/graph-merge/types";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
@@ -308,6 +311,47 @@ describe.each(backendMatrix())(
     // comes back `ok`, and only the apply's pre-existing per-write detach
     // refusal (`assertCompositionExistencePreserved`, surfaced as
     // `MergeConstraintConflictError`) stops the merge.
+
+    it("refuses at apply time an artifact that writes a required part without its edge", async () => {
+      cleanups = [];
+      const target = await makeStore();
+      await target.nodes.UWhole.create({}, { id: "w1" });
+      const source = unwrap(
+        await branch<G>(target, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.UPart.create(
+        {},
+        { id: "p2", partOf: { whole: { kind: "UWhole", id: "w1" } } },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+      expect(artifact.writes.edgeUpserts).toHaveLength(1);
+
+      // The planner never emits this write set: an artifact that creates the
+      // required part but not its attaching edge. Apply's own final-state
+      // check is what refuses it, through the same predicate the planner's
+      // refusal reads.
+      const { digest: _digest, ...input } = artifact;
+      const withoutEdge = await constructMergePlanArtifact({
+        ...input,
+        proposed: {
+          ...input.proposed,
+          edges: { ...input.proposed.edges, upserts: 0 },
+        },
+        writes: { ...input.writes, edgeUpserts: [] },
+      });
+      const applied = await applyMergePlan(target, withoutEdge);
+
+      if (!isErr(applied)) throw new Error("expected apply to be refused");
+      expect(applied.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(applied.error.details).toEqual({
+        part: { kind: "UPart", id: "p2" },
+        viaEdgeKind: "uHolds",
+        cause: "unattached",
+      });
+      await expect(
+        target.nodes.UPart.getById("p2" as never),
+      ).resolves.toBeUndefined();
+    });
 
     it("finds a candidate reachable through each of the three write sources from the live plan's view and from the wire artifact's view alike", async () => {
       cleanups = [];

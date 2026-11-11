@@ -3019,6 +3019,11 @@ export const TRANSACTION_RUNTIME: unique symbol = typeGraphGlobalSymbol(
   "transaction-runtime-v1",
 );
 
+/** A mark taken by {@link TransactionRuntime.markEffects}. */
+export type TransactionEffectsMark = Readonly<{
+  discard: (cause: unknown) => void;
+}>;
+
 export type TransactionRuntime = Readonly<{
   backend: TransactionBackend;
   /**
@@ -3045,6 +3050,17 @@ export type TransactionRuntime = Readonly<{
    * {@link file://./runtime-port.ts transactionReviveNode}.
    */
   reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
+  /**
+   * Marks the buffered effects this transaction context has recorded so far:
+   * its receipt counts, and — inside a `store.transaction` callback — the
+   * buffered `onOperationEnd` outcomes. `discard(cause)` forgets every effect
+   * recorded after the mark, reporting each discarded buffered outcome as
+   * `onError` with `cause`, as a failed transaction reports its buffer. For a
+   * scope of the transaction whose rows a savepoint rolled back, so neither a
+   * hook nor a receipt reports a write that does not commit, via
+   * {@link file://./runtime-port.ts markTransactionEffects}.
+   */
+  markEffects: () => TransactionEffectsMark;
 }>;
 
 /**
