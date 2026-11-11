@@ -1,5 +1,5 @@
 ---
-"@nicia-ai/typegraph": patch
+"@nicia-ai/typegraph": minor
 ---
 
 Three write paths now honor identity exactly as the ordinary node writes do. `importGraph` with `onConflict: "update"` sends a document's node `validTo` through the same identity check: an end an open identity assertion would outlive is reported as a per-row error carrying the `IdentityEndpointValidityError` message and the row is left unchanged, and an end that lands on an identity class member records the `window-end` transition; previously the import stored the end and recorded nothing. The transition and the row write sit behind one savepoint, so a row the import then refuses (for example on its own uniqueness claim) leaves no `window-end` transition for an end that never landed, and the same holds for a store update the write refuses. A provenance retraction that closes a fact's currency detaches the fact from its identity class, ending its open identity assertions as any soft delete does, and a reopen folds it back in as a restore; previously a closed fact kept its open assertions and stayed in its class while tombstoned. `bulkUpsertById` items that set `validTo` now go through the same identity check as `update` and `upsertById`, so a window end that an open identity assertion would outlive is refused with `IdentityEndpointValidityError` instead of committing.

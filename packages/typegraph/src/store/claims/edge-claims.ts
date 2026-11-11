@@ -28,6 +28,7 @@ import {
   ConfigurationError,
 } from "../../errors";
 import { type RowMembership } from "../../registry/row-membership";
+import { type ValidityWindow } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { isMissingTableError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -363,6 +364,30 @@ export function membershipCountsRow(
 }
 
 /**
+ * THE valid-time reading of {@link membershipCountsRow}: the half-open window
+ * of `asOf` coordinates at which a non-deleted row with these bounds is a
+ * member of a population whose rule is `membership`. An `"openRows"` row is a
+ * member while its own window holds; an `"allRows"` row from its `validFrom`
+ * on, ended or not.
+ *
+ * The JavaScript rendering of the `asOf` arm of `compileEdgeMembershipFilters`
+ * (`src/query/compiler/temporal.ts`) — `valid_from <= t`, and for an
+ * `"openRows"` kind `valid_to > t` — so a decision taken over these windows
+ * names exactly the rows a valid-time composition read returns at `t`.
+ */
+export function membershipValidityWindow(
+  membership: RowMembership,
+  row: Readonly<{
+    validFrom?: string | undefined;
+    validTo?: string | undefined;
+  }>,
+): ValidityWindow {
+  return membership === "openRows" ?
+      { validFrom: row.validFrom, validTo: row.validTo }
+    : { validFrom: row.validFrom };
+}
+
+/**
  * Whether moving a population from rule `prior` to rule `next` admits rows
  * the prior rule left out: ended rows that start counting when an
  * open-rows population becomes an all-rows one. A schema commit that widens
@@ -450,6 +475,7 @@ export function edgeCardinalityViolation(
   ref: EdgeCardinalityAxisRef,
   subject: EdgeCardinalityViolationSubject,
   existingCount: number,
+  incumbentEdgeId?: string,
 ): CardinalityError | undefined {
   if (existingCount <= 0) return undefined;
   return new CardinalityError({
@@ -461,6 +487,7 @@ export function edgeCardinalityViolation(
     toId: subject.toId,
     cardinality: ref.cardinality,
     existingCount,
+    ...(incumbentEdgeId === undefined ? {} : { incumbentEdgeId }),
   });
 }
 
@@ -483,9 +510,10 @@ export type EdgeCardinalityViolationSubject = Readonly<{
  */
 function edgeCardinalityClaimRefusal(
   params: ClaimEdgeCardinalityParams,
+  incumbentEdgeId?: string,
 ): CardinalityError {
   return requireDefined(
-    edgeCardinalityViolation(params, params, 1),
+    edgeCardinalityViolation(params, params, 1, incumbentEdgeId),
     "An incumbent count of one violates every constrained cardinality.",
   );
 }
@@ -572,17 +600,17 @@ export function claimsInProbeOrder(
  * inline `claim.scope !== undefined` spelling could.
  *
  * `incumbentEdgeId` (when the caller has one — a claim statement's returned
- * holder, or an in-batch collision's earlier claim) is forwarded only to the
- * composition arm: `CardinalityError` names no such field, and inventing one
- * here would be exactly the fabricated-value-a-reader-has-to-check-is-unread
- * shape this module's own `EdgeClaimSubject` docblock warns against.
+ * holder, an in-batch collision's earlier claim, or the stored edge a probe
+ * named after its count refused) is forwarded to both arms, so either
+ * refusal names the edge a caller must resolve. A caller that has none
+ * passes nothing rather than a placeholder.
  */
 export function claimRefusalFor(
   params: ClaimEdgeCardinalityParams,
   incumbentEdgeId?: string,
 ): CardinalityError | CompositionError {
   return params.scope === undefined ?
-      edgeCardinalityClaimRefusal(params)
+      edgeCardinalityClaimRefusal(params, incumbentEdgeId)
     : compositionClaimRefusal(params, incumbentEdgeId);
 }
 

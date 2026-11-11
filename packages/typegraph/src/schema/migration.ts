@@ -20,6 +20,7 @@ import { requireDefined } from "../utils/presence";
 import { canonicalEqual, canonicalJson } from "./canonical";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
+  acyclicFlagTransition,
   classifyOntologyChanges,
   type OntologyChange,
 } from "./ontology-change";
@@ -1224,6 +1225,22 @@ function diffEdgeDef(
     });
   }
 
+  // An edge-registration property like the cardinalities, so reported here
+  // and never as an ontology change. Declaring it is a tightening the schema
+  // commit probes against stored edges (a cycle refuses the commit), hence a
+  // warning; dropping it invalidates nothing.
+  const acyclicTransition = acyclicFlagTransition(before, after);
+  if (acyclicTransition !== undefined) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: acyclicTransition === "declared" ? "warning" : "safe",
+      details: `Edge "${name}" ${acyclicTransition} acyclic: true`,
+      before,
+      after,
+    });
+  }
+
   // Write-time validation only: stored edges are not invalidated, so this
   // is a warning (like cardinality), not a breaking change.
   if (before.endpointExistence !== after.endpointExistence) {
@@ -1672,10 +1689,10 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   return actions;
 }
 
-/** Every relation `changes` drops whose meta-edge is not built in, as written. */
+/** Every relation `changes` drops whose meta-edge is not built in. */
 function removedCustomRelations(
   changes: readonly OntologyChange[],
-): readonly string[] {
+): readonly NonNullable<OntologyChange["removedCustomRelation"]>[] {
   return changes.flatMap((change) =>
     change.removedCustomRelation === undefined ?
       []
@@ -1683,9 +1700,14 @@ function removedCustomRelations(
   );
 }
 
-function moveCustomRelationsAction(relations: readonly string[]): string {
+function moveCustomRelationsAction(
+  relations: readonly NonNullable<OntologyChange["removedCustomRelation"]>[],
+): string {
+  const written = relations.map(
+    ({ metaEdge, from, to }) => `${metaEdge}(${from}, ${to})`,
+  );
   return (
-    `MOVE custom ontology relations ${relations.join(", ")} ` +
+    `MOVE custom ontology relations ${written.join(", ")} ` +
     `into defineGraph({ annotations }), then commit with migrateSchema() ` +
     `(their meta-edges are not built in, and the committed schema drops them)`
   );

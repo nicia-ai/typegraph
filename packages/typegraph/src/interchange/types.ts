@@ -230,17 +230,21 @@ export type InterchangeIdentityTransition = z.infer<
 >;
 
 /**
- * The retention watermark accompanying an `archival` export: the SOURCE
- * graph's own `pruneIdentityTransitions` state at export time, so a reader of
- * the raw interchange payload knows the transitions array excludes anything
- * the source had already pruned. Distinct from the watermark import WRITES
- * into the restored graph, which is always the revision the restore's first
- * commit takes on the DESTINATION (see `importIdentityTransitionsIntoTarget`) —
- * this value is never written verbatim into a foreign graph's watermark.
+ * The retention cut accompanying an `archival` export: the raw
+ * `recordedRevision` below which the `transitions` section is missing rows
+ * because they had been pruned before the export — by the source graph
+ * itself, or on a graph the source had restored them from, whichever cut
+ * reaches higher (see `archivalRetentionCut`). `prunedBeforeRecordedAt` is the
+ * recorded time of the instant the cut was made at, so the pair re-forms that
+ * instant.
+ *
+ * A restore records it as the destination's RESTORED cut, a fact about the
+ * restored rows on the raw revisions they keep, and never as the
+ * destination's own watermark (see `importIdentityTransitionsIntoTarget`).
  */
 export const InterchangeIdentityRetentionSchema = z.object({
   prunedBeforeRevision: z.number().int().nonnegative(),
-  prunedAt: z.iso.datetime(),
+  prunedBeforeRecordedAt: z.iso.datetime(),
 });
 export type InterchangeIdentityRetention = z.infer<
   typeof InterchangeIdentityRetentionSchema
@@ -256,7 +260,7 @@ export const InterchangeIdentitySchema = z.object({
    * nothing here either, for the same reason (`working-copy.ts`).
    */
   transitions: z.array(InterchangeIdentityTransitionSchema).optional(),
-  /** `archival` mode only — the source graph's retention watermark. */
+  /** `archival` mode only — the cut below which `transitions` is missing pruned rows. */
   retention: InterchangeIdentityRetentionSchema.optional(),
 });
 export type InterchangeIdentity = z.infer<typeof InterchangeIdentitySchema>;

@@ -109,6 +109,7 @@ import {
 } from "../../core/types";
 import {
   CompilerInvariantError,
+  CompositionConfigurationError,
   ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
@@ -119,7 +120,10 @@ import {
   UniquenessError,
   ValidationError,
 } from "../../errors";
-import { validateNodeProps } from "../../errors/validation";
+import {
+  unrecognizedOptionKeyIssues,
+  validateNodeProps,
+} from "../../errors/validation";
 import { type IdentityFoldPlan } from "../../identity/service";
 import { type IdentityTarget } from "../../identity/sql-target";
 import {
@@ -140,6 +144,7 @@ import { type JsonPointer, resolveJsonPointer } from "../../query/json-pointer";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import type { CompiledSelectSql } from "../../query/sql-intent";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { compositionViaKind } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
@@ -159,6 +164,7 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import { acyclicRelationCountsRow } from "../acyclicity";
 import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
+import { type CompositionWindowTransition } from "../claims/composition-windows";
 import {
   assertNodeClaimTransitionsAvailable,
   checkUniquenessConstraints,
@@ -229,6 +235,8 @@ import {
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeReparentOptions,
@@ -296,7 +304,7 @@ import {
 } from "./edge-batch-validation";
 import {
   assertCompositionEdgeWindowEndable,
-  assertPreparedEdgeCreatesAcyclic,
+  assertPreparedEdgeCreateRelations,
   type EdgeCreatePrepared,
   edgeInsertWork,
   endCompositionEdgeWindow,
@@ -3605,7 +3613,7 @@ type CompositionEndpointEvidence =
  * frame's first statement.
  *
  * `endpoints` says what this call still owes on the endpoint rows, and
- * `validateAcyclicity` whether it owes the relation walk — see
+ * `validateRelations` whether it owes the relation walk — see
  * {@link CompositionEndpointEvidence} and
  * {@link prepareBatchCompositionCreateEdges}.
  */
@@ -3618,7 +3626,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   temporal: Readonly<{ validFrom?: string | null; validTo?: string }>,
   options: Readonly<{
     endpoints: CompositionEndpointEvidence;
-    validateAcyclicity: boolean;
+    validateRelations: boolean;
     /** A `reparent`'s instant; see `assertCompositionEdgeWindowCurrent`. */
     moveInstant?: ResolvedCompositionMoveInstant | undefined;
   }>,
@@ -3630,7 +3638,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
     validateEndpoints: options.endpoints.source === "read",
     validateCardinality: true,
-    validateAcyclicity: options.validateAcyclicity,
+    validateRelations: options.validateRelations,
     lock,
     moveInstant: options.moveInstant,
   });
@@ -3766,7 +3774,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
               work.whole.id,
             ),
           },
-      validateAcyclicity: true,
+      validateRelations: true,
     },
   );
 }
@@ -3792,7 +3800,7 @@ async function prepareCompositionEdgeForCreate<G extends GraphDef>(
  *   batch uses ({@link createEdgeBatchValidationBackend}), so a later item's
  *   probe counts the earlier items' edges although none is inserted yet.
  * - ACYCLICITY is probed ONCE for the whole batch
- *   ({@link assertPreparedEdgeCreatesAcyclic}), as an overlay of the prepared
+ *   ({@link assertPreparedEdgeCreateRelations}), as an overlay of the prepared
  *   edges on the stored relation, so a cycle that runs through more than one
  *   of the batch's own edges (an item naming another item as its whole, or
  *   restoring a tombstone that still carries edges of its own) is refused
@@ -3854,7 +3862,7 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
               source: "primedWhole",
               wholeRow: wholeRows.get(nodeRefKey(work.whole)),
             },
-        validateAcyclicity: false,
+        validateRelations: false,
       },
     );
     registerPendingEdgeForCardinality(
@@ -3863,7 +3871,7 @@ async function prepareBatchCompositionCreateEdges<G extends GraphDef>(
     );
     preparedEdges.push(preparedEdge);
   }
-  await assertPreparedEdgeCreatesAcyclic(
+  await assertPreparedEdgeCreateRelations(
     ctx,
     target,
     lock,
@@ -4014,9 +4022,13 @@ type PreparedAttachmentMove = Readonly<{
  *   replacement already present ({@link createEdgeBatchValidationBackend}).
  * - ACYCLICITY is probed once, as an overlay of every replacement on the
  *   stored relation less the retired incumbents
- *   ({@link assertPreparedEdgeCreatesAcyclic}), so two moves that close a
+ *   ({@link assertPreparedEdgeCreateRelations}), so two moves that close a
  *   cycle between them are refused, and a move under a part that the same
  *   set moves out of the way is not.
+ * - The composition WINDOWS are judged once too, over every replacement and
+ *   every retire's after-state (`retireTransition`), so a backdated `at` on a
+ *   part with no incumbent is refused when it lands inside the part's
+ *   history, while a move that splits its incumbent's window reads nothing.
  * - Each RETIRE's own verdict is reached here too: a `oneActive` incumbent's
  *   window end ({@link assertCompositionEdgeWindowEndable}) and a `one`
  *   incumbent's delete ({@link assertCompositionExistencePreserved}).
@@ -4074,7 +4086,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
       attachmentWindow(work, moveInstant),
       {
         endpoints,
-        validateAcyclicity: false,
+        validateRelations: false,
         moveInstant,
       },
     );
@@ -4115,7 +4127,7 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     prepared.push({ partId, decided, replacement, retire });
   }
 
-  await assertPreparedEdgeCreatesAcyclic(
+  await assertPreparedEdgeCreateRelations(
     ctx,
     target,
     lock,
@@ -4123,11 +4135,16 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
     prepared.flatMap((move) =>
       move.replacement === undefined ? [] : [move.replacement],
     ),
-    retires.flatMap((retire) =>
-      retire !== undefined && retireRemovesFromAcyclicRelation(ctx, retire) ?
-        [retire.incumbent.id]
-      : [],
-    ),
+    {
+      acyclicRelationExits: retires.flatMap((retire) =>
+        retire !== undefined && retireRemovesFromAcyclicRelation(ctx, retire) ?
+          [retire.incumbent.id]
+        : [],
+      ),
+      transitions: retires.flatMap((retire) =>
+        retire === undefined ? [] : [retireTransition(retire)],
+      ),
+    },
   );
   return prepared;
 }
@@ -4189,6 +4206,23 @@ function unretiringMoveInstant(
     },
     undefined,
   );
+}
+
+/**
+ * The composition window transition one retire makes: the incumbent's window
+ * ended at the move instant, or the row deleted. The instant a deleted row
+ * carries is never read — a deleted row counts at no coordinate.
+ */
+function retireTransition(
+  retire: IncumbentRetire,
+): CompositionWindowTransition {
+  return {
+    before: retire.incumbent,
+    after:
+      retire.population === "oneActive" ?
+        { ...retire.incumbent, valid_to: retire.moveInstant }
+      : { ...retire.incumbent, deleted_at: retire.moveInstant },
+  };
 }
 
 /** The incumbent's row and the state its retire leaves it in. */
@@ -4346,7 +4380,7 @@ async function prepareCompositionAttachmentDecision<G extends GraphDef>(
             options.partRowRestoredByUpdate ?
               { source: "restoredByUpdate" }
             : { source: "read" },
-          validateAcyclicity: true,
+          validateRelations: true,
         },
       );
     }
@@ -4816,10 +4850,9 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
     creates: readonly CreateNodeInput[];
     attachingCreates: readonly CreateNodeInput[];
     createWorks: readonly (CompositionCreateWork | undefined)[];
-    partOf: CompositionAttachment | undefined;
   }>,
 ): Promise<void> {
-  const { owed, creates, attachingCreates, createWorks, partOf } = batch;
+  const { owed, creates, attachingCreates, createWorks } = batch;
   const revisions = owed.flatMap((match) =>
     match.leg.leg === "revise" ? [{ ...match, leg: match.leg }] : [],
   );
@@ -4904,7 +4937,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
           .map(({ existing }) => ({ kind: existing.kind, id: existing.id })),
       );
       moves.push(
-        ...(await newRowAttachmentMoves(ctx, target, attachingCreates, partOf)),
+        ...(await newRowAttachmentMoves(ctx, target, attachingCreates)),
       );
       await prepareCompositionAttachmentMoves(
         ctx,
@@ -4953,19 +4986,18 @@ function newRowClaimTransitions<G extends GraphDef>(
  * The attachments of the rows a batch is about to create, as the moves
  * {@link prepareCompositionAttachmentMoves} counts alongside the matched
  * items' — each an `"attach"` of a part the frame has no row for yet, judged
- * against its whole's row exactly as the create batch will judge it. Every
- * request resolves the call's one `partOf`, so they share one whole, read
- * once. The part's id is a stand-in: the created row's real id is assigned
- * when the create batch prepares it, and nothing the frame counts depends on
- * it.
+ * against its whole's row exactly as the create batch will judge it. Each
+ * request resolves its own row's `partOf`; the wholes they name are read once
+ * each ({@link readNodeRowsByRef}). The part's id is a stand-in: the created
+ * row's real id is assigned when the create batch prepares it, and nothing
+ * the frame counts depends on it.
  */
 async function newRowAttachmentMoves<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   target: WriteTarget,
   attachingCreates: readonly CreateNodeInput[],
-  partOf: CompositionAttachment | undefined,
 ): Promise<readonly DecidedAttachmentMove[]> {
-  const requests = attachingCreates.map(({ kind }) => {
+  const requests = attachingCreates.map(({ kind, partOf }) => {
     const id = generateId();
     const request = requireDefined(
       resolveGetOrCreateAttachmentRequest(ctx, kind, id, partOf),
@@ -4973,15 +5005,119 @@ async function newRowAttachmentMoves<G extends GraphDef>(
     );
     return { id, request };
   });
-  const whole = requests[0]?.request.work.whole;
-  if (whole === undefined) return [];
-  const wholeRow = await target.getNode(ctx.graphId, whole.kind, whole.id);
+  if (requests.length === 0) return [];
+  const wholeRows = await readNodeRowsByRef(
+    target,
+    ctx.graphId,
+    requests.map(({ request }) => request.work.whole),
+    ctx.batchPointRead,
+  );
   return requests.map(({ id, request }) => ({
     partId: id,
     moveAt: undefined,
-    endpoints: { source: "primedWhole", wholeRow },
+    endpoints: {
+      source: "primedWhole",
+      wholeRow: wholeRows.get(nodeRefKey(request.work.whole)),
+    },
     decided: { request, disposition: "attach" },
   }));
+}
+
+/** Every key {@link NodeBulkGetOrCreateByConstraintOptions} accepts. */
+const BULK_GET_OR_CREATE_OPTION_KEYS = ["ifExists"] as const;
+
+/**
+ * Refuses an option `bulkGetOrCreateByConstraint` does not take — above all a
+ * batch-level `partOf`, which is per item (as on `bulkCreate`): a caller that
+ * still passes it in the options would otherwise have every attachment
+ * silently dropped.
+ */
+function assertBulkGetOrCreateOptionKeys(
+  kind: string,
+  options: Readonly<Record<string, unknown>> | undefined,
+): void {
+  if (options === undefined) return;
+  const issues = unrecognizedOptionKeyIssues(
+    options,
+    "options",
+    BULK_GET_OR_CREATE_OPTION_KEYS,
+  );
+  if (issues.length === 0) return;
+  throw new ValidationError(
+    `bulkGetOrCreateByConstraint on ${kind} does not accept ${issues.map((issue) => issue.path).join(", ")}.`,
+    { entityType: "node", kind, issues },
+    {
+      suggestion:
+        "State `partOf` on each item: `[{ props, partOf: { whole } }, ...]`.",
+    },
+  );
+}
+
+/**
+ * Refuses a `bulkGetOrCreateByConstraint` batch in which two items resolve to
+ * the same constraint key but state different attachments. Such items resolve
+ * to ONE node, which holds one whole, so honoring both postconditions is
+ * impossible, and the later item's would otherwise be dropped silently (it
+ * reuses the earlier item's result). The attachments are compared as the
+ * caller stated them, canonically — whole, `via` kind, `props` and window.
+ *
+ * @throws ValidationError naming both items' `partOf` paths.
+ */
+function assertDuplicateKeysStateOneAttachment(
+  kind: string,
+  validated: readonly Readonly<{ key: string | undefined }>[],
+  items: readonly Readonly<{ partOf?: CompositionAttachment }>[],
+): void {
+  const firstIndexByKey = new Map<string, number>();
+  for (const [index, { key }] of validated.entries()) {
+    if (key === undefined) continue;
+    const firstIndex = firstIndexByKey.get(key);
+    if (firstIndex === undefined) {
+      firstIndexByKey.set(key, index);
+      continue;
+    }
+    const first = items[firstIndex]?.partOf;
+    const repeated = items[index]?.partOf;
+    if (
+      canonicalEqual(
+        statedAttachmentIdentity(first),
+        statedAttachmentIdentity(repeated),
+      )
+    ) {
+      continue;
+    }
+    throw new ValidationError(
+      `bulkGetOrCreateByConstraint items ${String(firstIndex)} and ${String(index)} resolve to the same ${kind} but state different partOf attachments.`,
+      {
+        entityType: "node",
+        kind,
+        issues: [
+          {
+            path: `items[${String(index)}].partOf`,
+            message: `Item ${String(index)} matches the same constraint key as item ${String(firstIndex)}, which states a different attachment; one node holds one whole.`,
+          },
+        ],
+      },
+      {
+        suggestion:
+          "State the same partOf (or none) on every item that names the same key, or split the batch.",
+      },
+    );
+  }
+}
+
+/** A stated attachment reduced to what it asks for, for comparison. */
+function statedAttachmentIdentity(
+  partOf: CompositionAttachment | undefined,
+): unknown {
+  if (partOf === undefined) return undefined;
+  return {
+    whole: { kind: partOf.whole.kind, id: partOf.whole.id },
+    via: partOf.via === undefined ? undefined : compositionViaKind(partOf.via),
+    props: partOf.props,
+    validFrom: partOf.validFrom,
+    validTo: partOf.validTo,
+  };
 }
 
 // ============================================================
@@ -5130,7 +5266,7 @@ async function reparentParts<G extends GraphDef>(
 ): Promise<readonly NodeReparentResult[]> {
   if (items.length === 0) return [];
   if (!ctx.registry.isCompositionPart(kind)) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `Node kind "${kind}" is not a composition part: it declares no partOf/hasPart pair toward any whole.`,
       { code: "COMPOSITION_NOT_A_PART", partKind: kind },
       {
@@ -8322,14 +8458,18 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   ctx: NodeOperationContext<G>,
   kind: string,
   constraintName: string,
-  items: readonly Readonly<{ props: Record<string, unknown> }>[],
+  items: readonly NodeBulkGetOrCreateByConstraintItem<
+    Record<string, unknown>
+  >[],
   backend: GraphBackend | TransactionBackend,
-  options?: NodeGetOrCreateByConstraintOptions,
+  options?: NodeBulkGetOrCreateByConstraintOptions,
 ): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]> {
   if (items.length === 0) return [];
 
+  assertBulkGetOrCreateOptionKeys(kind, options);
   const ifExists = options?.ifExists ?? "return";
-  const partOf = options?.partOf;
+  const partOfAt = (index: number): CompositionAttachment | undefined =>
+    items[index]?.partOf;
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
@@ -8337,6 +8477,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   // Step 1: Validate all props and compute keys
   const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
+  assertDuplicateKeysStateOneAttachment(kind, validated, items);
 
   const kindsToCheck = uniquenessProbeKinds(
     kind,
@@ -8401,7 +8542,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (key === undefined) {
         toCreate.push({
           index,
-          input: createInputWithPartOf(kind, validatedProps, partOf),
+          input: createInputWithPartOf(kind, validatedProps, partOfAt(index)),
         });
         continue;
       }
@@ -8418,7 +8559,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (candidates === undefined) {
         toCreate.push({
           index,
-          input: createInputWithPartOf(kind, validatedProps, partOf),
+          input: createInputWithPartOf(kind, validatedProps, partOfAt(index)),
         });
       } else {
         toFetch.push({ index, candidates, key, validatedProps });
@@ -8445,7 +8586,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       if (existing === undefined) {
         toCreate.push({
           index,
-          input: createInputWithPartOf(kind, validatedProps, partOf),
+          input: createInputWithPartOf(kind, validatedProps, partOfAt(index)),
         });
         continue;
       }
@@ -8453,7 +8594,10 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         index,
         existing,
         validatedProps,
-        leg: resolveExistingGetOrCreateLeg(ctx, existing, { ifExists, partOf }),
+        leg: resolveExistingGetOrCreateLeg(ctx, existing, {
+          ifExists,
+          partOf: partOfAt(index),
+        }),
       });
     }
     const createInputs = toCreate.map((entry) => entry.input);
@@ -8481,7 +8625,6 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         creates: createInputs,
         attachingCreates,
         createWorks,
-        partOf,
       });
     }
     for (const match of held) {

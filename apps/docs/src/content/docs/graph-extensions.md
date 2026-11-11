@@ -337,6 +337,30 @@ Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
 
+A `partOf` or `hasPart` relation also carries `via`, the edge kind that
+realizes the composition, and may carry `partSide` (`"from"` or `"to"`) and
+`existence` (`"optional"` or `"required"`):
+`{ metaEdge: "partOf", from: "Section", to: "Chapter", via: "inChapter" }`.
+`via` is required, so a document that carries `{ metaEdge: "partOf", from,
+to }` is refused with `GraphExtensionValidationError`; add the realizing edge
+kind (declared in the document or already in the host graph) or drop the
+relation. `via`, `partSide` and `existence` on any other meta-edge are refused
+as well. `GRAPH_EXTENSION_ISSUE_CODES` names each refusal on the issue's
+`code`, and [Errors](/errors#composition-declaration-codes) says what to do
+about it:
+
+| Issue `code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` | A `partOf` / `hasPart` relation has no `via`. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `existence`. |
+
+The checks that need the merged graph (the `via` edge exists, admits the
+pair, and bounds each part to one whole) run when `evolve()` builds the merged
+registry and raise `ConfigurationError` with the codes in
+[Errors](/errors#composition-declaration-codes).
+
 A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
 checked against the same structural contract a compile-time declaration
 gets — the child's schema must extend the parent's — at `evolve()`, before
@@ -357,15 +381,26 @@ compile-time `G` it was called on, and a later `createStoreWithSchema(graph,
 backend)` folds the persisted extension back in under the same `G`, so the
 compile-time alias type of a base-graph kind that only becomes polymorphic
 through an extension's `subClassOf` is still the exact kind. Rather than
-return the extension's subclass rows under that type, `from(kind, alias)`, a
-list source and `to(kind, alias)` with no `expansion` throw
-`ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`), on the
-evolved store and after every restart. A list source is refused only for an
-extra kind none of its listed kinds' types admits. `store.search()` with
-`expansion: "subclasses"` is not refused: its hit is typed polymorphically
-whatever the compile-time graph declares. State `{ expansion: "subclasses" }`
-or `{ expansion: "exact" }`, or use `fromDynamic()`; see [Query Source ▸
-Subclass Expansion](/queries/source#subclass-expansion).
+return the extension's subclass rows under that type, a query over
+`from(kind, alias)`, a list source or `to(kind, alias)` with no `expansion`
+throws `ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`) from
+every terminal that returns rows, on the evolved store and after every
+restart; `count()` and `exists()` still answer. A list source is refused only
+for an extra kind none of its listed kinds' types admits. `store.search()`
+with `expansion: "subclasses"` is not refused: its hit is typed
+polymorphically whatever the compile-time graph declares. State
+`{ expansion: "subclasses" }` or `{ expansion: "exact" }`, or use
+`fromDynamic()`; see [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion).
+
+Because the extension is persisted, this reaches **every deployment that
+shares the database**, not only the one that called `evolve()`: another
+service running the same code graph picks the extension up on its next
+`createStoreWithSchema(...)` boot, and its unchanged unstated-expansion
+queries over the subclassed kind start refusing. Such a service opts out with
+`queryDefaults: { expansion: "exact" }` in its `createStore` /
+`createStoreWithSchema` options, or by declaring the relation in its code
+graph.
 
 The refusal reads the graph's ontology **values** at run time, not the type
 the store was declared with, so it also fires for a store typed over a wide
@@ -412,10 +447,13 @@ opens its write transaction. It returns an immutable `"noop"` or `"change"`
 plan with `graphId`, `baseline: { version, hash }`, and
 `result: { version, hash }`. Change plans expose an ordered `requirements`
 array whose entries name new-kind additions, empty-kind checks, vector slots,
-ontology tightening, and identity work. An `ontology-tightening` entry lists
-the ontology changes and newly constrained edge cardinalities that existing
-rows must satisfy; apply checks them on the fenced session and refuses with
-the same `MigrationError` `evolve()` raises. A `new-kind` entry describes a graph delta; it does not
+ontology and edge-kind tightening, and identity work. An `ontology-tightening`
+entry lists the ontology relation changes that existing rows must satisfy; an
+`edge-tightening` entry lists the edge kinds (`edgeKinds`) whose own
+registration tightens — a newly constrained cardinality (`edgeCardinalityAxes`),
+`acyclic: true`, or an endpoint pair no longer admitted. Neither entry is ever
+emitted with an empty list. Apply checks them on the fenced session and
+refuses with the same `MigrationError` `evolve()` raises. A `new-kind` entry describes a graph delta; it does not
 indicate that a removal is queued or direct callers to run
 `materializeRemovals()`. The plan is opaque and bound to the loaded TypeGraph
 module: it cannot be serialized, cloned, or reconstructed. It can be passed between

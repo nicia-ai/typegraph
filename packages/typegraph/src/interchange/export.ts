@@ -20,6 +20,7 @@ import {
   ExportStreamIdleTimeoutError,
 } from "../errors";
 import {
+  archivalRetentionCut,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
 } from "../identity/transition-log";
@@ -584,24 +585,24 @@ async function produceExportChunks<G extends GraphDef>(
   const schemaVersion = await backend.getActiveSchema(graphId);
   const archivalIdentityEnabled =
     store.graph.identity !== undefined && options.identityMode === "archival";
-  // The source graph's own retention watermark, so a reader of the raw
-  // payload knows the transitions section excludes anything the source had
-  // already pruned. Read from the same snapshot the rest of the export reads
-  // from, before the header is emitted, so a transactional export's header
-  // is consistent with everything that follows it. Omitted entirely when
-  // nothing has EVER been pruned (`prunedBeforeRevision === 0`):
-  // `identityTransitionRetentionAtTarget`'s "nothing pruned" default stamps a
-  // fresh `prunedAt` on every read (it names no real prune event), which
-  // would otherwise make two archival exports of an unchanged graph compare
-  // unequal on that field alone.
-  const rawRetention =
+  // The cut below which the transitions section is missing pruned rows, so a
+  // reader of the raw payload, and a restore, know it. Read from the same
+  // snapshot the rest of the export reads from, before the header is
+  // emitted, so a transactional export's header is consistent with
+  // everything that follows it. Omitted entirely when nothing was ever cut.
+  const retentionCut =
     archivalIdentityEnabled ?
-      await storeRuntime(store).identityTransitionRetentionAtTarget(backend)
+      archivalRetentionCut(
+        await storeRuntime(store).identityTransitionRetentionAtTarget(backend),
+      )
     : undefined;
   const retention =
-    rawRetention === undefined || rawRetention.prunedBeforeRevision === 0 ?
-      undefined
-    : rawRetention;
+    retentionCut === undefined ? undefined : (
+      {
+        prunedBeforeRevision: retentionCut.revision,
+        prunedBeforeRecordedAt: retentionCut.recordedAt,
+      }
+    );
   // Read for the SAME reason as `retention` above: a streaming importer's
   // header handler is the only place it can refuse an archival-transitions
   // restore into a `history: false` target BEFORE any node or edge write —

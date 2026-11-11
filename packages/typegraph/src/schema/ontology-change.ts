@@ -62,9 +62,10 @@
  * composition pair can make an already-live part's second whole a violation
  * of one whole per part (relation-wide) it never was before, so it is
  * `warning`, probed by `compositionSingleWhole` — the single-whole audit, the
- * composition acyclicity check over the PROPOSED composition relation, and
- * the check that no row of the realizing edge kind starts or ends later than
- * the commit, all run against the proposed registry in
+ * composition acyclicity check over the PROPOSED composition relation, the
+ * check that no row of the realizing edge kind starts or ends later than the
+ * commit, and the check that no part's rows have overlapping valid-time
+ * windows under the pair, all run against the proposed registry in
  * `prepareSchemaTighteningPreflight`.
  * REMOVED is `breaking`: dropping a composition declaration is a
  * read/write-semantics change (parts stop being deletable-with-their-whole,
@@ -85,8 +86,17 @@
  * loss: a subsumption relation removed, a kind removed from the middle of a
  * subclass chain, or the edge kind's own `from` / `to` declaration narrowed.
  * `edgeEndpointAdmissionLosses` is the one owner of that decision; a relation
- * removal carries its probe, and a loss no relation change carries is
- * reported as its own `entity: "edgeRegistration"` change.
+ * removal carries its probe, and a loss no relation change carries is an
+ * edge-registration tightening (see {@link OntologyClassification}): it is
+ * reported by the edge diff (`diff.edges`), never as an ontology change.
+ *
+ * What an ontology change MEANS for data is split from what the diff REPORTS.
+ * `OntologyChange` is the public report: one entry per relation that changed,
+ * nothing else. The probes a commit owes are the classifier's private
+ * output, returned beside it in an {@link OntologyClassification}, so a
+ * probe shape is never a semver surface and a registration property
+ * (`acyclic`, endpoints, cardinality) is reported in exactly one place, the
+ * edge diff.
  *
  * This module has exactly ONE owner for "did the ontology change, and how
  * severely": the RELATION-level diff above. `SerializedOntology.metaEdges`
@@ -119,6 +129,7 @@ import {
   META_EDGE_SUB_CLASS_OF,
   type MetaEdgeName,
 } from "../ontology/constants";
+import { isExternalIri } from "../ontology/external-iri";
 import {
   isCompositionMetaEdge,
   ontologyRelationIdentityKey,
@@ -153,7 +164,7 @@ import {
  * `uniques` row on an axis, minus the precomputed axis itself (the audit
  * derives that from `coveredKinds` through `uniquenessAxisGroupFor`).
  */
-export type UniquenessComponentProbeGroup = Readonly<{
+type UniquenessComponentProbeGroup = Readonly<{
   constraintName: string;
   /** Every kind the merged `kindWithSubClasses` axis now covers, code-point order. */
   coveredKinds: readonly string[];
@@ -217,9 +228,10 @@ type OntologyDataProbeBody =
 
 /**
  * The violation families each probe can produce. `compositionSingleWhole`
- * fans out into `composition`, `edgeAcyclicity` and `compositionFutureWindow`
+ * fans out into `composition`, `edgeAcyclicity`, `compositionFutureWindow`
  * (a row of the pair's realizing edge kind whose window starts or ends later
- * than the commit); every other probe
+ * than the commit) and `compositionWindowOverlap` (a part whose rows' windows
+ * would overlap under the pair); every other probe
  * names the family a `verifyConstraintFences()` row uses for the same fact.
  * `edgeCardinality` has no ontology probe — it is a write-time fence, not a
  * schema-commit check. {@link probeCoversViolationFamily} is the join.
@@ -229,7 +241,12 @@ export const PROBE_VIOLATION_FAMILIES = {
   nodeUniqueness: ["nodeUniqueness"],
   edgeEndpointAssignability: ["edgeEndpointAssignability"],
   edgeAcyclicity: ["edgeAcyclicity"],
-  composition: ["composition", "edgeAcyclicity", "compositionFutureWindow"],
+  composition: [
+    "composition",
+    "edgeAcyclicity",
+    "compositionFutureWindow",
+    "compositionWindowOverlap",
+  ],
   compositionExistence: ["compositionExistence"],
 } as const satisfies Record<OntologyDataProbeBody["kind"], readonly string[]>;
 
@@ -255,34 +272,26 @@ export function probeCoversViolationFamily(
 }
 
 /**
- * A change to the ontology. Moved here from `migration.ts`, which
- * re-exports it so the public path (`src/schema/index.ts`) is unchanged.
+ * A change to the ontology: one relation added, removed, or (for a
+ * composition pair's `existence`) modified. Moved here from `migration.ts`,
+ * which re-exports it so the public path (`src/schema/index.ts`) is
+ * unchanged.
  *
- * `entity: "edgeRegistration"` covers an edge kind's own registration:
- * `acyclic` and its admitted endpoint pairs are edge-registration
- * properties, not ontology meta-edges/relations, but they share this classifier and the tightening-probe machinery rather than
- * forking a second implementation of "what does a schema change do to
- * existing data".
+ * An edge kind's own registration (`acyclic`, endpoints, cardinality,
+ * `targetCardinality`) is not an ontology relation: it is reported by the
+ * edge diff (`SchemaDiff.edges`), whatever data check it owes.
  */
 export type OntologyChange = Readonly<{
   type: ChangeType;
-  entity: "relation" | "edgeRegistration";
+  entity: "relation";
   name: string;
   severity: ChangeSeverity;
   details: string;
   /**
-   * The data checks a commit of this change must run. Absent on `safe` and
-   * on `breaking` changes (breaking already requires an explicit
-   * `migrateSchema()`). Declared per the severity table above regardless of
-   * whether the diff-wide payload happens to be empty for this particular
-   * relation — `ontologyTighteningProbes` is what decides whether a family
-   * has any actual work to fold into a commit preflight.
-   */
-  probes?: readonly OntologyDataProbe[];
-  /**
    * Set only on the removal of a relation whose meta-edge is not built in,
    * one a custom `metaEdge()` declared before that factory was removed: the
-   * relation as written, such as `governs(Team, Project)`. The removal is
+   * relation as `{ metaEdge, from, to }`, such as `governs(Team, Project)` as
+   * `{ metaEdge: "governs", from: "Team", to: "Project" }`. The removal is
    * `breaking` because the stored document holds the last copy of a relation
    * the graph can no longer declare; a relation dropped alongside a kind it
    * names stays `safe` under the removed-kind rule but is still named here.
@@ -290,7 +299,41 @@ export type OntologyChange = Readonly<{
    * `migrateSchema()`; `getMigrationActions` lists every such relation, and
    * the store verbs that commit without `ensureSchema` refuse to drop one.
    */
-  removedCustomRelation?: string;
+  removedCustomRelation?: Readonly<{
+    metaEdge: string;
+    from: string;
+    to: string;
+  }>;
+}>;
+
+/** A classified relation change and the data checks a commit of it owes. */
+type ClassifiedRelationChange = Readonly<{
+  change: OntologyChange;
+  probes: readonly OntologyDataProbe[];
+}>;
+
+/**
+ * Everything one before/after pair means: the public report and the data
+ * checks a commit owes. {@link classifyOntologyChanges} is the report alone;
+ * the schema-commit preflight reads the rest.
+ */
+export type OntologyClassification = Readonly<{
+  /** Every relation change with the probes it carries, in report order. */
+  relationChanges: readonly ClassifiedRelationChange[];
+  /** Every relation change, as `SchemaDiff.ontology` reports it. */
+  changes: readonly OntologyChange[];
+  /** The relation changes that owe a data check, in report order. */
+  probedChanges: readonly OntologyChange[];
+  /**
+   * Edge kinds whose own registration tightens this commit and owes a data
+   * check no relation change already carries: `acyclic` turned on, or an
+   * admitted endpoint pair lost to a narrowed `from` / `to` declaration or a
+   * removed kind. Sorted. Reported by the edge diff, never as a relation
+   * change.
+   */
+  tightenedEdgeKinds: readonly string[];
+  /** The probe plan for the whole diff, unioned per kind. */
+  probes: readonly OntologyDataProbe[];
 }>;
 
 /** Everything classification reads. Deliberately narrower than `SerializedSchema`. */
@@ -590,13 +633,8 @@ export function requiredPartKindsByViaEdgeKind(
   );
 }
 
-/** One edge kind's admission loss: the pairs it stopped admitting, and what the probe still allows. */
+/** One edge kind's admission loss: it stopped admitting a pair live rows may sit on, and this is what the probe still allows. */
 type EdgeEndpointAdmissionLoss = Readonly<{
-  /**
-   * Admitted concrete pairs the proposal drops, between kinds that SURVIVE
-   * this commit. Sorted like `EdgeEndpointAllowance.allowedPairs`.
-   */
-  lostPairs: readonly (readonly [string, string])[];
   /**
    * What a live row may still sit on: the proposal's own admitted pairs,
    * plus every previously admitted pair naming a node kind this commit
@@ -684,11 +722,9 @@ function edgeEndpointAdmissionLosses(
     const droppedPairs = beforeAllowed.allowedPairs.filter(
       (pair) => !afterPairKeys.has(endpointPairKey(pair)),
     );
-    const lostPairs = droppedPairs.filter((pair) => !namesRemovedKind(pair));
-    if (lostPairs.length === 0) continue;
+    if (droppedPairs.every((pair) => namesRemovedKind(pair))) continue;
 
     losses.push({
-      lostPairs,
       allowance: {
         edgeKind,
         allowedPairs: [
@@ -745,61 +781,42 @@ export function addedEdgeKindProbes(
 }
 
 /**
- * Edge kinds present on both sides whose `acyclic` flag made the transition
- * `wasTransition` selects for. A brand-new edge kind (absent from `before`)
- * is not a CHANGE to an edge registration, so it qualifies for neither
- * direction here; the rows a previous removal may have left under its name
- * are probed by {@link addedEdgeKindProbes} instead.
- * The one loop {@link edgeAcyclicityAddedDelta} and
- * {@link edgeAcyclicityRemovedDelta} both filter, so the "present on both
- * sides" test cannot drift between the two directions.
+ * THE reading of an edge kind's `acyclic` flag across two documents:
+ * `"declared"` when it turned on, `"dropped"` when it turned off, `undefined`
+ * when it did not move. The edge diff (`diffEdgeDef`) and the tightening
+ * classifier both read it, so the report and the probe cannot disagree about
+ * which edge kinds changed acyclicity.
  */
-function edgeAcyclicityTransitionDelta(
-  before: OntologySnapshot,
-  after: OntologySnapshot,
-  kindDelta: SnapshotKindDelta,
-  wasTransition: (wasAcyclic: boolean, isAcyclic: boolean) => boolean,
-): readonly string[] {
-  return kindDelta.retainedEdgeKinds.filter((edgeKind) =>
-    wasTransition(
-      before.edges[edgeKind]?.acyclic === true,
-      after.edges[edgeKind]?.acyclic === true,
-    ),
-  );
+export function acyclicFlagTransition(
+  before: Readonly<{ acyclic?: boolean | undefined }>,
+  after: Readonly<{ acyclic?: boolean | undefined }>,
+): "declared" | "dropped" | undefined {
+  const wasAcyclic = before.acyclic === true;
+  const isAcyclic = after.acyclic === true;
+  if (wasAcyclic === isAcyclic) return undefined;
+  return isAcyclic ? "declared" : "dropped";
 }
 
 /**
  * Edge kinds present on both sides whose `acyclic` flag went from
- * absent/`false` to `true` this commit — an acyclic edge tightening.
+ * absent/`false` to `true` this commit — an acyclic edge tightening. A
+ * brand-new edge kind (absent from `before`) is not a CHANGE to an edge
+ * registration; the rows a previous removal may have left under its name are
+ * probed by {@link addedEdgeKindProbes} instead. Turning the flag off is
+ * `safe` and owes no probe: dropping the axiom can invalidate nothing
+ * already true of the data.
  */
 function edgeAcyclicityAddedDelta(
   before: OntologySnapshot,
   after: OntologySnapshot,
   kindDelta: SnapshotKindDelta,
 ): readonly string[] {
-  return edgeAcyclicityTransitionDelta(
-    before,
-    after,
-    kindDelta,
-    (wasAcyclic, isAcyclic) => !wasAcyclic && isAcyclic,
-  );
-}
-
-/**
- * Edge kinds present on both sides whose `acyclic` flag went from `true` to
- * absent/`false` this commit — always `safe`, no probe: dropping the axiom
- * can invalidate nothing already true of the data.
- */
-function edgeAcyclicityRemovedDelta(
-  before: OntologySnapshot,
-  after: OntologySnapshot,
-  kindDelta: SnapshotKindDelta,
-): readonly string[] {
-  return edgeAcyclicityTransitionDelta(
-    before,
-    after,
-    kindDelta,
-    (wasAcyclic, isAcyclic) => wasAcyclic && !isAcyclic,
+  return kindDelta.retainedEdgeKinds.filter(
+    (edgeKind) =>
+      acyclicFlagTransition(
+        requireDefined(before.edges[edgeKind]),
+        requireDefined(after.edges[edgeKind]),
+      ) === "declared",
   );
 }
 
@@ -808,10 +825,10 @@ function edgeAcyclicityRemovedDelta(
 // ============================================================
 
 /**
- * The probe kinds a META-EDGE/RELATION change can carry. Excludes
- * `edgeAcyclicity`: that probe belongs to an `entity: "edgeRegistration"`
- * change, classified in a separate arm of `classifyOntologyChanges` that
- * never calls {@link buildProbe} — see `edgeAcyclicityAddedDelta`.
+ * The probe kinds a RELATION change can carry. Excludes `edgeAcyclicity`:
+ * that probe belongs to an edge kind's own registration, classified in a
+ * separate arm of `classifyOntology` that never calls {@link buildProbe} —
+ * see `edgeAcyclicityAddedDelta`.
  */
 type ProbeKind = Exclude<OntologyDataProbe["kind"], "edgeAcyclicity">;
 
@@ -820,7 +837,7 @@ type RelationSeverity = Readonly<{
   probeKinds: readonly ProbeKind[];
   /** Replaces the plain "was added/removed" details with what to do about it. */
   details?: string;
-  removedCustomRelation?: string;
+  removedCustomRelation?: OntologyChange["removedCustomRelation"];
 }>;
 
 const KNOWN_META_EDGE_NAMES: ReadonlySet<string> = new Set(ALL_META_EDGE_NAMES);
@@ -922,7 +939,11 @@ function classifyCustomRelationSeverity(
       `is not built in and can no longer be declared, so the stored schema ` +
       `holds its last copy: move it into defineGraph({ annotations }) before ` +
       `committing with migrateSchema()`,
-    removedCustomRelation: description,
+    removedCustomRelation: {
+      metaEdge: relation.metaEdge,
+      from: relation.from,
+      to: relation.to,
+    },
   };
 }
 
@@ -947,43 +968,6 @@ type RelationClassificationContext = Readonly<{
   endpointAllowances: readonly EdgeEndpointAllowance[];
   inheritedRequiredPartEdgeKinds: readonly string[];
 }>;
-
-function carriesEndpointAssignabilityProbe(change: OntologyChange): boolean {
-  return (change.probes ?? []).some(
-    (probe) => probe.kind === "edgeEndpointAssignability",
-  );
-}
-
-function describeEndpointPairs(
-  pairs: readonly (readonly [string, string])[],
-): string {
-  return pairs.map(([from, to]) => `(${from} -> ${to})`).join(", ");
-}
-
-/**
- * The change an admission loss is reported as when no relation change in
- * the same diff already carries the diff-wide `edgeEndpointAssignability`
- * probe — a narrowed `from` / `to` declaration, or a removed kind whose
- * relations the removed-kind rule classified `safe`.
- */
-function classifyEndpointAdmissionLoss(
-  loss: EdgeEndpointAdmissionLoss,
-): OntologyChange {
-  const { edgeKind } = loss.allowance;
-  return {
-    type: "modified",
-    entity: "edgeRegistration",
-    name: edgeKind,
-    severity: "warning",
-    details: `Edge "${edgeKind}" no longer admits endpoint pairs: ${describeEndpointPairs(loss.lostPairs)}`,
-    probes: [
-      stampProbeFamilies({
-        kind: "edgeEndpointAssignability",
-        allowances: [loss.allowance],
-      }),
-    ],
-  };
-}
 
 function buildProbe(
   kind: ProbeKind,
@@ -1019,11 +1003,36 @@ function buildProbe(
   }
 }
 
+/**
+ * Whether a probe has anything to check. A change declares the probes its
+ * severity-table row names whatever the diff-wide payload happens to be, but
+ * an empty payload owes no read, so only a probe with work makes a change one
+ * that owes a data check.
+ */
+function probeHasWork(probe: OntologyDataProbe): boolean {
+  switch (probe.kind) {
+    case "nodeDisjointness": {
+      return probe.pairs.length > 0;
+    }
+    case "nodeUniqueness": {
+      return probe.groups.length > 0;
+    }
+    case "edgeEndpointAssignability": {
+      return probe.allowances.length > 0;
+    }
+    case "edgeAcyclicity":
+    case "composition":
+    case "compositionExistence": {
+      return probe.edgeKinds.length > 0;
+    }
+  }
+}
+
 function classifyRelation(
   direction: "added" | "removed",
   relation: SerializedOntologyRelation,
   context: RelationClassificationContext,
-): OntologyChange {
+): ClassifiedRelationChange {
   const name = relationKey(relation);
   const verb = direction === "added" ? "added" : "removed";
 
@@ -1033,7 +1042,7 @@ function classifyRelation(
   // `Company` rows the removal itself reclaims. Same reasoning as
   // `migrateSchema`'s dropped-kind handling. What the removal costs a
   // SURVIVING kind is not decided here: `edgeEndpointAdmissionLosses`
-  // reports it, and `classifyOntologyChanges` attaches the probe. A custom
+  // reports it, and `classifyOntology` attaches the probe. A custom
   // relation dropped this way is still named, since the stored document
   // holds its last copy whatever happens to the kind.
   const classified = classifyRelationSeverity(direction, relation);
@@ -1046,12 +1055,15 @@ function classifyRelation(
     context.removedKindNames.has(relation.to)
   ) {
     return {
-      type: direction,
-      entity: "relation",
-      name,
-      severity: "safe",
-      details: `Relation ${relationDescription(relation)} was ${verb} alongside a removed kind`,
-      ...removedCustomRelation,
+      change: {
+        type: direction,
+        entity: "relation",
+        name,
+        severity: "safe",
+        details: `Relation ${relationDescription(relation)} was ${verb} alongside a removed kind`,
+        ...removedCustomRelation,
+      },
+      probes: [],
     };
   }
 
@@ -1060,16 +1072,46 @@ function classifyRelation(
   );
 
   return {
-    type: direction,
-    entity: "relation",
-    name,
-    severity: classified.severity,
-    details:
-      classified.details ??
-      `Relation ${relationDescription(relation)} was ${verb}`,
-    ...(probes.length > 0 ? { probes } : {}),
-    ...removedCustomRelation,
+    change: {
+      type: direction,
+      entity: "relation",
+      name,
+      severity: severityOfRelationRemoval(
+        classified,
+        probes,
+        relation,
+        direction,
+      ),
+      details:
+        classified.details ??
+        `Relation ${relationDescription(relation)} was ${verb}`,
+      ...removedCustomRelation,
+    },
+    probes,
   };
+}
+
+/**
+ * An external IRI is never a kind, so a removed relation naming one cannot
+ * shrink an admitted endpoint pair directly. When the diff-wide allowance
+ * payload is also empty (no kind reaches the IRI's equivalence class either),
+ * nothing stored depends on the relation and it is `safe`; any other removal
+ * keeps the severity table's verdict.
+ */
+function severityOfRelationRemoval(
+  classified: RelationSeverity,
+  probes: readonly OntologyDataProbe[],
+  relation: SerializedOntologyRelation,
+  direction: "added" | "removed",
+): ChangeSeverity {
+  return (
+      direction === "removed" &&
+        classified.severity === "warning" &&
+        !probes.some((probe) => probeHasWork(probe)) &&
+        (isExternalIri(relation.from) || isExternalIri(relation.to))
+    ) ?
+      "safe"
+    : classified.severity;
 }
 
 /**
@@ -1098,7 +1140,7 @@ function classifyExistenceChange(
   before: SerializedOntologyRelation,
   after: SerializedOntologyRelation,
   context: RelationClassificationContext,
-): OntologyChange {
+): ClassifiedRelationChange {
   const name = relationKey(after);
   const beforeExistence = before.existence ?? "optional";
   const afterExistence = after.existence ?? "optional";
@@ -1106,21 +1148,26 @@ function classifyExistenceChange(
   if (afterExistence === "optional") {
     // required → optional: loosening.
     return {
-      type: "modified",
-      entity: "relation",
-      name,
-      severity: "safe",
-      details: `Relation ${relationDescription(after)} loosened existence from "${beforeExistence}" to "${afterExistence}"`,
+      change: {
+        type: "modified",
+        entity: "relation",
+        name,
+        severity: "safe",
+        details: `Relation ${relationDescription(after)} loosened existence from "${beforeExistence}" to "${afterExistence}"`,
+      },
+      probes: [],
     };
   }
 
   // optional (or unset) → required: tightening.
   return {
-    type: "modified",
-    entity: "relation",
-    name,
-    severity: "warning",
-    details: `Relation ${relationDescription(after)} tightened existence from "${beforeExistence}" to "${afterExistence}"`,
+    change: {
+      type: "modified",
+      entity: "relation",
+      name,
+      severity: "warning",
+      details: `Relation ${relationDescription(after)} tightened existence from "${beforeExistence}" to "${afterExistence}"`,
+    },
     probes: [
       buildProbe("composition", context, after),
       buildProbe("compositionExistence", context, after),
@@ -1145,6 +1192,20 @@ export function buildSchemaBaselineRegistry(
 }
 
 /**
+ * The ontology changes between two schema snapshots, as the diff reports
+ * them. See {@link classifyOntology} for the data checks a commit of them
+ * owes and for what the BEFORE side is excused from.
+ *
+ * @throws ConfigurationError as {@link classifyOntology} does.
+ */
+export function classifyOntologyChanges(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): readonly OntologyChange[] {
+  return classifyOntology(before, after).changes;
+}
+
+/**
  * Classifies every ontology change between two schema snapshots, with the
  * data probes a commit of a tightening change owes.
  *
@@ -1155,37 +1216,29 @@ export function buildSchemaBaselineRegistry(
  *   for this reason. See the module docblock for what the BEFORE side is
  *   excused from.
  */
-export function classifyOntologyChanges(
+export function classifyOntology(
   before: OntologySnapshot,
   after: OntologySnapshot,
-): readonly OntologyChange[] {
-  const changes: OntologyChange[] = [];
+): OntologyClassification {
+  const relationChanges: ClassifiedRelationChange[] = [];
+  const registrationProbes: Readonly<{
+    edgeKind: string;
+    probe: OntologyDataProbe;
+  }>[] = [];
   const kindDelta = snapshotKindDelta(before, after);
 
-  // Edge-registration `acyclic`. Independent of whether any
-  // ontology relation changed — an edge kind's acyclicity axiom shares no
-  // relation with `disjointWith` / `subClassOf` / `equivalentTo`, so this
-  // never needs a `KindRegistry` and runs unconditionally, before the
-  // relation-change early return below.
+  // Edge-registration `acyclic`. Independent of whether any ontology
+  // relation changed — an edge kind's acyclicity axiom shares no relation
+  // with `disjointWith` / `subClassOf` / `equivalentTo`, so this never needs
+  // a `KindRegistry` and runs unconditionally, before the relation-change
+  // early return below. Turning it OFF is safe and owes nothing.
   for (const edgeKind of edgeAcyclicityAddedDelta(before, after, kindDelta)) {
-    changes.push({
-      type: "modified",
-      entity: "edgeRegistration",
-      name: edgeKind,
-      severity: "warning",
-      details: `Edge "${edgeKind}" declared acyclic: true`,
-      probes: [
-        stampProbeFamilies({ kind: "edgeAcyclicity", edgeKinds: [edgeKind] }),
-      ],
-    });
-  }
-  for (const edgeKind of edgeAcyclicityRemovedDelta(before, after, kindDelta)) {
-    changes.push({
-      type: "modified",
-      entity: "edgeRegistration",
-      name: edgeKind,
-      severity: "safe",
-      details: `Edge "${edgeKind}" dropped acyclic: true`,
+    registrationProbes.push({
+      edgeKind,
+      probe: stampProbeFamilies({
+        kind: "edgeAcyclicity",
+        edgeKinds: [edgeKind],
+      }),
     });
   }
 
@@ -1219,69 +1272,93 @@ export function classifyOntologyChanges(
     after: buildSerializedEdgeKindFacts(after.edges),
   };
   if (
-    removedRelations.length === 0 &&
-    addedRelations.length === 0 &&
-    modifiedExistenceRelations.length === 0 &&
-    !edgeEndpointDeclarationsNarrowed(endpoints)
+    removedRelations.length > 0 ||
+    addedRelations.length > 0 ||
+    modifiedExistenceRelations.length > 0 ||
+    edgeEndpointDeclarationsNarrowed(endpoints)
   ) {
-    return changes;
-  }
+    // Built only when a relation changed or an edge kind's declared
+    // endpoints narrowed: a diff that does neither (the overwhelming
+    // majority of schema commits) never pays for a registry build, and never
+    // risks surfacing an incoherent legacy ontology's `ConfigurationError`
+    // on a commit that has nothing to do with it. AFTER stays enforced (the
+    // default): a proposal that INTRODUCES an incompatible hierarchy is
+    // exactly what the preflight requires this diff to catch before an
+    // upgrade.
+    const beforeRegistry = buildSchemaBaselineRegistry(before);
+    const afterRegistry = buildRegistryFromSerializedSchema(after);
 
-  // Built only when a relation changed or an edge kind's declared endpoints
-  // narrowed: a diff that does neither (the overwhelming majority of schema
-  // commits) never pays for a registry build, and never risks surfacing an
-  // incoherent legacy ontology's `ConfigurationError` on a commit that has
-  // nothing to do with it.
-  // AFTER stays enforced (the default): a proposal that INTRODUCES an
-  // incompatible hierarchy is exactly what the preflight requires this diff
-  // to catch before an upgrade.
-  const beforeRegistry = buildSchemaBaselineRegistry(before);
-  const afterRegistry = buildRegistryFromSerializedSchema(after);
-
-  const endpointAdmissionLosses = edgeEndpointAdmissionLosses(
-    endpoints,
-    kindDelta,
-    beforeRegistry,
-    afterRegistry,
-  );
-  const context: RelationClassificationContext = {
-    removedKindNames: kindDelta.removedKindNames,
-    disjointnessPairs: nodeDisjointnessDelta(beforeRegistry, afterRegistry),
-    uniquenessGroups: nodeUniquenessComponentGroups(
-      before,
-      after,
+    const endpointAdmissionLosses = edgeEndpointAdmissionLosses(
+      endpoints,
+      kindDelta,
       beforeRegistry,
       afterRegistry,
-    ),
-    endpointAllowances: endpointAdmissionLosses.map((loss) => loss.allowance),
-    inheritedRequiredPartEdgeKinds: newlyRequiredPartEdgeKinds(
-      beforeRegistry,
-      afterRegistry,
-    ),
-  };
-
-  for (const relation of removedRelations) {
-    changes.push(classifyRelation("removed", relation, context));
-  }
-  for (const relation of addedRelations) {
-    changes.push(classifyRelation("added", relation, context));
-  }
-  for (const [beforeRelation, afterRelation] of modifiedExistenceRelations) {
-    changes.push(
-      classifyExistenceChange(beforeRelation, afterRelation, context),
     );
-  }
+    const context: RelationClassificationContext = {
+      removedKindNames: kindDelta.removedKindNames,
+      disjointnessPairs: nodeDisjointnessDelta(beforeRegistry, afterRegistry),
+      uniquenessGroups: nodeUniquenessComponentGroups(
+        before,
+        after,
+        beforeRegistry,
+        afterRegistry,
+      ),
+      endpointAllowances: endpointAdmissionLosses.map((loss) => loss.allowance),
+      inheritedRequiredPartEdgeKinds: newlyRequiredPartEdgeKinds(
+        beforeRegistry,
+        afterRegistry,
+      ),
+    };
 
-  // The probe payload is diff-wide, so one relation change carrying it
-  // already covers every loss. Otherwise each loss is its own change, so
-  // the admission loss is never committed unprobed.
-  if (!changes.some((change) => carriesEndpointAssignabilityProbe(change))) {
-    for (const loss of endpointAdmissionLosses) {
-      changes.push(classifyEndpointAdmissionLoss(loss));
+    for (const relation of removedRelations) {
+      relationChanges.push(classifyRelation("removed", relation, context));
+    }
+    for (const relation of addedRelations) {
+      relationChanges.push(classifyRelation("added", relation, context));
+    }
+    for (const [beforeRelation, afterRelation] of modifiedExistenceRelations) {
+      relationChanges.push(
+        classifyExistenceChange(beforeRelation, afterRelation, context),
+      );
+    }
+
+    // The probe payload is diff-wide, so one relation change carrying it
+    // already covers every loss. Otherwise each loss belongs to its edge
+    // kind's own registration, so the admission loss is never committed
+    // unprobed.
+    const relationCarriesEndpointProbe = relationChanges.some(({ probes }) =>
+      probes.some(
+        (probe) =>
+          probe.kind === "edgeEndpointAssignability" && probeHasWork(probe),
+      ),
+    );
+    if (!relationCarriesEndpointProbe) {
+      for (const { allowance } of endpointAdmissionLosses) {
+        registrationProbes.push({
+          edgeKind: allowance.edgeKind,
+          probe: stampProbeFamilies({
+            kind: "edgeEndpointAssignability",
+            allowances: [allowance],
+          }),
+        });
+      }
     }
   }
 
-  return changes;
+  return {
+    relationChanges,
+    changes: relationChanges.map(({ change }) => change),
+    probedChanges: relationChanges
+      .filter(({ probes }) => probes.some((probe) => probeHasWork(probe)))
+      .map(({ change }) => change),
+    tightenedEdgeKinds: [
+      ...new Set(registrationProbes.map(({ edgeKind }) => edgeKind)),
+    ].toSorted(compareStrings),
+    probes: ontologyTighteningProbes([
+      ...relationChanges.flatMap(({ probes }) => probes),
+      ...registrationProbes.map(({ probe }) => probe),
+    ]),
+  };
 }
 
 // ============================================================
@@ -1318,8 +1395,8 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
 }
 
 /**
- * The probe plan for a whole diff: every probe the classified changes carry,
- * unioned per kind and deduped, with a probe kind DROPPED when its
+ * The probe plan for a whole diff: every probe the classified changes and
+ * edge registrations carry, unioned per kind and deduped, with a probe kind DROPPED when its
  * aggregated payload is empty — there is nothing for a commit preflight to
  * check, so there is nothing to run. This is what makes
  * `prepareSchemaTighteningPreflight` return `undefined` (no preflight
@@ -1331,39 +1408,37 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
  * `edgeEndpointAssignability`, then `edgeAcyclicity`, then
  * `compositionSingleWhole`, then `compositionRequiredWhole`.
  */
-export function ontologyTighteningProbes(
-  changes: readonly OntologyChange[],
+function ontologyTighteningProbes(
+  probesOfDiff: readonly OntologyDataProbe[],
 ): readonly OntologyDataProbe[] {
   const pairs = new Map<string, readonly [string, string]>();
   const groups = new Map<string, UniquenessComponentProbeGroup>();
   const allowances = new Map<string, EdgeEndpointAllowance>();
   const edgeKindProbes = new Map<EdgeKindProbeKind, Set<string>>();
 
-  for (const change of changes) {
-    for (const probe of change.probes ?? []) {
-      switch (probe.kind) {
-        case "nodeDisjointness": {
-          for (const pair of probe.pairs) pairs.set(pairKey(pair), pair);
-          break;
+  for (const probe of probesOfDiff) {
+    switch (probe.kind) {
+      case "nodeDisjointness": {
+        for (const pair of probe.pairs) pairs.set(pairKey(pair), pair);
+        break;
+      }
+      case "nodeUniqueness": {
+        for (const group of probe.groups) groups.set(groupKey(group), group);
+        break;
+      }
+      case "edgeEndpointAssignability": {
+        for (const allowance of probe.allowances) {
+          allowances.set(allowance.edgeKind, allowance);
         }
-        case "nodeUniqueness": {
-          for (const group of probe.groups) groups.set(groupKey(group), group);
-          break;
-        }
-        case "edgeEndpointAssignability": {
-          for (const allowance of probe.allowances) {
-            allowances.set(allowance.edgeKind, allowance);
-          }
-          break;
-        }
-        case "edgeAcyclicity":
-        case "composition":
-        case "compositionExistence": {
-          const collected = edgeKindProbes.get(probe.kind) ?? new Set<string>();
-          for (const edgeKind of probe.edgeKinds) collected.add(edgeKind);
-          edgeKindProbes.set(probe.kind, collected);
-          break;
-        }
+        break;
+      }
+      case "edgeAcyclicity":
+      case "composition":
+      case "compositionExistence": {
+        const collected = edgeKindProbes.get(probe.kind) ?? new Set<string>();
+        for (const edgeKind of probe.edgeKinds) collected.add(edgeKind);
+        edgeKindProbes.set(probe.kind, collected);
+        break;
       }
     }
   }

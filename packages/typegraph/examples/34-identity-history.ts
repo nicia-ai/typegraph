@@ -1,5 +1,5 @@
 /**
- * Example 29: Identity History
+ * Example 34: Identity History
  *
  * Three back-office systems each hold their own record of the same person:
  * a CRM contact, an ERP contact, and a support-desk contact. Operational
@@ -224,7 +224,13 @@ export async function main(): Promise<void> {
 
     console.log("\n=== 3. Retention: pruneIdentityTransitions ===\n");
 
+    // A prune cut is an instant this graph allocated: a transition this
+    // graph recorded itself carries one, while a restored transition's
+    // `recorded` is the source graph's and is refused.
     const secondTransition = requireDefined(allTransitions[1]);
+    if (secondTransition.restored !== undefined) {
+      throw new Error("the second transition was recorded on this graph");
+    }
     const retentionCutoff = secondTransition.recorded;
 
     const { transitions: beforePruneTransitions } =

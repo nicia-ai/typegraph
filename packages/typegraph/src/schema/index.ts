@@ -108,7 +108,9 @@ export type { UniquenessClaimGate } from "./uniqueness-claim-gate";
 export {
   isStructuralSubtype,
   isTypeLevelSubtype,
-  projectTypeVisible,
+  type StructuralSubsumptionVerdict,
+} from "./structural-subsumption";
+export {
   type StructuralIncomparableReason,
   type StructuralSubtypeReason,
   type StructuralSubtypeResult,
@@ -120,12 +122,7 @@ export {
 
 export {
   classifyOntologyChanges,
-  type OntologyDataProbe,
   type OntologySnapshot,
-  ontologyTighteningProbes,
-  PROBE_VIOLATION_FAMILIES,
-  probeCoversViolationFamily,
-  type UniquenessComponentProbeGroup,
 } from "./ontology-change";
 
 // ============================================================

@@ -26,6 +26,7 @@ export { registerCompositionMembershipReadIntegrationTests } from "./composition
 export { registerCompositionNavigationIntegrationTests } from "./composition-navigation";
 export { registerCompositionReadsModelIntegrationTests } from "./composition-reads-model";
 export { registerCompositionTighteningIntegrationTests } from "./composition-tightening";
+export { registerCompositionWindowOverlapIntegrationTests } from "./composition-window-overlap";
 export { registerConstraintFenceErrorIntegrationTests } from "./constraint-fence-errors";
 export { registerConstraintFenceTransactionHealthTests } from "./constraint-fence-transaction-health";
 export { registerConstraintFenceVerificationIntegrationTests } from "./constraint-fence-verification";

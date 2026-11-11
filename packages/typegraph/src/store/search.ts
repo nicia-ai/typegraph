@@ -36,7 +36,6 @@ import {
   DEFAULT_ALIAS_EXPANSION_AXES,
   type DefaultAliasExpansionAxis,
   expandKindsForAxis,
-  INDEPENDENT_ALIAS_TYPING,
   SEARCH_EXPANSION_DEFAULT,
 } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
@@ -342,12 +341,7 @@ function resolveSearchKinds(
       { capability: "search", graphId: ctx.graphId },
     );
   }
-  return expandKindsForAxis(
-    axis,
-    nodeKind,
-    ctx.registry,
-    INDEPENDENT_ALIAS_TYPING,
-  );
+  return expandKindsForAxis(axis, nodeKind, ctx.registry);
 }
 
 /**

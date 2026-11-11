@@ -20,7 +20,7 @@ import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import type { DatabaseExpression } from "../expressions";
 import { parseJsonPointer } from "../json-pointer";
 import { type CompiledSelectSql } from "../sql-intent";
-import { buildQueryAst } from "./ast-builder";
+import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import type {
@@ -163,7 +163,7 @@ export class ExecutableAggregateQuery<
    * Builds the query AST.
    */
   toAst(): QueryAst {
-    return buildQueryAst(this.#config, this.#state);
+    return buildRowQueryAst(this.#config, this.#state);
   }
 
   /**

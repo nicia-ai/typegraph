@@ -218,10 +218,9 @@ const redeclaredVectorGraph = defineGraph({
   },
   edges: {},
   ontology: [
-    // The compile-time filter reads the branded `EmbeddingValue`; the registry
-    // build compares an embedding as the fixed-length number array it
-    // validates, so it accepts a plain array of the same length.
-    // @ts-expect-error a plain number array is not the branded embedding type
+    // An embedding is the fixed-length number array it validates, to the
+    // compile-time check and the registry alike, so a plain array of the same
+    // length extends it.
     subClassOf(RedeclaredVectorMemo, SearchableDocument),
   ],
 });
@@ -243,10 +242,8 @@ const taggedSubclassGraph = defineGraph({
   },
   edges: {},
   ontology: [
-    // The compile-time filter reads the branded `EmbeddingValue` on the child
-    // against the plain array on the parent; the registry, comparing the
-    // embedding as a fixed-length number array, accepts it.
-    // @ts-expect-error a branded embedding is not a plain number array to the filter
+    // The embedding marker is type-only, so the compile-time check and the
+    // registry both accept the tagged child under the plain array.
     subClassOf(TaggedVectorMemo, PlainVectorDocument),
   ],
 });
@@ -335,28 +332,94 @@ async function expectRefusedAndStatedAxesAnswered(
 ): Promise<void> {
   expectUntypedSubclassRefusal(
     await rejectionOf(
-      Promise.resolve().then(() => store.query().from("TsRuntimeDoc", "d")),
+      store
+        .query()
+        .from("TsRuntimeDoc", "d")
+        .select((ctx) => ctx.d)
+        .execute(),
     ),
     ["from()", "fromDynamic()"],
   );
   expectUntypedSubclassRefusal(
     await rejectionOf(
-      Promise.resolve().then(() => store.query().from(["TsRuntimeDoc"], "d")),
+      store
+        .query()
+        .from(["TsRuntimeDoc"], "d")
+        .select((ctx) => ctx.d)
+        .execute(),
     ),
     ["from()", "fromDynamic()"],
   );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      store
+        .query()
+        .from("TsRuntimeOwner", "o")
+        .traverse("tsRuntimeOwns", "e")
+        .to("TsRuntimeDoc", "d")
+        .select((ctx) => ctx.d)
+        .execute(),
+    ),
+    ["to()", "toDynamic()"],
+  );
+  // Every row-returning terminal refuses the same alias: an aggregate can
+  // carry the alias's `kind` or `id`, typed exactly.
   expectUntypedSubclassRefusal(
     await rejectionOf(
       Promise.resolve().then(() =>
         store
           .query()
-          .from("TsRuntimeOwner", "o")
-          .traverse("tsRuntimeOwns", "e")
-          .to("TsRuntimeDoc", "d"),
+          .from("TsRuntimeDoc", "d")
+          .select((ctx) => ctx.d)
+          .compile(),
       ),
     ),
-    ["to()", "toDynamic()"],
+    ["from()", "fromDynamic()"],
   );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      store
+        .query()
+        .from("TsRuntimeDoc", "d")
+        .aggregate((ctx) => ({ title: ctx.d.title }))
+        .execute(),
+    ),
+    ["from()", "fromDynamic()"],
+  );
+  expectUntypedSubclassRefusal(
+    await rejectionOf(
+      store
+        .query()
+        .from("TsRuntimeDoc", "d")
+        .select((ctx) => ctx.d)
+        .paginate({ first: 1 }),
+    ),
+    ["from()", "fromDynamic()"],
+  );
+
+  // count() and exists() type no row, so they answer the same unstated
+  // expansion: the extension's subclass rows are counted.
+  // MUTATION CHECK: building the terminal AST through buildRowQueryAst
+  // (src/query/builder/terminal-query.ts) refuses all four.
+  expect(await store.query().from("TsRuntimeDoc", "d").count()).toBe(2);
+  expect(await store.query().from("TsRuntimeDoc", "d").exists()).toBe(true);
+  expect(
+    await store
+      .query()
+      .from("TsRuntimeDoc", "d")
+      .select((ctx) => ctx.d)
+      .count(),
+  ).toBe(2);
+  // No owner edge is seeded: the to() alias's count answers zero rather than
+  // refusing.
+  expect(
+    await store
+      .query()
+      .from("TsRuntimeOwner", "o")
+      .traverse("tsRuntimeOwns", "e")
+      .to("TsRuntimeDoc", "d")
+      .count(),
+  ).toBe(0);
 
   // A stated "subclasses" search hit is typed polymorphically whatever the
   // compile-time graph declares, so the extension's subclass is answered.
@@ -1677,9 +1740,11 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
 
       const uncovered = expectConfigurationError(
         await rejectionOf(
-          Promise.resolve().then(() =>
-            evolved.query().from(["TsCoverDoc", "TsCoverNote"], "n"),
-          ),
+          evolved
+            .query()
+            .from(["TsCoverDoc", "TsCoverNote"], "n")
+            .select((ctx) => ctx.n)
+            .execute(),
         ),
       );
       expect(uncovered.details).toMatchObject({
@@ -1712,7 +1777,15 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
       // `subsumptionAffectedKinds` (src/query/builder/alias-expansion.ts)
       // answers both reads with an untyped TsSubMemo row.
       for (const [surface, read] of [
-        ["from()", () => evolved.query().from("TsSubDoc", "d")],
+        [
+          "from()",
+          () =>
+            evolved
+              .query()
+              .from("TsSubDoc", "d")
+              .select((ctx) => ctx.d)
+              .execute(),
+        ],
         [
           "to()",
           () =>
@@ -1720,12 +1793,15 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
               .query()
               .from("TsSubBase", "b")
               .traverse("tsSubDocCites", "e")
-              .to("TsSubDoc", "d"),
+              .to("TsSubDoc", "d")
+              .select((ctx) => ctx.d)
+              .execute(),
         ],
-      ] as const satisfies readonly (readonly [string, () => unknown])[]) {
-        const error = expectConfigurationError(
-          await rejectionOf(Promise.resolve().then(() => read())),
-        );
+      ] as const satisfies readonly (readonly [
+        string,
+        () => Promise<unknown>,
+      ])[]) {
+        const error = expectConfigurationError(await rejectionOf(read()));
         expect({ surface, details: error.details }).toMatchObject({
           surface,
           details: {

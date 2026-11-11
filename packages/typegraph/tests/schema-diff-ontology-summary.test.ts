@@ -1,6 +1,7 @@
 /**
- * A diff whose only change is a `modified` ontology entry — an edge kind's
- * `acyclic` flag, a composition pair's `existence` — summarizes that change.
+ * A diff whose only change is a `modified` entry — an edge kind's `acyclic`
+ * flag (an edge-registration change, reported by the edge diff), a composition
+ * pair's `existence` (an ontology change) — summarizes that change.
  * The summary is interpolated into the `MigrationError` a verified store
  * raises, so "No changes" there read as a refusal with nothing to migrate.
  */
@@ -25,7 +26,9 @@ const Project = defineNode("Project", { schema: z.object({}) });
 const dependsOn = defineEdge("dependsOn");
 const inProject = defineEdge("inProject");
 
-const MODIFIED_ONLY_SUMMARY = "Ontology: 0 added, 0 removed, 1 modified";
+const MODIFIED_ONLY_SUMMARY = "Edges: 0 added, 0 removed, 1 modified";
+const ONTOLOGY_MODIFIED_ONLY_SUMMARY =
+  "Ontology: 0 added, 0 removed, 1 modified";
 
 function taskGraph(
   options: Readonly<{ acyclic: boolean; existence: "optional" | "required" }>,
@@ -60,21 +63,29 @@ const MODIFICATIONS = [
     name: "acyclic turned on",
     from: BASELINE,
     to: { ...BASELINE, acyclic: true },
+    bucket: "edges",
+    summary: MODIFIED_ONLY_SUMMARY,
   },
   {
     name: "acyclic turned off",
     from: { ...BASELINE, acyclic: true },
     to: BASELINE,
+    bucket: "edges",
+    summary: MODIFIED_ONLY_SUMMARY,
   },
   {
     name: "composition existence optional to required",
     from: BASELINE,
     to: { ...BASELINE, existence: "required" },
+    bucket: "ontology",
+    summary: ONTOLOGY_MODIFIED_ONLY_SUMMARY,
   },
   {
     name: "composition existence required to optional",
     from: { ...BASELINE, existence: "required" },
     to: BASELINE,
+    bucket: "ontology",
+    summary: ONTOLOGY_MODIFIED_ONLY_SUMMARY,
   },
 ] as const;
 
@@ -88,10 +99,13 @@ describe("schema diff summary for a modified ontology entry", () => {
         await getSchemaChanges(backend, taskGraph(modification.to)),
       );
 
-      console.log(modification.name, "->", diff.summary, diff.ontology);
+      const other = modification.bucket === "edges" ? "ontology" : "edges";
       expect(diff.hasChanges).toBe(true);
-      expect(diff.ontology.map((change) => change.type)).toEqual(["modified"]);
-      expect(diff.summary).toBe(MODIFIED_ONLY_SUMMARY);
+      expect(diff[modification.bucket].map((change) => change.type)).toEqual([
+        "modified",
+      ]);
+      expect(diff[other]).toEqual([]);
+      expect(diff.summary).toBe(modification.summary);
     });
   }
 

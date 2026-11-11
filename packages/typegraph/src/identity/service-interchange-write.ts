@@ -7,7 +7,6 @@ import {
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import {
-  readNextRecordedRevision,
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
@@ -44,13 +43,12 @@ import {
 import { type IdentityTarget, type PlainNodeRef } from "./sql-target";
 import { type IdentityAssertionStorageRow } from "./storage-types";
 import {
+  advanceIdentityTransitionCut,
   encodeIdentityTransitionRow,
-  hasNativeIdentityTransitionsBefore,
   type IdentityDecisionProvenance,
-  type IdentityRestoreBaseline,
+  type IdentityTransitionCut,
   type IdentityTransitionTransfer,
   insertIdentityTransitionValues,
-  writeIdentityTransitionRetentionWatermark,
 } from "./transition-log";
 import {
   type ResolvedIdentityValidityWindow,
@@ -556,9 +554,9 @@ function transitionShapeError(message: string, code: string): ValidationError {
  * or the watermark of a source that pruned. A zero watermark records that
  * nothing was pruned, which restores nothing. THE one decision every import
  * site takes on it — the up-front refusal on a target that keeps no
- * transition log, the read of the destination baseline before the first
- * write, and the restore itself — so no site restores what another refused,
- * or refuses what another would skip.
+ * transition log, a stream's check that its header announced the restore,
+ * and the restore itself — so no site restores what another refused, or
+ * refuses what another would skip.
  */
 export function isIdentityTransitionRestore(
   hasTransitions: boolean,
@@ -567,73 +565,52 @@ export function isIdentityTransitionRestore(
   return hasTransitions || (prunedBeforeRevision ?? 0) > 0;
 }
 
-/** The refusal for an archival restore whose rows are out of recorded-revision order. */
-function transitionsNotMonotoneError(
-  transitionId: string,
-  revision: number,
-  previousRevision: number,
-): ValidationError {
-  return transitionShapeError(
-    `Archival identity transitions must be ordered by non-decreasing recorded revision; ${transitionId} carries ${String(revision)} after ${String(previousRevision)}.`,
-    "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
-  );
-}
-
 /**
- * Refuses archival transitions out of non-decreasing `recordedRevision` order
- * and returns the last revision seen. `afterRevision` is the last revision a
- * previous part of the same restore carried, so a streamed restore whose
- * transitions arrive over several chunks is held to the order a single
- * document is, across chunk boundaries.
+ * Checks one restore's archival transitions for the two properties a
+ * well-formed section has before any of it is written, and remembers what it
+ * has seen so a streamed restore whose rows arrive over several chunks is
+ * held to them across chunk boundaries, exactly as a single document is:
+ *
+ * - non-decreasing `recordedRevision` order
+ *   (`IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE`), the order every export
+ *   writes;
+ * - a `transitionId` that names one row only
+ *   (`IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID`). The source graph's log
+ *   keys rows by it, so two rows under one id in one section never came from
+ *   an export, and restoring them would keep whichever the insert met first
+ *   and drop the other without a trace.
+ *
+ * Returns the check for one restore; call it with every part of the section
+ * in order.
  */
-export function assertIdentityTransitionsMonotone(
+export function createIdentityTransitionShapeCheck(): (
   transitions: readonly Readonly<{
     transitionId: string;
     recordedRevision: number;
   }>[],
-  afterRevision = Number.NEGATIVE_INFINITY,
-): number {
-  let previousRevision = afterRevision;
-  for (const row of transitions) {
-    if (row.recordedRevision < previousRevision) {
-      throw transitionsNotMonotoneError(
-        row.transitionId,
-        row.recordedRevision,
-        previousRevision,
-      );
+) => void {
+  let previousRevision = Number.NEGATIVE_INFINITY;
+  // Owned by this one restore and never handed out, so it is safe to grow in
+  // place rather than copy per chunk.
+  const seenIds = new Set<string>();
+  return (transitions) => {
+    for (const row of transitions) {
+      if (row.recordedRevision < previousRevision) {
+        throw transitionShapeError(
+          `Archival identity transitions must be ordered by non-decreasing recorded revision; ${row.transitionId} carries ${String(row.recordedRevision)} after ${String(previousRevision)}.`,
+          "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+        );
+      }
+      if (seenIds.has(row.transitionId)) {
+        throw transitionShapeError(
+          `Archival identity transitions must name each transitionId once; ${row.transitionId} appears more than once.`,
+          "IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID",
+        );
+      }
+      seenIds.add(row.transitionId);
+      previousRevision = row.recordedRevision;
     }
-    previousRevision = row.recordedRevision;
-  }
-  return previousRevision;
-}
-
-/**
- * Reads {@link IdentityRestoreBaseline} off `target`. THE one decision of
- * whether a destination is fresh, taken once per import — at the start of
- * `importGraph`'s transaction, and before the first chunk of
- * `importGraphStream` — so both restore the same archive to the same
- * watermark.
- */
-export async function readIdentityRestoreBaseline(
-  ctx: IdentityTransitionImportContext,
-  target: IdentityTarget,
-): Promise<IdentityRestoreBaseline> {
-  return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const floorRevision = await readNextRecordedRevision(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-    );
-    return {
-      floorRevision,
-      hasOwnHistory: await hasNativeIdentityTransitionsBefore(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        floorRevision,
-      ),
-    };
-  });
+  };
 }
 
 /**
@@ -643,8 +620,8 @@ export async function readIdentityRestoreBaseline(
  * it (see "Archival transitions and the retention watermark" in the identity
  * documentation). Its rows arrive already validated for SHAPE only, before
  * the import's first write: the interchange schema enforces a known cause and
- * a well-formed `{kind, id}` ref, and {@link assertIdentityTransitionsMonotone}
- * a non-decreasing `recordedRevision` across the whole restore.
+ * a well-formed `{kind, id}` ref, and {@link createIdentityTransitionShapeCheck}
+ * a non-decreasing `recordedRevision` and unique ids across the whole restore.
  *
  * Every inserted row is marked `restored_at` (the restore's own wall time),
  * regardless of what the wire payload carried — see
@@ -655,38 +632,23 @@ export async function readIdentityRestoreBaseline(
  * this graph's, so no floor on this graph's axis could separate "restored"
  * from "native" by number alone.
  *
- * The retention watermark is a SEPARATE, coarser signal — "this graph cannot
- * vouch for a complete history below revision N on its own axis" — and is
- * only ever advanced here when the destination's {@link IdentityRestoreBaseline}
- * says it had recorded no identity transitions of its own when the import
- * began. That baseline is a fact about the destination BEFORE the import, so
- * it is read once, ahead of the import's first write, and handed in
- * ({@link readIdentityRestoreBaseline}): probing here instead would answer
- * about a graph the import itself has already written to, and a streamed
- * import — whose node and assertion chunks commit their own transitions
- * before this one runs — would never find its destination fresh. Advancing it
- * unconditionally (the original design here) would, for a graph that already
- * has its own retained history, stamp a
- * destination-clock-derived floor over transitions the restore never
- * touched — misreporting the `retention-truncated` completeness reason, and
- * `IDENTITY_REPLAY_HISTORY_TRUNCATED`,
- * for classes the restore had nothing to do with. A graph with no native
- * rows yet has nothing of its own for that floor to misclassify, so setting
- * it there stays sound: reading THIS graph's clock at restore time and
- * adding one gives an honest floor on this graph's own timeline (there is no
- * earlier revision on it yet), and every later one the destination goes on
- * to record for real is, by the clock's own monotonicity, always at or
- * above it. The watermark write goes through the same monotonic
- * `writeIdentityTransitionRetentionWatermark` `pruneIdentityTransitionsForContext`
- * uses, so a later restore can only raise the floor, never lower it.
+ * `carriedCut` is the archive's retention: rows below it had already been
+ * pruned (on the source, or on a graph the source restored them from) when
+ * the archive was taken. It is a fact about the restored rows, on the raw
+ * revisions they keep, so it advances the destination's RESTORED cut and
+ * never its own watermark: this graph's own history below any revision is
+ * untouched by a restore, and claiming otherwise would report a gap in the
+ * destination's own timeline that does not exist while hiding the one that
+ * does. The write goes through the same monotonic
+ * `advanceIdentityTransitionCut` a prune uses, so a later restore can only
+ * raise the restored cut, never lower it.
  */
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
   target: IdentityTarget,
   transitions: readonly IdentityTransitionTransfer[],
-  carriedWatermark: number | undefined,
-  baseline: IdentityRestoreBaseline,
-): Promise<Readonly<{ created: number; watermark: number | undefined }>> {
+  carriedCut: IdentityTransitionCut | undefined,
+): Promise<Readonly<{ created: number }>> {
   // Raw identity statements run through the capture-approved handle
   // `withRecordedIdentityMutationTarget` resolves — under `history: true` the
   // target this function was HANDED refuses `executeStatement` outright (raw
@@ -695,7 +657,6 @@ export async function importIdentityTransitionsIntoTarget(
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
   return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const { floorRevision: destinationFloor, hasOwnHistory } = baseline;
     const restoredAt = nowIso();
     if (transitions.length > 0) {
       const values = transitions.map((row) =>
@@ -717,20 +678,17 @@ export async function importIdentityTransitionsIntoTarget(
       );
       await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
     }
-    if (
-      hasOwnHistory ||
-      !isIdentityTransitionRestore(transitions.length > 0, carriedWatermark)
-    ) {
-      return { created: transitions.length, watermark: undefined };
+    if (carriedCut !== undefined && carriedCut.revision > 0) {
+      await advanceIdentityTransitionCut(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        "restored-pruned",
+        carriedCut,
+        "transition-restore",
+      );
     }
-    await writeIdentityTransitionRetentionWatermark(
-      rawTarget,
-      ctx.schema,
-      ctx.graphId,
-      destinationFloor,
-      restoredAt,
-    );
-    return { created: transitions.length, watermark: destinationFloor };
+    return { created: transitions.length };
   });
 }
 

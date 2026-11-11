@@ -118,7 +118,7 @@ interface GraphData {
       };
     }>;
     // `archival` mode only, and only when the source has ever pruned.
-    retention?: { prunedBeforeRevision: number; prunedAt: string };
+    retention?: { prunedBeforeRevision: number; prunedBeforeRecordedAt: string };
   };
 }
 ```
@@ -147,15 +147,19 @@ validation and import handle all three.
 ### Archival identity transitions
 
 On a `history: true` graph, `exportGraph(store, { identityMode: "archival" })`
-additionally carries every retained identity transition, plus the source's
-own retention watermark when it has ever pruned. State export and working-copy branch cloning carry
+additionally carries every retained identity transition, plus a `retention`
+cut when rows had been pruned before the export: the raw `recordedRevision`
+below which the section is missing rows, and the recorded time of the instant
+the prune was made at. That is the source's own watermark, or the cut of an
+archive the source had itself restored, whichever is higher. State export and working-copy branch cloning carry
 neither field — a clone's own history starts at its clone revision, and
 current-truth state export is not a backup of explanation.
 
 Restoring `identity.transitions` validates shape only (a known cause, a
 well-formed reference, a `recordedRevision` a recorded instant can carry —
 an integer from 1, below `Number.MAX_SAFE_INTEGER` — in a non-decreasing
-sequence) and inserts every row verbatim. `importGraph` validates the whole
+sequence, and a `transitionId` that names one row only) and inserts every row
+verbatim. `importGraph` validates the whole
 section before writing anything; `importGraphStream` validates each
 `identity-transitions` chunk when it arrives, in order across chunks as well as
 within one, after the stream's earlier chunks have committed. A restore never
@@ -169,15 +173,15 @@ the SOURCE graph's own clock and interleaves arbitrarily with the
 destination's), so `transitionsOf` answers fully while `replay` never pairs
 a restored transition with a fabricated before/after.
 
-The restore also sets the destination's own retention watermark to the
-revision the restore's first commit takes on the destination — but only
-when the destination recorded no identity transitions of its own before the
-restore began. `importGraph` and `importGraphStream` set the same watermark
-for the same archive. A graph that already retains its own history keeps its
-existing watermark untouched, so an unrelated restore can never misreport that graph's own,
-fully-retained classes as truncated. `transitionsOf` and `replay` report the
-watermark, when set, as the `retention-truncated` reason of their
-`completeness`.
+The restore records the archive's `retention` cut as the destination's
+restored cut, and never changes the destination's own retention watermark:
+what was pruned is the restored rows' history, not any of the destination's
+own. `importGraph` and `importGraphStream` record the same cut for the same
+archive. `transitionsOf` and `replay` report it as the
+`restored-retention-truncated` reason of their `completeness`, so a restored
+lineage the source had truncated reads `partial`, as it does on the source,
+while the destination's own classes are never reported as truncated by a
+restore.
 
 A `state`-mode document naming a `transitions` section or a `retention`
 watermark is refused before anything is written, and a streamed one at its

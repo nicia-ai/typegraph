@@ -37,6 +37,7 @@
 import {
   type ClaimEdgeCardinalityParams,
   type CompositionClaimScope,
+  type EdgeRow,
   type GraphEntityReadBackend,
   isLiveNodeRowPresent,
 } from "../backend/types";
@@ -45,13 +46,16 @@ import { type GraphDef } from "../core/define-graph";
 import { type UniqueConstraint } from "../core/types";
 import { type CardinalityError, type CompositionError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { compareCodePoints } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import {
   acyclicEdgeRelations,
   edgeKindIsInAcyclicRelation,
 } from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
 import {
+  axisCountsRow,
   claimRefusalFor,
   claimsInProbeOrder,
   compositionClaimEndpoints,
@@ -282,6 +286,28 @@ export function edgeDetachNeedsConstraintFence(
 }
 
 /**
+ * WHICH constraint makes an edge update that STATES a `validTo` a constrained
+ * write. Everything {@link edgeDetachNeedsConstraintFence} names, since a
+ * stated end can detach; and, on a `population: "oneActive"` composition
+ * pair, every stated end — a later `validTo` on an already-ended row widens
+ * its window, and whether that window now overlaps another of the part's
+ * composition edges is a decision from rows no claim records
+ * (`assertCompositionWindowsDisjoint`). A plan reads no row, so it cannot
+ * tell a widening end from a shrinking one and fences both.
+ */
+export function edgeWindowEndNeedsConstraintFence(
+  registry: KindRegistry,
+  edgeKind: string,
+): ConstraintFenceReason | undefined {
+  return (
+    edgeDetachNeedsConstraintFence(registry, edgeKind) ??
+    (registry.compositionEdgePopulation(edgeKind) === "oneActive" ?
+      "edgeComposition"
+    : undefined)
+  );
+}
+
+/**
  * THE graph-level answer to "does writing into this graph owe a claim that must
  * precede the row it gates?", folded over the SAME per-kind functions the write
  * paths consult — a node kind any of whose claim sites is `pre-insert` under
@@ -455,8 +481,13 @@ export async function checkEdgeCardinalityConstraints(
         toKind: claim.toKind,
         toId: claim.toId,
       });
-      const error = edgeCardinalityViolation(claim, claim, exists ? 1 : 0);
-      if (error) throw error;
+      if (exists) {
+        throw edgeCardinalityRefusal(
+          claim,
+          1,
+          await namedIncumbentEdgeId(ctx, claim),
+        );
+      }
       continue;
     }
 
@@ -473,9 +504,62 @@ export async function checkEdgeCardinalityConstraints(
       endpointId,
       activeOnly: spec.holderLiveness === "liveAndActive",
     });
-    const error = edgeCardinalityViolation(claim, claim, count);
-    if (error) throw error;
+    if (count > 0) {
+      throw edgeCardinalityRefusal(
+        claim,
+        count,
+        await namedIncumbentEdgeId(ctx, claim),
+      );
+    }
   }
+}
+
+function edgeCardinalityRefusal(
+  claim: ClaimEdgeCardinalityParams,
+  existingCount: number,
+  incumbentEdgeId: string | undefined,
+): CardinalityError {
+  return requireDefined(
+    edgeCardinalityViolation(claim, claim, existingCount, incumbentEdgeId),
+    "A positive incumbent count violates every constrained cardinality.",
+  );
+}
+
+/**
+ * The stored edge occupying the slot a refused claim overran, read only
+ * after a count has refused so a write that succeeds pays nothing. The
+ * lowest id in code-point order among the population's members, the same
+ * incumbent the claim statements' `ORDER BY` names. `undefined` when no
+ * stored edge is visible (a pending row of the same batch), which the
+ * refusal then omits rather than inventing.
+ */
+async function namedIncumbentEdgeId(
+  ctx: ConstraintContext,
+  claim: ClaimEdgeCardinalityParams,
+): Promise<string | undefined> {
+  const { keyShape } = edgeCardinalitySpec(claim);
+  const keyedOnTarget = keyShape === "to";
+  const incident = await ctx.backend.findEdgesConnectedTo({
+    graphId: ctx.graphId,
+    nodeKind: keyedOnTarget ? claim.toKind : claim.fromKind,
+    nodeId: keyedOnTarget ? claim.toId : claim.fromId,
+  });
+  const sharesFrom = (edge: EdgeRow): boolean =>
+    edge.from_kind === claim.fromKind && edge.from_id === claim.fromId;
+  const sharesTo = (edge: EdgeRow): boolean =>
+    edge.to_kind === claim.toKind && edge.to_id === claim.toId;
+  const holders = incident.filter(
+    (edge) =>
+      edge.kind === claim.edgeKind &&
+      edge.deleted_at === undefined &&
+      axisCountsRow(claim, { validTo: edge.valid_to }) &&
+      (keyShape === "to" ? sharesTo(edge)
+      : keyShape === "from" ? sharesFrom(edge)
+      : sharesFrom(edge) && sharesTo(edge)),
+  );
+  return holders
+    .map((edge) => edge.id)
+    .toSorted((left, right) => compareCodePoints(left, right))[0];
 }
 
 function sameAxis(

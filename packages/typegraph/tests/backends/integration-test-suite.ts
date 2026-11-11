@@ -57,6 +57,7 @@ import {
   registerCompositionNavigationIntegrationTests,
   registerCompositionReadsModelIntegrationTests,
   registerCompositionTighteningIntegrationTests,
+  registerCompositionWindowOverlapIntegrationTests,
   registerConstraintFenceErrorIntegrationTests,
   registerConstraintFenceTransactionHealthTests,
   registerConstraintFenceVerificationIntegrationTests,
@@ -354,6 +355,7 @@ export function createIntegrationTestSuite<
     registerCompositionMembershipReadIntegrationTests(context);
     registerCompositionReadsModelIntegrationTests(context);
     registerCompositionNavigationIntegrationTests(context);
+    registerCompositionWindowOverlapIntegrationTests(context);
     registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);

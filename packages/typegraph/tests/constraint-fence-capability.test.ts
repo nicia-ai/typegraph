@@ -789,6 +789,33 @@ describe("a backend that declares no claim support", () => {
     }
   });
 
+  it("names the stored edge occupying the slot a probe refuses", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const store = createStore(
+        graph,
+        withoutClaimSupport(createSqliteBackend(db)),
+      );
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const carol = await store.nodes.Person.create({ name: "Carol" });
+      const held = await store.edges.reportsTo.create(alice, bob, {});
+
+      const error = await store.edges.reportsTo
+        .create(alice, carol, {})
+        .catch((error_: unknown) => error_);
+
+      expect(error).toMatchObject({
+        name: "CardinalityError",
+        details: { direction: "source", incumbentEdgeId: held.id },
+      });
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it("refuses an object carrying the members without declaring them", async () => {
     // The other direction of the same defect, and the reason the DECLARATION is
     // what `claimSupport` reads: a backend inferring support from the members

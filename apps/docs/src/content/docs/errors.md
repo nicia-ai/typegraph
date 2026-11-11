@@ -250,6 +250,18 @@ This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration
 surfaces as the engine's own failure — neither is reshaped into this error.
 
+#### Composition attachment window codes
+
+A `ValidationError` raised for a `partOf` attachment whose stated window cannot
+be applied carries one of these issue codes, under the path of the stated
+option (for example `partOf.validTo`). `details.kind` names the part kind and
+`details.id` the part when it is known:
+
+| Issue `code` | Raised when |
+| --- | --- |
+| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A create states a `partOf.validTo` on a `oneActive` composition pair. Only an open-ended edge counts as a membership there, so a bounded window would write an edge that does not attach the part. Omit `validTo` to attach the part, or write the bounded edge as history with `store.edges.<via>.create(...)`. |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A `partOf` on a part that already holds this whole through the realizing edge, or a reparent `at` that restates the incumbent's window, states a bound that differs from the edge's stored `validFrom` / `validTo`. An already-satisfied attachment only asserts placement: omit the option or restate the stored bound, and change the window on the realizing edge itself. |
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.
@@ -324,7 +336,10 @@ cannot answer a request. Its code names the reason:
 
 - `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
   `history: true`; there is no transition log to annotate reads with. Open
-  with `createStore(graph, backend, { history: true })`. Also thrown by
+  with `createStore(graph, backend, { history: true })`. `details.operation`
+  names what was refused (`transitionsOf`, `replay`,
+  `pruneIdentityTransitions` or `archival transition restore`), and so does
+  the message. Also thrown by
   `importGraph`/`importGraphStream` when an archival document's `transitions`
   section targets a history-off store: without `history: true` those rows
   could never be read back through `transitionsOf` / `replay` either, so the
@@ -338,7 +353,8 @@ cannot answer a request. Its code names the reason:
 - `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
   below the graph's retention watermark (see
   [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
-  names the watermark.
+  is the instant the prune was made at, which `fromRecorded` accepts to read
+  the range the prune left whole.
 - `IDENTITY_REPLAY_WALK_INCOMPLETE` — the lineage walk keyset-pages through
   every matching row with no per-round limit, so ordinary lineages — however
   many rows they hold — never hit this refusal; it fires only when a single
@@ -357,6 +373,15 @@ cannot answer a request. Its code names the reason:
   does not exist yet as already pruned, so it is refused and nothing is
   deleted. Pass an instant
   the graph has reached, such as `store.recordedNow()`.
+
+A `fromRecorded`, `toRecorded`, page `cursor` or prune `beforeRecorded` that
+this graph did not allocate is refused before anything is read or deleted, by
+the same ownership check `store.asOfRecorded` applies: another graph's instant
+or cursor raises `GraphAllocationMismatchError`
+(`GRAPH_ALLOCATION_OWNER_MISMATCH`), and a legacy unowned instant — the form a
+restored transition's `recorded` takes — raises `ConfigurationError` with
+`details.code` `RECORDED_ANCHOR_UNBOUND` (see [Recorded allocation ownership
+and lookup](#recorded-allocation-ownership-and-lookup)).
 
 A range with more boundaries than the requested `limit` is not an error —
 `replay` and `transitionsOf` page, returning a `nextCursor` on the
@@ -687,7 +712,7 @@ try {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1 }
+    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1, incumbentEdgeId: "<first-edge-id>" }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
@@ -697,7 +722,11 @@ try {
 `details.direction` names which endpoint's population was overrun —
 `"source"` for a `cardinality` violation, `"target"` for a
 `targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
-name both endpoints, regardless of direction.
+name both endpoints, regardless of direction. `details.incumbentEdgeId` is the
+id of the stored edge occupying the slot, so you can delete or update it
+without a second lookup; it comes from the claim row's holder, from a stored
+edge read the portable probe makes only once its count has refused, or from the
+earlier edge of the same batch. It is absent when no stored edge could be named.
 
 ### `EdgeAcyclicityError`
 
@@ -755,7 +784,9 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
 | `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
 | `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `"boundedAttachment"` | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A stated `partOf.validTo` on a `oneActive` pair, where only an open window is a membership, so the edge would not attach the part |
 | `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -779,6 +810,33 @@ try {
     // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
     //  move the part — it retires the incumbent attachment and creates the
     //  new one in one transaction. ..."
+  }
+}
+```
+
+On a `population: "oneActive"` pair the rule holds at every valid-time
+coordinate: the windows of one part's composition edges never overlap
+([One whole at every instant](/ontology#one-whole-at-every-instant)). A
+`"windowOverlap"` refusal names the edge being written and the one it would
+overlap, with both windows (an omitted bound is unbounded):
+
+```typescript
+// Chapter is attached to `book` from 2020, open-ended.
+try {
+  await store.edges.includedIn.create(chapter, anthology, {}, {
+    validFrom: "2019-01-01T00:00:00.000Z",
+    validTo: "2021-01-01T00:00:00.000Z",
+  });
+} catch (error) {
+  if (error instanceof CompositionError && error.code === "COMPOSITION_WINDOW_OVERLAP") {
+    console.log(error.details);
+    // { situation: "windowOverlap", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", edgeId: "<new edge id>",
+    //   validFrom: "2019-01-01T00:00:00.000Z", validTo: "2021-01-01T00:00:00.000Z",
+    //   incumbentEdgeKind: "chapterOf", incumbentEdgeId: "<the chapterOf edge's id>",
+    //   incumbentWholeKind: "Book", incumbentWholeId: "<book-id>",
+    //   incumbentValidFrom: "2020-01-01T00:00:00.000Z" }
   }
 }
 ```
@@ -860,11 +918,17 @@ the caller would have to make is visible in the error), and `"props"` (a
 `getOrCreateByConstraint` or `reparent` call resolving to an attachment that
 already holds — same whole, same realizing edge — whose stated `props` are
 schema-valid but canonically different from the edge's live stored props —
-carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`). `requestedVia`
-is the RESOLVED realizing edge of the pair the call's `partOf` names, so it is
-present even when the call omitted `via`.
+carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`), and
+`"window"` (the same, for a stated window bound: a `partOf.validFrom` /
+`partOf.validTo` on such a call, or a `reparent` `at` toward the whole the
+part already holds, that differs from the realizing edge's stored bound —
+carries `edgeKind`/`edgeId`, the stated `option`, and `stated`/`stored`).
+`requestedVia` is the RESOLVED realizing edge of the pair the call's `partOf`
+names, so it is present even when the call omitted `via`. `details` is a union
+discriminated by `situation`, so narrowing on it types exactly the fields that
+situation carries.
 
-The error's `code` names the same four shapes, so a handler that routes on
+The error's `code` names the same five shapes, so a handler that routes on
 `code` alone can tell them apart:
 
 | `details.situation` | `code` |
@@ -873,6 +937,7 @@ The error's `code` names the same four shapes, so a handler that routes on
 | `"detach"` | `COMPOSITION_DETACH_REFUSED` |
 | `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
 | `"props"` | `COMPOSITION_PROPS_CONFLICT` |
+| `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` |
 
 Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
@@ -888,14 +953,22 @@ node's live whole, realizing edge, and (when stated) props succeeds and is
 idempotent, and one whose node has no live whole writes the attachment — see
 [`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
 
-A `partOf` the graph cannot resolve raises `ConfigurationError` rather than
-`CompositionExistenceError` — the option is accepted-shaped but names no
+A `partOf` the graph cannot resolve raises `CompositionConfigurationError`
+rather than `CompositionExistenceError` — the option is accepted-shaped but names no
 declared pair, regardless of the part kind's `existence` and regardless of
 whether the call created the node or found it (the attachment is resolved
 before the match is even read, so the refusal cannot depend on what the
 constraint matched):
 
-| `details.code` | when |
+`CompositionConfigurationError` is a `ConfigurationError` whose `code` is the
+composition code itself (also kept on `details.code`), so every composition
+refusal carries its `COMPOSITION_*` code on `error.code`, whichever class
+raised it. The same class reports a composition navigation or export that
+names what the relation does not have (`COMPOSITION_NO_PARTS_DECLARED`,
+`COMPOSITION_NO_WHOLES_DECLARED`, `COMPOSITION_UNKNOWN_ALIAS`) and a
+composition unit an engine cut short (`COMPOSITION_UNIT_INDETERMINATE`).
+
+| `code` | when |
 | --- | --- |
 | `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.whole.kind` |
 | `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
@@ -1385,6 +1458,88 @@ declared the pair or the hierarchy implies it:
 | `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | A pair an equivalence class relates (`equivalentTo` or `sameAs`) fails in one direction. |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a pair an equivalence class relates. |
 
+#### Composition declaration codes
+
+A `partOf` / `hasPart` declaration is judged twice. The factories and the
+ontology shape check refuse a malformed declaration at the call or on load;
+registry build then checks each declaration against the edge kinds that realize
+it. Either refusal is a `ConfigurationError` whose `details.code` is the code
+below and whose `details.issues` lists every problem found; the declarative
+graph-extension validator reports the four shape codes marked (extension) as
+issue codes on `GraphExtensionValidationError` instead (see
+[Graph Extensions ▸ Ontology](/graph-extensions#ontology)). See
+[Composition](/ontology#composition) for the declarations themselves.
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_OPTION_UNKNOWN` | `partOf()` / `hasPart()` was given an option key other than `via`, `partSide` and `existence`. `details.unknownKeys` names them. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_INVALID` | `existence` is not `"optional"` or `"required"`, on a factory or on a persisted relation. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_INVALID` | `partSide` is not `"from"` or `"to"`, or contradicts the endpoints the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` (extension) | A `partOf` / `hasPart` relation has no `via`. Name the realizing edge kind, or delete the relation. A persisted schema that carries one is refused on load until it is rewritten. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `existence`. |
+| `ONTOLOGY_COMPOSITION_VIA_UNKNOWN` | `via` names an edge kind the graph does not register. |
+| `ONTOLOGY_COMPOSITION_VIA_ENDPOINTS` | Neither orientation of the part and whole kinds is an endpoint pair the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED` | The `via` edge admits both orientations between the two kinds, so `partSide` must say which end is the part. |
+| `ONTOLOGY_COMPOSITION_CARDINALITY` | The `via` edge does not declare `"one"` or `"oneActive"` on the part's side: `cardinality` when the part is the `from` end, `targetCardinality` when it is the `to` end. Without it a part could have several wholes. |
+| `ONTOLOGY_COMPOSITION_VIA_MIXED` | One edge kind realizes composition in two orientations, or admits an endpoint pair that is not a declared composition pair. Split the edge so it is exclusively a composition edge. |
+| `ONTOLOGY_COMPOSITION_POPULATION_MIXED` | The pairs that can hold one part kind declare different part-side cardinalities (`"one"` against `"oneActive"`). The claim is relation-wide, so every such edge must agree. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` | A `partOf` and its mirrored `hasPart` state different `existence`, or the pairs that can hold one part kind disagree on it. State the same `existence` everywhere. |
+
+#### Ontology and query expansion codes
+
+Alias expansion (`expansion: "exact" | "subclasses" | "narrower"`, see
+[Query Source ▸ Subclass Expansion](/queries/source#subclass-expansion)) and the
+ontology checks around it raise these `ConfigurationError` codes:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_EQUIVALENCE_INVALID_CLASS` | An `equivalentTo` class mixes node kinds and edge kinds, or holds more than one registered edge kind. `details.reason` says which, with `details.members`, `details.nodeKinds` and `details.edgeKinds`. Raised when the merged graph's registry is built, never by the extension validator on its own. |
+| `QUERY_ALIAS_EXPANSION_INVALID` | `expansion` is not one the surface offers (`store.search()` offers `"exact"` and `"subclasses"` only, and a store-wide default cannot be `"narrower"`), or the removed `includeSubClasses` option was stated. `details.surface` names the call. Pass `expansion: "exact"` where `includeSubClasses` was `false` and `"subclasses"` where it was `true`. |
+| `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES` | An alias typed from the compile-time graph would expand to subclass kinds only the live schema (a persisted extension) declares, so its static row type would be wrong. `details.kind` and `details.extraKinds` name them. State `expansion: "subclasses"` or `"exact"`, or use `fromDynamic()` / `toDynamic()`. |
+| `ONTOLOGY_NARROWER_KIND_NOT_REGISTERED` | `expansion: "narrower"` expands `details.rootKind` to `details.narrowerKind`, which is not a registered node kind. Register it or remove its `broader` / `narrower` relation. |
+| `ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED` | `expansion: "narrower"` on a traversal target expands to a kind the traversed edge does not admit as an endpoint (`details.rootKind`, `details.narrowerKind`, `details.edgeKind`). Widen the edge's endpoints or drop the relation. |
+| `SEARCH_EXPANSION_KIND_UNINDEXED` | A `store.search()` expansion would silently skip rows of some expanded kinds: fulltext, because they declare no `searchable()` field the index covers; vector, because they declare the field with a different `embedding()` tag. `details.capability` says which, `details.kinds` lists them. Declare the field identically on them, search the kinds separately, or pass `expansion: "exact"`. |
+| `SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED` | The candidate query of `updateWhere()` selects more than one concrete node kind (`details.candidateKinds`), typically because its source expands through subclasses. Pass `{ expansion: "exact" }` to `from()` or run one `updateWhere()` per kind. |
+| `EMPTY_KIND_SET` | `toKindSet()` was given no kinds. An empty set would compile to a filter nothing matches. |
+
+#### Composition read and write guard codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `COMPOSITION_NO_PARTS_DECLARED` | `subgraph({ composition: true })` on a graph that declares no `partOf` / `hasPart` relation, or `parts()` on an alias whose kinds are the whole of no composition pair. Declare the relation, or omit the option. |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `wholes()` on an alias whose kinds are the part of no composition pair. |
+| `COMPOSITION_UNKNOWN_ALIAS` | `parts()` / `wholes()` was given `{ from }` naming an alias the query does not have. `details.knownAliases` lists the aliases it does. |
+| `COMPOSITION_UNIT_INDETERMINATE` | The database cut the composition closure of a `subgraph({ composition: true })` read short (a statement timeout, for example), so the owned unit is unknown. The read never returns a prefix of it: retry with a higher timeout. `details.rootKind` and `details.rootId` name the root. |
+| `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
+| `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
+| `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
+
+#### Fresh-snapshot guard codes
+
+A decision protected only by the per-graph write fence (no claim row behind the
+read) is only as good as the snapshot it reads. A backend whose fence cannot
+advance a `typegraph_fences` row, such as one built on an advisory lock alone,
+cannot show a `REPEATABLE READ` or `SERIALIZABLE` session that it observed the
+writers it waited on, so those isolation levels are refused; `READ COMMITTED`
+is the level such a backend supports. The refusal is a `ConfigurationError`
+whose `details` carry `graphId`, `isolation` and `fenceRow`:
+
+| `details.code` | Decision it protects |
+| --- | --- |
+| `EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT` | The cycle probe of a write to a declared-acyclic edge kind. |
+| `COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT` | The parts closure a delete of a composition whole reads. |
+| `COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT` | Whether an `existence: "required"` part still holds a whole when its attachment is detached or deleted. |
+
+#### Store view and schema registry codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `STORE_VIEW_SEALED_COORDINATE` | A read on a `StoreView` stated its own temporal option (`temporalMode`, `asOf` or `recordedAsOf`; `details.stated` names them). The view's coordinate is sealed: read at another coordinate through the live store or `store.view(...)`. |
+| `GRAPH_TEMPLATE_CONTENT_CONFLICT` | Registering a graph template under an id that already holds a template with different schema content (`details.templateId`). Pick another template id, or register the same definition. |
+| `IDENTITY_ROLLBACK_REQUIRES_MIGRATION` | `rollbackSchema()` targeted a version whose identity configuration, ontology relations or node kinds differ from the active one, so the identity closure cannot be rebuilt in place (`details.fromVersion`, `details.toVersion`). Commit the target version's graph definition forward with `migrateSchema()`. |
+
 #### Unique constraint option codes
 
 `defineGraph` refuses a unique constraint whose `scope` or `collation` is stated
@@ -1502,7 +1657,7 @@ assertion's id structurally in `details.issues[].assertionId`, and
 | `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
 | `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
 
-Archival transitions carry four `ValidationError` codes of their own, each a
+Archival transitions carry five `ValidationError` codes of their own, each a
 precondition failure on the identity section as a whole rather than a per-row
 outcome — unlike the table above, these THROW uncaught and are never recorded
 in `result.errors`:
@@ -1512,14 +1667,18 @@ in `result.errors`:
 | `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. Refused before any write. |
 | `IDENTITY_STATE_IMPORT_RETENTION` | A `state`-mode document carries a `retention` watermark; only archival exports carry one. Refused before any write. |
 | `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` are not ordered by non-decreasing `recordedRevision` — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. |
+| `IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID` | An archival document's `transitions` name one `transitionId` more than once — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. An export never writes two rows under one id. Re-importing the same archive is not this error: a row already on the target is kept, so the re-import is idempotent. |
 | `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
 
-A write that records an identity transition on a database whose transition-log
-relations were never created (base-schema version 9 not yet adopted; see
+A write that records an identity transition, a `transitionsOf` or `replay`
+read, a `pruneIdentityTransitions` call or an archival transition restore on a
+database whose transition-log relations were never created (base-schema
+version 9 not yet adopted; see
 [Base-schema version 9](/backend-setup/#base-schema-version-9-the-identity-transition-log))
 throws a `ConfigurationError` whose `details.code` is
-`IDENTITY_TRANSITION_RELATIONS_MISSING` and whose `details.relations` names
-both relations.
+`IDENTITY_TRANSITION_RELATIONS_MISSING`, whose `details.relations` names
+both relations, and whose `details.surface` is `capture-flush`,
+`transition-read`, `transition-prune` or `transition-restore`.
 
 #### Merge provenance sidecar codes
 
@@ -1721,7 +1880,7 @@ a retry against the same retired owner cannot repair it.
 
 | `details.code` | Meaning |
 | --- | --- |
-| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. Also raised when a restored identity transition's `recorded`, which takes that unowned form, is passed to `asOfRecorded` or to a transition-log window, cursor or prune. |
 | `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
 | `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
 | `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
@@ -1772,20 +1931,34 @@ try {
 }
 ```
 
-The `details.reason` value `"ontology-tightening-violated"` means an ontology
-change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or
-`partOf`/`hasPart`, or removing `subClassOf` or `equivalentTo` — is false
-against rows that already exist. `details.changes` carries only the ontology
-changes in this diff that required a data check (a `safe` or `breaking`
-change in the same commit is never included, even one alongside the change
-that was refused); `details.violations` carries the offending rows in
-exactly the shape `store.verifyConstraintFences()` returns — including
-`family: "composition"` entries when a newly-declared `partOf`/`hasPart`
-pair finds a part already holding two live wholes, or a cycle in the
-proposed composition relation, and `family: "compositionFutureWindow"`
-entries when the pair's realizing edge kind already holds a row whose
-window starts or ends later than the commit. Resolve those rows (delete them, change
-their kind, or narrow the ontology change) and retry. See
+The `details.reason` value `"ontology-tightening-violated"` means a schema
+tightening other than an edge cardinality is false against rows that already
+exist. It is raised for:
+
+- adding `disjointWith`, `subClassOf`, `equivalentTo`, `sameAs`, or
+  `partOf`/`hasPart`, or removing `subClassOf`, `equivalentTo` or `sameAs`;
+- declaring `acyclic: true` over an existing cycle;
+- narrowing an edge kind's `from`/`to` (or its source-dependent target map)
+  out from under an edge it admitted, whatever that edge's validity window;
+- `store.removeKinds()` of a mid-chain kind that a surviving subclass's live
+  edge relied on;
+- re-adding an edge kind over rows a discarded drop left in its table.
+
+Every refusal of this kind and of `"edge-cardinality-tightening-violated"`
+below carries the same four details fields:
+
+| Field | What it holds |
+| --- | --- |
+| `changes` | The ontology changes in this diff that owed a data check (a `safe` or `breaking` change in the same commit is never included, even one alongside the change that was refused). Empty when only an edge kind's own registration tightened. |
+| `edgeKinds` | The edge kinds whose own registration tightened: a newly constrained `cardinality` or `targetCardinality`, `acyclic: true`, or an endpoint pair no longer admitted. Empty when only ontology relations tightened. |
+| `axes` | The edge-cardinality axes this commit newly constrains, each an `{direction, cardinality, edgeKind}` triple. |
+| `violations` | The offending rows, in exactly the shape `store.verifyConstraintFences()` returns for the proposed schema, **every violated family included**: `nodeDisjointness`, `nodeUniqueness`, `edgeEndpointAssignability`, `edgeAcyclicity`, `edgeCardinality`, and for composition `composition`, `compositionExistence`, `compositionFutureWindow` (a realizing edge kind that already holds a row whose window starts or ends later than the commit) and `compositionWindowOverlap` (a part whose stored rows would have overlapping valid-time windows under the pair). |
+
+One refusal reports every family the commit violates, so repair the listed
+rows once and retry: delete them, change their kind, or narrow the change.
+The `reason` only names the headline family: `"edge-cardinality-tightening-violated"`
+whenever at least one cardinality row violates, `"ontology-tightening-violated"`
+otherwise. A refused commit publishes nothing. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 for what each meta-edge checks.
 
@@ -1833,7 +2006,11 @@ or `targetCardinality` on an edge kind is false against rows that already
 exist. `details.axes` names the axes this commit newly constrains (each an
 `{direction, cardinality, edgeKind}` triple); `details.violations` carries
 the offending rows in exactly the shape `store.verifyConstraintFences()`
-returns. An axis is probed whenever the proposed value is constrained and
+returns, and also lists any other family the same commit violates. A
+cardinality violation names its `edgeKind`, `direction`, `cardinality` and the
+node(s) it is keyed on (`keyedOn.from` and/or `keyedOn.to`, each a kind name
+and id) as plain values; `target` is the claim row's storage address. An
+axis is probed whenever the proposed value is constrained and
 differs from the stored one — including a genuine loosening, which costs one
 read of an already-clean population rather than risk missing a tightening.
 
@@ -1853,8 +2030,9 @@ The `details.reason` value `"custom-relation-removal"` means
 `store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would drop a
 stored relation that names a custom meta-edge from the removed `metaEdge()`
 factory. The stored schema holds the last copy of that relation, so these verbs
-refuse before writing anything. `details.relations` names each relation as
-written, such as `governs(Team, Project)`. Move them into
+refuse before writing anything. `details.relations` lists each relation as a
+`{ metaEdge, from, to }` object, such as
+`{ metaEdge: "governs", from: "Team", to: "Project" }`. Move them into
 `defineGraph({ annotations })`, commit once with `migrateSchema()`, then retry.
 See
 [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis).
@@ -2154,8 +2332,8 @@ try {
 | `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
 | `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
-| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store opened without `history: true` |
-| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` called on a store whose backend owns recorded time (engine-native) |
+| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` / `pruneIdentityTransitions` / an archival transition restore on a store opened without `history: true` |
+| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | The same operations on a store whose backend owns recorded time (engine-native) |
 | `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
 | `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
 | `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond every revision the graph holds |
@@ -2176,10 +2354,22 @@ try {
 | `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
 | `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
 | `COMPOSITION_PROPS_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
+| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | `CompositionError` | constraint | A stated `partOf.validTo` on a `oneActive` pair would write an edge that does not attach the part |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | `CompositionConfigurationError` | user | No composition pair is declared between the part's kind and the stated whole's kind |
+| `COMPOSITION_VIA_NOT_DECLARED` | `CompositionConfigurationError` | user | `via` names an edge kind that realizes no declared pair there |
+| `COMPOSITION_VIA_AMBIGUOUS` | `CompositionConfigurationError` | user | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `CompositionConfigurationError` | user | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair |
+| `COMPOSITION_NO_PARTS_DECLARED` | `CompositionConfigurationError` | user | `parts()` or `subgraph({ composition })` from a kind (or graph) that declares no composition parts |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `CompositionConfigurationError` | user | `wholes()` from a kind that declares no composition wholes |
+| `COMPOSITION_UNKNOWN_ALIAS` | `CompositionConfigurationError` | user | `parts()` / `wholes()` names a `from` alias the query does not have |
+| `COMPOSITION_UNIT_INDETERMINATE` | `CompositionConfigurationError` | user | The engine cut a composition closure statement short before it could be read whole |
+| `COMPOSITION_WINDOW_REQUIRES_FRESH_SNAPSHOT` | `ConfigurationError` (`details.code`) | user | A composition window decision ran on a snapshot-isolation session whose fence cannot show the snapshot to be fresh; use `read_committed` |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

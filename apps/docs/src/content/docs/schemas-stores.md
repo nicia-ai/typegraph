@@ -1417,6 +1417,8 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
   constraintName: string,
   items: readonly {
     props: { name: string; email?: string };
+    // Per item, as on bulkCreate: see partOf on get-or-create.
+    partOf?: { whole; via?; props?; validFrom?; validTo? };
   }[],
   options?: { ifExists?: "return" | "update" }
 ): Promise<
@@ -3086,14 +3088,17 @@ both lists, an edge is returned if either admits it.
 pass the edge's type or its kind string. `via` follows the same rule as
 [`parts({ via })`](/queries/recursive#composition-shortcuts-parts-and-wholes):
 it must realize a pair at the root's kind itself. An edge that realizes a pair
-only further down the tree is refused with `ConfigurationError`
+only further down the tree is refused with `CompositionConfigurationError`
 (`COMPOSITION_VIA_NOT_DECLARED`), and `details.declaredVia` lists the edges
-that would work.
+that would work. `via` is the object form's only key: any other is refused
+with `ValidationError` (issue path `composition.<key>`, code
+`unrecognized_keys`) rather than read as `composition: true`, so a misspelled
+`via` never widens the export to every realizing edge.
 
 This is set-level, not per-root-kind-required: a root whose kind declares
 no composition parts contributes nothing extra and the read still runs
 normally. A graph that declares no composition relation at all cannot
-honor the option meaningfully and throws `ConfigurationError`
+honor the option meaningfully and throws `CompositionConfigurationError`
 (`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
 `composition` were absent.
 

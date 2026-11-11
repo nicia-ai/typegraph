@@ -19,13 +19,13 @@ import {
   computeSchemaHash,
   ensureSchema,
   getSchemaChanges,
-  isStructuralSubtype,
   type JsonSchema,
   requiresMigration,
   type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
 import { propertySchemasEqual } from "../src/schema/migration";
+import { isProjectedSchemaSubtype } from "../src/schema/structural-subtype";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -368,7 +368,7 @@ describe("propertySchemasEqual over projection spellings", () => {
   });
 });
 
-describe("isStructuralSubtype over projection spellings", () => {
+describe("isProjectedSchemaSubtype over projection spellings", () => {
   it("reads a tuple and its restated-arity spelling as mutual subtypes", () => {
     const prefixItems: JsonSchema[] = [{ type: "number" }, { type: "number" }];
     const earlier: JsonSchema = { type: "array", prefixItems };
@@ -380,10 +380,10 @@ describe("isStructuralSubtype over projection spellings", () => {
       maxItems: 2,
     };
 
-    expect(isStructuralSubtype(earlier, current)).toEqual({
+    expect(isProjectedSchemaSubtype(earlier, current)).toEqual({
       verdict: "subtype",
     });
-    expect(isStructuralSubtype(current, earlier)).toEqual({
+    expect(isProjectedSchemaSubtype(current, earlier)).toEqual({
       verdict: "subtype",
     });
   });
@@ -476,7 +476,7 @@ describe("a tuple whose members became required is a change", () => {
   ] as const)(
     "judges an all-optional %s tuple not a subtype of the required one",
     (_label, child, parent) => {
-      const result = isStructuralSubtype(
+      const result = isProjectedSchemaSubtype(
         z.toJSONSchema(child) as JsonSchema,
         z.toJSONSchema(parent) as JsonSchema,
       );
@@ -488,7 +488,7 @@ describe("a tuple whose members became required is a change", () => {
         reason: "array-bounds-not-tighter",
       });
       expect(
-        isStructuralSubtype(
+        isProjectedSchemaSubtype(
           z.toJSONSchema(parent) as JsonSchema,
           z.toJSONSchema(child) as JsonSchema,
         ),

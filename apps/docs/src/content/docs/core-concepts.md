@@ -751,8 +751,19 @@ const graph = defineGraph({
 
 ### Scope Options
 
-- `"kind"`: Unique within this exact type only
-- `"kindWithSubClasses"`: Unique across this type and all subclasses
+- `"kind"`: The constraint keys the rows of the kind that declares it.
+- `"kindWithSubClasses"`: The constraint keys the rows of every kind in the
+  declaring kind's `subClassOf` hierarchy (its ancestors, descendants and
+  siblings) in one shared key space, so a value taken by a row of one kind is
+  refused for a row of another.
+
+A constraint is enforced on the writes of the kind that declares it; a subclass
+does not inherit it. A constraint declared only on a parent kind therefore does
+not cover rows written as a subclass, whichever scope it has. To get uniqueness
+across a hierarchy, declare the constraint on every kind in it with the same
+`name`, `fields` and `collation` and `scope: "kindWithSubClasses"`:
+each kind's writes then claim the same key and probe the others' rows. Declared
+with `scope: "kind"`, the same constraint on each kind is uniqueness per kind.
 
 TypeScript requires both `scope` and `collation`. An untyped caller that omits
 `scope` gets `"kindWithSubClasses"`, and one that omits `collation` gets

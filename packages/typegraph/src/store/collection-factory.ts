@@ -40,6 +40,8 @@ import {
   type IfExistsMode,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeReparentOptions,
@@ -163,9 +165,11 @@ export type NodeOperations = Readonly<{
   executeBulkGetOrCreateByConstraint: (
     kind: string,
     constraintName: string,
-    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    items: readonly NodeBulkGetOrCreateByConstraintItem<
+      Record<string, unknown>
+    >[],
     backend: GraphBackend | TransactionBackend,
-    options?: NodeGetOrCreateByConstraintOptions,
+    options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
     kind: string,

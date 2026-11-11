@@ -118,6 +118,12 @@ function compositionClaim(
  * order, so a peer taking the same two rows can never take them in the
  * opposite order and deadlock.
  *
+ * The claim is the CURRENT half of one whole per part — it reserves the
+ * part's one open attachment, so a row born ended takes none. The valid-time
+ * half (no two of a part's windows overlap) is the composition window
+ * decision's (`./composition-windows.ts`), which every insert path takes
+ * beside this claim set.
+ *
  * The ONE owner every insert path calls: the store's `edgeInsertWork`
  * (`src/store/operations/edge-operations.ts`) and import's
  * `importEdgeInsertWork` (`src/interchange/import.ts`), which before this
@@ -168,9 +174,13 @@ export function edgeKindOwesAnyClaim(
  * `oneActive`.
  *
  * Either way the row must be one composition counts ({@link axisCountsRow}):
- * resurrecting an ENDED `oneActive` history row attaches nothing, so it owes
- * no claim and is not refused because the part holds another whole — the
- * same exemption {@link edgeInsertClaims} gives the identical row born ended.
+ * resurrecting an ENDED `oneActive` history row attaches nothing NOW, so it
+ * owes no claim and is not refused because the part holds another whole —
+ * the same exemption {@link edgeInsertClaims} gives the identical row born
+ * ended. What such a row does hold is a valid-time window, which the claim
+ * cannot express: the composition window decision
+ * (`assertCompositionWindowsDisjoint`, `./composition-windows.ts`) judges it,
+ * at every re-entry and insert, against the part's other windows.
  */
 export function compositionReentryClaim(
   registry: KindRegistry,

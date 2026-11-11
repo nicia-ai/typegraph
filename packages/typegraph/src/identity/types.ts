@@ -246,8 +246,12 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * ascending by recorded revision, in pages of at most `options.limit`
      * boundaries (default 200, maximum 2000). A capped page carries
      * `nextCursor`, naming the first boundary it stopped short of: pass it
-     * back as `options.cursor` for the next page of the same `ref`. Requires
-     * the store to be opened with `history: true`.
+     * back as `options.cursor` for the next page of the same `ref`.
+     * `options.fromRecorded` / `toRecorded` and the cursor must each come
+     * from this graph: another graph's instant, a legacy unowned one, and a
+     * restored transition's `recorded` are refused by the same ownership
+     * check `asOfRecorded` applies. Requires the store to be opened with
+     * `history: true`.
      *
      * On `tx.identity` specifically: reads the transition log itself, which
      * — unlike every other read on this facade — is NOT read-your-writes
@@ -260,10 +264,12 @@ export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
      * `completeness` carries the `pending-transaction-notes` reason.
      *
      * `completeness` is the one place to check whether a page is the whole
-     * answer the log can give: more pages, a retention cut, restored
+     * answer the log can give: more pages, this graph's own retention cut, a
+     * cut an archival restore carried in from its source, restored
      * transitions discovery could not attribute, and current class members
      * that arrived through writes history capture never saw (for example
-     * before `history: true` was enabled) are all reported there.
+     * before `history: true` was enabled) are all reported there. It
+     * describes one page; it is not a loop condition — page on `nextCursor`.
      *
      * Deliberately absent from {@link IdentityReadFacade}: it answers across
      * every recorded coordinate, not the one a read-only lens is pinned to.

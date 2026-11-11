@@ -19,10 +19,12 @@ import { type RecordedInstant, resolveReadCoordinate } from "../core/temporal";
 import type { KindEntity } from "../core/types";
 import type { AnyEdgeType, NodeType, TemporalMode } from "../core/types";
 import {
+  CompositionConfigurationError,
   ConfigurationError,
   KindNotFoundError,
   ValidationError,
 } from "../errors";
+import { unrecognizedOptionKeyIssues } from "../errors/validation";
 import type { RecursiveCyclePolicy } from "../query/ast";
 import {
   type OneStatementBatchItem,
@@ -1069,7 +1071,7 @@ function resolveSubgraphCompositionEdgeKinds<
 ): readonly string[] {
   if (!compositionRequested(params.options.composition)) return [];
   if (params.registry.compositionEdgeKinds().length === 0) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `subgraph({ composition: true }) requires the graph to declare at least one partOf/hasPart relation, but "${params.graphId}" declares none.`,
       { code: "COMPOSITION_NO_PARTS_DECLARED" },
       {
@@ -1089,7 +1091,7 @@ function resolveSubgraphCompositionEdgeKinds<
     requestedVia,
   );
   if (!viaReach.realized) {
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `subgraph composition via "${requestedVia}" realizes no partOf/hasPart pair at root kind "${ctx.root.kind}".`,
       {
         code: "COMPOSITION_VIA_NOT_DECLARED",
@@ -1737,7 +1739,7 @@ async function fetchCompositionClosureNodes(
     return await fetchIncludedNodes(ctx, reachableCte, includedIdsCte);
   } catch (error) {
     if (!isStatementCutShortError(error)) throw error;
-    throw new ConfigurationError(
+    throw new CompositionConfigurationError(
       `The composition closure of ${ctx.root.kind} "${ctx.root.id}" was cut short by the database before it finished, so the owned unit is unknown rather than incomplete.`,
       {
         code: "COMPOSITION_UNIT_INDETERMINATE",
@@ -2148,6 +2150,13 @@ function validateEdgeWindows(
   }
 }
 
+/**
+ * Every key the object form of {@link SubgraphCompositionSelection} accepts.
+ * Any other key is refused rather than read as `composition: true`: a
+ * misspelled `via` would otherwise widen the export to every realizing edge.
+ */
+const SUBGRAPH_COMPOSITION_OPTION_KEYS = ["via"] as const;
+
 function isCompositionSelection(
   composition: unknown,
 ): composition is SubgraphCompositionSelection | undefined {
@@ -2227,6 +2236,23 @@ function validateSubgraphTraversalOptions(
         ],
       },
     );
+  }
+  if (isPlainObject(options.composition)) {
+    const issues = unrecognizedOptionKeyIssues(
+      options.composition,
+      "composition",
+      SUBGRAPH_COMPOSITION_OPTION_KEYS,
+    );
+    if (issues.length > 0) {
+      throw new ValidationError(
+        `Subgraph composition does not accept ${issues.map((issue) => issue.path).join(", ")}`,
+        { issues },
+        {
+          suggestion:
+            "Pass `composition: true` for every realizing edge, or `composition: { via }` to restrict the closure to one.",
+        },
+      );
+    }
   }
   if (!isCompositionSelection(options.composition)) {
     throw new ValidationError(

@@ -185,9 +185,8 @@ import {
   readIdentityAssertionsByIdsAtTarget,
   readIdentityAssertionsForInterchange,
   readIdentityAssertionsTouchingAtTarget,
-  readIdentityRestoreBaseline,
   readIdentityTransitionPageForInterchange,
-  readTransitionRetentionDetails,
+  readIdentityTransitionRetention,
   rebuildIdentityClosureForContext,
   refKey,
   removeIdentityKindsForContext,
@@ -199,8 +198,9 @@ import {
 import { type IdentityTarget } from "../identity/sql-target";
 import {
   type IdentityDecisionProvenance,
-  type IdentityRestoreBaseline,
+  type IdentityTransitionCut,
   identityTransitionLogUnavailableError,
+  type IdentityTransitionRetention,
 } from "../identity/transition-log";
 import type {
   IdentityFacade,
@@ -1820,20 +1820,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.readIdentityTransitionPageAtTarget(target, options),
       identityTransitionRetentionAtTarget: (target) =>
         this.identityTransitionRetentionAtTarget(target),
-      readIdentityRestoreBaselineAtTarget: (target) =>
-        this.readIdentityRestoreBaselineAtTarget(target),
-      importIdentityTransitionsAtTarget: (
-        target,
-        transitions,
-        watermark,
-        baseline,
-      ) =>
-        this.importIdentityTransitionsAtTarget(
-          target,
-          transitions,
-          watermark,
-          baseline,
-        ),
+      importIdentityTransitionsAtTarget: (target, transitions, carriedCut) =>
+        this.importIdentityTransitionsAtTarget(target, transitions, carriedCut),
       applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
         this.applyIdentityMergeAtTarget(
           target,
@@ -2244,14 +2232,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
-  /** @internal Reads a graph's identity transition-retention watermark for archival export. */
+  /** @internal Reads a graph's identity transition retention for archival export. */
   identityTransitionRetentionAtTarget(
     target: GraphBackend | TransactionBackend,
-  ): ReturnType<typeof readTransitionRetentionDetails> {
-    if (this.#graph.identity === undefined) {
-      return Promise.resolve({ prunedBeforeRevision: 0, prunedAt: nowIso() });
-    }
-    return readTransitionRetentionDetails(
+  ): Promise<IdentityTransitionRetention> {
+    if (this.#graph.identity === undefined) return Promise.resolve({});
+    return readIdentityTransitionRetention(
       target,
       this.#sqlSchema(),
       this.graphId,
@@ -2281,40 +2267,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       throw identityTransitionLogUnavailableError(
         this.graphId,
         this.#recordedTimeOwnership,
+        "archival transition restore",
       );
     }
-  }
-
-  /** @internal Reads the destination facts an archival transition restore decides on. */
-  readIdentityRestoreBaselineAtTarget(
-    target: IdentityTarget,
-  ): Promise<IdentityRestoreBaseline> {
-    this.#requireIdentityTransitionRestore();
-    return readIdentityRestoreBaseline(
-      { graphId: this.graphId, schema: this.#sqlSchema() },
-      target,
-    );
   }
 
   /** @internal Restores archival identity transitions inside an import transaction. */
   importIdentityTransitionsAtTarget(
     target: IdentityTarget,
     transitions: readonly IdentityTransitionTransfer[],
-    carriedWatermark: number | undefined,
-    baseline: IdentityRestoreBaseline,
+    carriedCut: IdentityTransitionCut | undefined,
   ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
     if (
-      !isIdentityTransitionRestore(transitions.length > 0, carriedWatermark)
+      !isIdentityTransitionRestore(transitions.length > 0, carriedCut?.revision)
     ) {
-      return Promise.resolve({ created: 0, watermark: undefined });
+      return Promise.resolve({ created: 0 });
     }
     this.#requireIdentityTransitionRestore();
     return importIdentityTransitionsIntoTarget(
       { graphId: this.graphId, schema: this.#sqlSchema() },
       target,
       transitions,
-      carriedWatermark,
-      baseline,
+      carriedCut,
     );
   }
 

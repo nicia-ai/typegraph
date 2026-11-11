@@ -186,6 +186,17 @@ transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
 | an edge's admitted endpoint pair              | Safe                                                | Warning — checked against live edges               |
 
+Where a change is reported follows one rule: `SchemaDiff.ontology` carries
+ontology relations (the meta-edge rows above), and `SchemaDiff.edges` carries
+everything about an edge kind's own registration — its endpoints, `cardinality`,
+`targetCardinality`, `endpointExistence` and `acyclic`. A tightening that
+needs a data check never appears under a category whose list is empty:
+declaring `acyclic: true` shows as a `warning` entry in `diff.edges` and
+leaves `diff.ontology` empty, and a narrowed `from`/`to` is the one existing
+`fromKinds`/`toKinds` entry in `diff.edges`. A removed `sameAs` or
+`equivalentTo` that names an external IRI and strands no kind's endpoint pair
+is `safe`: an IRI is never a kind.
+
 `sameAs` and `differentFrom` no longer have a public factory to author them
 with (see
 [Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis)
@@ -229,8 +240,15 @@ a `differentFrom` relation exactly like the always-safe row.
   or end later than its write, the commit also refuses when a non-deleted row
   of the realizing edge kind already has a `validFrom` or `validTo` later
   than the commit (`compositionFutureWindow`). This includes an edge kind
-  re-added over rows a discarded drop left behind. End or delete those rows,
-  then retry.
+  re-added over rows a discarded drop left behind. On a `oneActive` pair a
+  part's composition edges may never have overlapping valid-time windows, so
+  the commit also refuses when a part holds a row of the realizing edge kind
+  whose window overlaps another of its rows under the proposed relation —
+  any realizing edge kind, the pair's own or one declared earlier
+  (`compositionWindowOverlap`, naming the part and the overlapping edges).
+  This applies to an upgrade from the three-part `partOf(part, whole)` with
+  no `via` too: declaring the `via` adds the pair and runs every one of these
+  checks. End or delete those rows, then retry.
 - **Making a realizing edge's ended rows count** is checked the same way.
   Redeclaring a `oneActive` realizing edge `one` refuses the commit when a
   part's ended row would become a second whole beside its live row under
@@ -278,6 +296,13 @@ try {
 }
 ```
 
+The refusal lists every violated family at once: `details.violations`
+holds the ontology, `acyclic`, endpoint and edge-cardinality rows together,
+`details.changes` the ontology changes that owed a check and
+`details.edgeKinds` the edge kinds whose own registration tightened. When a
+cardinality row violates, `details.reason` is
+`"edge-cardinality-tightening-violated"` instead, with the same fields — see
+[Edge cardinality tightenings](#edge-cardinality-tightenings-are-checked-against-your-data).
 Resolve the offending rows (delete them, change their kind, or narrow the
 ontology change), then retry. `store.verifyConstraintFences()` lists the same
 rows on demand at any time — run it against a live store to find conflicts
@@ -313,7 +338,10 @@ against the live population before the version is published:
 - An edge kind that tightens **both axes in the same commit** is checked
   independently for each; either violation refuses the whole commit, and the
   thrown error reports every newly-constrained axis, not just the first one
-  found.
+  found. The same holds across families: a commit that also declares
+  `acyclic: true` or adds an ontology axiom is refused once, with the
+  `edgeAcyclicity` or ontology rows beside the `edgeCardinality` rows in
+  `details.violations`, so one repair covers the whole commit.
 - Moving an axis from `one` to `oneActive` is a **loosening**: `one` counts
   every edge for its whole life and `oneActive` only edges whose `validTo` is
   open, so data that satisfies `one` already satisfies `oneActive`. That move
@@ -351,6 +379,12 @@ try {
   }
 }
 ```
+
+A cardinality violation names its edge kind, direction and the node(s) it is
+keyed on as plain values (`violation.edgeKind`, `violation.direction`,
+`violation.keyedOn.from` / `violation.keyedOn.to`), and the write-time
+`CardinalityError` carries `details.incumbentEdgeId`, the stored edge occupying
+the slot, so neither needs a second query to act on.
 
 Resolve the offending rows (delete the excess edges, or loosen the target
 schema change), then retry. This check has the same residual window as the
@@ -526,7 +560,8 @@ never auto-migrates. The first `ensureSchema`/`createStoreWithSchema` call
 after upgrading throws `MigrationError`, or returns `status: "breaking"` with
 `throwOnBreaking: false`. Its migration actions include one entry naming
 every persisted relation that uses a custom meta-edge, and each such change
-in `diff.ontology` carries the relation in `removedCustomRelation`.
+in `diff.ontology` carries the relation in `removedCustomRelation` as a
+`{ metaEdge, from, to }` object.
 `store.evolve()`, `store.planEvolution()` and `store.removeKinds()` would
 drop the relations too, so each refuses before writing with `MigrationError`
 (`reason: "custom-relation-removal"`, the relations in `details.relations`),
@@ -585,7 +620,7 @@ version 9, and a release that knows only version 8 refuses a database stamped
 [Base-schema version 9](/backend-setup#base-schema-version-9-the-identity-transition-log)).
 The narrowed `SerializedMetaEdge` shape adds no constraint of its own,
 because a document is only rewritten into it on a database already stamped
-6, though an older release's `parseSerializedSchema` could not read it
+9, though an older release's `parseSerializedSchema` could not read it
 either: the pre-change `serializedSchemaZod` required
 `transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry. In a mixed-version fleet, upgrade every
 application instance sharing a database before any of them opens it with this

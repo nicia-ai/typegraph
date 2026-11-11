@@ -58,6 +58,8 @@ export {
   type MeasurableTransactionContext,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeCollection,
   type NodeCurrentReads,
   type NodeGetOrCreateByConstraintOptions,

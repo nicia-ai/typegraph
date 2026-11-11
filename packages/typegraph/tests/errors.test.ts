@@ -33,7 +33,9 @@ import type {
 import {
   CardinalityError,
   CompilerInvariantError,
+  CompositionConfigurationError,
   CompositionCycleError,
+  CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   ContributionUnavailableError,
@@ -429,14 +431,77 @@ describe("CompositionExistenceError", () => {
     expect(props.code).toBe("COMPOSITION_PROPS_CONFLICT");
     expect(props.suggestion).toContain("store.edges.segmentOf.update");
 
-    // Four situations, four codes — no two share one.
+    const window = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "window",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      option: "partOf.validFrom",
+      stated: "2024-01-01T00:00:00.000Z",
+      stored: "2023-01-01T00:00:00.000Z",
+    });
+    expect(window.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_CONFLICT");
+    expect(window.message).toContain("partOf.validFrom");
+
+    // Five situations, five codes — no two share one.
     expect(
-      new Set([create.code, detach.code, existing.code, props.code]).size,
-    ).toBe(4);
-    for (const error of [create, detach, existing, props]) {
+      new Set([
+        create.code,
+        detach.code,
+        existing.code,
+        props.code,
+        window.code,
+      ]).size,
+    ).toBe(5);
+    for (const error of [create, detach, existing, props, window]) {
       expect(error.name).toBe("CompositionExistenceError");
       expect(error.category).toBe("constraint");
     }
+  });
+
+  it("puts every composition refusal's code on error.code, whatever its class", () => {
+    // MUTATION CHECK: drop the `code` override from
+    // `CompositionConfigurationError` — its `code` is then the generic
+    // CONFIGURATION_ERROR and a caller routing on `error.code` misses it.
+    const declaration = new CompositionConfigurationError("no pair", {
+      code: "COMPOSITION_WHOLE_NOT_DECLARED",
+      partKind: "A",
+      wholeKind: "B",
+    });
+    expect(declaration).toBeInstanceOf(ConfigurationError);
+    expect(declaration.code).toBe("COMPOSITION_WHOLE_NOT_DECLARED");
+    expect(declaration.details.code).toBe("COMPOSITION_WHOLE_NOT_DECLARED");
+    expect(declaration.name).toBe("CompositionConfigurationError");
+
+    const bounded = new CompositionError({
+      situation: "boundedAttachment",
+      partKind: "Clip",
+      wholeKind: "Show",
+      wholeId: "show-1",
+      edgeKind: "clipOf",
+      validTo: "2024-01-01T00:00:00.000Z",
+    });
+    expect(bounded.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_BOUNDED");
+
+    const overlap = new CompositionError({
+      situation: "windowOverlap",
+      partKind: "Clip",
+      partId: "clip-1",
+      wholeKind: "Show",
+      wholeId: "show-2",
+      edgeKind: "clipOf",
+      edgeId: "edge-2",
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+      incumbentEdgeKind: "clipOf",
+      incumbentEdgeId: "edge-1",
+      incumbentWholeKind: "Show",
+      incumbentWholeId: "show-1",
+      incumbentValidFrom: "2021-01-01T00:00:00.000Z",
+    });
+    expect(overlap.code).toBe("COMPOSITION_WINDOW_OVERLAP");
+    expect(overlap.message).toContain("[2021-01-01T00:00:00.000Z, unbounded)");
   });
   // MUTATION: return one shared code from any arm of
   // `describeCompositionExistenceRefusal` (src/errors/index.ts) — the

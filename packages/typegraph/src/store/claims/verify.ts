@@ -28,6 +28,7 @@
 import type { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import type {
+  ClaimEdgeCardinalityParams,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   ContendedUniqueRow,
@@ -51,6 +52,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { groupBy } from "../../utils/array";
 import { compareStrings } from "../../utils/compare";
 import { nowIso } from "../../utils/date";
+import { nodeRefKey } from "../../utils/tuple-key";
 import {
   acyclicEdgeRelations,
   type EdgeAcyclicityViolation,
@@ -73,9 +75,13 @@ import {
   uniquenessClaimTarget,
 } from "./axis";
 import { compositionEdgeCardinalityDeclarations } from "./composition-claims";
+import { readCompositionWindowOverlaps } from "./composition-windows";
 import {
+  compositionClaimEndpoints,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimTarget,
+  type EdgeCardinalityDirection,
+  edgeCardinalitySpec,
 } from "./edge-claims";
 
 /**
@@ -99,7 +105,26 @@ export type ConstraintFenceViolation =
     }>
   | Readonly<{
       family: "edgeCardinality";
+      /**
+       * The claim row's address, for a reader who wants to go straight to the
+       * row a writer contends for. `axis` and `key` are storage encodings
+       * (delimiter-joined axis, JSON-encoded key): read the plain fields
+       * below for the edge kind, the direction and the node(s) instead.
+       */
       target: ClaimTarget;
+      edgeKind: string;
+      /** Which endpoint's population overran its declared cardinality. */
+      direction: EdgeCardinalityDirection;
+      /** The declared cardinality the population overran. */
+      cardinality: string;
+      /**
+       * The node(s) the overrun population is keyed on: `from` for a
+       * source-side axis, `to` for a target-side axis, both for `unique`.
+       */
+      keyedOn: Readonly<{
+        from?: Readonly<{ kind: string; id: string }>;
+        to?: Readonly<{ kind: string; id: string }>;
+      }>;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -113,6 +138,8 @@ export type ConstraintFenceViolation =
        */
       family: "composition";
       target: ClaimTarget;
+      /** The part holding more than one whole. */
+      part: Readonly<{ kind: string; id: string }>;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -141,6 +168,20 @@ export type ConstraintFenceViolation =
        */
       family: "compositionFutureWindow";
       edgeKind: string;
+      edgeIds: readonly string[];
+    }>
+  | Readonly<{
+      /**
+       * One part holding two or more non-deleted composition edges of a
+       * `population: "oneActive"` pair whose valid-time windows share an
+       * instant, so `store.asOf(t)` shows the part with two wholes — a state
+       * no write may leave (`COMPOSITION_WINDOW_OVERLAP`). `edgeIds` names
+       * every edge of the part that overlaps another. Untargeted like
+       * `compositionExistence`: no claim row records a window.
+       */
+      family: "compositionWindowOverlap";
+      partKind: string;
+      partId: string;
       edgeIds: readonly string[];
     }>
   | Readonly<{
@@ -363,6 +404,52 @@ function disjointnessViolations(
   }));
 }
 
+type EdgeContentionViolation = Extract<
+  ConstraintFenceViolation,
+  { family: "edgeCardinality" | "composition" }
+>;
+
+/** A contended-edge violation before its holder ids are attached. */
+type ContentionWithoutEdges =
+  EdgeContentionViolation extends infer Member ?
+    Member extends EdgeContentionViolation ?
+      Omit<Member, "edgeIds">
+    : never
+  : never;
+
+/**
+ * The plain-valued part of one contended edge axis: the family, the claim
+ * row's address, and the edge kind, direction and node(s) it is keyed on as
+ * kind names and ids. The row already knows which query found it (`scope` is
+ * set only by the composition query), so this never re-derives the family.
+ */
+function plainContention(
+  claim: ClaimEdgeCardinalityParams,
+  target: ClaimTarget,
+): ContentionWithoutEdges {
+  if (claim.scope !== undefined) {
+    return {
+      family: "composition",
+      target,
+      part: compositionClaimEndpoints(claim).part,
+    };
+  }
+  const { keyShape } = edgeCardinalitySpec(claim);
+  const from = { kind: claim.fromKind, id: claim.fromId };
+  const to = { kind: claim.toKind, id: claim.toId };
+  return {
+    family: "edgeCardinality",
+    target,
+    edgeKind: claim.edgeKind,
+    direction: claim.direction,
+    cardinality: claim.cardinality,
+    keyedOn:
+      keyShape === "from" ? { from }
+      : keyShape === "to" ? { to }
+      : { from, to },
+  };
+}
+
 /**
  * Live edges folded onto the cardinality axis each one would claim, reported
  * where an axis carries more than one holder.
@@ -386,7 +473,7 @@ function edgeCardinalityViolations(
     string,
     Readonly<{
       target: ClaimTarget;
-      family: "edgeCardinality" | "composition";
+      violation: ContentionWithoutEdges;
       edgeIds: Set<string>;
     }>
   >();
@@ -397,16 +484,16 @@ function edgeCardinalityViolations(
     // `exactOptionalPropertyTypes` refuses for `ClaimEdgeCardinalityParams`'
     // OPTIONAL `scope`.
     const { scope, ...rest } = row;
-    const target = edgeCardinalityClaimTarget({
+    const claim = {
       ...rest,
       graphId,
       ...(scope === undefined ? {} : { scope }),
-    });
-    const family = row.scope === undefined ? "edgeCardinality" : "composition";
+    };
+    const target = edgeCardinalityClaimTarget(claim);
     const identity = targetIdentity(target);
     const entry = byAxis.get(identity) ?? {
       target,
-      family,
+      violation: plainContention(claim, target),
       edgeIds: new Set<string>(),
     };
     entry.edgeIds.add(row.edgeId);
@@ -415,8 +502,7 @@ function edgeCardinalityViolations(
   return [...byAxis.values()]
     .filter((entry) => entry.edgeIds.size > 1)
     .map((entry) => ({
-      family: entry.family,
-      target: entry.target,
+      ...entry.violation,
       edgeIds: [...entry.edgeIds].toSorted((left, right) =>
         compareStrings(left, right),
       ),
@@ -453,6 +539,7 @@ const UNTARGETED_FAMILY_ORDER = [
   "edgeAcyclicity",
   "compositionExistence",
   "compositionFutureWindow",
+  "compositionWindowOverlap",
 ] as const;
 
 type ClaimTargetedViolation = Extract<
@@ -482,6 +569,9 @@ function untargetedOrderKey(violation: UntargetedViolation): string {
     case "compositionExistence": {
       return violation.partKind;
     }
+    case "compositionWindowOverlap": {
+      return nodeRefKey({ kind: violation.partKind, id: violation.partId });
+    }
     case "edgeAcyclicity": {
       return violation.relation;
     }
@@ -493,7 +583,8 @@ function untargetedOrderKey(violation: UntargetedViolation): string {
  * (their existing {@link compareClaimTargets} order), then the untargeted
  * families in {@link UNTARGETED_FAMILY_ORDER}, each ordered by its own key
  * (`edgeEndpointAssignability` and `compositionFutureWindow` by edge kind,
- * `compositionExistence` by part kind, `edgeAcyclicity` by relation).
+ * `compositionExistence` by part kind, `compositionWindowOverlap` by part,
+ * `edgeAcyclicity` by relation).
  */
 function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
@@ -646,8 +737,9 @@ export async function auditConstraintFences(
  * THE fence audit. Reads only; reports every claim axis whose population
  * already carries more than one live claimant, every edge kind whose live
  * rows sit outside every declared endpoint pair, every acyclic relation
- * already carrying a cycle, every live required part with no live whole, and
- * every composition row whose window starts or ends later than now.
+ * already carrying a cycle, every live required part with no live whole,
+ * every composition row whose window starts or ends later than now, and every
+ * part whose composition edges' valid-time windows overlap.
  *
  * The `edgeAcyclicity` family does NOT go through
  * `readConstraintFenceViolations` (the backend port every other family
@@ -707,12 +799,49 @@ export async function verifyConstraintFences(
     context.registry.compositionEdgeKinds(),
   );
 
+  const compositionWindowOverlap = await compositionWindowOverlapViolations(
+    context.registry,
+    context.backend,
+    context.graphId,
+    context.registry.compositionEdgeKinds(),
+  );
+
   return [
     ...claimBacked,
     ...acyclicity,
     ...compositionExistence,
     ...compositionFutureWindow,
+    ...compositionWindowOverlap,
   ].toSorted(compareConstraintFenceViolations);
+}
+
+/**
+ * The `compositionWindowOverlap` family: one violation per part whose
+ * composition edges' valid-time windows overlap, where one of the overlapping
+ * rows is of `edgeKinds` ({@link readCompositionWindowOverlaps} — the same
+ * window and the same holder scope the write path judges). Shared by this
+ * audit (every realizing edge kind) and the schema-commit preflight (the edge
+ * kinds of the pairs a commit adds), against the registry each one reads.
+ */
+export async function compositionWindowOverlapViolations(
+  registry: KindRegistry,
+  backend: GraphReadBackend,
+  graphId: string,
+  edgeKinds: readonly string[],
+): Promise<readonly ConstraintFenceViolation[]> {
+  if (edgeKinds.length === 0) return [];
+  const overlaps = await readCompositionWindowOverlaps(
+    registry,
+    backend,
+    graphId,
+    edgeKinds,
+  );
+  return overlaps.map((overlap) => ({
+    family: "compositionWindowOverlap" as const,
+    partKind: overlap.part.kind,
+    partId: overlap.part.id,
+    edgeIds: overlap.edgeIds,
+  }));
 }
 
 /**

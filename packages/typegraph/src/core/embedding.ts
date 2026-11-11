@@ -25,9 +25,15 @@ declare const EMBEDDING_BRAND: unique symbol;
  * At runtime this is just `readonly number[]`, but TypeScript can
  * distinguish it from regular arrays for query builder typing.
  */
-export type EmbeddingValue = readonly number[] & {
-  readonly [EMBEDDING_BRAND]: true;
-};
+export type EmbeddingValue = readonly number[] & EmbeddingBrand;
+
+/**
+ * The type-only tag {@link EmbeddingValue} carries on top of
+ * `readonly number[]`. A value carries no runtime trace of it, so a plain
+ * number array that satisfies an `embedding()` field's validation is a valid
+ * value of that field.
+ */
+export type EmbeddingBrand = Readonly<{ [EMBEDDING_BRAND]: true }>;
 
 // ============================================================
 // Embedding Metadata Symbol

@@ -1,3 +1,6 @@
+import { type z } from "zod";
+
+import { type EmbeddingBrand } from "../core/embedding";
 import { type AnyEdgeType, type NodeProps, type NodeType } from "../core/types";
 import { type CompositionRealization } from "../registry/composition-relation";
 
@@ -148,6 +151,82 @@ type LiteralKeysOf<T> = {
   string;
 
 /**
+ * The type-only tags a `Parent` value type carries with no runtime trace: a
+ * Zod `.brand()` tag, and the `embedding()` marker ({@link EmbeddingBrand}).
+ * A value satisfying the parent's schema at runtime carries them by
+ * construction, so the compile-time check grants them to the child's value
+ * rather than refusing a child whose own schema never stated them.
+ */
+type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (
+  Readonly<Record<typeof z.core.$brand, infer Tag>>
+) ?
+  Readonly<Record<typeof z.core.$brand, Tag>>
+: unknown) &
+  (NonNullable<Parent> extends EmbeddingBrand ? EmbeddingBrand : unknown);
+
+/**
+ * Values the type-level view never maps into: primitives (a branded primitive
+ * is an intersection with an object type, so it must stop here before the
+ * object arm), and built-ins whose members are methods.
+ */
+type OpaqueTypeLevelValue =
+  | string
+  | number
+  | bigint
+  | boolean
+  | symbol
+  | Date
+  | RegExp
+  | Error
+  | Promise<unknown>
+  | ReadonlyMap<unknown, unknown>
+  | ReadonlySet<unknown>
+  | ((...args: never[]) => unknown);
+
+type TypeLevelElement<Parent> =
+  NonNullable<Parent> extends readonly (infer Element)[] ? Element : unknown;
+
+/**
+ * `Child`'s value type as the compile-time check compares it with
+ * `Parent`'s, recursively through array elements and object properties:
+ *
+ * - a `readonly` array or tuple reads as its mutable form. `.readonly()`
+ *   freezes a parsed value without changing what it stores, so a
+ *   `z.array(z.string()).readonly()` child stores exactly the values a
+ *   `z.array(z.string())` parent does, and an `embedding()` child extends a
+ *   `z.array(z.number())` parent;
+ * - every {@link RuntimeInvisibleTags} tag `Parent` carries is granted, so a
+ *   plain `z.string()` child extends a `z.string().brand<"Email">()` parent
+ *   and a fixed-length number array extends an `embedding()`.
+ *
+ * Both are facts the registry's structural check cannot see either, so the
+ * compile-time check, the registry and `isTypeLevelSubtype` agree on them.
+ * A `null`/`undefined` member is kept as is: granting a tag to it would
+ * erase it, and a child that may omit what the parent requires would then
+ * pass.
+ */
+type TypeLevelChild<Child, Parent> =
+  Child extends null | undefined ? Child
+  : (Child extends OpaqueTypeLevelValue ? Child
+    : Child extends readonly (infer Element)[] ?
+      number extends Child["length"] ?
+        TypeLevelChild<Element, TypeLevelElement<Parent>>[]
+      : {
+          -readonly [Index in keyof Child]: TypeLevelChild<
+            Child[Index],
+            TypeLevelElement<Parent>
+          >;
+        }
+    : Child extends object ?
+      {
+        [Key in keyof Child]: Key extends keyof NonNullable<Parent> ?
+          TypeLevelChild<Child[Key], NonNullable<Parent>[Key]>
+        : Child[Key];
+      }
+    : Child) &
+      RuntimeInvisibleTags<Parent>;
+
+/**
  * Every key `Parent`'s schema declares that `Child`'s schema has no
  * compatible replacement for: a property `Child` is missing while `Parent`
  * requires it, or a property both declare whose `Child` type does not fit
@@ -166,11 +245,13 @@ type LiteralKeysOf<T> = {
  * one key at a time never constructs a weak object type, so it is immune to
  * that detector. Each side of the property comparison is tuple-wrapped
  * (`[Child[K]] extends [Parent[K]]`) to compare a union type as a whole
- * rather than distributing the conditional over its members.
+ * rather than distributing the conditional over its members. The child side
+ * is compared through {@link TypeLevelChild}, which reads a `readonly` array
+ * as mutable and grants the parent's type-only brands.
  */
 export type IncompatibleKeys<Child, Parent> = {
   [K in LiteralKeysOf<Parent>]-?: K extends keyof Child ?
-    [Child[K]] extends [Parent[K]] ?
+    [TypeLevelChild<Child[K], Parent[K]>] extends [Parent[K]] ?
       never
     : K
   : undefined extends Parent[K] ? never
@@ -179,28 +260,47 @@ export type IncompatibleKeys<Child, Parent> = {
   string;
 
 /**
- * Type-level refusal carrier for `subClassOf` / `equivalentTo` / `sameAs`:
- * printed in place of the parent/partner parameter when the child's schema
- * does not structurally extend it. A named object, not a branded `never`,
- * so the compiler error names the offending properties instead of printing
- * "not assignable to type 'never'" — the same idiom `UniqueAlias`
- * (`src/query/builder/types.ts`) already uses for a type-level refusal.
+ * The relation factory a {@link StructuralSubtypeMismatch} reports for, and
+ * the remedy it suggests: an equivalence that fails in one direction may
+ * still hold as a `subClassOf` in the other, while a subclass that is no
+ * structural subtype is a taxonomy, which `broader` models.
+ */
+type StructuralSubtypeMismatchWording = Readonly<{
+  subClassOf: Readonly<{
+    requirement: "the child's schema must extend the parent's";
+    fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
+  }>;
+  equivalentTo: Readonly<{
+    requirement: "each kind's schema must extend the other's, and the first named here does not extend the second";
+    fix: "Give the first kind these properties with compatible types, or declare subClassOf() in the one direction that holds.";
+  }>;
+}>;
+
+/**
+ * Type-level refusal carrier for `subClassOf` / `equivalentTo`: printed in
+ * place of the parent/partner parameter when the first kind's schema does not
+ * structurally extend the second's. A named object, not a branded `never`,
+ * so the compiler error names the relation, both kinds and the offending
+ * properties instead of printing "not assignable to type 'never'" — the same
+ * idiom `UniqueAlias` (`src/query/builder/types.ts`) already uses for a
+ * type-level refusal.
  */
 export type StructuralSubtypeMismatch<
+  Relation extends keyof StructuralSubtypeMismatchWording,
   ChildKind extends string,
   ParentKind extends string,
   Fields extends string,
 > = Readonly<{
-  __typegraphSubClassOfError: `subClassOf(${ChildKind}, ${ParentKind}): the child's schema must extend the parent's`;
+  __typegraphStructuralSubtypeError: `${Relation}(${ChildKind}, ${ParentKind}): ${StructuralSubtypeMismatchWording[Relation]["requirement"]}`;
   missingOrIncompatibleProperties: Fields;
-  fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
+  fix: StructuralSubtypeMismatchWording[Relation]["fix"];
 }>;
 
 /**
  * Resolves to `unknown` (a no-op intersection member) when `C`'s schema
  * output structurally extends `P`'s, or to a {@link StructuralSubtypeMismatch}
  * naming the incompatible fields otherwise. `NodeProps` is the Zod OUTPUT
- * type, so this sees exactly what `isStructuralSubtype`
+ * type, so this sees exactly what `isProjectedSchemaSubtype`
  * (`src/schema/structural-subtype.ts`) sees when applied to the same pair's
  * projected JSON Schema, modulo the refinements, transforms, and
  * value-level constraints that projection cannot represent —
@@ -225,6 +325,7 @@ export type StructuralSubtypeMismatch<
 export type SubClassOfCheck<C extends NodeType, P extends NodeType> =
   [IncompatibleKeys<NodeProps<C>, NodeProps<P>>] extends [never] ? unknown
   : StructuralSubtypeMismatch<
+      "subClassOf",
       C["kind"],
       P["kind"],
       IncompatibleKeys<NodeProps<C>, NodeProps<P>>
@@ -243,11 +344,13 @@ export type EquivalentToCheck<A extends NodeType, B extends NodeType> =
     [IncompatibleKeys<NodeProps<B>, NodeProps<A>>] extends [never] ?
       unknown
     : StructuralSubtypeMismatch<
+        "equivalentTo",
         B["kind"],
         A["kind"],
         IncompatibleKeys<NodeProps<B>, NodeProps<A>>
       >
   : StructuralSubtypeMismatch<
+      "equivalentTo",
       A["kind"],
       B["kind"],
       IncompatibleKeys<NodeProps<A>, NodeProps<B>>

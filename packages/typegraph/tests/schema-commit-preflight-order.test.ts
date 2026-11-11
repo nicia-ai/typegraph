@@ -48,6 +48,7 @@ function recordingTightening(
   return {
     run: recordingStep(calls, name),
     probedChanges: [],
+    tightenedEdgeKinds: [],
     newlyConstrainedAxes: [],
     uniquenessClaimGates: [],
     capabilityError: { code: "TEST", message: "test" },

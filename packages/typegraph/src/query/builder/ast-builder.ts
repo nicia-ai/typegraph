@@ -66,3 +66,21 @@ export function buildQueryAst(
     ...(state.fusion !== undefined && { fusion: state.fusion }),
   };
 }
+
+/**
+ * {@link buildQueryAst} for a terminal that hands the caller rows typed from
+ * the query's aliases: refuses first with the state's `rowTypeRefusal`, the
+ * refusal an alias owes when its static type does not admit every kind it
+ * scans (`resolveAliasKinds`, `./alias-expansion.ts`). The scalar
+ * `count()` / `exists()` terminals type no row and build through
+ * {@link buildQueryAst} directly.
+ *
+ * @throws ConfigurationError (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`)
+ */
+export function buildRowQueryAst(
+  config: QueryBuilderConfig,
+  state: QueryBuilderState,
+): QueryAst {
+  if (state.rowTypeRefusal !== undefined) throw state.rowTypeRefusal;
+  return buildQueryAst(config, state);
+}

@@ -68,6 +68,7 @@ export {
   type EdgeKinds,
   // Embedding type for vector search
   embedding,
+  type EmbeddingBrand,
   type EmbeddingSchema,
   type EmbeddingValue,
   externalRef,
@@ -143,7 +144,10 @@ export {
   type IdentityTransition,
   type IdentityTransitionCause,
   type IdentityTransitionCursor,
+  type IdentityTransitionCut,
   type IdentityTransitionHistory,
+  type IdentityTransitionPruneResult,
+  type IdentityTransitionRetention,
   type IdentityTransitionTransfer,
   type IdentityValidityWindow,
   type IdentityWriteSummary,
@@ -394,7 +398,6 @@ export type {
 export {
   // Individual relation factories (for convenience)
   broader,
-  compositionViaKind,
   // Transitive-closure utilities (reason over subClassOf/equivalentTo hierarchies)
   computeTransitiveClosure,
   // Core ontology module
@@ -421,6 +424,7 @@ export {
 export type {
   BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
+  CompositionConfigurationCode,
   CompositionCycleErrorDetails,
   CompositionErrorDetails,
   CompositionExistenceErrorDetails,
@@ -441,6 +445,7 @@ export type {
   IdentityEndpointValidityErrorDetails,
   IdentityReplayErrorDetails,
   IdentitySeparationViolationErrorDetails,
+  IdentityTransitionLogOperation,
   IdentityValidityWindowErrorDetails,
   InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
@@ -457,6 +462,7 @@ export type {
   RuntimeKindTokenFailure,
   SchemaContentConflictErrorDetails,
   SchemaMismatchErrorDetails,
+  SchemaTighteningRefusalDetails,
   StaleVersionErrorDetails,
   StoreNotInitializedErrorDetails,
   StoreNotInitializedReason,
@@ -474,6 +480,7 @@ export {
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
+  CompositionConfigurationError,
   CompositionCycleError,
   CompositionError,
   CompositionExistenceError,
@@ -714,16 +721,6 @@ export {
   isSchemaInitialized,
   registerGraphTemplate,
 } from "./schema";
-// The data checks a schema commit's ontology tightening owes. Named here so
-// a consumer narrowing `MigrationErrorDetails.changes[n].probes` or a
-// `ConstraintFenceViolation`'s `edgeEndpointAssignability` member (below)
-// can name every field's type without a subpath import. Also available from
-// the "./schema" subpath.
-export type {
-  OntologyDataProbe,
-  UniquenessComponentProbeGroup,
-} from "./schema";
-export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
 // The constraints a schema commit refuses to strand, for a consumer
 // narrowing `MigrationErrorDetails` on
 // `reason: "unique-constraint-requires-empty-kind"`. Also available from the
@@ -731,8 +728,9 @@ export { PROBE_VIOLATION_FAMILIES, probeCoversViolationFamily } from "./schema";
 export type { UniquenessClaimGate } from "./schema";
 // The axes a schema commit's edge-cardinality tightening owes, for a
 // consumer narrowing `MigrationErrorDetails` on
-// `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
-// ontology probe types above. Also available from the "./backend" subpath.
+// `reason: "edge-cardinality-tightening-violated"` or
+// `"ontology-tightening-violated"`. Also available from the "./backend"
+// subpath.
 // `CompositionClaimScope` is exported alongside it: it is `EdgeCardinalityDeclaration.scope`'s
 // only non-`undefined` member, so a consumer narrowing that field needs it
 // too, without reaching into `./backend/types` directly.
@@ -840,6 +838,8 @@ export type {
   MeasurableTransactionContext,
   Node,
   NodeBulkFindByIndexOptions,
+  NodeBulkGetOrCreateByConstraintItem,
+  NodeBulkGetOrCreateByConstraintOptions,
   NodeCollection,
   NodeCreateOptions,
   NodeDeleteOptions,
@@ -1013,8 +1013,16 @@ export {
 } from "./query";
 
 // The one expansion axis a `from`/`to` alias, a store-wide default, and
-// `search()` state (the default and search forms exclude `"narrower"`).
-export type { AliasExpansionAxis, DefaultAliasExpansionAxis } from "./query";
+// `search()` state (the default and search forms exclude `"narrower"`), the
+// options bag a `from`/`to` wrapper forwards, and the alias type a forwarded
+// bag resolves to.
+export type {
+  AliasExpansionAxis,
+  AliasExpansionOptions,
+  DefaultAliasExpansionAxis,
+  ExpansionAliasNodeType,
+  ForwardedExpansionAxes,
+} from "./query";
 export {
   DEFAULT_ALIAS_EXPANSION_AXIS,
   SEARCH_EXPANSION_DEFAULT,

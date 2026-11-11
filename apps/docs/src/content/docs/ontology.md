@@ -213,6 +213,76 @@ declare `broader(child, parent)` instead; see
 [Hierarchical (Concept Hierarchy)](#hierarchical-concept-hierarchy) below and
 `expansion: "narrower"` in [Source](/queries/source#expansion-narrower--kind-level-taxonomies).
 
+**What the compile-time check sees.** It compares each property's `z.infer`
+output type, so it catches every mismatch in shape, optionality and literal
+values, and none in length bounds, patterns, numeric bounds or refinements.
+Facts a value carries only in its type are not mismatches: a plain
+`z.string()` child extends a `z.string().brand<"Email">()` parent, a
+`z.array(z.string()).readonly()` child extends a `z.array(z.string())`
+parent, and `embedding(n)` and a plain number array extend each other, as the
+registry check accepts them. A refused `equivalentTo` names the direction that
+fails (`equivalentTo(A, B): each kind's schema must extend the other's, and
+the first named here does not extend the second`) and suggests declaring
+`subClassOf` in the direction that holds.
+
+**Predicting the verdict from tooling.** `isStructuralSubtype(childSchema,
+parentSchema)` and `isTypeLevelSubtype(childSchema, parentSchema)`, from
+`@nicia-ai/typegraph/schema`, take two Zod schemas (a kind's `schema`, or any
+two fields):
+
+```typescript
+import { isStructuralSubtype, isTypeLevelSubtype } from "@nicia-ai/typegraph/schema";
+
+isTypeLevelSubtype(Employee.schema, Person.schema); // will subClassOf(Employee, Person) compile?
+isStructuralSubtype(Employee.schema, Person.schema); // will the registry build it?
+```
+
+`isStructuralSubtype` is the registry's own verdict on the pair, computed the
+way a registry build computes it, so it sees what a JSON Schema document
+cannot (a strict or refined parent, a regex flag, a `.trim()`).
+`isTypeLevelSubtype` is the same comparison over only what the type checker
+sees. Whatever the first accepts, the second accepts too; the converse does
+not hold (`z.string()` under `z.string().min(3)` compiles and is refused at
+registry build). Both return one of four verdicts:
+
+| `verdict` | meaning |
+| --- | --- |
+| `"subtype"` | every value the child stores satisfies the parent |
+| `"not-subtype"` | a comparable pair that fails; `reason` and `path` name the field |
+| `"incomparable"` | the pair cannot be judged (`reason`, `path`); the registry refuses it like `"not-subtype"` |
+| `"unchecked"` | a side has no JSON Schema projection at all, so nothing was compared; the registry builds the pair unjudged |
+
+**Declaring relations through a generic helper.** `subClassOf` and
+`equivalentTo` check a pair whose types are known at the call. Inside a helper
+generic over its node types, the types are not known yet, so forward the check
+as the helper's own parameter constraint and pass the type arguments
+explicitly; the helper's callers are then checked as direct callers are, and
+its result keeps the endpoint literals that keep aliases exact:
+
+```typescript
+import {
+  equivalentTo,
+  type EquivalentToCheck,
+  type NodeType,
+  subClassOf,
+  type SubClassOfCheck,
+} from "@nicia-ai/typegraph";
+
+function declareSubclass<C extends NodeType, P extends NodeType>(
+  child: C,
+  parent: P & SubClassOfCheck<C, P>,
+) {
+  return subClassOf<C, P>(child, parent);
+}
+
+function declareEquivalent<A extends NodeType, B extends NodeType>(
+  first: A,
+  second: B & EquivalentToCheck<A, B>,
+) {
+  return equivalentTo<A, B>(first, second);
+}
+```
+
 **Query behavior — polymorphic by default:**
 
 A query against a kind other kinds declare themselves `subClassOf` returns
@@ -588,9 +658,9 @@ for the full order.
 #### Attaching a part: `partOf: { whole, via?, props? }`
 
 Every write that can give a part a whole takes the same attachment value:
-`create`, `bulkCreate` (per item), `getOrCreateByConstraint` /
-`bulkGetOrCreateByConstraint`, and
-[`reparent`](#reparent-moving-a-part-to-a-new-whole).
+`create`, `bulkCreate` (per item), `getOrCreateByConstraint`,
+`bulkGetOrCreateByConstraint` (per item, so one batch can place parts under
+different wholes), and [`reparent`](#reparent-moving-a-part-to-a-new-whole).
 
 ```typescript
 const chapter = await store.nodes.Chapter.create(
@@ -624,10 +694,23 @@ leaves nothing of the refused create behind.
   a variable annotated `readonly OntologyRelation[]`, the type accepts any
   node kind of the graph instead. The runtime check is authoritative either
   way: a pair that is not declared between the two kinds raises
-  `ConfigurationError` (`details.code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+  `CompositionConfigurationError` (`code: "COMPOSITION_WHOLE_NOT_DECLARED"`).
+  That class is a `ConfigurationError` whose `code` is the composition code
+  itself (also kept on `details.code`): every composition refusal —
+  `CompositionError`, `CompositionExistenceError` and
+  `CompositionConfigurationError` — carries its `COMPOSITION_*` code on
+  `error.code`.
   `store.getNodeCollection(kind)` takes any kind string, and a
   `StoreProjection` carries the same whole kinds its graph declares for each
-  projected kind.
+  projected kind. A helper typed by the node type alone,
+  `NodeCollection<typeof Section, "section_title">`, accepts
+  `store.nodes.Section` and attaches through it with any `{ kind, id }`
+  whole — the narrowing is the third type parameter's, so spell
+  `NodeCollection<typeof Section, "section_title", CompositionWholeReference<typeof graph, "Section">>`
+  to keep it. A standalone `CompositionAttachment<typeof paragraphOf>` value
+  defaults its whole to any `{ kind, id }`, so to pass it to a typed
+  collection's `partOf`, type its second parameter as
+  `CompositionWholeReference<typeof graph, "Paragraph">` too.
 - **`via`** names the realizing edge. Pass the edge's type when you have it
   (a typo is a compile error, the same check `partOf`/`hasPart` apply) or its
   kind string when the edge is chosen at runtime. It is required only when the
@@ -644,10 +727,16 @@ leaves nothing of the refused create behind.
   bound or an inverted pair is refused with `ValidationError` on every
   surface, including a get-or-create that finds the attachment already held.
   On a `population: "oneActive"` pair only an open-ended edge is a
-  membership, so stating `validTo` there is refused (issue path
-  `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): the edge
-  it would write attaches nothing. Record a past membership as history with
+  membership, so stating `validTo` there is refused with `CompositionError`
+  (`COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`, `situation:
+  "boundedAttachment"`): the edge it would write attaches nothing. Record a past membership as history with
   `store.edges.<via>.create(...)` and a `validTo` at or before now instead.
+  That history row must not overlap any other composition edge of the same
+  part on a `"oneActive"` pair: windows are half-open (`[validFrom,
+  validTo)`, so one that ends where another starts shares no instant), and a
+  write that would leave two of them sharing an instant is refused with
+  `CompositionError` (`COMPOSITION_WINDOW_OVERLAP`, see
+  [One whole at every instant](#one-whole-at-every-instant)).
   No composition window may start or end later than the write that states
   it (see [Choosing a containment tier](#choosing-a-containment-tier)): a
   later `validFrom` or `validTo` refuses with `CompositionError`
@@ -716,7 +805,7 @@ population, which is also what decides how the old attachment is retired:
 | population | retire | valid-time read at any instant before the move |
 | --- | --- | --- |
 | `"one"` | the composition edge is deleted | the attachment is gone from every `store.asOf(t)` read, at every coordinate — a `"one"` binding persists for the row's whole life, ended or not, so an ended row would still read as an attachment |
-| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two |
+| `"oneActive"` | the window is ended at the move instant | the previous membership stays readable as valid-time history; because the same instant ends the old window and opens the new one, no `store.asOf(t)` coordinate shows the part with zero wholes or with two. A part with no current whole has no window to split: a backdated `at` that lands inside one of its history rows is refused with `CompositionError` (`COMPOSITION_WINDOW_OVERLAP`) |
 
 A `"oneActive"` window cannot end before it starts, so the move instant is
 judged against the incumbent's `validFrom`. An `at` equal to it retires a
@@ -745,13 +834,108 @@ than being silently dropped, since the no-op performs no write to apply it —
 `store.edges.<via>.update(...)` changes the edge directly. A stated `at` is
 checked the same way: the no-op opens no new window, so `at` stands only when
 it equals the realizing edge's stored `validFrom`, and any other instant is
-refused with `ValidationError` under `options.at`
-(`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`), as a differing `partOf.validFrom`
-is on get-or-create. An omitted `at` states nothing and is never refused here.
-A kind that
+refused with `CompositionExistenceError`
+(`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `situation: "window"`, `option:
+"options.at"`), as a differing `partOf.validFrom` is on get-or-create. An
+omitted `at` states nothing and is never refused here. A kind that
 declares no `partOf`/`hasPart` pair at all raises
-`ConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
+`CompositionConfigurationError` (`COMPOSITION_NOT_A_PART`); a missing or already-deleted
 part raises `NodeNotFoundError`.
+
+#### Reading a part's whole, and detaching an optional part
+
+There is no dedicated `wholeOf` or `detach` verb: both are one call on
+surfaces that already exist. The whole a part holds now — through whichever
+realizing edge holds it — is a one-hop `wholes()`:
+
+```typescript
+const [held] = await store
+  .query()
+  .from("Chapter", "chapter")
+  .whereNode("chapter", (chapter) => chapter.id.eq(chapterId))
+  .wholes("whole", { maxHops: 1 })
+  .select((ctx) => ({
+    whole: { kind: ctx.whole.kind, id: ctx.whole.id },
+    edgeKind: ctx.whole_edge.kind,
+    edgeId: ctx.whole_edge.id,
+  }))
+  .execute();
+// `held` is undefined when the chapter has no current whole.
+```
+
+Read it through `store.asOf(t)` for the whole the part held at `t`. To
+detach an **optional** part, retire the realizing edge that holds it the way
+its population retires one, which is the rule `reparent` applies to an
+incumbent:
+
+```typescript
+// population "oneActive": end the window, keeping the membership as history.
+await store.edges.chapterOf.update(edgeId, {}, {
+  validTo: new Date().toISOString(),
+});
+// population "one": delete the edge (an ended row would still bind).
+await store.edges.chapterOf.delete(edgeId);
+```
+
+A `validTo` later than the store's clock is refused
+(`COMPOSITION_VALIDITY_FUTURE_END`), so state the current time or earlier. A
+part declared `existence: "required"` cannot be detached at all
+(`COMPOSITION_DETACH_REFUSED`): move it with `reparent`, or delete the part.
+
+#### One whole at every instant
+
+On a `population: "oneActive"` pair a part keeps its history: every ended
+realizing edge is a past membership, and `store.asOf(t)` with `parts()`,
+`wholes()` or `subgraph({ composition })` returns each edge whose window
+holds `t`. The one-whole rule therefore holds at every valid-time coordinate,
+not only now: **for one part, the windows of its composition edges never
+overlap.**
+
+- A window is half-open, `[validFrom, validTo)`. Two windows that only touch
+  — one ends where the next starts, as a `reparent` leaves them — share no
+  instant. A zero-width window (`validFrom` equal to `validTo`) reads at no
+  instant and overlaps nothing. A row stored with no `validFrom` (a history
+  row born ended without one) reads at every instant before its `validTo`.
+- The rows judged are the ones a valid-time read can return for the part:
+  every non-deleted edge of every realizing edge kind that has the node on
+  its part side, in either orientation — the same scope as the one-whole
+  claim. A soft-deleted edge reads at no coordinate and holds no window, so
+  resurrecting it is judged like a create.
+- Every write that adds or widens a window is judged as the state it leaves,
+  before its first statement: `store.edges.<via>.create`, `bulkCreate`,
+  `bulkInsert`, `bulkUpsertById`, `getOrCreateByEndpoints` and its bulk
+  form, an edge `update` that states a later `validTo` or `clearValidTo`, a
+  resurrection, `partOf` on a node create or get-or-create, `reparent` and
+  `bulkReparent`, and `importGraph`. A batch is judged as a whole, so it may
+  end one row and add the next in the same call. A write that would leave two
+  windows sharing an instant is refused with `CompositionError`
+  (`COMPOSITION_WINDOW_OVERLAP`, `situation: "windowOverlap"`). Its details
+  name the written edge's kind, id and window, and the other edge's kind, id,
+  whole and window (`incumbentEdgeKind`, `incumbentEdgeId`,
+  `incumbentWholeKind`, `incumbentWholeId`, `incumbentValidFrom`,
+  `incumbentValidTo`; an omitted bound is unbounded). An import reports it
+  as that row's per-row error, so an archive whose history does not overlap
+  restores in any row order.
+- The ordinary attach and move cost nothing extra. An attach whose
+  `validFrom` the write stamps starts at or after every stored window's end,
+  because no composition window ends later than the write that stated it,
+  and a `reparent` splits its incumbent's window at the move instant. Any
+  other write — a backdated attach, a history row, a widened or reopened
+  window, a resurrection, a `reparent` of a part with no current whole —
+  reads the part's stored edges under the same per-graph write fence every
+  composition write already takes, so two concurrent writers of one part's
+  history are serialized.
+- `population: "one"` is unchanged: its claim already holds a part to one
+  row for the row's whole life.
+
+`store.verifyConstraintFences()` reports a part whose stored windows overlap
+as `compositionWindowOverlap` (`partKind`, `partId` and the overlapping
+`edgeIds`) — a state only a write beneath the store, or rows written before
+their edge kind realized a pair, can leave. A schema commit that declares a
+pair over such rows is refused until they are repaired
+([`compositionWindowOverlap`](/schema-evolution#ontology-tightenings-are-checked-against-your-data)).
+To repair one, end or delete one of the overlapping edges so the windows
+abut.
 
 #### `partOf` on get-or-create is a postcondition
 
@@ -766,7 +950,7 @@ optional and required parts alike, and most of its outcomes are successes:
 | a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
 | a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
 | a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
-| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `ValidationError` (issue path `partOf.validFrom` or `partOf.validTo`, code `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`) — the same rule as `props` | — |
+| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `CompositionExistenceError` (`situation: "window"`, `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `option` naming `partOf.validFrom` or `partOf.validTo`) — the same rule as `props` | — |
 | a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
 | a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
 
@@ -780,7 +964,7 @@ two concurrent calls naming different wholes for one part end with exactly
 one attachment and one `situation: "existing"` refusal, never a silent move.
 
 The attachment is resolved before the match is read, so the
-`ConfigurationError` refusals above (`COMPOSITION_WHOLE_NOT_DECLARED`,
+`CompositionConfigurationError` refusals above (`COMPOSITION_WHOLE_NOT_DECLARED`,
 `COMPOSITION_VIA_NOT_DECLARED`, `COMPOSITION_VIA_AMBIGUOUS`) fire identically
 on a found node and on a created one. On the `ifExists: "update"` and
 resurrection legs every read the attachment owes runs before the property
@@ -789,7 +973,13 @@ a refused property update (a unique conflict, a validation error) leaves the
 attachment and its history untouched — even for a caller that catches the
 error inside an enclosing `store.transaction(...)`.
 
-`bulkGetOrCreateByConstraint` applies the same rule to the batch as a whole.
+`bulkGetOrCreateByConstraint` takes `partOf` on each item
+(`[{ props, partOf }]`) and applies the same rule to the batch as a whole.
+Two items that resolve to the same constraint key resolve to one node, so
+they must state the same attachment (or none); a batch where they differ is
+refused with `ValidationError` (issue path `items[<i>].partOf`) before it
+reads anything, and a `partOf` passed in the batch options instead of on the
+items is refused (issue path `options.partOf`) rather than ignored.
 Before its first write it reaches, for **every** item whose constraint
 matched an existing node, each verdict a read can decide:
 
@@ -1135,6 +1325,11 @@ Tier 1 is enforced, in full, at write time:
   history row created, imported or restored still ended is no member and
   closes no cycle, while reopening an ended row (`clearValidTo`) puts it back
   and is probed like a create.
+- **One whole at every instant.** On a `population: "oneActive"` pair, the
+  valid-time windows of one part's composition edges never overlap — across
+  every realizing edge kind and both orientations, the same scope as the
+  one-whole claim — so no `store.asOf(t)` read shows the part with two
+  wholes. See [One whole at every instant](#one-whole-at-every-instant).
 - **One row, one fact.** A composition edge's window never starts or ends
   later than the write that states it — every write path refuses one with
   `CompositionError` (`COMPOSITION_VALIDITY_FUTURE_START`,

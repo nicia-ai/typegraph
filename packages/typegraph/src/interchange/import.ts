@@ -108,16 +108,13 @@ import {
 } from "../errors";
 import { zodIssuesToValidationIssues } from "../errors/validation";
 import {
-  assertIdentityTransitionsMonotone,
+  createIdentityTransitionShapeCheck,
   IDENTITY_IMPORT_FAILED_ASSERTION,
   IDENTITY_IMPORT_PROGRESS,
   isIdentityTransitionRestore,
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
-import {
-  type IdentityRestoreBaseline,
-  identityTransitionLogUnavailableError,
-} from "../identity/transition-log";
+import { identityTransitionLogUnavailableError } from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { orientCompositionEndpoints } from "../registry/composition-relation";
 import { type KindRegistry } from "../registry/kind-registry";
@@ -127,6 +124,7 @@ import {
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
 import { edgeInsertClaims } from "../store/claims/composition-claims";
+import { assertCompositionWindowsDisjoint } from "../store/claims/composition-windows";
 import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
@@ -497,14 +495,6 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
-  /**
-   * The destination as it stood before the import began, when the caller
-   * already read it: a streamed import reads it once, ahead of its first
-   * chunk, and hands it to the chunk that restores transitions. Absent for a
-   * single-document import, whose one attempt reads it itself before its
-   * first write.
-   */
-  identityRestoreBaseline?: IdentityRestoreBaseline | undefined;
 }>;
 
 /**
@@ -580,14 +570,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     endpointLiveness: new Map<string, boolean>(),
     endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),
   };
-  // Before the first row: whether this destination has identity history of
-  // its own is a fact about it BEFORE this import, and the node and assertion
-  // writes below record transitions of their own.
-  const identityRestoreBaseline =
-    inputs.identityRestoreBaseline ??
-    (identitySectionRestoresTransitions(inputs.data.identity) ?
-      await inputs.runtime.readIdentityRestoreBaselineAtTarget(target)
-    : undefined);
   await processNodes(
     frame,
     inputs.graphId,
@@ -640,7 +622,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
       target,
       inputs.graphId,
       inputs.data.identity,
-      identityRestoreBaseline,
       result,
       errors,
     );
@@ -652,7 +633,6 @@ async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
   options: ResolvedImportOptions,
-  identityRestoreBaseline?: IdentityRestoreBaseline,
 ): Promise<ImportResult> {
   // Reject an identity payload aimed at an identity-disabled graph, and
   // runtime-validate the (bounded) identity section, BEFORE any entity write —
@@ -665,7 +645,7 @@ async function importGraphData<G extends GraphDef>(
       (data.identity.transitions?.length ?? 0) > 0,
       data.identity.retention,
     );
-    assertIdentityTransitionsMonotone(data.identity.transitions ?? []);
+    createIdentityTransitionShapeCheck()(data.identity.transitions ?? []);
   }
   assertIdentityTransitionsRestoreSupported(
     store,
@@ -744,7 +724,6 @@ async function importGraphData<G extends GraphDef>(
     batchPointRead,
     uniqueSidecarBatch,
     statementExecution,
-    identityRestoreBaseline,
   };
 
   // One transaction on a transactional backend; runs directly otherwise, with
@@ -890,15 +869,10 @@ export async function importGraphStream<G extends GraphDef>(
   let receivedEdges = false;
   let receivedIdentity = false;
   let receivedIdentityTransitions = false;
-  // The last revision a transitions chunk carried, so the next one is held
-  // to the same non-decreasing order a single document is.
-  let lastTransitionRevision = Number.NEGATIVE_INFINITY;
-  // The destination before this stream's first chunk, when the header
-  // announces an archival transition restore. Read there, once: every chunk
-  // commits on its own, so by the time the transitions chunk runs the
-  // destination already holds the transitions this stream's own node and
-  // assertion chunks recorded.
-  let identityRestoreBaseline: IdentityRestoreBaseline | undefined;
+  // One shape check for the whole stream, so every transitions chunk is held
+  // to the same order and id uniqueness a single document is, across chunk
+  // boundaries.
+  const checkTransitionShape = createIdentityTransitionShapeCheck();
   let releaseImportLease: (() => void) | undefined;
 
   try {
@@ -968,12 +942,6 @@ export async function importGraphStream<G extends GraphDef>(
             chunk.header.identity?.hasTransitions === true,
             chunk.header.identity?.retention,
           );
-          if (streamHeaderAnnouncesRestore(chunk.header)) {
-            identityRestoreBaseline =
-              await storeRuntime(store).readIdentityRestoreBaselineAtTarget(
-                targetBackend,
-              );
-          }
           header = chunk.header;
           break;
         }
@@ -1078,22 +1046,18 @@ export async function importGraphStream<G extends GraphDef>(
               "Graph interchange stream emitted identity transitions without an identity header.",
             );
           }
-          // The destination baseline was read at the header, before any chunk
-          // wrote. Transitions the header never announced have no baseline to
-          // be restored against, and applying them without one would drop the
-          // retention watermark an announced stream sets.
+          // The header is the only place a stream announces a restore before
+          // its first write — the history-off refusal depends on it — so
+          // transitions it never announced are refused rather than restored.
           if (
-            identityRestoreBaseline === undefined &&
+            !streamHeaderAnnouncesRestore(header) &&
             chunk.transitions.length > 0
           ) {
             throw new Error(
               "Graph interchange stream emitted identity transitions its header did not announce (identity.hasTransitions).",
             );
           }
-          lastTransitionRevision = assertIdentityTransitionsMonotone(
-            chunk.transitions,
-            lastTransitionRevision,
-          );
+          checkTransitionShape(chunk.transitions);
           receivedIdentityTransitions = true;
           mergeImportResult(
             result,
@@ -1101,7 +1065,6 @@ export async function importGraphStream<G extends GraphDef>(
               store,
               graphDataForChunk(header, [], [], [], chunk.transitions),
               { ...options, refreshStatistics: false },
-              identityRestoreBaseline,
             ),
           );
           throwIfStreamChunkFailed(result, options);
@@ -1344,9 +1307,9 @@ function assertIdentityImportSupported<G extends GraphDef>(
  * Rejects an archival transitions/retention payload aimed at a store that
  * keeps no TypeGraph transition log (history off, or engine-native recorded
  * time) BEFORE any entity write. Whether a payload is a restore at all is
- * {@link isIdentityTransitionRestore}'s decision — the same one the baseline
- * read and the restore itself take — so a document this guard lets through is
- * never refused later for being a restore.
+ * {@link isIdentityTransitionRestore}'s decision — the same one the restore
+ * itself takes — so a document this guard lets through is never refused later
+ * for being a restore.
  *
  * `importIdentityTransitionsAtTarget` (`store.ts`) raises the same
  * `IdentityReplayError` (both gate on TypeGraph capture, never the public
@@ -1378,6 +1341,7 @@ function assertIdentityTransitionsRestoreSupported<G extends GraphDef>(
     throw identityTransitionLogUnavailableError(
       store.graphId,
       store.recordedTimeOwnership,
+      "archival transition restore",
     );
   }
 }
@@ -1440,8 +1404,7 @@ function streamHeaderAnnouncesRestore(header: GraphDataHeader): boolean {
  * The refusal for a stream whose header announced a transition restore but
  * that ended without the `identity-transitions` chunk carrying it: a
  * truncated stream, or a writer that left out the trailing chunk. Accepting
- * it would drop the transitions and the retention watermark the header
- * promised. Raised at the end of the stream, after the earlier chunks
+ * it would drop the transitions and the retention cut the header promised. Raised at the end of the stream, after the earlier chunks
  * committed, because only the end shows the chunk is missing.
  */
 function streamTransitionsMissingError(): ValidationError {
@@ -1641,7 +1604,6 @@ async function importIdentitySection<G extends GraphDef>(
   target: IdentityTarget,
   graphId: string,
   identity: NonNullable<GraphData["identity"]>,
-  restoreBaseline: IdentityRestoreBaseline | undefined,
   result: ImportResult,
   errors: ImportError[],
 ): Promise<void> {
@@ -1661,12 +1623,7 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
-  await importIdentityTransitionsSection(
-    runtime,
-    target,
-    identity,
-    restoreBaseline,
-  );
+  await importIdentityTransitionsSection(runtime, target, identity);
 }
 
 /**
@@ -1682,36 +1639,24 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
   target: IdentityTarget,
   identity: NonNullable<GraphData["identity"]>,
-  restoreBaseline: IdentityRestoreBaseline | undefined,
 ): Promise<void> {
-  if (!identitySectionRestoresTransitions(identity)) return;
+  const { transitions = [], retention } = identity;
+  if (
+    !isIdentityTransitionRestore(
+      transitions.length > 0,
+      retention?.prunedBeforeRevision,
+    )
+  )
+    return;
   await runtime.importIdentityTransitionsAtTarget(
     target,
-    identity.transitions ?? [],
-    identity.retention?.prunedBeforeRevision,
-    requireDefined(
-      restoreBaseline,
-      "an archival transition restore reached its write with no destination baseline",
+    transitions,
+    retention === undefined ? undefined : (
+      {
+        revision: retention.prunedBeforeRevision,
+        recordedAt: retention.prunedBeforeRecordedAt,
+      }
     ),
-  );
-}
-
-/**
- * Whether an identity section restores transitions (see
- * {@link isIdentityTransitionRestore}), and so whether the import owes the
- * destination's {@link IdentityRestoreBaseline}: both the baseline read
- * (before the import's first write) and the restore itself (after its last)
- * decide on it, so neither runs without the other.
- */
-function identitySectionRestoresTransitions(
-  identity: GraphData["identity"],
-): boolean {
-  return (
-    identity !== undefined &&
-    isIdentityTransitionRestore(
-      (identity.transitions?.length ?? 0) > 0,
-      identity.retention?.prunedBeforeRevision,
-    )
   );
 }
 
@@ -2918,6 +2863,24 @@ async function updateImportedEdge(
       if (!(error instanceof CompositionExistenceError)) throw error;
       return `${error.code}: ${error.message}`;
     }
+  }
+  // A document's later `validTo` on an already-ended row widens its window.
+  try {
+    await assertCompositionWindowsDisjoint(
+      { graphId, registry, lock: frame.lock },
+      frame.target,
+      {
+        revisions: [
+          {
+            before: existing,
+            after: { ...existing, valid_to: edge.validTo ?? existing.valid_to },
+          },
+        ],
+      },
+    );
+  } catch (error) {
+    if (!(error instanceof CompositionError)) throw error;
+    return `${error.code}: ${error.message}`;
   }
   const { session } = frame;
   try {
@@ -4561,6 +4524,21 @@ async function processEdge(
   );
   if (!cardinalityResult.ok) {
     return { status: "error", error: cardinalityResult.error };
+  }
+
+  // The composition window decision, against the rows already stored — this
+  // path writes each edge as it goes, so a document's earlier history rows of
+  // the same part are among them, and an archive whose history does not
+  // overlap restores whatever order it lists the rows in.
+  try {
+    await assertCompositionWindowsDisjoint(
+      { graphId, registry, lock: frame.lock },
+      frame.target,
+      { inserts: [params] },
+    );
+  } catch (error) {
+    if (!(error instanceof CompositionError)) throw error;
+    return { status: "error", error: `${error.code}: ${error.message}` };
   }
 
   // Acyclicity is checked AFTER the row lands, inside the same

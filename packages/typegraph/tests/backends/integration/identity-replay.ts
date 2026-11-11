@@ -18,6 +18,7 @@ import {
   defineGraph,
   defineGraphExtension,
   defineNode,
+  GraphAllocationMismatchError,
   IdentityReplayError,
   pruneIdentityTransitions,
   type TransitionPageCursor,
@@ -41,6 +42,8 @@ import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   completenessReason,
+  nativeRecorded,
+  restoredTruncatedBeforeOf,
   truncatedBeforeOf,
 } from "../../identity-history-completeness";
 import { type IntegrationTestContext } from "./test-context";
@@ -181,6 +184,58 @@ async function provisionPagedLineage(context: IntegrationTestContext) {
   return { store, a, firstPage, cursor };
 }
 
+/**
+ * Two graphs on one backend with the same nodes and the same history,
+ * so an instant or cursor from one names a real position on the other's
+ * axis: read there, it would silently answer (or prune) the wrong range.
+ */
+async function twoGraphsWithHistory(
+  context: IntegrationTestContext,
+  suffix: string,
+) {
+  const graphs = await Promise.all(
+    ["own", "foreign"].map((side) =>
+      provisionDepartedLineageStore(
+        context,
+        departedLineageGraph(`identity_owned_instants_${suffix}_${side}`),
+      ),
+    ),
+  );
+  const [store, foreign] = graphs as [
+    DepartedLineageStore,
+    DepartedLineageStore,
+  ];
+  const [a, b, c] = ["oi-a", "oi-b", "oi-c"].map((id) => personRef(id)) as [
+    ReturnType<typeof personRef>,
+    ReturnType<typeof personRef>,
+    ReturnType<typeof personRef>,
+  ];
+  for (const graph of graphs) {
+    for (const ref of [a, b, c]) {
+      await graph.nodes.Person.create({}, { id: ref.id });
+    }
+    await graph.identity.assertSame(a, b);
+    await graph.identity.assertSame(b, c);
+  }
+  const foreignNow = requireDefined(await foreign.recordedNow());
+  // The foreign instant names a revision this graph also has, so only the
+  // ownership check stands between it and a read of the wrong range.
+  expect(recordedInstantRevision(foreignNow)).toBe(
+    recordedInstantRevision(requireDefined(await store.recordedNow())),
+  );
+  return { store, foreign, a, foreignNow };
+}
+
+/** The error `read` rejects with; a read that resolves fails the test. */
+async function refusal(read: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await read();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the read to be refused, but it resolved.");
+}
+
 export function registerIdentityReplayIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -198,9 +253,11 @@ export function registerIdentityReplayIntegrationTests(
       const clock = requireDefined(await store.recordedNow());
       const clockRevision = recordedInstantRevision(clock);
       const wallTime = recordedInstantWallTime(clock);
+      const owner = recordedInstantOwner(clock);
       const beyondNextCommit = createRecordedInstant(
         clockRevision + 2,
         wallTime,
+        owner,
       );
 
       const refusal = await pruneIdentityTransitions(store, {
@@ -223,7 +280,11 @@ export function registerIdentityReplayIntegrationTests(
 
       // The next commit's own revision is the highest truthful watermark:
       // everything recorded so far is below it, everything later is not.
-      const nextCommit = createRecordedInstant(clockRevision + 1, wallTime);
+      const nextCommit = createRecordedInstant(
+        clockRevision + 1,
+        wallTime,
+        owner,
+      );
       const pruned = await pruneIdentityTransitions(store, {
         beforeRecorded: nextCommit,
       });
@@ -338,12 +399,14 @@ export function registerIdentityReplayIntegrationTests(
         .map((transition) =>
           recordedInstantRevision(asRecordedInstant(transition.recorded)),
         );
+      const targetOwner = recordedInstantOwner(targetClock);
       const highestRestored = Math.max(...restoredRevisions);
       expect(highestRestored).toBeGreaterThanOrEqual(nextRevision);
 
       const beyondEverything = createRecordedInstant(
         highestRestored + 2,
         recordedInstantWallTime(targetClock),
+        targetOwner,
       );
       const refusal = await pruneIdentityTransitions(target, {
         beforeRecorded: beyondEverything,
@@ -354,11 +417,13 @@ export function registerIdentityReplayIntegrationTests(
         highestPrunableRevision: highestRestored + 1,
       });
 
+      const cutAboveClock = createRecordedInstant(
+        highestRestored + 1,
+        recordedInstantWallTime(targetClock),
+        targetOwner,
+      );
       const pruned = await pruneIdentityTransitions(target, {
-        beforeRecorded: createRecordedInstant(
-          highestRestored + 1,
-          recordedInstantWallTime(targetClock),
-        ),
+        beforeRecorded: cutAboveClock,
       });
       expect(pruned.prunedBeforeRevision).toBe(nextRevision);
       expect(pruned.pruned).toBeGreaterThanOrEqual(restoredRevisions.length);
@@ -367,6 +432,14 @@ export function registerIdentityReplayIntegrationTests(
       expect(
         completenessReason(after, "unattributed-restored"),
       ).toBeUndefined();
+      // The restored rows the prune deleted above the clamped watermark are
+      // reported through the restored cut, on their own raw revisions.
+      expect(restoredTruncatedBeforeOf(after)).toBe(
+        createRecordedInstant(
+          highestRestored + 1,
+          recordedInstantWallTime(targetClock),
+        ),
+      );
 
       // The watermark stays on the destination's own axis, so its next
       // commit is not reported as pruned.
@@ -385,9 +458,123 @@ export function registerIdentityReplayIntegrationTests(
     });
   });
 
-  describe("archival restore sets one watermark on either entry point", () => {
+  describe("transition-log instants are refused unless this graph allocated them", () => {
+    it("refuses another graph's instant as fromRecorded / toRecorded, as asOfRecorded does", async () => {
+      const { store, a, foreignNow } = await twoGraphsWithHistory(
+        context,
+        "window",
+      );
+      const asOf = await refusal(() =>
+        store.asOfRecorded(foreignNow).identity.membersOf(a),
+      );
+      expect(asOf).toBeInstanceOf(GraphAllocationMismatchError);
+      for (const options of [
+        { fromRecorded: foreignNow },
+        { toRecorded: foreignNow },
+      ]) {
+        for (const read of [
+          () => store.identity.transitionsOf(a, options),
+          () => store.identity.replay(a, options),
+        ]) {
+          const error = await refusal(read);
+          console.info("foreign window refusal", options, error);
+          expect(error).toBeInstanceOf(GraphAllocationMismatchError);
+          expect((error as GraphAllocationMismatchError).code).toBe(
+            (asOf as GraphAllocationMismatchError).code,
+          );
+        }
+      }
+    });
+
+    it("refuses an unowned (legacy or restored-form) instant as a window bound, as asOfRecorded does", async () => {
+      const { store, a } = await twoGraphsWithHistory(context, "unowned");
+      const now = requireDefined(await store.recordedNow());
+      const unowned = createRecordedInstant(
+        recordedInstantRevision(now),
+        recordedInstantWallTime(now),
+      );
+      const asOf = await refusal(() =>
+        store.asOfRecorded(unowned).identity.membersOf(a),
+      );
+      expect(asOf).toMatchObject({
+        details: { code: "RECORDED_ANCHOR_UNBOUND" },
+      });
+      for (const read of [
+        () => store.identity.transitionsOf(a, { fromRecorded: unowned }),
+        () => store.identity.replay(a, { toRecorded: unowned }),
+      ]) {
+        expect(await refusal(read)).toMatchObject({
+          details: { code: "RECORDED_ANCHOR_UNBOUND" },
+        });
+      }
+    });
+
+    it("refuses a page cursor another graph minted for the same reference", async () => {
+      const { store, foreign, a } = await twoGraphsWithHistory(
+        context,
+        "cursor",
+      );
+      const foreignPage = await foreign.identity.transitionsOf(a, {
+        limit: 1,
+      });
+      const foreignCursor = requireDefined(foreignPage.nextCursor);
+      // This graph's own cursor for the same position is accepted.
+      const ownPage = await store.identity.transitionsOf(a, { limit: 1 });
+      await expect(
+        store.identity.transitionsOf(a, {
+          cursor: requireDefined(ownPage.nextCursor),
+        }),
+      ).resolves.toBeDefined();
+      for (const read of [
+        () => store.identity.transitionsOf(a, { cursor: foreignCursor }),
+        () => store.identity.replay(a, { cursor: foreignCursor }),
+      ]) {
+        expect(await refusal(read)).toBeInstanceOf(
+          GraphAllocationMismatchError,
+        );
+      }
+    });
+
+    it("refuses a prune at another graph's or an unowned instant, deleting nothing and leaving the watermark alone", async () => {
+      const { store, a, foreignNow } = await twoGraphsWithHistory(
+        context,
+        "prune",
+      );
+      const before = await store.identity.transitionsOf(a);
+      expect(before.transitions).toHaveLength(2);
+      expect(before.completeness).toEqual({ status: "complete" });
+      const unowned = createRecordedInstant(
+        recordedInstantRevision(foreignNow),
+        recordedInstantWallTime(foreignNow),
+      );
+
+      const foreignPrune = await refusal(() =>
+        pruneIdentityTransitions(store, { beforeRecorded: foreignNow }),
+      );
+      expect(foreignPrune).toBeInstanceOf(GraphAllocationMismatchError);
+      const unownedPrune = await refusal(() =>
+        pruneIdentityTransitions(store, { beforeRecorded: unowned }),
+      );
+      expect(unownedPrune).toMatchObject({
+        details: { code: "RECORDED_ANCHOR_UNBOUND" },
+      });
+
+      const after = await store.identity.transitionsOf(a);
+      console.info("after refused prunes", after.completeness);
+      expect(
+        after.transitions.map((transition) => transition.transitionId),
+      ).toEqual(
+        before.transitions.map((transition) => transition.transitionId),
+      );
+      expect(after.completeness).toEqual({ status: "complete" });
+      const archive = await exportGraph(store, { identityMode: "archival" });
+      expect(archive.identity?.retention).toBeUndefined();
+    });
+  });
+
+  describe("archival restore carries the source's retention cut on either entry point", () => {
     for (const variant of ["unpruned", "pruned"] as const) {
-      it(`importGraph and importGraphStream agree on the retention cut for an ${variant} source`, async () => {
+      it(`importGraph and importGraphStream report the same retention for an ${variant} source`, async () => {
         const source = await provisionDepartedLineageStore(
           context,
           departedLineageGraph(`identity_restore_parity_source_${variant}`),
@@ -399,11 +586,13 @@ export function registerIdentityReplayIntegrationTests(
         const first = await source.identity.assertSame(alice, bob);
         await source.identity.retractAssertion(first.assertion.id);
         await source.identity.assertSame(alice, bob);
-        if (variant === "pruned") {
-          const history = await source.identity.transitionsOf(alice);
-          await pruneIdentityTransitions(source, {
-            beforeRecorded: requireDefined(history.transitions.at(-1)).recorded,
-          });
+        const sourceHistory = await source.identity.transitionsOf(alice);
+        const cut =
+          variant === "pruned" ?
+            nativeRecorded(sourceHistory.transitions.at(-1))
+          : undefined;
+        if (cut !== undefined) {
+          await pruneIdentityTransitions(source, { beforeRecorded: cut });
         }
         const archive = await exportGraph(source, {
           identityMode: "archival",
@@ -440,30 +629,61 @@ export function registerIdentityReplayIntegrationTests(
         expect(documentResult.errors).toEqual([]);
         expect(streamResult.errors).toEqual([]);
 
-        const documentReplay = await documentTarget.identity.replay(alice);
-        const documentFloor = requireDefined(truncatedBeforeOf(documentReplay));
-        const streamReplay = await streamTarget.identity.replay(alice);
-        expect(
-          recordedInstantRevision(
-            requireDefined(truncatedBeforeOf(streamReplay)),
-          ),
-        ).toBe(recordedInstantRevision(documentFloor));
-        // The floor sits at the restore's first commit, so the union the
-        // restore itself recorded is still a replayable step.
-        expect(streamReplay.steps.map((step) => step.transition.cause)).toEqual(
-          ["assert"],
-        );
+        const expectedRestoredCut =
+          cut === undefined ? undefined : (
+            createRecordedInstant(
+              recordedInstantRevision(cut),
+              recordedInstantWallTime(cut),
+            )
+          );
+        for (const target of [documentTarget, streamTarget]) {
+          const history = await target.identity.transitionsOf(alice);
+          const replay = await target.identity.replay(alice);
+          console.info("restored completeness", {
+            variant,
+            history: history.completeness,
+            replay: replay.completeness,
+          });
+          // A restore never claims a gap in the destination's own timeline.
+          expect(truncatedBeforeOf(history)).toBeUndefined();
+          expect(truncatedBeforeOf(replay)).toBeUndefined();
+          // What the source had pruned is reported as the restored cut, on
+          // the source's own axis, by both entry points alike.
+          expect(restoredTruncatedBeforeOf(history)).toBe(expectedRestoredCut);
+          expect(restoredTruncatedBeforeOf(replay)).toBe(expectedRestoredCut);
+          // The union the restore itself recorded is a replayable step.
+          expect(replay.steps.map((step) => step.transition.cause)).toEqual([
+            "assert",
+          ]);
+        }
       });
     }
 
-    it("leaves a destination's own earlier history unfloored on a streamed restore", async () => {
+    it("reports a pruned source's cut on a destination with history of its own, and leaves that history untruncated", async () => {
       const source = await provisionDepartedLineageStore(
         context,
         departedLineageGraph("identity_restore_native_source"),
       );
-      await source.nodes.Person.create({}, { id: "rn-a" });
-      await source.nodes.Person.create({}, { id: "rn-b" });
+      for (const id of ["rn-a", "rn-b", "rn-c"]) {
+        await source.nodes.Person.create({}, { id });
+      }
       await source.identity.assertSame(personRef("rn-a"), personRef("rn-b"));
+      await source.identity.assertSame(personRef("rn-b"), personRef("rn-c"));
+      const sourceHistory = await source.identity.transitionsOf(
+        personRef("rn-a"),
+      );
+      const cut = nativeRecorded(sourceHistory.transitions.at(-1));
+      await pruneIdentityTransitions(source, { beforeRecorded: cut });
+      // The source names the instant it was pruned at, not the prune's own
+      // wall clock, so the cut can be handed back as a window bound.
+      const prunedSource = await source.identity.transitionsOf(
+        personRef("rn-a"),
+      );
+      expect(truncatedBeforeOf(prunedSource)).toBe(cut);
+      const fromCut = await source.identity.transitionsOf(personRef("rn-a"), {
+        fromRecorded: requireDefined(truncatedBeforeOf(prunedSource)),
+      });
+      expect(fromCut.completeness).toEqual({ status: "complete" });
       const chunks: GraphInterchangeChunk[] = [];
       for await (const chunk of exportGraphStream(source, {
         identityMode: "archival",
@@ -491,8 +711,37 @@ export function registerIdentityReplayIntegrationTests(
       );
       expect(streamResult.errors).toEqual([]);
 
+      // The restored lineage lost its first assertion to the source's prune,
+      // and says so rather than reading complete.
+      const restored = await target.identity.transitionsOf(personRef("rn-a"));
+      expect(
+        restored.transitions.filter(
+          (transition) => transition.restored !== undefined,
+        ),
+      ).toHaveLength(1);
+      expect(restoredTruncatedBeforeOf(restored)).toBe(
+        createRecordedInstant(
+          recordedInstantRevision(cut),
+          recordedInstantWallTime(cut),
+        ),
+      );
+      expect(truncatedBeforeOf(restored)).toBeUndefined();
+
+      // The destination's own history is whole on its own axis.
       const own = await target.identity.replay(personRef("rn-own-a"));
       expect(truncatedBeforeOf(own)).toBeUndefined();
+      expect(own.steps.map((step) => step.transition.cause)).toEqual([
+        "assert",
+      ]);
+
+      // A re-export carries the cut on, so a second restore reports it too.
+      const reexported = await exportGraph(target, {
+        identityMode: "archival",
+      });
+      expect(reexported.identity?.retention).toEqual({
+        prunedBeforeRevision: recordedInstantRevision(cut),
+        prunedBeforeRecordedAt: recordedInstantWallTime(cut),
+      });
     });
   });
 
@@ -1404,8 +1653,8 @@ export function registerIdentityReplayIntegrationTests(
         const { store, a, firstPage, cursor } =
           await provisionPagedLineage(context);
         const whole = await store.identity.transitionsOf(a);
-        const firstBoundary = requireDefined(firstPage.transitions[0]).recorded;
-        const lastBoundary = requireDefined(whole.transitions.at(-1)).recorded;
+        const firstBoundary = nativeRecorded(firstPage.transitions[0]);
+        const lastBoundary = nativeRecorded(whole.transitions.at(-1));
         const ids = (history: typeof whole) =>
           history.transitions.map((transition) => transition.transitionId);
         const afterFirstPage = whole.transitions.filter(
@@ -1432,7 +1681,7 @@ export function registerIdentityReplayIntegrationTests(
 
         // A window that starts after the cursor wins: the page begins at the
         // later of the two, on replay exactly as on transitionsOf.
-        const laterStart = requireDefined(whole.transitions.at(-1)).recorded;
+        const laterStart = nativeRecorded(whole.transitions.at(-1));
         const startsAfterCursor = await store.identity.transitionsOf(a, {
           cursor,
           fromRecorded: laterStart,

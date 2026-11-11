@@ -11,7 +11,7 @@ import { z } from "zod";
 
 import { isObjectSchema } from "../../src/schema/migration";
 import { serializeSchemaProperties } from "../../src/schema/serializer";
-import { isStructuralSubtype } from "../../src/schema/structural-subtype";
+import { isProjectedSchemaSubtype } from "../../src/schema/structural-subtype";
 import { structuralSubtypeProjection } from "../../src/schema/structural-subtype-projection";
 import { type JsonSchema } from "../../src/schema/types";
 import { comparableSchemaArb, tightenArb } from "./arbitraries";
@@ -34,7 +34,7 @@ describe("structural subtyping properties", () => {
   it("P1: reflexivity — every comparable schema is a subtype of itself", () => {
     fc.assert(
       fc.property(comparableSchemaArb, (schema) => {
-        expect(isStructuralSubtype(schema, schema)).toEqual({
+        expect(isProjectedSchemaSubtype(schema, schema)).toEqual({
           verdict: "subtype",
         });
       }),
@@ -48,7 +48,7 @@ describe("structural subtyping properties", () => {
           tightenArb(parent).map((child) => [child, parent] as const),
         ),
         ([child, parent]) => {
-          expect(isStructuralSubtype(child, parent)).toEqual({
+          expect(isProjectedSchemaSubtype(child, parent)).toEqual({
             verdict: "subtype",
           });
         },
@@ -65,7 +65,7 @@ describe("structural subtyping properties", () => {
           ),
         ),
         ([child, parent]) => {
-          const result = isStructuralSubtype(child, parent);
+          const result = isProjectedSchemaSubtype(child, parent);
           if (result.verdict !== "subtype") {
             // Per the plan: a P3 counterexample is a design defect in the
             // rule set, not a test problem — surface the triple rather than
@@ -106,11 +106,11 @@ describe("structural subtyping properties", () => {
             required: [...(parent.required ?? []), FRESH_PROPERTY_NAME],
           };
 
-          expect(isStructuralSubtype(child, parent)).toEqual({
+          expect(isProjectedSchemaSubtype(child, parent)).toEqual({
             verdict: "subtype",
           });
 
-          const reverse = isStructuralSubtype(parent, child);
+          const reverse = isProjectedSchemaSubtype(parent, child);
           expect(reverse).toMatchObject({
             verdict: "not-subtype",
             reason: "missing-required-property",
@@ -132,7 +132,7 @@ describe("structural subtyping properties", () => {
           required: parentRequired.filter((name) => name !== droppedName),
         };
 
-        const result = isStructuralSubtype(child, parent);
+        const result = isProjectedSchemaSubtype(child, parent);
         expect(result).toMatchObject({
           verdict: "not-subtype",
           reason: "optional-in-child-required-in-parent",
@@ -147,7 +147,7 @@ describe("structural subtyping properties", () => {
         comparableSchemaArb,
         comparableSchemaArb,
         (schemaA, schemaB) => {
-          const result = isStructuralSubtype(schemaA, schemaB);
+          const result = isProjectedSchemaSubtype(schemaA, schemaB);
           const isWellShaped =
             result.verdict === "subtype" ?
               Object.keys(result).length === 1
@@ -449,7 +449,7 @@ function parentArb(): fc.Arbitrary<z.ZodType> {
 }
 
 function finiteVerdict(child: z.ZodType, parent: z.ZodType) {
-  return isStructuralSubtype(
+  return isProjectedSchemaSubtype(
     serializeSchemaProperties(child),
     serializeSchemaProperties(parent),
   );
@@ -495,7 +495,7 @@ describe("structural subtyping properties — finite value sets", () => {
   it("P8: over the live projection, an accepted finite child admits no value the parent refuses", () => {
     fc.assert(
       fc.property(pinnedChildArb(), parentArb(), (child, parent) => {
-        const result = isStructuralSubtype(
+        const result = isProjectedSchemaSubtype(
           structuralSubtypeProjection(z.object({ field: child.schema })),
           structuralSubtypeProjection(z.object({ field: parent })),
         );

@@ -788,7 +788,10 @@ describe("engine-native recorded time: identity replay", () => {
     );
     await expect(
       pruneIdentityTransitions(store, {
-        beforeRecorded: "2026-01-01T00:00:00.000Z",
+        beforeRecorded: createEngineRecordedInstant(
+          "engine-revision",
+          "2026-01-01T00:00:00.000Z",
+        ),
       }),
     ).rejects.toMatchObject(engineNativeReplayRefusal);
     await expect(
