@@ -10,9 +10,10 @@ A non-fact whole whose validity window has ENDED still holds its parts up: it is
 
 **`createRetractionCapability` refuses a configuration whose fact kinds own required parts it cannot reach**: a fact kind that is the whole of an `existence: "required"` pair whose part kind is not itself a fact kind throws `ConfigurationError` (`PROVENANCE_REQUIRED_PART_NOT_A_FACT`, naming the whole kind, the part kind and every offending pair). Both sides are read through subsumption, so a fact kind that subclasses a declared whole kind counts, and so does a subclass of a declared required part kind.
 
-**The audit sees one more orphan shape.** `store.verifyConstraintFences()`' `compositionExistence` family also reports a live required part whose whole is TOMBSTONED, not only one with no composition edge at all — a state the delete cascade cannot produce but a direct backend write, a custom port or a bypassed import can. The write path's incumbent decision is unchanged and deliberately narrower: a tombstoned whole still holds its part's attachment there, so a second whole cannot quietly take it.
+**The audit reports a required part under a tombstoned whole.** `store.verifyConstraintFences()`' `compositionExistence` family reports a live required part whose whole is tombstoned, as it does one with no composition edge at all — a state the delete cascade cannot produce but a direct backend write, a custom port or a bypassed import can. The write path's incumbent decision is deliberately narrower: a tombstoned whole still holds its part's attachment there, so a second whole cannot quietly take it.
+
+`GraphReadBackend` gains the optional `getNodes` member `GraphBackend` already has, so a read surface narrowed by hand can pass the batch point read through.
 
 ### Breaking
 
 - `RetractionReport.died` can name a fact that was not believed before the transition, when that fact was live, unsupported and closed by it. A consumer treating `died` as a subset of the previously believed set sees an extra entry instead of a silent tombstone.
-- `GraphReadBackend` gains the optional `getNodes` member it already had on `GraphBackend`, so a read surface narrowed by hand can pass the batch point read through.

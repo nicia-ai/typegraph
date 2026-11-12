@@ -9,3 +9,4 @@
 ### Breaking
 
 - A stored unique constraint that omits `scope` now parses as `"kindWithSubClasses"`, not `"kind"`: `getActiveSchema`, schema diffs and introspection of such a document report the scope the store enforced. Enforcement is unchanged. To make such a constraint kind-scoped, declare `scope: "kind"`. That redeploy reshapes the constraint, so the uniqueness gate refuses it while the kind holds rows (`unique-constraint-requires-empty-kind`, cause `constraint-reshaped`): export and delete the kind's rows, commit the schema, then import them again.
+- A custom backend's caller that matched `IDENTITY_REQUIRES_ATOMIC_BACKEND` for a `migrateSchema` edge match-identity re-key must match `EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND` instead.
