@@ -1,9 +1,33 @@
 // Doltgres spike smoke test — run: pnpm smoke:doltgres
 // Requires a Doltgres on localhost:4132. Either works:
-//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.5.0   (latest release)
+//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.5.1   (latest release)
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 // DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
+//
+// RE-MEASURED 2026-11-12 on TypeGraph main 33cd294a against 1.5.1 (released 2026-11-11).
+//   - TypeGraph #807 is merged, so the walk is green on main without a patch: 1.5.1 scores
+//     63 passed, 0 failed, 2 skipped. doltgresql main is four Dolt dependency bumps past
+//     1.5.1 and PR #3634 has not moved from ad6e1d72, so neither was rebuilt.
+//   - 1.5.1 stops reading a partial index for a sort or a lookup join the query does not
+//     imply (doltgresql#3812, #3813; before it such a query silently lost rows). TypeGraph
+//     keeps partial unique indexes on its schema-version and identity tables, so the sort
+//     form is now a support check and 1.5.1 is the floor: 1.5.0 scores 62 / 1 / 2.
+//   - Still present on 1.5.1: `ON CONFLICT DO UPDATE SET col = EXCLUDED.col` on a table
+//     with an expression index writes another column's value, without an error
+//     (doltgresql#3789). A declared index over `props` is such an index, and the atomic
+//     node mutation statement behind `bulkUpsertById` is such an upsert. It cannot reach
+//     the corruption today only because it fails first: it names its target with
+//     `INSERT INTO ... AS`, which Doltgres refuses (below). With a `props` index
+//     materialized, single-node create over a soft-deleted id, `upsertById` and `update`
+//     store the right row. The match-identity edge upsert beside a declared edge index
+//     is not measured.
+//   - Three gaps the walk had not reached, none filed upstream yet, each pinned:
+//     `INSERT INTO t AS alias` (`aliased inserts are not yet supported`), which fails
+//     every `bulkUpsertById`; `ILIKE`, which the case-insensitive string predicates
+//     compile to; and `ANALYZE (SKIP_LOCKED)`, so `materializeIndexes()` creates its
+//     indexes and then warns that the statistics refresh failed.
+//   - Unchanged: #2600, #3335, #3389, #3771, #3772 and the data-modifying INSERT CTE.
 //
 // RE-MEASURED 2026-11-06 against 1.5.0 (released 2026-11-05) and PR #3634 at ad6e1d72.
 //   - 1.5.0 releases every fix that was pinned `fixed-unreleased`: SET LOCAL (#3099's
@@ -587,6 +611,8 @@ function report(): void {
  * What stops the revision-change journal's first write: its trigger function's
  * `EXECUTE format('... $1 ...') USING` has the `$1` substituted inside the literal.
  */
+/** A gap measured here that has no upstream issue yet. */
+const UNFILED = "not yet filed upstream";
 const BIND_SUBSTITUTION_ISSUE = "doltgresql#3771";
 const FORMAT_BIND_SUBSTITUTION = 'at or near "{": syntax error';
 
@@ -1194,6 +1220,104 @@ async function runDeviationBattery(): Promise<void> {
   // The blocker for the typed walk on 1.3.3, and the build divergence. Fixed on main.
   await probeMatchIdentityCheck();
   await probeCheckBesideExpressionIndex();
+  // Before 1.5.1 the planner replaced this sort with a scan of the partial index, so only
+  // the three rows inside the index predicate came back (doltgresql#3813).
+  await probe(
+    "queries: a sort beside a partial index returns every row",
+    SUPPORTED,
+    [
+      `DROP TABLE IF EXISTS "probe_partial_sort"`,
+      `CREATE TABLE "probe_partial_sort" ("id" INT PRIMARY KEY, "a" INT NOT NULL, "b" INT)`,
+      `INSERT INTO "probe_partial_sort" ("id", "a", "b")
+       SELECT k, 100 - k, CASE WHEN k <= 3 THEN NULL ELSE k END
+       FROM generate_series(1, 10) AS k`,
+      `CREATE INDEX "probe_partial_sort_a" ON "probe_partial_sort" ("a") WHERE "b" IS NULL`,
+      `SELECT count(1)::int AS "rows"
+       FROM (SELECT "id" FROM "probe_partial_sort" ORDER BY "a") AS sorted`,
+    ],
+    [{ rows: 10 }],
+  );
+  await probeUpsertBesideExpressionIndex();
+  // The atomic node mutation statement behind `bulkUpsertById` aliases its target so the
+  // conflict arm can read the stored row.
+  await probe(
+    "bulk node upsert: INSERT INTO ... AS alias",
+    unsupported("aliased inserts are not yet supported", UNFILED),
+    [
+      `DROP TABLE IF EXISTS "probe_aliased_insert"`,
+      `CREATE TABLE "probe_aliased_insert" ("id" INT PRIMARY KEY, "version" INT NOT NULL)`,
+      `INSERT INTO "probe_aliased_insert" AS "stored" ("id", "version") VALUES (1, 1)
+       ON CONFLICT ("id") DO UPDATE SET "version" = "stored"."version" + 1`,
+    ],
+  );
+  await probe(
+    "queries: ILIKE (case-insensitive string predicates)",
+    unsupported("ILIKE is not yet supported", UNFILED),
+    [`SELECT 'Alice' ILIKE 'a%' AS matched`],
+  );
+  // `materializeIndexes()` refreshes statistics this way after it creates an index, and
+  // degrades to a warning when the statement fails. Plain `ANALYZE t` is accepted.
+  await probe(
+    "statistics: ANALYZE (SKIP_LOCKED)",
+    unsupported('at or near "(": syntax error', UNFILED),
+    [...PROBE_SETUP, `ANALYZE (SKIP_LOCKED) "probe_rows"`],
+  );
+}
+
+/**
+ * A pin whose symptom is a SUCCESS: with an expression index on the table,
+ * `ON CONFLICT DO UPDATE SET s = EXCLUDED.s` stores `EXCLUDED.u` in `s`
+ * (doltgresql#3789). No TypeGraph upsert targets a table with an expression index today.
+ */
+async function probeUpsertBesideExpressionIndex(): Promise<void> {
+  const name =
+    "upserts: ON CONFLICT DO UPDATE beside an expression index (wrong column)";
+  const issue = "doltgresql#3789";
+  const client = new Client(DOLTGRES_CONNECTION);
+  try {
+    await client.connect();
+    await client.query(`DROP TABLE IF EXISTS "probe_upsert_expr"`);
+    await client.query(
+      `CREATE TABLE "probe_upsert_expr" ("id" INT PRIMARY KEY, "s" TEXT, "u" TEXT)`,
+    );
+    await client.query(
+      `CREATE INDEX "probe_upsert_expr_u" ON "probe_upsert_expr" ((length("u")))`,
+    );
+    await client.query(`INSERT INTO "probe_upsert_expr" VALUES (1, 'a', 'x')`);
+    await client.query(
+      `INSERT INTO "probe_upsert_expr" VALUES (1, 'named', 'neighbor')
+       ON CONFLICT ("id") DO UPDATE SET "s" = EXCLUDED."s"`,
+    );
+    const stored = await client.query<{ s: string; u: string }>(
+      `SELECT "s", "u" FROM "probe_upsert_expr" WHERE "id" = 1`,
+    );
+    const row = stored.rows[0];
+    const observed = JSON.stringify(row);
+    if (row?.s === "neighbor" && row.u === "x") {
+      results.push({
+        step: name,
+        outcome: "pass",
+        detail: `stores the neighboring column's value as pinned (${issue})`,
+      });
+      return;
+    }
+    results.push({
+      step: name,
+      outcome: "fail",
+      detail:
+        row?.s === "named" && row.u === "x" ?
+          `NOW CORRECT — ${issue} looks fixed; promote this to a support check`
+        : `wrong in a DIFFERENT way than ${issue}: ${observed}`,
+    });
+  } catch (error) {
+    results.push({ step: name, outcome: "fail", detail: describeError(error) });
+  } finally {
+    try {
+      await client.end();
+    } catch {
+      // Intentionally ignored: see probeMatchIdentityCheck.
+    }
+  }
 }
 
 /**
