@@ -19,7 +19,7 @@ import { z } from "zod";
 
 import {
   CardinalityError,
-  CompositionExistenceError,
+  CompositionError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -185,8 +185,8 @@ describe("get-or-create's partOf postcondition under the fence", () => {
       { partOf: { whole: { kind: "AfWhole", id: wholeB.id } } },
     ).catch((error: unknown) => error);
 
-    expect(refusal).toBeInstanceOf(CompositionExistenceError);
-    const details = (refusal as CompositionExistenceError).details;
+    expect(refusal).toBeInstanceOf(CompositionError);
+    const details = (refusal as CompositionError).details;
     expect(details.situation).toBe("existing");
     if (details.situation !== "existing")
       throw new Error("expected an existing-whole conflict");
@@ -337,10 +337,8 @@ describe("a refused attachment and the property update it came with", () => {
           partOf: { whole: { kind: "AfWhole", id: wholeB.id } },
         },
       ).catch((error: unknown) => error);
-      expect(refusal).toBeInstanceOf(CompositionExistenceError);
-      expect((refusal as CompositionExistenceError).details.situation).toBe(
-        "existing",
-      );
+      expect(refusal).toBeInstanceOf(CompositionError);
+      expect((refusal as CompositionError).details.situation).toBe("existing");
     });
 
     const reread = requireDefined(await store.nodes.AfPart.getById(part.id));
@@ -612,10 +610,8 @@ describe("an already-satisfied partOf resolve", () => {
         },
       },
     ).catch((error: unknown) => error);
-    expect(refusal).toBeInstanceOf(CompositionExistenceError);
-    expect((refusal as CompositionExistenceError).details.situation).toBe(
-      "props",
-    );
+    expect(refusal).toBeInstanceOf(CompositionError);
+    expect((refusal as CompositionError).details.situation).toBe("props");
     expect(counter.transactions).toBeGreaterThan(0);
   });
 });

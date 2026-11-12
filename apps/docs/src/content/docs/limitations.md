@@ -352,6 +352,12 @@ before the affected nodes can be deleted.
 
 ## Composition Existence (`existence: "required"`)
 
+- **`existence: "required"` is judged on the current state, not at every
+  valid-time coordinate.** The guarantee that a required part has a whole is
+  checked when a write happens. A required part whose node `validFrom`
+  precedes its composition edge's `validFrom` shows no whole at an `asOf`
+  instant between the two. "At most one whole" on a `oneActive` pair is
+  different: it is enforced at every valid-time instant.
 - **Type-level narrowing of `partOf`'s whole kind is conservative.** On
   `store.nodes.<Kind>`, `partOf.whole` is limited to references of the whole
   kinds the ontology declares for that part kind (including a polymorphic

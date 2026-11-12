@@ -250,18 +250,6 @@ This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration
 surfaces as the engine's own failure — neither is reshaped into this error.
 
-#### Composition attachment window codes
-
-A `ValidationError` raised for a `partOf` attachment whose stated window cannot
-be applied carries one of these issue codes, under the path of the stated
-option (for example `partOf.validTo`). `details.kind` names the part kind and
-`details.id` the part when it is known:
-
-| Issue `code` | Raised when |
-| --- | --- |
-| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A create states a `partOf.validTo` on a `oneActive` composition pair. Only an open-ended edge counts as a membership there, so a bounded window would write an edge that does not attach the part. Omit `validTo` to attach the part, or write the bounded edge as history with `store.edges.<via>.create(...)`. |
-| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A `partOf` on a part that already holds this whole through the realizing edge, or a reparent `at` that restates the incumbent's window, states a bound that differs from the edge's stored `validFrom` / `validTo`. An already-satisfied attachment only asserts placement: omit the option or restate the stored bound, and change the window on the realizing edge itself. |
-
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.
@@ -806,6 +794,9 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"boundedAttachment"` | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A stated `partOf.validTo` on a `oneActive` pair, where only an open window is a membership, so the edge would not attach the part |
 | `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
 | `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
+| `"existing"` | `COMPOSITION_WHOLE_CONFLICT` | A `getOrCreateByConstraint` call states a `partOf` that contradicts the whole (or realizing edge) the existing node already holds |
+| `"props"` | `COMPOSITION_PROPS_CONFLICT` | A `getOrCreateByConstraint` or `reparent` call states `partOf.props` that differ from the already-satisfied attachment's stored props |
+| `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -878,6 +869,26 @@ is an earlier row of the same batch, which has no stored edge to name. Run `stor
 `family: "composition"` entries) to find every part already holding more
 than one whole.
 
+**A request that disagrees with the attachment the part already holds.** A
+`getOrCreateByConstraint` call (or `reparent`) whose `partOf` is already
+satisfied writes nothing, so an option it cannot honor is refused rather than
+dropped: `"existing"` (a different whole or realizing edge — carries
+`currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move the
+caller would have to make is visible; `requestedVia` is the RESOLVED realizing
+edge, present even when the call omitted `via`), `"props"` (same whole and edge,
+schema-valid but different `partOf.props` — carries `edgeKind`/`edgeId` and
+`currentProps`/`requestedProps`) and `"window"` (a stated `partOf.validFrom` /
+`partOf.validTo`, or a `reparent` `at`, that differs from the realizing edge's
+stored bound — carries `edgeKind`/`edgeId`, the stated `option`, and
+`stated`/`stored`). Call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
+to fix an `"existing"` refusal, which is the operation that actually moves a
+part; call `store.edges.<via>.update(edgeId, ...)` to fix a `"props"` or
+`"window"` refusal, which changes the realizing edge itself. None of them fires
+for a match: a call whose `partOf` equals the node's live whole, realizing edge
+and (when stated) props and window succeeds and is idempotent, and one whose
+node has no live whole writes the attachment — see
+[`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
+
 **A composition window never starts or ends later than its write.** A row
 with no `validTo` is the part's current attachment and an ended row is
 history, for good — which is what lets the claim, the delete cascade, the
@@ -910,10 +921,8 @@ credentials before declaring one.
 ### `CompositionExistenceError`
 
 Thrown when a write would leave an `existence: "required"` composition part
-with no live whole: a bare create with no `partOf`, a detach (ending,
-soft-deleting, or hard-deleting the composition edge) of a live part, or a
-`getOrCreateByConstraint` call stating `partOf` against a node that already
-exists.
+with no live whole: a bare create with no `partOf`, or a detach (ending,
+soft-deleting, or hard-deleting the composition edge) of a live part.
 
 ```typescript
 // Segment partOf Episode (via segmentOf, existence: "required"):
@@ -927,50 +936,30 @@ try {
 }
 ```
 
-`details.situation` distinguishes the four shapes: `"create"` (no `partId`
-yet — deciding the refusal is what keeps the row from ever being written),
-`"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller
-tried to end), `"existing"` (a `getOrCreateByConstraint` call whose `partOf`
-postcondition the already-existing node contradicts — carries
-`currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move
-the caller would have to make is visible in the error), and `"props"` (a
-`getOrCreateByConstraint` or `reparent` call resolving to an attachment that
-already holds — same whole, same realizing edge — whose stated `props` are
-schema-valid but canonically different from the edge's live stored props —
-carries `edgeKind`/`edgeId` and `currentProps`/`requestedProps`), and
-`"window"` (the same, for a stated window bound: a `partOf.validFrom` /
-`partOf.validTo` on such a call, or a `reparent` `at` toward the whole the
-part already holds, that differs from the realizing edge's stored bound —
-carries `edgeKind`/`edgeId`, the stated `option`, and `stated`/`stored`).
-`requestedVia` is the RESOLVED realizing edge of the pair the call's `partOf`
-names, so it is present even when the call omitted `via`. `details` is a union
-discriminated by `situation`, so narrowing on it types exactly the fields that
-situation carries.
+`details.situation` distinguishes the two shapes: `"create"` (no `partId`
+yet — deciding the refusal is what keeps the row from ever being written) and
+`"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller tried
+to end). `details` is a union discriminated by `situation`, so narrowing on it
+types exactly the fields that situation carries.
 
-The error's `code` names the same five shapes, so a handler that routes on
+The error's `code` names the same two shapes, so a handler that routes on
 `code` alone can tell them apart:
 
 | `details.situation` | `code` |
 | --- | --- |
 | `"create"` | `COMPOSITION_WHOLE_REQUIRED` |
 | `"detach"` | `COMPOSITION_DETACH_REFUSED` |
-| `"existing"` | `COMPOSITION_WHOLE_CONFLICT` |
-| `"props"` | `COMPOSITION_PROPS_CONFLICT` |
-| `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` |
 
 Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
 create refusal; soft-delete or hard-delete the part itself (which frees its
-edge — a retired part is not orphaned by losing it) to fix a detach refusal;
-call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
-to fix an `"existing"` refusal, which is the operation that actually moves a
-part; call `store.edges.<via>.update(edgeId, props)` to fix a `"props"`
-refusal, which changes the realizing edge's own properties directly.
+edge — a retired part is not orphaned by losing it) to fix a detach refusal.
 
-An `"existing"` or `"props"` refusal fires only for a CONTRADICTION. A
-`getOrCreateByConstraint` (or `reparent`) call whose `partOf` matches the
-node's live whole, realizing edge, and (when stated) props succeeds and is
-idempotent, and one whose node has no live whole writes the attachment — see
-[`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
+**The guarantee is about the current state.** `existence: "required"` says a
+part has a whole when a write happens; it is not enforced at every historical
+valid-time coordinate. A required part whose node `validFrom` precedes its
+composition edge's `validFrom` shows no whole at an `asOf` instant between the
+two. "At most one whole" on a `oneActive` pair is the rule that holds at every
+valid-time instant ([`CompositionError`](#compositionerror)'s `"windowOverlap"`).
 
 A `partOf` the graph cannot resolve raises `CompositionConfigurationError`
 rather than `CompositionExistenceError` — the option is accepted-shaped but names no
@@ -2377,9 +2366,9 @@ try {
 | `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
-| `COMPOSITION_WHOLE_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
-| `COMPOSITION_PROPS_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
-| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | `CompositionExistenceError` | constraint | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
+| `COMPOSITION_WHOLE_CONFLICT` | `CompositionError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
+| `COMPOSITION_PROPS_CONFLICT` | `CompositionError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | `CompositionError` | constraint | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
 | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | `CompositionError` | constraint | A stated `partOf.validTo` on a `oneActive` pair would write an edge that does not attach the part |
 | `COMPOSITION_WHOLE_NOT_DECLARED` | `CompositionConfigurationError` | user | No composition pair is declared between the part's kind and the stated whole's kind |
 | `COMPOSITION_VIA_NOT_DECLARED` | `CompositionConfigurationError` | user | `via` names an edge kind that realizes no declared pair there |

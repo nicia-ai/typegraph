@@ -1308,6 +1308,29 @@ export class NodeDeletePlanMismatchError extends TypeGraphError {
  *   `edgeId` / `validFrom` / `validTo` are the written edge's window as the
  *   write leaves it, and the `incumbent*` fields the other edge's — the one
  *   the write would overlap. An omitted bound is unbounded on that side.
+ * - `"existing"` (`COMPOSITION_WHOLE_CONFLICT`): a `getOrCreateByConstraint`
+ *   call whose `partOf` postcondition the already-existing node CONTRADICTS.
+ *   `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` name both
+ *   sides so a caller can see the move it would have to make: the whole (and
+ *   realizing edge) the node holds now, and the one the call asked for.
+ *   `requestedVia` is the RESOLVED realizing edge of the pair the stated
+ *   `partOf` names (`resolveCompositionAttachment`), not an echo of a stated
+ *   `via`. `currentVia` is absent when the contradiction is a differing whole
+ *   rather than a differing realizing edge only.
+ * - `"props"` (`COMPOSITION_PROPS_CONFLICT`): a `getOrCreateByConstraint` or
+ *   `reparent` call whose attachment is already satisfied (same whole, same
+ *   realizing edge — named by `edgeKind`/`edgeId`) but whose stated
+ *   `partOf.props` are schema-valid and canonically DIFFERENT from the edge's
+ *   live stored props. Neither call writes on an already-satisfied
+ *   attachment, so a valid-but-different `props` is an accepted option this
+ *   API cannot honor — it is refused rather than silently dropped, exactly
+ *   like a differing whole or realizing edge.
+ * - `"window"` (`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`): the same refusal
+ *   for a stated window bound — a `getOrCreateByConstraint` whose
+ *   already-satisfied attachment stores a different `partOf.validFrom` /
+ *   `partOf.validTo`, or a `reparent` to the whole the part already holds
+ *   whose `at` is not the edge's stored `validFrom`. `option` names the stated
+ *   option, `stated` and `stored` both instants.
  *
  * Composition membership is a fact of a row, not of an instant: a row with
  * no `validTo` is the part's current attachment and an ended row is history,
@@ -1382,186 +1405,6 @@ export type CompositionErrorDetails =
       incumbentWholeId: string;
       incumbentValidFrom?: string;
       incumbentValidTo?: string;
-    }>;
-
-function compositionWindowLabel(
-  validFrom: string | undefined,
-  validTo: string | undefined,
-): string {
-  return `[${validFrom ?? "unbounded"}, ${validTo ?? "unbounded"})`;
-}
-
-function compositionPartLabel(
-  details: Readonly<{ partKind: string; partId?: string | undefined }>,
-): string {
-  return `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
-}
-
-function compositionWholeLabel(
-  whole: Readonly<{ kind: string; id: string }>,
-  via: string | undefined,
-): string {
-  return `${whole.kind}/${whole.id}${via === undefined ? "" : ` (via "${via}")`}`;
-}
-
-/**
- * What one {@link CompositionErrorDetails} situation reads as: its code, its
- * message, and the way out — one switch, so a code never drifts from the
- * message it is raised with.
- */
-function describeCompositionRefusal(
-  details: CompositionErrorDetails,
-): Readonly<{ code: string; message: string; suggestion: string }> {
-  const partLabel = compositionPartLabel(details);
-  const wholeLabel = `${details.wholeKind}/${details.wholeId}`;
-  switch (details.situation) {
-    case "occupied": {
-      return {
-        code: "COMPOSITION_WHOLE_OCCUPIED",
-        message:
-          `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}": ` +
-          `it already has a whole${
-            details.incumbentEdgeId === undefined ?
-              ""
-            : ` (held by edge ${details.incumbentEdgeId})`
-          }, and composition allows exactly one.`,
-        suggestion:
-          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
-      };
-    }
-    case "futureStart":
-    case "futureEnd": {
-      const field =
-        details.situation === "futureStart" ? "validFrom" : "validTo";
-      return {
-        code:
-          details.situation === "futureStart" ?
-            "COMPOSITION_VALIDITY_FUTURE_START"
-          : "COMPOSITION_VALIDITY_FUTURE_END",
-        message: `Cannot write composition edge "${details.edgeKind}"${
-          details.edgeId === undefined ? "" : ` ${details.edgeId}`
-        } between ${partLabel} and ${wholeLabel}: ${field} "${details.bound}" is later than the operation clock "${details.operationInstant}".`,
-        suggestion: `Use a ${field} at or before the current time. A composition attachment is current while its window is open and history once it ends; scheduling either transition for later is not supported — make the change when it happens, with \`reparent\` to move a part.`,
-      };
-    }
-    case "futureMove": {
-      return {
-        code: "COMPOSITION_MOVE_FUTURE",
-        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": the move instant is later than the operation clock "${details.operationInstant}".`,
-        suggestion:
-          "Omit `at` to move the part now, or pass an instant at or before the current time. A move cannot be scheduled for later.",
-      };
-    }
-    case "moveBeforeIncumbent": {
-      return {
-        code: "COMPOSITION_MOVE_BEFORE_INCUMBENT",
-        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": its current attachment (edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}) starts at "${details.incumbentValidFrom}", so ending it at the move instant would close it before it opened.`,
-        suggestion:
-          "Pass an `at` at or after the current attachment's validFrom, or omit `at` to move the part at the later of the current time and that validFrom.",
-      };
-    }
-    case "boundedAttachment": {
-      return {
-        code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
-        message: `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}" with \`partOf.validTo\` "${details.validTo}": the pair's population is "oneActive", where only an open window is a membership, so the edge would not attach the part.`,
-        suggestion: `Omit \`partOf.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${details.edgeKind}.create(...)\`.`,
-      };
-    }
-    case "windowOverlap": {
-      return {
-        code: "COMPOSITION_WINDOW_OVERLAP",
-        message: `Cannot write composition edge "${details.edgeKind}" ${details.edgeId} between ${partLabel} and ${wholeLabel} with window ${compositionWindowLabel(details.validFrom, details.validTo)}: it overlaps the window ${compositionWindowLabel(details.incumbentValidFrom, details.incumbentValidTo)} of edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which attaches the part to ${details.incumbentWholeKind}/${details.incumbentWholeId}. A part holds one whole at every valid-time instant.`,
-        suggestion:
-          "Give the edge a window that ends at or before the other edge's validFrom, or starts at or after its validTo (windows are half-open, so touching windows do not overlap). To move the part, call `store.nodes.<PartKind>.reparent(partId, { whole, at? })`, which ends the current window at the instant the new one opens. To correct recorded history, end or delete the overlapping edge first.",
-      };
-    }
-  }
-}
-
-/**
- * Thrown when a composition edge (`partOf`/`hasPart`) write breaks one of the
- * rules that keep a part's attachment a fact of the row: a part holds exactly
- * one whole across every declared composition relation (enforced by one
- * claim row per part — `typegraph_edge_claims`, the reserved composition
- * axis), at every valid-time instant on a `oneActive` pair (no two of a
- * part's composition windows overlap), and an attachment's window never
- * starts or ends later than the write that states it.
- *
- * One class, one code per situation ({@link CompositionErrorDetails}), so a
- * caller that routes on `code` can tell a second whole from a scheduled
- * window.
- */
-export class CompositionError extends TypeGraphError {
-  declare readonly details: CompositionErrorDetails;
-
-  constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
-    const refusal = describeCompositionRefusal(details);
-    super(refusal.message, refusal.code, {
-      details,
-      category: "constraint",
-      suggestion: refusal.suggestion,
-      cause: options?.cause,
-    });
-    this.name = "CompositionError";
-  }
-}
-
-/**
- * Details for CompositionExistenceError.
- *
- * `partId` is absent on a bare create refusal (`situation: "create"`): the
- * node has not been assigned an id yet at the point the refusal is decided,
- * since deciding it is what keeps the row from ever being written.
- * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
- * existing composition edge row is what the caller is trying to end,
- * soft-delete, or hard-delete.
- *
- * `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` are
- * present only on `situation: "existing"` — a `getOrCreateByConstraint` call
- * whose `partOf` postcondition the already-existing node CONTRADICTS. Both
- * sides are named so a caller can see the move it would have to make: the
- * whole (and realizing edge) the node holds now, and the one the call asked
- * for. `requestedVia` is the RESOLVED realizing edge of the pair the stated
- * `partOf` names (`resolveCompositionAttachment`), not an echo of a stated
- * `via` — a call that omitted `via` because the part declares one pair
- * toward that whole kind still names that pair's edge here. `currentVia` is
- * absent when the contradiction is a differing whole rather than a differing
- * realizing edge only.
- *
- * `currentProps`/`requestedProps` are present only on `situation: "props"` —
- * a `getOrCreateByConstraint` or `reparent` call whose attachment is already
- * satisfied (same whole, same realizing edge — named by `edgeKind`/`edgeId`)
- * but whose stated `partOf.props` are schema-valid and canonically DIFFERENT
- * from the edge's live stored props. Neither call writes on an
- * already-satisfied attachment, so a valid-but-different `props` is an
- * accepted option this API cannot honor — it is refused rather than silently
- * dropped, exactly like a differing whole or realizing edge.
- *
- * `"window"` is the same refusal for a stated window bound: a
- * `getOrCreateByConstraint` whose already-satisfied attachment stores a
- * different `partOf.validFrom` / `partOf.validTo`, or a `reparent` to the
- * whole the part already holds whose `at` is not the edge's stored
- * `validFrom`. `option` names the stated option, `stated` and `stored` both
- * instants.
- *
- * `situation` and the error's `code` say the same thing in two vocabularies —
- * `"create"`/`COMPOSITION_WHOLE_REQUIRED`,
- * `"detach"`/`COMPOSITION_DETACH_REFUSED`,
- * `"existing"`/`COMPOSITION_WHOLE_CONFLICT`,
- * `"props"`/`COMPOSITION_PROPS_CONFLICT`,
- * `"window"`/`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` — from one owner
- * ({@link describeCompositionExistenceRefusal}), so a caller may branch on
- * either. The details are a union discriminated by `situation`, so narrowing
- * on it types exactly the fields that situation carries.
- */
-export type CompositionExistenceErrorDetails =
-  | Readonly<{ situation: "create"; partKind: string; partId?: string }>
-  | Readonly<{
-      situation: "detach";
-      partKind: string;
-      partId: string;
-      edgeKind: string;
-      edgeId: string;
     }>
   | Readonly<{
       situation: "existing";
@@ -1595,31 +1438,106 @@ export type CompositionExistenceErrorDetails =
       stored?: string;
     }>;
 
+function compositionWindowLabel(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): string {
+  return `[${validFrom ?? "unbounded"}, ${validTo ?? "unbounded"})`;
+}
+
+function compositionPartLabel(
+  details: Readonly<{ partKind: string; partId?: string | undefined }>,
+): string {
+  return `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+}
+
+function compositionRequestedWholeLabel(
+  details: Readonly<{ wholeKind: string; wholeId: string }>,
+): string {
+  return `${details.wholeKind}/${details.wholeId}`;
+}
+
+function compositionWholeLabel(
+  whole: Readonly<{ kind: string; id: string }>,
+  via: string | undefined,
+): string {
+  return `${whole.kind}/${whole.id}${via === undefined ? "" : ` (via "${via}")`}`;
+}
+
 /**
- * What one {@link CompositionExistenceErrorDetails} situation reads as: its
- * machine-readable code, its message, and the way out.
- *
- * One switch rather than three parallel ones (a code map, a message builder,
- * a suggestion ladder): a situation added to the union teaches exactly one
- * function, and a code can never drift from the message it is raised with.
+ * What one {@link CompositionErrorDetails} situation reads as: its code, its
+ * message, and the way out — one switch, so a code never drifts from the
+ * message it is raised with.
  */
-function describeCompositionExistenceRefusal(
-  details: CompositionExistenceErrorDetails,
+function describeCompositionRefusal(
+  details: CompositionErrorDetails,
 ): Readonly<{ code: string; message: string; suggestion: string }> {
   const partLabel = compositionPartLabel(details);
   switch (details.situation) {
-    case "create": {
+    case "occupied": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
       return {
-        code: "COMPOSITION_WHOLE_REQUIRED",
-        message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
-        suggestion: `Pass \`partOf: { whole }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        message:
+          `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}": ` +
+          `it already has a whole${
+            details.incumbentEdgeId === undefined ?
+              ""
+            : ` (held by edge ${details.incumbentEdgeId})`
+          }, and composition allows exactly one.`,
+        suggestion:
+          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
       };
     }
-    case "detach": {
+    case "futureStart":
+    case "futureEnd": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      const field =
+        details.situation === "futureStart" ? "validFrom" : "validTo";
       return {
-        code: "COMPOSITION_DETACH_REFUSED",
-        message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}" (edge ${details.edgeId}): this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
-        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { whole, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+        code:
+          details.situation === "futureStart" ?
+            "COMPOSITION_VALIDITY_FUTURE_START"
+          : "COMPOSITION_VALIDITY_FUTURE_END",
+        message: `Cannot write composition edge "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` ${details.edgeId}`
+        } between ${partLabel} and ${wholeLabel}: ${field} "${details.bound}" is later than the operation clock "${details.operationInstant}".`,
+        suggestion: `Use a ${field} at or before the current time. A composition attachment is current while its window is open and history once it ends; scheduling either transition for later is not supported — make the change when it happens, with \`reparent\` to move a part.`,
+      };
+    }
+    case "futureMove": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_MOVE_FUTURE",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": the move instant is later than the operation clock "${details.operationInstant}".`,
+        suggestion:
+          "Omit `at` to move the part now, or pass an instant at or before the current time. A move cannot be scheduled for later.",
+      };
+    }
+    case "moveBeforeIncumbent": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_MOVE_BEFORE_INCUMBENT",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": its current attachment (edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}) starts at "${details.incumbentValidFrom}", so ending it at the move instant would close it before it opened.`,
+        suggestion:
+          "Pass an `at` at or after the current attachment's validFrom, or omit `at` to move the part at the later of the current time and that validFrom.",
+      };
+    }
+    case "boundedAttachment": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        message: `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}" with \`partOf.validTo\` "${details.validTo}": the pair's population is "oneActive", where only an open window is a membership, so the edge would not attach the part.`,
+        suggestion: `Omit \`partOf.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${details.edgeKind}.create(...)\`.`,
+      };
+    }
+    case "windowOverlap": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_WINDOW_OVERLAP",
+        message: `Cannot write composition edge "${details.edgeKind}" ${details.edgeId} between ${partLabel} and ${wholeLabel} with window ${compositionWindowLabel(details.validFrom, details.validTo)}: it overlaps the window ${compositionWindowLabel(details.incumbentValidFrom, details.incumbentValidTo)} of edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which attaches the part to ${details.incumbentWholeKind}/${details.incumbentWholeId}. A part holds one whole at every valid-time instant.`,
+        suggestion:
+          "Give the edge a window that ends at or before the other edge's validFrom, or starts at or after its validTo (windows are half-open, so touching windows do not overlap). To move the part, call `store.nodes.<PartKind>.reparent(partId, { whole, at? })`, which ends the current window at the instant the new one opens. To correct recorded history, end or delete the overlapping edge first.",
       };
     }
     case "existing": {
@@ -1656,25 +1574,111 @@ function describeCompositionExistenceRefusal(
 }
 
 /**
+ * Thrown when a composition edge (`partOf`/`hasPart`) write breaks one of the
+ * rules that keep a part's attachment a fact of the row: a part holds exactly
+ * one whole across every declared composition relation (enforced by one
+ * claim row per part — `typegraph_edge_claims`, the reserved composition
+ * axis), at every valid-time instant on a `oneActive` pair (no two of a
+ * part's composition windows overlap), and an attachment's window never
+ * starts or ends later than the write that states it.
+ *
+ * Also thrown when a get-or-create or attach request disagrees with the
+ * attachment the part already has — a different whole, different edge
+ * `props`, or a different validity window (`"existing"`, `"props"`,
+ * `"window"`) — an accepted option the call cannot honor without silently
+ * dropping it.
+ *
+ * One class, one code per situation ({@link CompositionErrorDetails}), so a
+ * caller that routes on `code` can tell a second whole from a scheduled
+ * window.
+ */
+export class CompositionError extends TypeGraphError {
+  declare readonly details: CompositionErrorDetails;
+
+  constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
+    const refusal = describeCompositionRefusal(details);
+    super(refusal.message, refusal.code, {
+      details,
+      category: "constraint",
+      suggestion: refusal.suggestion,
+      cause: options?.cause,
+    });
+    this.name = "CompositionError";
+  }
+}
+
+/**
+ * Details for CompositionExistenceError.
+ *
+ * `partId` is absent on a bare create refusal (`situation: "create"`): the
+ * node has not been assigned an id yet at the point the refusal is decided,
+ * since deciding it is what keeps the row from ever being written.
+ * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
+ * existing composition edge row is what the caller is trying to end,
+ * soft-delete, or hard-delete.
+ *
+ * `situation` and the error's `code` say the same thing in two vocabularies —
+ * `"create"`/`COMPOSITION_WHOLE_REQUIRED`,
+ * `"detach"`/`COMPOSITION_DETACH_REFUSED` — from one owner
+ * ({@link describeCompositionExistenceRefusal}), so a caller may branch on
+ * either. The details are a union discriminated by `situation`, so narrowing
+ * on it types exactly the fields that situation carries.
+ */
+export type CompositionExistenceErrorDetails =
+  | Readonly<{ situation: "create"; partKind: string; partId?: string }>
+  | Readonly<{
+      situation: "detach";
+      partKind: string;
+      partId: string;
+      edgeKind: string;
+      edgeId: string;
+    }>;
+
+/**
+ * What one {@link CompositionExistenceErrorDetails} situation reads as: its
+ * machine-readable code, its message, and the way out.
+ *
+ * One switch rather than three parallel ones (a code map, a message builder,
+ * a suggestion ladder): a situation added to the union teaches exactly one
+ * function, and a code can never drift from the message it is raised with.
+ */
+function describeCompositionExistenceRefusal(
+  details: CompositionExistenceErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = compositionPartLabel(details);
+  switch (details.situation) {
+    case "create": {
+      return {
+        code: "COMPOSITION_WHOLE_REQUIRED",
+        message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
+        suggestion: `Pass \`partOf: { whole }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+      };
+    }
+    case "detach": {
+      return {
+        code: "COMPOSITION_DETACH_REFUSED",
+        message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}" (edge ${details.edgeId}): this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
+        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { whole, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+      };
+    }
+  }
+}
+
+/**
  * Thrown when a write would leave a required-existence composition part
- * (`existence: "required"`) with no live whole (a bare create with no
- * `partOf`, or a detach that would orphan a currently-live part), or when a
- * `getOrCreateByConstraint`/`reparent` call stating `partOf` resolves to an
- * attachment that already holds — a different whole, the same whole through
- * a different realizing edge, or the same whole and edge with different
- * `props` (`"found"`/`"updated"`/reparent's no-op) — an accepted option this
- * API cannot honor without silently dropping it.
+ * (`existence: "required"`) with no live whole: a bare create with no
+ * `partOf` (`situation: "create"`), or a detach that would orphan a
+ * currently-live part (`situation: "detach"`).
  *
  * Its own class rather than a `CompositionError` code: `CompositionError` is
- * the "at most one whole" refusal; this is the "at least one whole while
- * live, and a whole is never silently re-assigned" refusal — a different
- * invariant with a different shape (no incumbent edge to name on the create
- * leg). Shares `CompositionError`'s `"constraint"` category.
+ * the "at most one whole" refusal and the attachment-request conflicts; this
+ * is the "at least one whole while live" refusal — a different invariant with
+ * a different shape (no incumbent edge to name on the create leg). Shares
+ * `CompositionError`'s `"constraint"` category.
  *
- * One class, five codes — one per situation, since a bare create, a refused
- * detach, a contradicted whole, a contradicted `props` and a contradicted
- * window are five different things to handle and a caller that routes on
- * `code` alone must be able to tell them apart.
+ * One class, two codes — one per situation, since a bare create and a refused
+ * detach are different things to handle and a caller that routes on `code`
+ * alone must be able to tell them apart.
  */
 export class CompositionExistenceError extends TypeGraphError {
   declare readonly details: CompositionExistenceErrorDetails;

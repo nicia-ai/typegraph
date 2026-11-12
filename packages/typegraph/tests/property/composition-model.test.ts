@@ -843,7 +843,7 @@ function resolveMove(
   // A no-op move cannot honor a stated instant other than the held edge's
   // own start, so it refuses it rather than dropping it.
   if (noop && at !== undefined && at !== incumbent.edge.validFrom) {
-    refusals.push(CompositionExistenceError);
+    refusals.push(CompositionError);
   }
   if (
     !noop &&

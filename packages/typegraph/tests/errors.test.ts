@@ -408,53 +408,8 @@ describe("CompositionExistenceError", () => {
     expect(detach.code).toBe("COMPOSITION_DETACH_REFUSED");
     expect(detach.suggestion).toContain("reparent");
 
-    const existing = new CompositionExistenceError({
-      partKind: "Segment",
-      partId: "segment-1",
-      situation: "existing",
-      currentWhole: { kind: "Episode", id: "episode-1" },
-      requestedWhole: { kind: "Episode", id: "episode-2" },
-      requestedVia: "segmentOf",
-    });
-    expect(existing.code).toBe("COMPOSITION_WHOLE_CONFLICT");
-    expect(existing.message).toContain("Episode/episode-2");
-
-    const props = new CompositionExistenceError({
-      partKind: "Segment",
-      partId: "segment-1",
-      situation: "props",
-      edgeKind: "segmentOf",
-      edgeId: "edge-1",
-      currentProps: { order: 1 },
-      requestedProps: { order: 2 },
-    });
-    expect(props.code).toBe("COMPOSITION_PROPS_CONFLICT");
-    expect(props.suggestion).toContain("store.edges.segmentOf.update");
-
-    const window = new CompositionExistenceError({
-      partKind: "Segment",
-      partId: "segment-1",
-      situation: "window",
-      edgeKind: "segmentOf",
-      edgeId: "edge-1",
-      option: "partOf.validFrom",
-      stated: "2024-01-01T00:00:00.000Z",
-      stored: "2023-01-01T00:00:00.000Z",
-    });
-    expect(window.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_CONFLICT");
-    expect(window.message).toContain("partOf.validFrom");
-
-    // Five situations, five codes — no two share one.
-    expect(
-      new Set([
-        create.code,
-        detach.code,
-        existing.code,
-        props.code,
-        window.code,
-      ]).size,
-    ).toBe(5);
-    for (const error of [create, detach, existing, props, window]) {
+    expect(create.code).not.toBe(detach.code);
+    for (const error of [create, detach]) {
       expect(error.name).toBe("CompositionExistenceError");
       expect(error.category).toBe("constraint");
     }
@@ -503,9 +458,53 @@ describe("CompositionExistenceError", () => {
     expect(overlap.code).toBe("COMPOSITION_WINDOW_OVERLAP");
     expect(overlap.message).toContain("[2021-01-01T00:00:00.000Z, unbounded)");
   });
+
+  it("carries a CompositionError code per attachment-request conflict", () => {
+    const existing = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "existing",
+      currentWhole: { kind: "Episode", id: "episode-1" },
+      requestedWhole: { kind: "Episode", id: "episode-2" },
+      requestedVia: "segmentOf",
+    });
+    expect(existing.code).toBe("COMPOSITION_WHOLE_CONFLICT");
+    expect(existing.message).toContain("Episode/episode-2");
+
+    const props = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "props",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      currentProps: { order: 1 },
+      requestedProps: { order: 2 },
+    });
+    expect(props.code).toBe("COMPOSITION_PROPS_CONFLICT");
+    expect(props.suggestion).toContain("store.edges.segmentOf.update");
+
+    const window = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "window",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      option: "partOf.validFrom",
+      stated: "2024-01-01T00:00:00.000Z",
+      stored: "2023-01-01T00:00:00.000Z",
+    });
+    expect(window.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_CONFLICT");
+    expect(window.message).toContain("partOf.validFrom");
+
+    expect(new Set([existing.code, props.code, window.code]).size).toBe(3);
+    for (const error of [existing, props, window]) {
+      expect(error.name).toBe("CompositionError");
+      expect(error.category).toBe("constraint");
+    }
+  });
   // MUTATION: return one shared code from any arm of
-  // `describeCompositionExistenceRefusal` (src/errors/index.ts) — the
-  // distinctness assertion drops to 3 and that arm's own expectation fails.
+  // `describeCompositionRefusal` (src/errors/index.ts) — the distinctness
+  // assertion drops to 2 and that arm's own expectation fails.
 
   it("keeps situation as the discriminant for the populated details", () => {
     const error = new CompositionExistenceError({

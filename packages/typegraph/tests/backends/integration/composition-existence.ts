@@ -1146,6 +1146,39 @@ export function registerCompositionExistenceIntegrationTests(
     // The edge is then born ended and the assertion above reads its
     // `validTo`.
 
+    it('case 12c: `existence: "required"` is judged on the current state — a required part shows no whole at an asOf instant before its edge\'s window opens', async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const nodeFrom = "2020-01-01T00:00:00.000Z";
+      const edgeFrom = "2021-01-01T00:00:00.000Z";
+      const between = "2020-06-01T00:00:00.000Z";
+      const show = await store.nodes.EeShow.create({}, { validFrom: nodeFrom });
+      const clip = await store.nodes.EeLiveClip.create(
+        {},
+        {
+          validFrom: nodeFrom,
+          partOf: {
+            whole: { kind: "EeShow", id: show.id },
+            validFrom: edgeFrom,
+          },
+        },
+      );
+
+      const wholesAt = async (instant: string) => {
+        const wholes = await store
+          .asOf(instant)
+          .query()
+          .from("EeLiveClip", "clip")
+          .whereNode("clip", (node) => node.id.eq(clip.id))
+          .wholes("whole")
+          .select((ctx) => ({ kind: ctx.whole.kind, id: ctx.whole.id }))
+          .execute();
+        return wholes.map((whole) => whole.id);
+      };
+
+      expect(await wholesAt(between)).toEqual([]);
+      expect(await wholesAt(edgeFrom)).toEqual([show.id]);
+    });
+
     it("case 12b: an already-unattached `oneActive` composition edge (planted through the RAW backend, bypassing case 12's create-time guard) is unattached, and cleaning it up is not refused", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const show = await store.nodes.EeShow.create({});
@@ -1524,8 +1557,8 @@ export function registerCompositionExistenceIntegrationTests(
           { key: "seg-1" },
           { partOf: { whole: { kind: "EeEpisode", id: episodeB.id } } },
         ).catch((error_: unknown) => error_);
-      expect(foundError).toBeInstanceOf(CompositionExistenceError);
-      expect((foundError as CompositionExistenceError).details).toMatchObject({
+      expect(foundError).toBeInstanceOf(CompositionError);
+      expect((foundError as CompositionError).details).toMatchObject({
         situation: "existing",
         currentWhole: { kind: "EeEpisode", id: episodeA.id },
       });
@@ -1539,7 +1572,7 @@ export function registerCompositionExistenceIntegrationTests(
             partOf: { whole: { kind: "EeEpisode", id: episodeB.id } },
           },
         ).catch((error_: unknown) => error_);
-      expect(updatedError).toBeInstanceOf(CompositionExistenceError);
+      expect(updatedError).toBeInstanceOf(CompositionError);
 
       await store.nodes.EeKeyedSegment.delete(created.node.id);
       const resurrected =

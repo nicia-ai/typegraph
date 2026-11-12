@@ -4471,7 +4471,7 @@ async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
  * REQUIRED part found unattached (only reachable through rows written
  * outside the store's write path) is repaired on the same terms — and a
  * DIFFERENT whole, or the same whole through a different realizing edge, is
- * refused with `CompositionExistenceError` (`situation: "existing"`). Moving
+ * refused with `CompositionError` (`situation: "existing"`). Moving
  * a part is `reparent`'s decision, never a side effect of a lookup.
  *
  * The lock-free read below is a PRE-CHECK and nothing more: its only effect

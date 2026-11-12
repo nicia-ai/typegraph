@@ -56,7 +56,7 @@ import { z } from "zod";
 
 import {
   CardinalityError,
-  CompositionExistenceError,
+  CompositionError,
   createStore,
   defineEdge,
   defineGraph,
@@ -558,11 +558,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
         expect(summarizeRace(race)).toEqual({
           contenderState: "blocked",
           holder: "ok",
-          contender: CompositionExistenceError.name,
+          contender: CompositionError.name,
         });
         const refusal = requireError(race.contender);
-        expect(refusal).toBeInstanceOf(CompositionExistenceError);
-        const details = (refusal as CompositionExistenceError).details;
+        expect(refusal).toBeInstanceOf(CompositionError);
+        const details = (refusal as CompositionError).details;
         expect(details.situation).toBe("existing");
         if (details.situation !== "existing")
           throw new Error("expected an existing-whole conflict");

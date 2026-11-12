@@ -45,7 +45,6 @@ import {
   asNodeId,
   CardinalityError,
   CompositionError,
-  CompositionExistenceError,
   ConfigurationError,
   createStore,
   defineEdge,
@@ -830,7 +829,7 @@ export function registerCompositionAttachmentIntegrationTests(
       ]);
       for (const call of calls) {
         const error = await call().catch((error_: unknown) => error_);
-        expect(error).toBeInstanceOf(CompositionExistenceError);
+        expect(error).toBeInstanceOf(CompositionError);
         expect(error).toMatchObject({
           code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
           details: { situation: "window", option: "options.at" },
@@ -1640,7 +1639,7 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(first.action).toBe("created");
 
       // MUTATION CHECK: restore the unconditional refusal (throw
-      // `CompositionExistenceError` whenever `partOf` is stated against a
+      // `CompositionError` whenever `partOf` is stated against a
       // found/updated node — `decideCompositionIncumbent`'s satisfied arm,
       // src/store/operations/composition-create.ts) — this second call then
       // rejects instead of returning `"found"`.
@@ -1675,11 +1674,11 @@ export function registerCompositionAttachmentIntegrationTests(
         { partOf: { whole: { kind: "CaAnthology", id: anthology.id } } },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      expect((error as CompositionExistenceError).code).toBe(
+      expect(error).toBeInstanceOf(CompositionError);
+      expect((error as CompositionError).code).toBe(
         "COMPOSITION_WHOLE_CONFLICT",
       );
-      const details = (error as CompositionExistenceError).details;
+      const details = (error as CompositionError).details;
       expect(details.situation).toBe("existing");
       if (details.situation !== "existing")
         throw new Error("expected an existing-whole conflict");
@@ -1726,8 +1725,8 @@ export function registerCompositionAttachmentIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      const details = (error as CompositionExistenceError).details;
+      expect(error).toBeInstanceOf(CompositionError);
+      const details = (error as CompositionError).details;
       if (details.situation !== "existing")
         throw new Error("expected an existing-whole conflict");
       expect(details.currentVia).toBe("caChapterOf");
@@ -1744,7 +1743,7 @@ export function registerCompositionAttachmentIntegrationTests(
       expect(await store.edges.caChapterOf.find({})).toHaveLength(0);
 
       // MUTATION CHECK: restore the unconditional refusal — this rejects
-      // with `CompositionExistenceError` and no edge is ever written.
+      // with `CompositionError` and no edge is ever written.
       const result = await store.nodes.CaChapter.getOrCreateByConstraint(
         "ca_chapter_slug",
         { slug: "one" },
@@ -1819,7 +1818,7 @@ export function registerCompositionAttachmentIntegrationTests(
       );
 
       // MUTATION CHECK: as above — resolving only on the no-whole arm makes
-      // this a `CompositionExistenceError` (`situation: "existing"`) naming
+      // this a `CompositionError` (`situation: "existing"`) naming
       // `CaReader` as the requested whole, and its suggestion tells the
       // caller to `reparent` to a whole `reparent` itself refuses.
       const error = await store.nodes.CaChapter.getOrCreateByConstraint(
@@ -1834,7 +1833,7 @@ export function registerCompositionAttachmentIntegrationTests(
       ).catch((error_: unknown) => error_);
 
       expect(error).toBeInstanceOf(ConfigurationError);
-      expect(error).not.toBeInstanceOf(CompositionExistenceError);
+      expect(error).not.toBeInstanceOf(CompositionError);
       expect((error as ConfigurationError).details).toEqual(
         matchingObject({ code: "COMPOSITION_WHOLE_NOT_DECLARED" }),
       );
@@ -1919,11 +1918,11 @@ export function registerCompositionAttachmentIntegrationTests(
         },
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      expect((error as CompositionExistenceError).code).toBe(
+      expect(error).toBeInstanceOf(CompositionError);
+      expect((error as CompositionError).code).toBe(
         "COMPOSITION_PROPS_CONFLICT",
       );
-      expect((error as CompositionExistenceError).details).toEqual(
+      expect((error as CompositionError).details).toEqual(
         matchingObject({
           situation: "props",
           edgeKind: "caChapterOf",
@@ -1995,8 +1994,8 @@ export function registerCompositionAttachmentIntegrationTests(
         props: { order: 2 },
       }).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      expect((error as CompositionExistenceError).details).toEqual(
+      expect(error).toBeInstanceOf(CompositionError);
+      expect((error as CompositionError).details).toEqual(
         matchingObject({
           situation: "props",
           edgeKind: "caChapterOf",
@@ -2061,8 +2060,8 @@ export function registerCompositionAttachmentIntegrationTests(
         ],
       ).catch((error_: unknown) => error_);
 
-      expect(error).toBeInstanceOf(CompositionExistenceError);
-      const details = (error as CompositionExistenceError).details;
+      expect(error).toBeInstanceOf(CompositionError);
+      const details = (error as CompositionError).details;
       expect(details.situation).toBe("existing");
       if (details.situation !== "existing")
         throw new Error("expected an existing-whole conflict");
@@ -2212,7 +2211,7 @@ export function registerCompositionAttachmentIntegrationTests(
         }
       });
 
-      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      expect(caught).toBeInstanceOf(CompositionError);
       const chapters = await store.nodes.CaChapter.find({});
       expect(chapters.map((chapter) => chapter.slug)).toEqual(["held"]);
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
@@ -2275,10 +2274,8 @@ export function registerCompositionAttachmentIntegrationTests(
         }
       });
 
-      expect(caught).toBeInstanceOf(CompositionExistenceError);
-      expect((caught as CompositionExistenceError).details.situation).toBe(
-        "existing",
-      );
+      expect(caught).toBeInstanceOf(CompositionError);
+      expect((caught as CompositionError).details.situation).toBe("existing");
       // "bare" was never attached: the one edge is still "held"'s own.
       const edges = await store.edges.caChapterOf.find({});
       expect(edges.map((edge) => edge.toId)).toEqual([held.id]);
@@ -2325,10 +2322,8 @@ export function registerCompositionAttachmentIntegrationTests(
         }
       });
 
-      expect(caught).toBeInstanceOf(CompositionExistenceError);
-      expect((caught as CompositionExistenceError).details.situation).toBe(
-        "props",
-      );
+      expect(caught).toBeInstanceOf(CompositionError);
+      expect((caught as CompositionError).details.situation).toBe("props");
       const edges = await store.edges.caChapterOf.find({});
       expect(edges).toHaveLength(1);
       expect(edges.some((edge) => edge.fromId === bare.id)).toBe(false);
@@ -2404,7 +2399,7 @@ export function registerCompositionAttachmentIntegrationTests(
         }
       });
 
-      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      expect(caught).toBeInstanceOf(CompositionError);
       // Neither half of "bare"'s leg landed: no property update (the row's
       // version is the one its create wrote) and no attachment.
       const after = requireDefined(
@@ -2460,7 +2455,7 @@ export function registerCompositionAttachmentIntegrationTests(
         }
       });
 
-      expect(caught).toBeInstanceOf(CompositionExistenceError);
+      expect(caught).toBeInstanceOf(CompositionError);
       expect(await store.nodes.CaChapter.getById(gone.id)).toBeUndefined();
       expect(await store.edges.caChapterOf.find({})).toHaveLength(1);
     });
@@ -2956,7 +2951,7 @@ export function registerCompositionAttachmentIntegrationTests(
         ];
         for (const call of calls) {
           const error = await call().catch((error_: unknown) => error_);
-          expect(error).toBeInstanceOf(CompositionExistenceError);
+          expect(error).toBeInstanceOf(CompositionError);
           expect(error).toMatchObject({
             code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
             details: { situation: "window", option: `partOf.${field}` },

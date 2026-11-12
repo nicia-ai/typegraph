@@ -1241,7 +1241,7 @@ function judgeSatisfiedAttachment(
  * shape `situation: "existing"` refuses one dimension over (a differing
  * whole, or a differing realizing edge).
  *
- * Disagreeing `props` refuse with `CompositionExistenceError`
+ * Disagreeing `props` refuse with `CompositionError`
  * (`situation: "props"`) naming both sides, and a disagreeing window bound
  * with its `"window"` sibling naming the stated option. Neither is
  * rewritten here: this call resolves an attachment, and changing the
@@ -1263,7 +1263,7 @@ function assertSatisfiedAttachmentHonored(
   );
   if (verdict.honored) return;
   if (verdict.dimension === "props") {
-    throw new CompositionExistenceError({
+    throw new CompositionError({
       partKind,
       partId,
       situation: "props",
@@ -1309,7 +1309,7 @@ export function assertSatisfiedMoveInstantHonored(
 
 /**
  * The one shape of a stated window bound an already-held attachment cannot
- * apply: `CompositionExistenceError` (`situation: "window"`,
+ * apply: `CompositionError` (`situation: "window"`,
  * `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`) naming the stated option and both
  * instants — the window sibling of the `"props"` refusal.
  */
@@ -1319,8 +1319,8 @@ function attachmentWindowConflict(
   partId: string,
   bound: Readonly<{ stated: string | null; stored: string | undefined }>,
   currentEdge: Pick<EdgeRow, "id" | "kind">,
-): CompositionExistenceError {
-  return new CompositionExistenceError({
+): CompositionError {
+  return new CompositionError({
     situation: "window",
     partKind,
     partId,
@@ -1341,7 +1341,7 @@ function attachmentWindowConflict(
  *   attachment and write the requested one. Moving a part is what the caller
  *   asked for.
  * - `"refuse"` — every get-or-create path: an incumbent that is NOT the
- *   requested attachment raises `CompositionExistenceError`
+ *   requested attachment raises `CompositionError`
  *   (`situation: "existing"`). A lookup never moves a part as a side effect,
  *   so two racing callers that each ask for a different whole end with
  *   exactly one attachment and one refusal.
@@ -1497,7 +1497,7 @@ export function incumbentSatisfiesRequestedAttachment(
  *   retire it, then write the requested attachment.
  *
  * A different incumbent under `onIncumbent: "refuse"` throws
- * `CompositionExistenceError` (`situation: "existing"`) naming both sides —
+ * `CompositionError` (`situation: "existing"`) naming both sides —
  * the held whole (and realizing edge, when only the edge differs) and the
  * requested one.
  *
@@ -1536,7 +1536,7 @@ function decideCompositionIncumbent(
   const wholeMatches =
     current.whole.kind === attachment.whole.kind &&
     current.whole.id === attachment.whole.id;
-  throw new CompositionExistenceError({
+  throw new CompositionError({
     partKind,
     partId,
     situation: "existing",
@@ -1697,7 +1697,7 @@ export async function decideCompositionAttachmentUnderFence(
 
 /**
  * The live whole a composition part currently holds, if any — read to name
- * it in `CompositionExistenceError`'s `situation: "existing"` message, and
+ * it in `CompositionError`'s `situation: "existing"` message, and
  * to decide whether a `getOrCreateByConstraint` postcondition is already
  * satisfied. The whole-only projection of
  * {@link findLiveCompositionAttachment}.

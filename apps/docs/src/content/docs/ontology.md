@@ -828,13 +828,13 @@ one is stated) is accepted as a **no-op** — no write, no history — so a
 caller converging on a destination need not first ask where the part is.
 Stated `props` are still checked on that no-op: valid and canonically equal
 to the realizing edge's live stored props, the no-op stands; valid but
-different raises `CompositionExistenceError` (`situation: "props"`,
+different raises `CompositionError` (`situation: "props"`,
 `COMPOSITION_PROPS_CONFLICT`) rather
 than being silently dropped, since the no-op performs no write to apply it —
 `store.edges.<via>.update(...)` changes the edge directly. A stated `at` is
 checked the same way: the no-op opens no new window, so `at` stands only when
 it equals the realizing edge's stored `validFrom`, and any other instant is
-refused with `CompositionExistenceError`
+refused with `CompositionError`
 (`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `situation: "window"`, `option:
 "options.at"`), as a differing `partOf.validFrom` is on get-or-create. An
 omitted `at` states nothing and is never refused here. A kind that
@@ -950,10 +950,10 @@ optional and required parts alike, and most of its outcomes are successes:
 | no match | — | created with the attachment, exactly as `create` with `partOf` | `"created"` |
 | a soft-deleted match | — | restored, and attached in the same transaction | `"resurrected"` |
 | a live match | holds this whole through the resolved pair's realizing edge | **satisfied**: no write, no history; with `ifExists: "update"` the property update alone runs | `"found"` / `"updated"` |
-| a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionExistenceError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
-| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `CompositionExistenceError` (`situation: "window"`, `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `option` naming `partOf.validFrom` or `partOf.validTo`) — the same rule as `props` | — |
+| a live match | holds this whole, but stated `props` differ from the edge's live stored props | refused: `CompositionError` (`situation: "props"`, `COMPOSITION_PROPS_CONFLICT`) — a satisfied match writes no edge, so a different value cannot be applied silently | — |
+| a live match | holds this whole, but a stated `validFrom` / `validTo` differs from the edge's stored window | refused: `CompositionError` (`situation: "window"`, `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`, `option` naming `partOf.validFrom` or `partOf.validTo`) — the same rule as `props` | — |
 | a live match | has no live whole | **attached now**, required or optional alike; with `ifExists: "update"` the attachment and the property update are one write plan | `"found"` / `"updated"` |
-| a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionExistenceError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
+| a live match | holds a **different** whole, or the same whole through another realizing edge | refused: `CompositionError` (`situation: "existing"`, `COMPOSITION_WHOLE_CONFLICT`), naming the held and the requested attachment | — |
 
 "Satisfied" means the whole matches, the realizing edge matches the resolved
 pair, any stated `props` are valid and canonically equal to the edge's
@@ -1097,6 +1097,13 @@ deleting the *whole* — deleting a whole still cascades to its required parts
 `partOf` (and the equivalent option on `bulkCreate`'s per-item `partOf`) is
 also accepted as a convenience on an `existence: "optional"` pair — the same
 one write, never required for one.
+
+`existence: "required"` is a guarantee about the current state, judged when a
+write happens. It is not enforced at every historical valid-time coordinate: a
+required part whose node `validFrom` precedes its composition edge's
+`validFrom` shows no whole at an `asOf` instant between the two. By contrast,
+"at most one whole" on a `oneActive` pair is enforced at every valid-time
+instant ([One whole at every instant](#one-whole-at-every-instant)).
 
 Composition existence is a create/detach-time write-path guarantee, not a
 retroactive repair: `store.verifyConstraintFences()` reports a live required

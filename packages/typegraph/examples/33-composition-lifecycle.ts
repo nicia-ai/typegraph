@@ -35,6 +35,7 @@
 import { deepStrictEqual } from "node:assert/strict";
 
 import {
+  CompositionError,
   CompositionExistenceError,
   createAdapterStore,
   defineEdge,
@@ -264,16 +265,16 @@ export async function main(): Promise<void> {
         { partOf: { whole: otherEpisode } },
       ).catch((error: unknown) => error);
     assertTrue(
-      movedElsewhereError instanceof CompositionExistenceError,
+      movedElsewhereError instanceof CompositionError,
       "naming a DIFFERENT whole is refused",
     );
     assertEqual(
-      (movedElsewhereError as CompositionExistenceError).details.situation,
+      (movedElsewhereError as CompositionError).details.situation,
       "existing",
       "refusal situation is 'existing'",
     );
     assertEqual(
-      (movedElsewhereError as CompositionExistenceError).code,
+      (movedElsewhereError as CompositionError).code,
       "COMPOSITION_WHOLE_CONFLICT",
       "refusal code is COMPOSITION_WHOLE_CONFLICT",
     );

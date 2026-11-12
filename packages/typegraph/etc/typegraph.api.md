@@ -1190,31 +1190,6 @@ export type CompositionErrorDetails = Readonly<{
     incumbentWholeId: string;
     incumbentValidFrom?: string;
     incumbentValidTo?: string;
-}>;
-
-// @public
-export type CompositionExistence = "optional" | "required";
-
-// @public
-export class CompositionExistenceError extends TypeGraphError {
-    constructor(details: CompositionExistenceErrorDetails, options?: {
-        cause?: unknown;
-    });
-    // (undocumented)
-    readonly details: CompositionExistenceErrorDetails;
-}
-
-// @public
-export type CompositionExistenceErrorDetails = Readonly<{
-    situation: "create";
-    partKind: string;
-    partId?: string;
-}> | Readonly<{
-    situation: "detach";
-    partKind: string;
-    partId: string;
-    edgeKind: string;
-    edgeId: string;
 }> | Readonly<{
     situation: "existing";
     partKind: string;
@@ -1246,6 +1221,31 @@ export type CompositionExistenceErrorDetails = Readonly<{
     option: string;
     stated: string | null;
     stored?: string;
+}>;
+
+// @public
+export type CompositionExistence = "optional" | "required";
+
+// @public
+export class CompositionExistenceError extends TypeGraphError {
+    constructor(details: CompositionExistenceErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: CompositionExistenceErrorDetails;
+}
+
+// @public
+export type CompositionExistenceErrorDetails = Readonly<{
+    situation: "create";
+    partKind: string;
+    partId?: string;
+}> | Readonly<{
+    situation: "detach";
+    partKind: string;
+    partId: string;
+    edgeKind: string;
+    edgeId: string;
 }>;
 
 // @public

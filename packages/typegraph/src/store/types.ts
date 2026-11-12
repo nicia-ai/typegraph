@@ -1078,7 +1078,7 @@ export type NodeGetOrCreateByConstraintOptions<
    * whose live whole, and whose realizing edge kind, already equal the
    * resolved attachment satisfies it; a node with a DIFFERENT live whole, or
    * the same whole through another realizing edge, refuses with
-   * `CompositionExistenceError` (`situation: "existing"`) naming both sides;
+   * `CompositionError` (`situation: "existing"`) naming both sides;
    * a node with no live whole has the attachment written now, whatever the
    * pair's declared `existence` (a REQUIRED part found unattached is
    * repaired on the same terms — see `applyExistingPartOfPostcondition`).
@@ -1087,7 +1087,7 @@ export type NodeGetOrCreateByConstraintOptions<
    * it — but they are still validated, and still honored as a postcondition:
    * omitted, or valid and canonically equal to the edge's live stored props,
    * the call is idempotent; valid but DIFFERENT refuses with
-   * `CompositionExistenceError` (`situation: "props"`) naming both, rather
+   * `CompositionError` (`situation: "props"`) naming both, rather
    * than silently keeping the stored value. Update the realizing edge
    * directly (`store.edges.<via>.update(...)`) to actually change it.
    *
@@ -1526,7 +1526,7 @@ export type NodeCollection<
    * stated `attachment.props` is still validated and still honored as a
    * postcondition on that no-op: omitted, or valid and canonically equal to
    * the edge's live stored props, the no-op stands; valid but DIFFERENT
-   * refuses with `CompositionExistenceError` (`situation: "props"`) rather
+   * refuses with `CompositionError` (`situation: "props"`) rather
    * than silently keeping the stored value. The result's `edge` is the
    * holding edge either way; `moved` is false on that no-op.
    *
