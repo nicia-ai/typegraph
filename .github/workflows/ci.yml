@@ -346,7 +346,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/2", "2/2"]
+        shard: ["1/3", "2/3", "3/3"]
     services:
       postgres:
         image: pgvector/pgvector:pg18
@@ -417,14 +417,14 @@ jobs:
           TYPEGRAPH_PG_MAX_WORKERS: 4
 
       - name: Run PostgreSQL perf sanity
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
       - name: Run PostgreSQL example
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm test:examples:postgres
         env:
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
