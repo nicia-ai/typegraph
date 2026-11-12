@@ -1,9 +1,30 @@
 // Doltgres spike smoke test — run: pnpm smoke:doltgres
 // Requires a Doltgres on localhost:4132. Either works:
-//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.4.0   (latest release)
+//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.5.0   (latest release)
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 // DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
+//
+// RE-MEASURED 2026-11-06 against 1.5.0 (released 2026-11-05) and PR #3634 at ad6e1d72.
+//   - 1.5.0 releases every fix that was pinned `fixed-unreleased`: SET LOCAL (#3099's
+//     efSearch item), CREATE INDEX CONCURRENTLY (#3532), to_regprocedure (#3466), TG_ARGV
+//     (#3545), PostgreSQL format() (#3546), the scalar FOR query target (#3409) and CHECK
+//     beside an expression index (#3680). Those pins are now plain support checks, so 1.5.0
+//     is the floor and 1.4.0 fails them. With no unreleased fix left to track, the
+//     `fixed-unreleased` expectation is gone.
+//   - On 1.5.0 the revision journal installs and stops at its first write on #3771, as
+//     main did. Unchanged: #2600, #3335, #3389, #3772 and the data-modifying INSERT CTE.
+//   - Scores with TypeGraph #807 applied: 1.5.0 58 passed, 0 failed, 2 skipped; 1.4.0
+//     51 / 8 / 1 (the seven promoted checks, plus revision tracking failing at bootstrap
+//     on to_regprocedure); #3634 at ad6e1d72 56 / 2 / 2. #3634's base predates #3681 and
+//     #3680, so CIC and the CHECK fail there; every fence probe and the endpoint race pass.
+//     Merging 1.5.0 into it conflicts on the Dolt pin, which carries the still-open Dolt
+//     #12145. Without #807, 1.5.0 scores 53 / 6 / 1 on the node-row locking clauses.
+//   - Upstream fixed doltgresql#3723 after 1.5.0: INSERT ... SELECT over two aliases of
+//     one table stored the second alias's values in both columns. TypeGraph's edge
+//     inserts select FROM nodes AS from_node CROSS JOIN nodes AS to_node, but every
+//     inserted value is a bound parameter and the aliases appear only in WHERE, so they
+//     never had that shape.
 //
 // RE-MEASURED 2026-11-04 on TypeGraph main 0df38d8e against 1.4.0 (still the latest
 // release), doltgresql main 4841363d and PR #3634 at ad6e1d72.
@@ -563,38 +584,22 @@ function report(): void {
 // pool connection would then be handed to an unrelated step.
 
 /**
- * The two gaps behind the revision-change journal's trigger function, found once
- * doltgresql#3466 stopped masking them.
+ * What stops the revision-change journal's first write: its trigger function's
+ * `EXECUTE format('... $1 ...') USING` has the `$1` substituted inside the literal.
  */
-const TG_ARGV_ISSUE = "doltgresql#3545";
-const FORMAT_ISSUE = "doltgresql#3546";
 const BIND_SUBSTITUTION_ISSUE = "doltgresql#3771";
-const TG_ARGV_UNRESOLVED = 'column "tg_argv" could not be found';
-/** What the journal's `EXECUTE format(...)` raises once TG_ARGV resolves: it runs `0`. */
-const FORMAT_RETURNS_ZERO = 'at or near "0": syntax error';
 const FORMAT_BIND_SUBSTITUTION = 'at or near "{": syntax error';
-const TO_REGPROCEDURE_MISSING = "'to_regprocedure' not found";
 
 /** What a probe is pinned to produce. */
 type Expectation =
   | Readonly<{ kind: "supported" }>
   /** The engine must reject it, with an error containing `message`. */
-  | Readonly<{ kind: "unsupported"; message: string; issue: string }>
-  /**
-   * Rejected by the latest release with `message`, accepted by a build of main. Passes on
-   * both and names which one it observed, so the battery is right against the published
-   * image while tracking main.
-   */
-  | Readonly<{ kind: "fixed-unreleased"; message: string; issue: string }>;
+  | Readonly<{ kind: "unsupported"; message: string; issue: string }>;
 
 const SUPPORTED: Expectation = { kind: "supported" };
 
 function unsupported(message: string, issue: string): Expectation {
   return { kind: "unsupported", message, issue };
-}
-
-function fixedUnreleased(message: string, issue: string): Expectation {
-  return { kind: "fixed-unreleased", message, issue };
 }
 
 /**
@@ -648,21 +653,12 @@ async function probe(
       );
       return;
     }
-    const fixedOnMain = expectation.kind === "fixed-unreleased";
     if (failure === undefined) {
-      results.push(
-        fixedOnMain ?
-          {
-            step: name,
-            outcome: "pass",
-            detail: `supported on this build (${expectation.issue} fixed on main, unreleased)`,
-          }
-        : {
-            step: name,
-            outcome: "fail",
-            detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
-          },
-      );
+      results.push({
+        step: name,
+        outcome: "fail",
+        detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
+      });
       return;
     }
     const detail = describeError(failure);
@@ -671,10 +667,7 @@ async function probe(
         {
           step: name,
           outcome: "pass",
-          detail:
-            fixedOnMain ?
-              `unsupported on this build as pinned (${expectation.issue}, fixed on main, unreleased)`
-            : `unsupported as pinned (${expectation.issue})`,
+          detail: `unsupported as pinned (${expectation.issue})`,
         }
       : {
           step: name,
@@ -1035,20 +1028,16 @@ async function runDeviationBattery(): Promise<void> {
      ON CONFLICT ("id") DO UPDATE SET "embedding" = EXCLUDED."embedding"`,
   ]);
   // The per-search `efSearch` override is applied with `SET LOCAL` inside the search's own
-  // transaction. 1.4.0 rejects it; main accepts it and scopes it to the transaction.
-  await probe(
-    "pgvector: per-search efSearch (SET LOCAL)",
-    fixedUnreleased("SET LOCAL is not yet supported", "doltgresql#3099"),
-    [`BEGIN`, `SET LOCAL hnsw.ef_search = 40`],
-  );
-  // `materializeIndexes()` builds the ANN index CONCURRENTLY. Main's index is a real
-  // one: EXPLAIN of `ORDER BY embedding <=> $1 LIMIT k` reads it in vector order.
+  // transaction. 1.5.0 accepts it and scopes it to the transaction.
+  await probe("pgvector: per-search efSearch (SET LOCAL)", SUPPORTED, [
+    `BEGIN`,
+    `SET LOCAL hnsw.ef_search = 40`,
+  ]);
+  // `materializeIndexes()` builds the ANN index CONCURRENTLY. Since 1.5.0 the index is a
+  // real one: EXPLAIN of `ORDER BY embedding <=> $1 LIMIT k` reads it in vector order.
   await probe(
     "pgvector: ANN index build (CREATE INDEX CONCURRENTLY)",
-    fixedUnreleased(
-      "concurrent index creation is not yet supported",
-      "doltgresql#3532",
-    ),
+    SUPPORTED,
     [
       ...PROBE_SETUP,
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS "probe_ann"
@@ -1110,16 +1099,14 @@ async function runDeviationBattery(): Promise<void> {
     unsupported('at or near "lock": syntax error', "doltgresql#2600"),
     [...PROBE_SETUP, `BEGIN`, `LOCK TABLE "probe_rows" IN SHARE MODE`],
   );
-  await probe(
-    "revision journal: to_regprocedure",
-    fixedUnreleased(TO_REGPROCEDURE_MISSING, "doltgresql#3466"),
-    [`SELECT to_regprocedure('pg_catalog.now()')`],
-  );
-  // The two gaps the to_regprocedure fix unmasks. The journal's trigger function reads its
-  // table names from TG_ARGV and splices them with format('%I').
+  await probe("revision journal: to_regprocedure", SUPPORTED, [
+    `SELECT to_regprocedure('pg_catalog.now()')`,
+  ]);
+  // The journal's trigger function reads its table names from TG_ARGV and splices them
+  // with format('%I').
   await probe(
     "revision journal: TG_ARGV in a trigger function",
-    fixedUnreleased(TG_ARGV_UNRESOLVED, TG_ARGV_ISSUE),
+    SUPPORTED,
     [
       `DROP TABLE IF EXISTS "probe_trigger"`,
       `DROP FUNCTION IF EXISTS probe_trigger_argv()`,
@@ -1136,22 +1123,16 @@ async function runDeviationBattery(): Promise<void> {
   // old MySQL formatter silently returning zero for a PostgreSQL format string.
   await probe(
     "revision journal: PostgreSQL format()",
-    fixedUnreleased(
-      "function 'FORMAT' expected 2 or 3 arguments",
-      FORMAT_ISSUE,
-    ),
+    SUPPORTED,
     [
       `SELECT format('hello') AS greeting, format('%I', 'journal table') AS identifier`,
     ],
     [{ greeting: "hello", identifier: '"journal table"' }],
   );
-  // #3420 adds scalar FOR .. IN query targets; #3409 is still broken in 1.4.0.
+  // Scalar FOR .. IN query targets (#3420, #3409), released in 1.5.0.
   await probe(
     "PL/pgSQL: scalar FOR query target",
-    fixedUnreleased(
-      "record variable `(unnamed row)` could not be found",
-      "doltgresql#3409",
-    ),
+    SUPPORTED,
     [
       `CREATE OR REPLACE FUNCTION probe_scalar_loop() RETURNS int LANGUAGE plpgsql AS $probe$
        DECLARE value int; total int := 0;
@@ -1216,9 +1197,9 @@ async function runDeviationBattery(): Promise<void> {
 }
 
 /**
- * A fixed-unreleased pin whose 1.4.0 symptom is a SUCCESS: with an expression index on
- * the table, 1.4.0 never evaluates its CHECK constraints (doltgresql#3680), so a
- * violating row is accepted. TypeGraph's edge table carries the match-identity CHECK,
+ * A support check whose regression is a SUCCESS: with an expression index on the table,
+ * 1.4.0 never evaluated its CHECK constraints (doltgresql#3680, fixed in 1.5.0), so a
+ * violating row was accepted. TypeGraph's edge table carries the match-identity CHECK,
  * and declared indexes are expression indexes over `props`.
  */
 async function probeCheckBesideExpressionIndex(): Promise<void> {
@@ -1250,8 +1231,7 @@ async function probeCheckBesideExpressionIndex(): Promise<void> {
           {
             step: name,
             outcome: "pass",
-            detail:
-              "violating row refused (doltgresql#3680 fixed on main, unreleased)",
+            detail: "violating row refused",
           }
         : {
             step: name,
@@ -1263,9 +1243,9 @@ async function probeCheckBesideExpressionIndex(): Promise<void> {
     }
     results.push({
       step: name,
-      outcome: "pass",
+      outcome: "fail",
       detail:
-        "violating row ACCEPTED as pinned (doltgresql#3680, fixed on main, unreleased)",
+        "violating row ACCEPTED: CHECK skipped beside an expression index (doltgresql#3680 regressed)",
     });
   } catch (error) {
     results.push({ step: name, outcome: "fail", detail: describeError(error) });
@@ -1402,33 +1382,13 @@ const WALK_STEPS: readonly string[] = [
 
 /**
  * Why a `revisionTracking: true` store cannot journal a write, by the error that surfaces.
- * Ordered as an engine meets them: each one masks the next.
+ * Ordered as an engine meets them: each one masks the next. 1.5.0 released the fixes for
+ * the three earlier gaps (#3466, #3545, #3546), so their probes above are support checks.
  */
 const REVISION_JOURNAL_GAPS: readonly Readonly<{
   message: string;
   reason: string;
 }>[] = [
-  {
-    message: TO_REGPROCEDURE_MISSING,
-    reason:
-      "blocked at bootstrap (doltgresql#3466, fixed on main, unreleased): the " +
-      "revision-change journal's install guard and readiness check call `to_regprocedure`.",
-  },
-  {
-    message: TG_ARGV_UNRESOLVED,
-    reason:
-      `blocked at the first write (${TG_ARGV_ISSUE}, fixed on main, unreleased): the journal installs, ` +
-      "but its trigger function reads its table names from TG_ARGV, which Doltgres does " +
-      "not bind (pg_trigger.tgargs is populated; TG_OP, NEW and OLD work). The store " +
-      "bootstraps and then refuses every write.",
-  },
-  {
-    message: FORMAT_RETURNS_ZERO,
-    reason:
-      `blocked at the first write (${FORMAT_ISSUE}, fixed on main, unreleased): the journal's trigger ` +
-      "function splices table names with format('%I', ...), which Doltgres resolves to " +
-      "MySQL's FORMAT(X, D) and returns '0', so the dynamic statement it executes is `0`.",
-  },
   {
     message: FORMAT_BIND_SUBSTITUTION,
     reason:
