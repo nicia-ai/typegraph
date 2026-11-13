@@ -14,9 +14,11 @@ export type VariableLengthTraversal = Traversal & {
 /**
  * Selects and validates the variable-length traversal target for recursive compilation.
  *
- * Invariants:
- * - Query must contain exactly one variable-length traversal.
- * - Recursive mode currently supports only a single traversal in the query.
+ * Invariant: the AST compiled here holds exactly one traversal, and it is the
+ * variable-length one. A query with several traversals, recursive or fixed,
+ * compiles through `compileMultiStageRecursiveQuery` (`recursive-chain.ts`),
+ * which isolates each traversal into a single-traversal stage AST before it
+ * reaches this pass; the refusal below guards that contract.
  */
 export function runRecursiveTraversalSelectionPass(
   ast: QueryAst,

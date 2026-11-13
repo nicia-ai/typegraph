@@ -82,6 +82,16 @@ export const BASE_SCHEMA_RELEASES = [
     id: "durable-store-operation-outcomes",
     orderedShapeDigests: { postgres: "3f3ce0cc5077fc1b7c9e414494863e9d7fd036f0f15e63016cda3cf42f6bfd51", sqlite: "4af4a4e35c414a6022745c1178086b424bf9488bc73ca84b5f70c31bdf298b1c" },
   },
+  {
+    version: 9,
+    id: "identity-transition-log",
+    orderedShapeDigests: {
+      postgres:
+        "1b3caa52175c0d09383cc01ac96c9695140569cd1893906a844c014c30a008d6",
+      sqlite:
+        "606188336c70bb143b083c95f709c7c36f16b1236936e3a2cb5804d0fc8be1ff",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {
@@ -152,6 +162,21 @@ function migrationError(
 }
 
 /**
+ * Refuses with `BaseSchemaMigrationError` unless `installedVersion` is this
+ * release's base schema. The one verdict both the root backend's
+ * `assertBaseSchemaCurrent` and a schema-write adoption (which reads the
+ * marker on the caller's own transaction) apply.
+ */
+export function assertBaseSchemaVersionCurrent(
+  installedVersion: number | undefined,
+  currentVersion: number = CURRENT_BASE_SCHEMA_VERSION,
+): void {
+  const state = classifyVersion(installedVersion, currentVersion);
+  if (state === "current") return;
+  throw migrationError(installedVersion, currentVersion, state);
+}
+
+/**
  * One owner for deployment-wide physical schema adoption.
  *
  * The ordered registry is deliberately separate from per-graph schema
@@ -193,14 +218,8 @@ export function createBaseSchemaLifecycle(
     );
   }
 
-  function requireCurrent(installedVersion: number | undefined): void {
-    const state = classifyVersion(installedVersion, currentVersion);
-    if (state === "current") return;
-    throw migrationError(installedVersion, currentVersion, state);
-  }
-
   async function assertCurrent(): Promise<void> {
-    requireCurrent(await options.readVersion());
+    assertBaseSchemaVersionCurrent(await options.readVersion(), currentVersion);
   }
 
   async function writeVersion(version: number): Promise<number> {
@@ -236,7 +255,7 @@ export function createBaseSchemaLifecycle(
       await adoptStep(step);
       observedVersion = await writeVersion(step.version);
     }
-    requireCurrent(observedVersion);
+    assertBaseSchemaVersionCurrent(observedVersion, currentVersion);
   }
 
   async function adopt(): Promise<void> {

@@ -39,6 +39,14 @@ export function sortedReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
+ * `value` as JSON with sibling keys sorted at every depth
+ * (`JSON.stringify(value, sortedReplacer)`).
+ */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, sortedReplacer);
+}
+
+/**
  * Compare two values for canonical-form equality.
  *
  * Returns `true` when both values produce identical JSON under `sortedReplacer`
@@ -50,7 +58,5 @@ export function sortedReplacer(_key: string, value: unknown): unknown {
  * may or may not be the desired semantics depending on context.
  */
 export function canonicalEqual(a: unknown, b: unknown): boolean {
-  return (
-    JSON.stringify(a, sortedReplacer) === JSON.stringify(b, sortedReplacer)
-  );
+  return canonicalJson(a) === canonicalJson(b);
 }

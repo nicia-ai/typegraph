@@ -52,6 +52,7 @@ import {
   setupSharedPgliteMergeEngine,
   type SharedPgliteMergeEngine,
 } from "../../graph-merge/test-utils";
+import { propertyRuns } from "../run-budget";
 import type { MergeLawScenario } from "./arbitraries";
 import { mergeLawScenarioArb } from "./arbitraries";
 import { normalizeGraph, normalizeReport } from "./normalize";
@@ -97,7 +98,7 @@ const BRANCH_B = asBranchId("law-branch-b");
  * PGlite engine with isolated tables for this file, matching the determinism
  * gate's rationale.
  */
-const LAW_RUNS = process.env["CI"] ? 8 : 16;
+const LAW_RUNS = propertyRuns({ ci: 8, local: 16 });
 
 /** In-memory Dice trigram over the `name` field (no embeddings). */
 const nameSimilarity: SimilarityStrategy<LawGraph> = {

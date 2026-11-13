@@ -455,6 +455,94 @@ describe("getFieldTypeInfo - caching", () => {
 });
 
 // ============================================================
+// kindsDivergingFromSubsumingDeclaration
+// ============================================================
+
+function subsumedBy(parentKind: string, ...childKinds: readonly string[]) {
+  return (childKind: string, candidate: string) =>
+    candidate === parentKind && childKinds.includes(childKind);
+}
+
+describe("kindsDivergingFromSubsumingDeclaration", () => {
+  const vector = z.object({ vector: embedding(3).optional() });
+  const plainVector = z.object({ vector: z.array(z.number()).optional() });
+
+  it("names a subclass that drops the subsuming kind's embedding tag, and the builder refuses the same alias", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: vector }],
+        ["Memo", { schema: plainVector }],
+        ["Note", { schema: z.object({ text: z.string() }) }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo", "Note"),
+    );
+    const kinds = ["Doc", "Memo", "Note"];
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(kinds, "vector"),
+    ).toEqual(["Memo"]);
+    expect(
+      introspector.getSharedFieldTypeInfo(kinds, "vector"),
+    ).toBeUndefined();
+  });
+
+  it("names a subclass that adds an embedding tag the subsuming kind lacks", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: plainVector }],
+        ["Memo", { schema: vector }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo"),
+    );
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(
+        ["Doc", "Memo"],
+        "vector",
+      ),
+    ).toEqual(["Memo"]);
+  });
+
+  it("names nothing when every declaration keeps the tag, or a kind omits the field", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: vector }],
+        ["Memo", { schema: vector }],
+        ["Note", { schema: z.object({ text: z.string() }) }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo", "Note"),
+    );
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(
+        ["Doc", "Memo", "Note"],
+        "vector",
+      ),
+    ).toEqual([]);
+  });
+
+  it("holds equivalent kinds that disagree on the tag against each other", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Tagged", { schema: vector }],
+        ["Plain", { schema: plainVector }],
+      ]),
+      undefined,
+      (childKind, candidate) => childKind !== candidate,
+    );
+
+    expect(
+      introspector
+        .kindsDivergingFromSubsumingDeclaration(["Tagged", "Plain"], "vector")
+        .toSorted(),
+    ).toEqual(["Plain", "Tagged"]);
+  });
+});
+
+// ============================================================
 // getSharedFieldTypeInfo
 // ============================================================
 

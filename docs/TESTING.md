@@ -82,18 +82,19 @@ before returning the engine to the pool. The file's `afterAll` closes the pool.
 Keep this lifecycle when adding cases to these suites.
 
 The PGlite integration suite also uses this pool for physically isolated merge
-branches and review targets. Its primary fixture still shares one engine and
-resets data before each test; serialized-backend tests intentionally use that
-primary engine. Isolated fixtures are released by the shared integration suite's
-cleanup hook, and the file closes both the primary engine and pool at completion.
+branches and review targets. Each of its slice files still shares one primary
+engine across its tests and resets data before each test; serialized-backend
+tests intentionally use that primary engine. Isolated fixtures are released by
+the shared integration suite's cleanup hook, and each slice file closes both its
+primary engine and its pool at completion.
 
-The libSQL adapter and integration suite uses temporary database files. CI sets
+The libSQL adapter and integration suites use temporary database files. CI sets
 `TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
 disposable files on the Linux runner's RAM-backed filesystem. This preserves
 file-client behavior, close/reopen persistence, and default journal/synchronous
 settings while avoiding variable disk flush latency. Locally the suite defaults
 to the OS temporary directory; the override must name an existing directory.
-It affects only this suite's database files, not other tools' temporary files.
+It affects only these suites' database files, not other tools' temporary files.
 
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
@@ -102,6 +103,46 @@ import { createAdapterTestSuite } from "./adapter-test-suite";
 
 createAdapterTestSuite("SQLite", () => createTestBackend());
 ```
+
+The **shared integration suite** (`integration-test-suite.ts`) runs the
+cross-backend query, write, and merge cases registered under
+`tests/backends/integration/`. Vitest parallelizes and shards by file, so each
+backend lane registers the suite from several slice files rather than one:
+
+| Lane | Slice files | Shared setup |
+| --- | --- | --- |
+| better-sqlite3 | `sqlite/sqlite-integration-slice-{0,1}.test.ts` | `sqlite/sqlite-integration-lane.ts` |
+| libSQL | `sqlite/libsql-integration-slice-{0..3}.test.ts` | `sqlite/libsql-integration-lane.ts` |
+| PGlite | `postgres/pglite-integration-slice-{0..3}.test.ts` | `postgres/pglite-integration-lane.ts` |
+| node-postgres | `postgres/postgres-integration-slice-{0..3}.test.ts` | `postgres/postgres-integration-lane.ts` |
+| postgres-js | `postgres/postgres-js-integration-slice-{0..3}.test.ts` | `postgres/postgres-js-integration-lane.ts` |
+
+A slice file only states `slice: { index, count }`; the lane module owns the
+backend factories and lifecycle hooks, so every slice of a lane is set up
+identically. Each slice file is its own worker and therefore owns its own
+engine, pool, temporary files, or provisioned PostgreSQL database.
+
+`tests/backends/integration-registrations.ts` is the single list of what the
+suite contains. To add a sub-suite, export its `register…` function from
+`tests/backends/integration/index.ts` and add one `{ register }` entry to
+`INTEGRATION_REGISTRATIONS`. It is assigned to a slice automatically: the
+slicer packs registrations heaviest-first into the lightest slice, using each
+entry's optional `weight` (measured share of suite wall time) and a default for
+entries without one. Weights only affect balance, never coverage, so they need
+no upkeep; re-measure them only when one slice of a lane becomes a clear long
+pole. `tests/integration-suite-slices.test.ts` fails when a lane's slice files
+do not cover indexes `0..count-1` exactly once or when the slices of a lane do
+not add up to the full registration list.
+
+Because a registration can move to a different slice file when the list, a
+weight, or a slice count changes, shared suites must not call
+`toMatchSnapshot()`, which keys its snapshot to the running test file. Record a
+per-dialect expectation with `toMatchFileSnapshot()` and a path beside the
+suite instead (see `capability-bundle-no-throw.ts`); the same guard enforces
+this.
+
+To change a lane's slice count, add or remove slice files and state the new
+`count` in every slice file of that lane.
 
 ### Oracle suites
 
@@ -501,8 +542,8 @@ only SQLite unit/property tests). The jobs are:
 | Job | What it runs |
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
-| **Test (SQLite)** | Four `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
-| **Test (Coverage)** | Four V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
+| **Test (SQLite)** | Five `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
+| **Test (Coverage)** | Five V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
 | **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3; packed-consumer checks against 7.0.2 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
@@ -517,6 +558,37 @@ To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
+
+### Shard balance
+
+The sharded jobs split test files by recorded duration, not by Vitest's default
+path hash, which evens out file counts and leaves one shard several times
+slower than another. `vitest.shard-sequencer.ts` assigns each file to a shard
+from the durations in `vitest.shard-weights.json`, which holds one map per lane
+(`sqlite` for the default lanes, `postgres` when `POSTGRES_URL` is set, since a
+suite with a server leg costs far more there).
+
+The split depends only on the file list, the recorded weights, and the shard
+count, so the jobs of one commit agree on it; `tests/shard-sequencer.test.ts`
+checks that the shards add up to every test file exactly once. A file with no
+recorded duration is placed at the mean, so adding a test file needs no
+bookkeeping. Stale weights cost balance, never coverage.
+
+Durations are recorded from CI, since a runner's relative file costs differ
+from a workstation's (server-backed suites share the runner's cores with the
+PostgreSQL service). The coverage and PostgreSQL jobs upload a JSON report per
+shard as `shard-durations-*` artifacts. Refresh the weights from a green run
+when a shard drifts well above the others:
+
+```bash
+cd packages/typegraph
+
+gh run download <run-id> --pattern 'shard-durations-sqlite-*' --dir durations/sqlite
+node --import tsx scripts/update-shard-weights.ts sqlite durations/sqlite/*/*.json
+
+gh run download <run-id> --pattern 'shard-durations-postgres-*' --dir durations/postgres
+node --import tsx scripts/update-shard-weights.ts postgres durations/postgres/*/*.json
+```
 
 ## Type-level consumer contracts
 

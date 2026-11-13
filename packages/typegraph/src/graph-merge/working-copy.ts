@@ -6,7 +6,10 @@
  * ({@link cloneWorkingCopyStrategy}): `exportGraphStream` the base, then
  * `importGraphStream` into a fresh store on a caller-provided backend. IDs are
  * preserved by interchange, so the diff engine (T3) can key on stable ids across
- * base and fork. This leverages public entrypoints only, needs zero schema
+ * base and fork. The clone falls back to a materialized `exportGraph` /
+ * `importGraph` when a stream cannot run: when the fresh backend shares the
+ * base's snapshot connection, or when the graph declares required-existence
+ * composition parts (a streamed import refuses those). This leverages public entrypoints only, needs zero schema
  * changes, and behaves identically across SQLite and Postgres.
  *
  * INTERCHANGE FIDELITY LIMITATION (verified, design §13.x): the interchange
@@ -74,8 +77,8 @@ import {
   importGraphStream,
   isBackendDerivedFrom,
   sharesSerializedTransactionResource,
-  snapshotExportContention,
   storeBackend,
+  streamedImportRefusal,
   summarizeImportErrors,
   wrapWithManagedClose,
 } from "./typegraph-internal";
@@ -242,19 +245,18 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             // Keep descendants branchable with the same O(1) anchor contract,
             // but do not copy recorded-time history into the disposable fork.
             //
-            // Deliberately narrower than Store.workingCopyOptions (the full
-            // set a fork inherits, see forkStoreOptions): the clone's backend
-            // is a FRESH, empty database, not a physical copy of the base's,
-            // so a `schema` naming the base's tables would misdirect writes
-            // on an unrelated backend, and an external `recordedRead`
-            // binding would point at a relation the clone never populates.
-            // Hooks, `coalesceUnchangedUpserts`, `autoRefreshStatistics` and
-            // `queryDefaults` carry no such physical assumption, but the
-            // clone strategy is used for host-agnostic P0 branching where the
-            // caller's `makeBackend` factory — not the base's own
-            // configuration — owns the fresh store's behavior; only the
-            // branchability contract (`revisionTracking`) is load-bearing
-            // enough to thread through unconditionally.
+            // Narrower than Store.workingCopyOptions (the full set a fork
+            // inherits, see forkStoreOptions): the clone's backend is a
+            // FRESH, empty database, not a physical copy of the base's, so a
+            // `schema` naming the base's tables would misdirect writes on an
+            // unrelated backend, and an external `recordedRead` binding would
+            // point at a relation the clone never populates.
+            // `queryDefaults` decide which rows a query returns, so they are
+            // carried: the same query must answer alike on the base and on
+            // its working copy. Hooks, `coalesceUnchangedUpserts` and
+            // `autoRefreshStatistics` stay with the caller's `makeBackend`
+            // factory, which owns the fresh store's write-side behavior.
+            ...cloneQueryDefaults(baseStore),
             revisionTracking: baseStore.revisionTrackingEnabled,
             ...(options.revisionJournal === false ?
               { revisionJournal: false as const }
@@ -265,7 +267,6 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           includeMeta: true,
           includeTemporal: true,
           includeDeleted: false,
-          batchSize: CLONE_IMPORT_BATCH_SIZE,
         } as const;
         const importOptions = {
           onConflict: "error",
@@ -276,20 +277,20 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
             { refreshStatistics: false as const }
           : {}),
         } as const;
-        // When the fresh backend writes through the connection the base's
-        // snapshot export would hold, streaming is exactly what the import
-        // guard refuses — so ask that guard's own predicate, and materialize
-        // the export instead of streaming it when it says so.
+        // Materialize the export instead of streaming it whenever the
+        // streamed import would refuse, as decided by that import's own
+        // predicate.
         const result =
           (
-            snapshotExportContention(
-              storeBackend(baseStore),
-              storeBackend(freshStore),
-            ) === undefined
+            streamedImportRefusal(freshStore, storeBackend(baseStore)) ===
+            undefined
           ) ?
             await importGraphStream(
               freshStore,
-              exportGraphStream(baseStore, exportOptions),
+              exportGraphStream(baseStore, {
+                ...exportOptions,
+                batchSize: CLONE_IMPORT_BATCH_SIZE,
+              }),
               importOptions,
             )
           : await importGraph(
@@ -317,6 +318,14 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
       }
     },
   };
+}
+
+/** The base's query defaults, as the option a cloned store is opened with. */
+function cloneQueryDefaults<G extends GraphDef>(
+  baseStore: Store<G>,
+): Pick<StoreOptions, "queryDefaults"> {
+  const { queryDefaults } = baseStore.workingCopyOptions;
+  return queryDefaults === undefined ? {} : { queryDefaults };
 }
 
 /**

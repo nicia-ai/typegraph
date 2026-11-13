@@ -24,6 +24,7 @@
  * `drizzle-orm` into a false "install drizzle-orm" instruction.
  */
 import { ConfigurationError } from "../errors";
+import { isObjectRecord } from "../utils/object";
 
 /** The optional peer dependency the typed refusal names. */
 export const MISSING_PEER_PACKAGE = "drizzle-orm";
@@ -176,11 +177,6 @@ const MISSING_SPECIFIER_PATTERN = /Cannot find (?:package|module) '([^']+)'/;
 /** Matches `drizzle-orm` and `drizzle-orm/<subpath>`, never a mere substring of a longer specifier or an importer path. */
 const DRIZZLE_ORM_SPECIFIER_PATTERN = /^drizzle-orm(\/|$)/;
 
-/** Narrows `unknown` to a plain object whose string-keyed members can be read defensively — never an assertion. */
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null;
-}
-
 /**
  * Whether `error` is a Node module-resolution failure naming a MISSING
  * `drizzle-orm` (or `drizzle-orm/<subpath>`) specifier — never a whole-message
@@ -189,7 +185,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
  * reach it only through {@link loadDrizzleBackedModule}.
  */
 export function isMissingDrizzlePeerError(error: unknown): boolean {
-  if (!isRecord(error)) return false;
+  if (!isObjectRecord(error)) return false;
 
   const code = error["code"];
   if (typeof code !== "string" || !MISSING_MODULE_ERROR_CODES.has(code)) {

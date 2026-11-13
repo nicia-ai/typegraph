@@ -688,7 +688,7 @@ export function registerSetNodeMutationIntegrationTests(
       ).resolves.toMatchObject({ state: "pending" });
     });
 
-    it("refuses includeSubClasses candidates before changing any concrete kind", async () => {
+    it("refuses subclass-expanded candidates and accepts the exact kind", async () => {
       const content = defineNode("CandidateContent", {
         schema: z.object({ name: z.string() }),
       });
@@ -711,23 +711,99 @@ export function registerSetNodeMutationIntegrationTests(
       const subclassNode = await store.nodes.CandidateArticle.create({
         name: "subclass",
       });
-      const candidates = store
+      const polymorphicCandidates = store
         .query()
-        .from("CandidateContent", "content", { includeSubClasses: true })
+        .from("CandidateContent", "content")
         .select((query) => query.content.id);
 
-      await expect(
-        store.nodes.CandidateContent.updateWhere({
-          candidates,
-          patch: { name: "must not change" },
-        }),
-      ).rejects.toThrow("one concrete node kind");
+      const refusal = await store.nodes.CandidateContent.updateWhere({
+        candidates: polymorphicCandidates,
+        patch: { name: "must not change" },
+      }).catch((error: unknown) => error);
+      if (!(refusal instanceof ConfigurationError)) {
+        throw new TypeError("expected a ConfigurationError refusal", {
+          cause: refusal,
+        });
+      }
+      expect(refusal).toMatchObject({
+        details: {
+          code: "SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED",
+          operation: "updateWhere",
+          expansion: "subclasses",
+        },
+      });
+      expect(refusal.details["candidateKinds"]).toEqual(
+        expect.arrayContaining(["CandidateArticle", "CandidateContent"]),
+      );
+      expect(refusal.suggestion).toContain('{ expansion: "exact" }');
       await expect(
         store.nodes.CandidateContent.getById(baseNode.id),
       ).resolves.toMatchObject({ name: "base" });
       await expect(
         store.nodes.CandidateArticle.getById(subclassNode.id),
       ).resolves.toMatchObject({ name: "subclass" });
+
+      const exactCandidates = store
+        .query()
+        .from("CandidateContent", "content", { expansion: "exact" })
+        .select((query) => query.content.id);
+
+      await expect(
+        store.nodes.CandidateContent.updateWhere({
+          candidates: exactCandidates,
+          patch: { name: "base updated" },
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+      await expect(
+        store.nodes.CandidateContent.getById(baseNode.id),
+      ).resolves.toMatchObject({ name: "base updated" });
+      await expect(
+        store.nodes.CandidateArticle.getById(subclassNode.id),
+      ).resolves.toMatchObject({ name: "subclass" });
+    });
+
+    it("advises one update per kind when a candidate list names several kinds", async () => {
+      const invoice = defineNode("CandidateInvoice", {
+        schema: z.object({ name: z.string() }),
+      });
+      const receipt = defineNode("CandidateReceipt", {
+        schema: z.object({ name: z.string() }),
+      });
+      const graph = defineGraph({
+        id: "update_where_listed_candidates",
+        nodes: {
+          CandidateInvoice: { type: invoice },
+          CandidateReceipt: { type: receipt },
+        },
+        edges: {},
+      });
+      const store = await context.createStore(graph);
+      const invoiceNode = await store.nodes.CandidateInvoice.create({
+        name: "invoice",
+      });
+      const listedCandidates = store
+        .query()
+        .from(["CandidateInvoice", "CandidateReceipt"], "document")
+        .select((query) => query.document.id);
+
+      const refusal = await store.nodes.CandidateInvoice.updateWhere({
+        candidates: listedCandidates,
+        patch: { name: "must not change" },
+      }).catch((error: unknown) => error);
+      if (!(refusal instanceof ConfigurationError)) {
+        throw new TypeError("expected a ConfigurationError refusal", {
+          cause: refusal,
+        });
+      }
+      expect(refusal.details).toMatchObject({
+        code: "SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED",
+        candidateKinds: ["CandidateInvoice", "CandidateReceipt"],
+      });
+      expect(refusal.suggestion).toContain("one updateWhere() per node kind");
+      expect(refusal.suggestion).not.toContain("expansion");
+      await expect(
+        store.nodes.CandidateInvoice.getById(invoiceNode.id),
+      ).resolves.toMatchObject({ name: "invoice" });
     });
 
     it("refuses parameterized candidate queries before executing the set update", async () => {

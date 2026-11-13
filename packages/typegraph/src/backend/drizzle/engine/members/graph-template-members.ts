@@ -7,8 +7,8 @@
  * because `PgTable` and `SQLiteTable` share no common supertype — the same
  * reason `kind-removal-members.ts` binds its row access per dialect.
  *
- * `registerGraphTemplate`'s insert-then-verify sequence and its
- * content-conflict refusal are identical on both dialects; only the row's
+ * `registerGraphTemplate`'s insert-then-read sequence is identical on both
+ * dialects; only the row's
  * timestamp and JSON-document encoding differ, threaded through as the
  * `rowAccess` dep the same way `kind-removal-members.ts` and
  * `index-materialization-members.ts` do it.
@@ -35,7 +35,7 @@
  * confirmed. That asymmetry is threaded through as the optional
  * `copyContributionMarkers` dep, present only on the SQLite profile.
  */
-import { ConfigurationError } from "../../../../errors";
+import { DatabaseOperationError } from "../../../../errors";
 import { type CompiledRowsSql } from "../../../../query/sql-intent";
 import type { SerializedSchema } from "../../../../schema/types";
 import {
@@ -228,12 +228,13 @@ export function createGraphTemplateMembers(
       ): Promise<GraphTemplateRow> {
         await rowAccess.insertIgnoringConflict(params);
         const row = await rowAccess.selectByTemplateId(params.templateId);
-        if (row?.schemaHash !== params.schemaHash) {
-          throw new ConfigurationError(
-            `Graph template "${params.templateId}" already exists with different schema content.`,
+        if (row === undefined) {
+          throw new DatabaseOperationError(
+            `Graph template "${params.templateId}" was not readable after registration.`,
             {
-              code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
-              templateId: params.templateId,
+              operation: "select",
+              entity: "graph-template",
+              reason: "no_row_returned",
             },
           );
         }

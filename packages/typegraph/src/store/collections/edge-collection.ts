@@ -17,7 +17,6 @@ import {
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
-  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -39,6 +38,7 @@ import {
   type EdgeIdentityExpectation,
   edgeIdentityFromRow,
 } from "../operations/edge-identity";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -118,6 +118,7 @@ export type EdgeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeUpdate: (
     input: {
@@ -281,6 +282,22 @@ export type UpsertUpdateEdgeInput = EdgeUpdateInput &
     validFrom?: string | null;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>;
+
+/**
+ * What a batch create states beyond its own rows.
+ */
+export type EdgeCreateBatchOptions = Readonly<{
+  /**
+   * The updates the caller writes right after this batch, inside the same
+   * transaction. Every one of them is prepared before this batch's first
+   * insert, against the state the inserts leave — re-entry cardinality and
+   * composition claims counting this batch's rows, merged props, the window
+   * verdict — and the ones that resurrect join this batch's one acyclicity
+   * probe. A refusal any of them reaches then precedes every write of the
+   * combined set, instead of surfacing after this batch's rows are stored.
+   */
+  pairedUpdates?: readonly EdgeUpsertUpdateBatchEntry[];
+}>;
 
 export type EdgeUpsertUpdateBatchEntry = Readonly<{
   input: UpsertUpdateEdgeInput;
@@ -1078,7 +1095,9 @@ export function createEdgeCollection<
         );
         if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
-            const created = await executeEdgeCreateBatch(createInputs, target);
+            const created = await executeEdgeCreateBatch(createInputs, target, {
+              pairedUpdates: updateEntries,
+            });
             for (const [index, entry] of toCreate.entries()) {
               results[entry.index] = narrowEdge<E>(
                 requireDefined(created[index]),
@@ -1126,8 +1145,9 @@ export function createEdgeCollection<
       // written it, never on an autocommit read taken before it (the defect
       // `upsertById` had on the node side).
       //
-      // `runOptionallyInTransaction` is the one owner of "open a transaction if
-      // this backend has one": already inside `store.transaction(...)` the
+      // `runOwnedMutationSetTransaction` opens a transaction if this backend
+      // has one (and replays it when the per-graph write fence refuses its
+      // snapshot): already inside `store.transaction(...)` the
       // target IS the caller's transaction and no nested one opens, and on a
       // backend without interactive transactions there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
@@ -1136,7 +1156,9 @@ export function createEdgeCollection<
         "edge",
         backend,
         () =>
-          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real

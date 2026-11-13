@@ -25,7 +25,7 @@ import {
   isSameClaimOwner,
 } from "../../store/claims/axis";
 import {
-  type ConstrainedCardinality,
+  type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
@@ -93,7 +93,7 @@ import {
   assertGraphCommandCoordination,
   assertGraphCommandExecutionContext,
   type GraphCommandExecutionContext,
-  normalizeGraphCommandIsolation,
+  readGraphWriteFenceAcquisition,
 } from "../command-contract";
 import {
   resolveEdgeEndpointIds,
@@ -109,10 +109,11 @@ import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   CompareAndSetNodeParams,
+  CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -120,10 +121,12 @@ import type {
   DeleteUniqueParams,
   DisjointOverlapRow,
   DurableEdgeBatchMembers,
+  EdgeCardinalityDeclaration,
   EdgeClaimOutcome,
   EdgeConvergeCreateCommand,
   EdgeConvergeCreateCommandResult,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindActiveEdgesBySourceV1Params,
@@ -147,6 +150,7 @@ import type {
   InsertUniqueParams,
   ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommandResult,
   NodeRow,
   NodeRowLock,
@@ -154,6 +158,7 @@ import type {
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
   ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
   SchemaWriteFenceParams,
@@ -176,7 +181,10 @@ import {
   ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT,
   ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
 } from "./operations/contribution-evidence";
-import { ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT } from "./operations/edge-claims";
+import {
+  ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
+  claimPredicateShapeKey,
+} from "./operations/edge-claims";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -206,6 +214,10 @@ const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
 // resulting budget, so a future strategy cannot silently invalidate this cost.
 const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
 const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
+
+function claimTargetKey(axis: string, key: string): string {
+  return encodeTupleKey([axis, key]);
+}
 
 function chunkAtomicNodeEntriesByIdSource(
   entries: readonly AtomicNodeBatchEntry[],
@@ -294,10 +306,34 @@ export function atomicNodeReplacementSubmissionMaxEntries(
   );
 }
 
+/**
+ * The belt behind the composition-eligibility gates (`resolveAtomicEdgeBatchExecutor`
+ * et al., `src/store/operations/atomic-mutation-program.ts`): a fused command
+ * is an optimization attempt, not evidence that its dimensions ran, and a
+ * composition claim (`scope.kind === "composition"`) must NEVER
+ * reach a fused write — the fused single-claim path (`createEdgeWithPlan`)
+ * carries exactly one claim by construction, and even the batch path's
+ * generic multi-claim support is a policy choice this assertion enforces
+ * rather than a capability this library exercises. A composition edge
+ * always owes at least two claims (its own declared axis, plus this one),
+ * so every gate that reaches this function should already have routed such
+ * an edge kind through the portable path; this throws if one ever does not.
+ */
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
   claim: ClaimEdgeCardinalityParams,
 ): void {
+  if (claim.scope?.kind === "composition") {
+    throw new CompilerInvariantError(
+      "A fused edge write can never apply a composition claim: a composition " +
+        "edge kind always owes at least two claims, which every static " +
+        "eligibility gate must route through the portable write path instead.",
+      {
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+      },
+    );
+  }
   const matchesEdge =
     claim.graphId === params.graphId &&
     claim.edgeId === params.id &&
@@ -552,6 +588,33 @@ function claimOwnerOf(params: InsertUniqueParams): ClaimOwner {
 }
 
 /**
+ * Narrows a fence-audit declaration to the axis ref alone, dropping
+ * `edgeKind`.
+ *
+ * A switch on the discriminant, the same shape {@link edgeCardinalityAxisName}
+ * uses and for the same stated reason: reading `declaration.cardinality`
+ * outside a narrowed branch widens to the union of both directions'
+ * cardinality types (`unique` included), so building the object field-by-field
+ * would need an `as EdgeCardinalityAxisRef` assertion — defeating the very
+ * pairing {@link EdgeCardinalityAxisRef} exists to make unspellable. The
+ * switch keeps the compiler correlating `direction` and `cardinality` instead
+ * of trusting an assertion that a wrongly-paired future declaration would
+ * silently pass.
+ */
+function axisRefFromDeclaration(
+  declaration: EdgeCardinalityDeclaration,
+): EdgeCardinalityAxisRef {
+  switch (declaration.direction) {
+    case "source": {
+      return { direction: "source", cardinality: declaration.cardinality };
+    }
+    case "target": {
+      return { direction: "target", cardinality: declaration.cardinality };
+    }
+  }
+}
+
+/**
  * The internal operation backend — what `createCommonOperationBackend`
  * returns. Includes `commitSchemaVersion` and `setActiveVersion` so the
  * top-level backend wrappers can call them on a fresh tx-scoped
@@ -567,7 +630,7 @@ export type CommonOperationBackend = Pick<
   | "clearGraphPreservingContributionMaterializations"
   | "compareAndSetNode"
   | "countEdgesByKind"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "countNodesByKind"
   | "deleteEdge"
   | "deleteEdgesBatch"
@@ -1039,6 +1102,101 @@ function pairAtomicMutationChunksWithIds<T>(
     offset += entries.length;
     return { entries, ids: chunkIds };
   });
+}
+
+// `graphId` and `edgeKind` are fixed per statement; each admitted pair costs
+// two more (`fromKind`, `toKind`).
+const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 2;
+const MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT = 2;
+
+/**
+ * How many admitted pairs one `buildMisassignedEdgeEndpointAudit` statement
+ * may render, sized to the connection's bound-parameter budget. Unlike the
+ * disjunction this statement used to render, a `VALUES` derived table does
+ * not grow SQLite's expression-tree depth with the pair count, so the bound
+ * budget is the only ceiling left to respect.
+ */
+function misassignedEdgeEndpointPairChunkSize(
+  maxBindParameters: number,
+): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT) /
+        MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT,
+    ),
+  );
+}
+
+/**
+ * The projection every edge-family fence-audit statement returns
+ * (`src/backend/drizzle/operations/constraint-fence-audit.ts`
+ * `edgeAuditProjection`). One declaration, so an added audit column is a type
+ * error at every reader rather than an `undefined` field on a reported row.
+ */
+type EdgeAuditRow = Readonly<{
+  edge_id: string;
+  edge_kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+/** The audit row's snake_case columns as the reported row names them. */
+function edgeAuditRowFields(row: EdgeAuditRow): MisassignedEdgeEndpointRow {
+  return {
+    edgeKind: row.edge_kind,
+    edgeId: row.edge_id,
+    fromKind: row.from_kind,
+    fromId: row.from_id,
+    toKind: row.to_kind,
+    toId: row.to_id,
+  };
+}
+
+/**
+ * The live edges of one edge kind whose endpoints match none of its
+ * allowance's admitted pairs, chunking the pairs across several statements
+ * when the allowance exceeds `pairChunkSize`.
+ *
+ * A row is truly misassigned only when it fails EVERY chunk's admitted-pairs
+ * predicate — failing one chunk means only that the row is not admitted by
+ * that chunk's pairs, not that no pair anywhere admits it. So the final
+ * answer is the INTERSECTION, by edge id, of what each chunk's statement
+ * reports; a chunk that already leaves no candidates ends the loop early,
+ * since intersecting with the empty set can only stay empty.
+ */
+async function readMisassignedEdgeEndpointRows(
+  execution: OperationBackendExecution,
+  operationStrategy: CommonOperationStrategy,
+  graphId: string,
+  allowance: EdgeEndpointAllowance,
+  pairChunkSize: number,
+): Promise<readonly MisassignedEdgeEndpointRow[]> {
+  const pairChunks =
+    allowance.allowedPairs.length === 0 ?
+      [[]]
+    : chunkArray(allowance.allowedPairs, pairChunkSize);
+  let candidates: Map<string, EdgeAuditRow> | undefined;
+  for (const pairChunk of pairChunks) {
+    const rows = await execution.execAll<EdgeAuditRow>(
+      operationStrategy.buildMisassignedEdgeEndpointAudit(
+        graphId,
+        allowance.edgeKind,
+        pairChunk,
+      ),
+    );
+    const rowsByEdgeId = new Map(rows.map((row) => [row.edge_id, row]));
+    candidates =
+      candidates === undefined ? rowsByEdgeId : (
+        new Map([...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)))
+      );
+    if (candidates.size === 0) break;
+  }
+  return [...(candidates?.values() ?? [])].map((row) =>
+    edgeAuditRowFields(row),
+  );
 }
 
 function assembleAtomicResolvedMutationSet<TRow>(
@@ -1760,7 +1918,9 @@ export function createCommonOperationBackend(
    * COMMITTED, so two concurrent writers would both see "the incumbent is not
    * live yet" and both commit. Statement 1 is therefore decision-free — it only
    * makes the row exist, takes its lock and reports the COMMITTED holder — and
-   * statement 2 re-evaluates liveness after that lock is held.
+   * statement 2 re-evaluates liveness after that lock is held. Between them,
+   * {@link readClaimlessIncumbents} refuses a composition claim whose axis a
+   * claimless live edge already occupies.
    *
    * Duplicate conflict targets are refused rather than collapsed: a multi-row
    * upsert cannot affect one row twice, so two entries claiming one axis would
@@ -1775,7 +1935,7 @@ export function createCommonOperationBackend(
 
     const targetKey = (entry: ClaimEdgeCardinalityParams): string => {
       const target = edgeCardinalityClaimTarget(entry);
-      return `${target.axis}\u0000${target.key}`;
+      return claimTargetKey(target.axis, target.key);
     };
     const seen = new Set<string>();
     for (const entry of entries) {
@@ -1791,8 +1951,11 @@ export function createCommonOperationBackend(
     }
 
     const outcomes = new Map<string, EdgeClaimOutcome>();
-    // One claim row per inserted edge, so the edge-insert budget is the right
-    // ceiling for the multi-row lock statement.
+    // Chunked by CLAIM entries, not edges — a two-axis edge kind emits two
+    // claims per inserted edge. The edge-insert budget is still a safe
+    // ceiling here: a claim row binds fewer parameters than an edge row, so
+    // chunking claims at the same size never exceeds the bind budget an edge
+    // insert of that size already clears.
     for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
       const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
       const rows = await execution.execAll<{
@@ -1801,10 +1964,19 @@ export function createCommonOperationBackend(
         holder_edge_id: string;
       }>(lockQuery);
       const holderByTarget = new Map(
-        rows.map((row) => [`${row.axis}\u0000${row.key}`, row.holder_edge_id]),
+        rows.map((row) => [
+          claimTargetKey(row.axis, row.key),
+          row.holder_edge_id,
+        ]),
       );
+      const incumbentByTarget = await readClaimlessIncumbents(chunk);
       for (const entry of chunk) {
         const key = targetKey(entry);
+        const incumbent = incumbentByTarget.get(key);
+        if (incumbent !== undefined) {
+          outcomes.set(key, { status: "refused", holderEdgeId: incumbent });
+          continue;
+        }
         const holder = holderByTarget.get(key);
         if (holder === undefined || holder === entry.edgeId) {
           outcomes.set(key, { status: "claimed" });
@@ -1827,8 +1999,41 @@ export function createCommonOperationBackend(
   }
 
   /**
+   * The live edges already occupying a composition claim's axis, keyed like
+   * the lock's holders. An ordinary axis is read-probed by the store before
+   * it is claimed; a composition axis is relation-wide and has no read probe,
+   * so a live attachment that predates its `partOf` declaration holds no claim
+   * row and only this read can see it — the batch counterpart of the
+   * single-row guard's `incumbent_edge_id`.
+   */
+  async function readClaimlessIncumbents(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const compositionEntries = entries.filter(
+      (entry) => entry.scope !== undefined,
+    );
+    const incumbents = new Map<string, string>();
+    if (compositionEntries.length === 0) return incumbents;
+    for (const query of operationStrategy.buildReadEdgeClaimIncumbents(
+      compositionEntries,
+    )) {
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        incumbent_edge_id: string;
+      }>(query);
+      for (const row of rows) {
+        const key = claimTargetKey(row.axis, row.key);
+        if (!incumbents.has(key)) incumbents.set(key, row.incumbent_edge_id);
+      }
+    }
+    return incumbents;
+  }
+
+  /**
    * Single-claim fast path. The lock statement reports both the committed
-   * claim holder and whether a claimless live edge already occupies the axis.
+   * claim holder and the live edge, claimed or not, already occupying the
+   * axis.
    * A stale foreign holder is taken over only through a second guarded
    * statement whose fresh snapshot rechecks the entire axis.
    */
@@ -1837,7 +2042,7 @@ export function createCommonOperationBackend(
   ): Promise<EdgeClaimOutcome> {
     const rows = await execution.execAll<{
       holder_edge_id: string;
-      has_incumbent: boolean | number;
+      incumbent_edge_id: string | null;
     }>(operationStrategy.buildLockEdgeClaimGuarded(params, nowIso()));
     const locked = rows[0];
     if (locked === undefined) {
@@ -1846,15 +2051,12 @@ export function createCommonOperationBackend(
         { operation: "insert", entity: "edge" },
       );
     }
-    const hasIncumbent =
-      locked.has_incumbent === true || locked.has_incumbent === 1;
-    if (locked.holder_edge_id === params.edgeId) {
-      return hasIncumbent ?
-          { status: "refused", holderEdgeId: params.edgeId }
-        : { status: "claimed" };
+    const incumbent = locked.incumbent_edge_id ?? undefined;
+    if (incumbent !== undefined) {
+      return { status: "refused", holderEdgeId: incumbent };
     }
-    if (hasIncumbent) {
-      return { status: "refused", holderEdgeId: locked.holder_edge_id };
+    if (locked.holder_edge_id === params.edgeId) {
+      return { status: "claimed" };
     }
 
     const takeOver = await execution.execAll<{ holder_edge_id: string }>(
@@ -4178,7 +4380,9 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : {
-        async lockSchemaVersionAndGraphWrite(params: SchemaWriteFenceParams) {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaGraphWriteFenceParams,
+        ) {
           const row = await execution.execGet<Record<string, unknown>>(
             buildLockSchemaVersionAndGraphWrite(
               params,
@@ -4186,9 +4390,7 @@ export function createCommonOperationBackend(
               schemaGraphWriteFenceSql,
             ),
           );
-          if (row !== undefined) {
-            return normalizeGraphCommandIsolation(row["transaction_isolation"]);
-          }
+          if (row !== undefined) return readGraphWriteFenceAcquisition(row);
 
           // A blocked `FOR SHARE` can recheck the old active row out of its
           // statement snapshot without substituting the winner's new row. As
@@ -4496,6 +4698,7 @@ export function createCommonOperationBackend(
     plan: ManagedEdgeCreatePlan,
   ): Promise<EdgeCreateCommandResult> {
     const { params } = plan;
+    const claims = plan.cardinalityClaims ?? [];
     if (
       plan.schemaFence !== undefined &&
       plan.schemaFence.graphId !== params.graphId
@@ -4509,7 +4712,7 @@ export function createCommonOperationBackend(
         },
       );
     }
-    if (plan.schemaFence !== undefined && plan.cardinalityClaim !== undefined) {
+    if (plan.schemaFence !== undefined && claims.length > 0) {
       return {
         outcome: "unsupported",
         entity: "edge",
@@ -4533,9 +4736,14 @@ export function createCommonOperationBackend(
         dimensions: ["schemaFence"],
       };
     }
+    // v1 fuses at most one claim: the fused CTE
+    // (`buildInsertEdgeIfEndpointsLiveWithCardinalityClaim`) reserves exactly
+    // one axis row. A two-axis plan takes the portable claim-then-insert
+    // path on every engine — refused here, before any SQL runs, never a
+    // silently-dropped second axis.
     if (
-      plan.cardinalityClaim !== undefined &&
-      executeEdgeCardinalityInsert === undefined
+      claims.length > 1 ||
+      (claims.length === 1 && executeEdgeCardinalityInsert === undefined)
     ) {
       return {
         outcome: "unsupported",
@@ -4547,7 +4755,7 @@ export function createCommonOperationBackend(
     let row: EdgeRow | undefined;
     if (plan.schemaFence !== undefined) {
       row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
-    } else if (plan.cardinalityClaim === undefined) {
+    } else if (claims.length === 0) {
       row = await executeEdgeEndpointInsert(params);
     } else {
       // The unsupported case is returned above before any SQL executes.
@@ -4561,7 +4769,8 @@ export function createCommonOperationBackend(
           },
         );
       }
-      row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
+      const claim = requireDefined(claims[0]);
+      row = await executeEdgeCardinalityInsert(params, claim);
     }
 
     return row === undefined ?
@@ -4593,7 +4802,7 @@ export function createCommonOperationBackend(
     // Durable convergence delegates that decision to the row-level unique
     // arbiter and may therefore execute directly on a root session.
     if (
-      plan.cardinalityClaim !== undefined ||
+      (plan.cardinalityClaims ?? []).length > 0 ||
       operationStrategy.buildConvergeEdgeCreate === undefined ||
       (!durable && !options.dynamicEdgeConvergence) ||
       (!durable && context.coordination === "none") ||
@@ -5285,8 +5494,10 @@ export function createCommonOperationBackend(
       }
     },
 
-    async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = operationStrategy.buildCountEdgesFrom(params);
+    async countEdgesAtEndpoint(
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> {
+      const query = operationStrategy.buildCountEdgesAtEndpoint(params);
       const row = await execution.execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -5377,7 +5588,7 @@ export function createCommonOperationBackend(
           }
           return edgeRows;
         },
-        }),
+      }),
 
     ...(buildFindEdgesAcrossKinds === undefined ?
       {}
@@ -5629,42 +5840,55 @@ export function createCommonOperationBackend(
         nodeId: row.node_id,
       }));
 
-      // One statement per declared cardinality, because that is the
-      // granularity at which the population's key and liveness differ.
-      const edgeKindsByCardinality = new Map<
-        ConstrainedCardinality,
-        string[]
+      // One statement per declared axis, because that is the granularity at
+      // which the population's key and liveness differ — and a composition
+      // declaration (`declaration.scope !== undefined`) is its own axis even
+      // under the same axis name, because its population is relation-wide:
+      // the peer test is the oriented two-arm union, not exact-kind equality
+      // (see `buildContendedCompositionEdgeRowAudit`).
+      const edgeAxes = new Map<
+        string,
+        Readonly<{
+          ref: EdgeCardinalityAxisRef;
+          edgeKinds: string[];
+          scope: CompositionClaimScope | undefined;
+        }>
       >();
       for (const declaration of params.edgeCardinalities) {
-        const kinds = edgeKindsByCardinality.get(declaration.cardinality) ?? [];
-        kinds.push(declaration.edgeKind);
-        edgeKindsByCardinality.set(declaration.cardinality, kinds);
+        const axisKey = claimPredicateShapeKey(declaration);
+        const entry = edgeAxes.get(axisKey) ?? {
+          // Narrowed to the axis ref alone: `declaration` also carries
+          // `edgeKind`, and keeping that field on `ref` would let a later
+          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+          // spread ORDER to discard it instead of the type excluding it.
+          ref: axisRefFromDeclaration(declaration),
+          edgeKinds: [],
+          scope: declaration.scope,
+        };
+        entry.edgeKinds.push(declaration.edgeKind);
+        edgeAxes.set(axisKey, entry);
       }
       const contendedEdgeRows: ContendedEdgeRow[] = [];
-      for (const [cardinality, edgeKinds] of edgeKindsByCardinality) {
-        const rows = await execution.execAll<{
-          edge_id: string;
-          edge_kind: string;
-          from_kind: string;
-          from_id: string;
-          to_kind: string;
-          to_id: string;
-        }>(
-          operationStrategy.buildContendedEdgeRowAudit(
-            params.graphId,
-            cardinality,
-            edgeKinds,
-          ),
+      for (const { ref, edgeKinds, scope } of edgeAxes.values()) {
+        const rows = await execution.execAll<EdgeAuditRow>(
+          scope === undefined ?
+            operationStrategy.buildContendedEdgeRowAudit(
+              params.graphId,
+              ref,
+              edgeKinds,
+            )
+          : operationStrategy.buildContendedCompositionEdgeRowAudit(
+              params.graphId,
+              ref,
+              scope.holders,
+              edgeKinds,
+            ),
         );
         for (const row of rows) {
           contendedEdgeRows.push({
-            edgeKind: row.edge_kind,
-            cardinality,
-            edgeId: row.edge_id,
-            fromKind: row.from_kind,
-            fromId: row.from_id,
-            toKind: row.to_kind,
-            toId: row.to_id,
+            ...ref,
+            ...edgeAuditRowFields(row),
+            scope,
           });
         }
       }
@@ -5678,7 +5902,35 @@ export function createCommonOperationBackend(
           disjointOverlaps.push({ kinds, nodeId: row.node_id });
       }
 
-      return { contendedUniqueRows, contendedEdgeRows, disjointOverlaps };
+      // Present whenever the caller asked for the family (the key is
+      // defined, even if empty) — never present otherwise, so
+      // `auditConstraintFences`'s "asked and got nothing" refusal stays
+      // meaningful.
+      const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
+      if (params.edgeEndpointAllowances !== undefined) {
+        const pairChunkSize =
+          misassignedEdgeEndpointPairChunkSize(maxBindParameters);
+        for (const allowance of params.edgeEndpointAllowances) {
+          for (const row of await readMisassignedEdgeEndpointRows(
+            execution,
+            operationStrategy,
+            params.graphId,
+            allowance,
+            pairChunkSize,
+          )) {
+            misassignedEdgeEndpointRows.push(row);
+          }
+        }
+      }
+
+      return {
+        contendedUniqueRows,
+        contendedEdgeRows,
+        disjointOverlaps,
+        ...(params.edgeEndpointAllowances === undefined ?
+          {}
+        : { misassignedEdgeEndpointRows }),
+      };
     },
 
     async checkUnique(

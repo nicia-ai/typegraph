@@ -1,7 +1,9 @@
 /**
  * SQLite Backend Integration Tests
  *
- * Tests the SQLite adapter with a real in-memory database.
+ * Tests the SQLite adapter with a real in-memory database. The shared
+ * cross-backend integration suite runs from this lane's
+ * `sqlite-integration-slice-*.test.ts` files.
  * Follows Better Auth's pattern: users provide a configured Drizzle instance
  * and run migrations to create TypeGraph tables.
  */
@@ -50,7 +52,6 @@ import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
 import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
-import { createIntegrationTestSuite } from "../integration-test-suite";
 
 // ============================================================
 // Shared Adapter Test Suite
@@ -58,29 +59,6 @@ import { createIntegrationTestSuite } from "../integration-test-suite";
 
 // Run the shared adapter test suite for SQLite
 createAdapterTestSuite("SQLite", () => createTestBackend());
-
-// ============================================================
-// Shared Integration Test Suite
-// ============================================================
-
-// Run the shared integration test suite for SQLite
-createIntegrationTestSuite("SQLite", () => {
-  const db = createTestDatabase();
-  // SQLite uses in-memory databases, no cleanup needed
-  return {
-    backend: createSqliteBackend(db),
-    // better-sqlite3 is one synchronous handle, so the batteries-included
-    // factory already yields a serialized backend. It gets its own database so
-    // nothing a provenance test does reaches the suite's own fixture.
-    createSerializedBackend: (overrides) => {
-      refuseUnsupportedSerializedBackendCapabilities("SQLite", overrides);
-      const { backend } = createLocalSqliteBackend({
-        schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
-      });
-      return Promise.resolve({ backend, close: () => backend.close() });
-    },
-  };
-});
 
 // ============================================================
 // createSerializedBackend capability-override refusal

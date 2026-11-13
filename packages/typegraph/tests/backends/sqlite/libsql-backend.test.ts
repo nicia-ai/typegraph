@@ -1,13 +1,11 @@
 /**
  * libsql Backend Integration Tests
  *
- * Runs the shared adapter and integration test suites against a libsql
- * backend, plus libsql-specific tests for lifecycle and known caveats.
+ * Runs the shared adapter test suite against a libsql backend, plus
+ * libsql-specific tests for lifecycle and known caveats. The shared
+ * cross-backend integration suite runs from this lane's
+ * `libsql-integration-slice-*.test.ts` files.
  */
-import { existsSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -22,8 +20,10 @@ import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
-import { createIntegrationTestSuite } from "../integration-test-suite";
+import {
+  cleanupTemporaryFiles,
+  createTemporaryDbPath,
+} from "./libsql-temporary-database";
 
 const ConcurrencyPerson = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -34,37 +34,6 @@ const concurrencyGraph = defineGraph({
   nodes: { Person: { type: ConcurrencyPerson } },
   edges: {},
 });
-
-// ============================================================
-// Temp File Helpers
-// ============================================================
-
-// Temp files exercise the persistent-file layout the shared suites assume.
-// (In-memory databases also work — see the specific tests and
-// libsql-client-versions.test.ts for how each client version frames them.)
-// CI uses a RAM-backed directory for these disposable files. Keep file-client
-// semantics and default SQLite pragmas without paying the runner's disk fsync
-// latency on every schema statement and autocommit write.
-
-const temporaryFiles: string[] = [];
-
-function createTemporaryDbPath(): string {
-  const dbPath = path.join(
-    process.env["TYPEGRAPH_LIBSQL_TMPDIR"] ?? tmpdir(),
-    `typegraph-libsql-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`,
-  );
-  temporaryFiles.push(dbPath);
-  return dbPath;
-}
-
-function cleanupTemporaryFiles(): void {
-  for (const dbPath of temporaryFiles.splice(0)) {
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const filePath = dbPath + suffix;
-      if (existsSync(filePath)) unlinkSync(filePath);
-    }
-  }
-}
 
 afterEach(cleanupTemporaryFiles);
 
@@ -80,44 +49,6 @@ createAdapterTestSuite("libsql", async () => {
   return wrapWithManagedClose(backend, () => {
     client.close();
   });
-});
-
-// ============================================================
-// Shared Integration Test Suite
-// ============================================================
-
-createIntegrationTestSuite("libsql", async () => {
-  const dbPath = createTemporaryDbPath();
-  const client = createClient({ url: `file:${dbPath}` });
-  const { backend } = await createLibsqlBackend(client);
-  return {
-    backend,
-    cleanup: async () => {
-      await backend.close();
-      client.close();
-    },
-    // A local-FILE client is the serialized libsql shape (`protocol: "file"`),
-    // opened on its own temp file so nothing a provenance test does reaches
-    // the suite's own fixture.
-    createSerializedBackend: async (overrides) => {
-      refuseUnsupportedSerializedBackendCapabilities("libsql", overrides);
-      const serializedPath = createTemporaryDbPath();
-      const serializedClient = createClient({ url: `file:${serializedPath}` });
-      const { backend: serializedBackend } = await createLibsqlBackend(
-        serializedClient,
-        {
-          schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
-        },
-      );
-      return {
-        backend: serializedBackend,
-        close: async () => {
-          await serializedBackend.close();
-          serializedClient.close();
-        },
-      };
-    },
-  };
 });
 
 // ============================================================

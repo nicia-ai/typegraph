@@ -28,7 +28,8 @@ import {
   planMergeIncremental,
 } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
-import type { MergePlanArtifact } from "../../src/graph-merge/plan-schema";
+import type { MergePlanArtifactV3 } from "../../src/graph-merge/plan-schema";
+import { MERGE_PLAN_FORMAT_VERSION } from "../../src/graph-merge/plan-schema";
 import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { Embedder, GraphBranch } from "../../src/graph-merge/types";
@@ -165,9 +166,9 @@ describe("public merge plan lifecycle", () => {
   });
 
   async function rehashTarget(
-    artifact: MergePlanArtifact,
-    target: unknown,
-  ): Promise<MergePlanArtifact> {
+    artifact: MergePlanArtifactV3,
+    target: MergePlanArtifactV3["target"],
+  ): Promise<MergePlanArtifactV3> {
     const { digest: _digest, ...input } = artifact;
     return constructMergePlanArtifact({ ...input, target });
   }
@@ -266,7 +267,7 @@ describe("public merge plan lifecycle", () => {
     }
 
     const malformed = await applyMergePlan(base, {
-      formatVersion: 1,
+      formatVersion: MERGE_PLAN_FORMAT_VERSION,
     } as unknown as typeof artifact);
     expect(isErr(malformed)).toBe(true);
     if (isErr(malformed))

@@ -102,6 +102,10 @@ if [[ -n "${VITEST_SHARD:-}" ]]; then
   vitest_args+=("--shard=$VITEST_SHARD")
 fi
 
+# Extra vitest options from the caller, e.g.
+# `pnpm test:postgres --reporter=json --outputFile=report.json`.
+vitest_args+=("$@")
+
 # tests/backends/integration/ is deliberately absent: it holds suite
 # definitions registered via createIntegrationTestSuite, not *.test.ts files,
 # so listing it matches nothing and reads as coverage that is not there.

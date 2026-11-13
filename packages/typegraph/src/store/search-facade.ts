@@ -19,6 +19,8 @@ import { type GraphBackend } from "../backend/types";
 import { type GraphDef, type NodeKinds } from "../core/define-graph";
 import { type NodeRegistration, type NodeType } from "../core/types";
 import { KindNotFoundError } from "../errors";
+import { type PolymorphicNodeType } from "../ontology/types";
+import { type DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
 import { type QueryBuilder } from "../query/builder/query-builder";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
@@ -40,19 +42,62 @@ import {
 import { type Node } from "./types";
 
 /**
+ * The option shape of a call that takes the search default or states
+ * `"exact"`: the hit stays the searched kind's own type.
+ */
+type ExactExpansion = Readonly<{
+  expansion?: "exact" | undefined;
+}>;
+
+/**
+ * States the call's expansion axis as a type parameter, so the hit type can
+ * follow it. Intersected with the option type rather than threaded through
+ * it: the axis is a fact about one call, not about a reusable options value.
+ * The key is required, so a call that omits the option or passes `undefined`
+ * never lands here: it takes the exact overload. An options value typed by
+ * the library's own option type, whose `expansion` is optional and either
+ * axis, matches neither and takes the last overload, which types the hit as
+ * an unpinned axis would.
+ */
+type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
+  expansion: E;
+}>;
+
+/**
+ * The node type a hit carries for a kind searched under axis `E`, matching
+ * the `from()` alias over the same kind and stated axis:
+ *
+ * - `"exact"` — the kind's own type.
+ * - `"subclasses"` — {@link PolymorphicNodeType} unconditionally, as
+ *   `from(kind, alias, { expansion: "subclasses" })` types its alias: the
+ *   kind's properties, with the `kind` discriminant and `NodeId` brand
+ *   widened whether or not the compile-time ontology declares a subclass, so
+ *   a subclass a persisted extension added is typed soundly.
+ * - an axis the call site does not pin to one literal — widened too, the
+ *   conservative reading.
+ */
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> =
+  [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
+
+/**
  * Resolves the hit's `node` type. Compile-time kinds keep their
- * narrowed `Node<N>`; kinds outside `G` (added via graph extension through
- * `store.evolve()`, or string variables the type system can't see)
+ * `Node<N>`, narrowed or widened by the stated expansion axis (see
+ * {@link SearchNodeType}); kinds outside `G` (added via graph extension
+ * through `store.evolve()`, or string variables the type system can't see)
  * widen to the base `Node` so callers don't need a cast.
  *
  * This is the same shape as `getNodeCollection` — the dynamic form
  * works for any registered kind, and the type narrows when (and only
  * when) the literal is statically known.
  */
-type ResolveNode<G extends GraphDef, K extends string> =
+type ResolveNode<
+  G extends GraphDef,
+  K extends string,
+  E extends DefaultAliasExpansionAxis,
+> =
   K extends NodeKinds<G> ?
     G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
-      Node<N>
+      Node<SearchNodeType<N, E>>
     : Node
   : Node;
 
@@ -139,17 +184,34 @@ export class StoreSearch<G extends GraphDef> {
    * configured with) and resolves the matching node IDs back to typed
    * `Node` objects.
    */
-  async fulltext<K extends string>(
+  fulltext<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
+    nodeKind: K,
+    options: FulltextSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
+  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, E>>[]>;
+  fulltext<K extends string>(
+    nodeKind: K,
+    options: FulltextSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K, "exact">>[]>;
+  fulltext<K extends string>(
     nodeKind: K,
     options: FulltextSearchOptions<ResolveNodeType<G, K>>,
-  ): Promise<readonly FulltextSearchHit<ResolveNode<G, K>>[]> {
+  ): Promise<
+    readonly FulltextSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
+  async fulltext(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly FulltextSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeFulltextSearch<ResolveNode<G, K>>(
+    return executeFulltextSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as FulltextSearchOptions,
+      options as FulltextSearchOptions,
     );
   }
 
@@ -164,17 +226,34 @@ export class StoreSearch<G extends GraphDef> {
    * Pure vector — no fulltext leg, no fusion. For combined
    * vector+fulltext ranking, use `hybrid`.
    */
-  async vector<K extends string>(
+  vector<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
+    nodeKind: K,
+    options: VectorSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
+  ): Promise<readonly VectorSearchHit<ResolveNode<G, K, E>>[]>;
+  vector<K extends string>(
+    nodeKind: K,
+    options: VectorSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly VectorSearchHit<ResolveNode<G, K, "exact">>[]>;
+  vector<K extends string>(
     nodeKind: K,
     options: VectorSearchOptions<ResolveNodeType<G, K>>,
-  ): Promise<readonly VectorSearchHit<ResolveNode<G, K>>[]> {
+  ): Promise<
+    readonly VectorSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
+  async vector(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly VectorSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeVectorSearch<ResolveNode<G, K>>(
+    return executeVectorSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as VectorSearchOptions,
+      options as VectorSearchOptions,
     );
   }
 
@@ -187,17 +266,34 @@ export class StoreSearch<G extends GraphDef> {
    * over-fetch is 4× `limit` from each source — tune via `vector.k` /
    * `fulltext.k` for higher-recall corpora.
    */
-  async hybrid<K extends string>(
+  hybrid<
+    K extends string,
+    E extends DefaultAliasExpansionAxis = DefaultAliasExpansionAxis,
+  >(
+    nodeKind: K,
+    options: HybridSearchOptions<ResolveNodeType<G, K>> & StatedExpansion<E>,
+  ): Promise<readonly HybridSearchHit<ResolveNode<G, K, E>>[]>;
+  hybrid<K extends string>(
+    nodeKind: K,
+    options: HybridSearchOptions<ResolveNodeType<G, K>> & ExactExpansion,
+  ): Promise<readonly HybridSearchHit<ResolveNode<G, K, "exact">>[]>;
+  hybrid<K extends string>(
     nodeKind: K,
     options: HybridSearchOptions<ResolveNodeType<G, K>>,
-  ): Promise<readonly HybridSearchHit<ResolveNode<G, K>>[]> {
+  ): Promise<
+    readonly HybridSearchHit<ResolveNode<G, K, DefaultAliasExpansionAxis>>[]
+  >;
+  async hybrid(
+    nodeKind: string,
+    // Contravariance: the overloads narrow the accessor callback to the
+    // kind, which is wider than the base instantiation the core helpers take.
+    options: unknown,
+  ): Promise<readonly HybridSearchHit[]> {
     this.#assertKindRegistered(nodeKind);
-    return executeHybridSearch<ResolveNode<G, K>>(
+    return executeHybridSearch(
       this.#context,
       nodeKind,
-      // Contravariance: the narrowed accessor callback is intentionally
-      // wider than the base instantiation the core helpers take.
-      options as unknown as HybridSearchOptions,
+      options as HybridSearchOptions,
     );
   }
 

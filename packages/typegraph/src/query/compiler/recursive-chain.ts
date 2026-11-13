@@ -52,10 +52,10 @@ function stageAst(
     start: {
       alias: traversal.joinFromAlias,
       kinds: getNodeKindsForAlias(ast, traversal.joinFromAlias),
-      includeSubClasses:
+      expansion:
         index === 0 && traversal.joinFromAlias === ast.start.alias ?
-          ast.start.includeSubClasses
-        : false,
+          ast.start.expansion
+        : "exact",
     },
     traversals: [traversal],
     predicates: ast.predicates.filter((predicate) =>

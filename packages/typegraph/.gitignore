@@ -1,3 +1,4 @@
 .stryker-tmp/
 coverage/
 .vitest-reports/
+.vitest-durations/

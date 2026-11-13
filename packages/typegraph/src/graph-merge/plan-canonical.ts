@@ -4,6 +4,8 @@ import {
   MERGE_PLAN_DIGEST_ALGORITHM,
   type MergePlanArtifact,
   type MergePlanArtifactInput,
+  type MergePlanArtifactV3,
+  type MergePlanArtifactV3Input,
 } from "./plan-schema";
 
 /** Returns the recursively key-sorted JSON representation used for plan identity. */
@@ -21,11 +23,11 @@ export async function computeMergePlanDigest(
   return sha256Hex(canonicalMergePlanJson(artifact), 32);
 }
 
-/** Adds the canonical digest to an otherwise complete V1 artifact. */
+/** Adds the canonical digest to an otherwise complete V3 artifact. */
 export async function finalizeMergePlanArtifact(
-  artifact: MergePlanArtifactInput,
-): Promise<MergePlanArtifact> {
-  const finalized = {
+  artifact: MergePlanArtifactV3Input,
+): Promise<MergePlanArtifactV3> {
+  const finalized: MergePlanArtifactV3 = {
     ...artifact,
     digest: {
       algorithm: MERGE_PLAN_DIGEST_ALGORITHM,
@@ -35,7 +37,7 @@ export async function finalizeMergePlanArtifact(
   const canonical: unknown = JSON.parse(
     JSON.stringify(finalized, sortedReplacer),
   );
-  return canonical as MergePlanArtifact;
+  return canonical as MergePlanArtifactV3;
 }
 
 function omitDigest(artifact: MergePlanArtifact): MergePlanArtifactInput {

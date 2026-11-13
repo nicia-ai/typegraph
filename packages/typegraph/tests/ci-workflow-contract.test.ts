@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { DECLARATION_HEAP_MB } from "../scripts/declaration-emit";
+
 const WORKFLOW_PATH = fileURLToPath(
   new URL("../../../.github/workflows/ci.yml", import.meta.url),
 );
@@ -26,6 +28,9 @@ const METADATA_PREDICATE_PATH = fileURLToPath(
 );
 const TSUP_CONFIG_PATH = fileURLToPath(
   new URL("../tsup.config.ts", import.meta.url),
+);
+const BUILD_PIPELINE_PATH = fileURLToPath(
+  new URL("../scripts/build.ts", import.meta.url),
 );
 
 function runGit(fixtureDirectory: string, args: readonly string[]): string {
@@ -93,10 +98,16 @@ describe("CI workflow contract", () => {
     rmSync(fixtureDirectory, { force: true, recursive: true });
   });
 
-  it("runs four coverage shards with timeout headroom", () => {
+  it("runs five coverage shards with timeout headroom", () => {
     const workflow = readFileSync(WORKFLOW_PATH, "utf8");
 
-    for (const [index, shard] of ["1/4", "2/4", "3/4", "4/4"].entries()) {
+    for (const [index, shard] of [
+      "1/5",
+      "2/5",
+      "3/5",
+      "4/5",
+      "5/5",
+    ].entries()) {
       expect(workflow).toContain(`shard: "${shard}"`);
       expect(workflow).toContain(`artifact: coverage-blob-${index + 1}`);
     }
@@ -115,9 +126,26 @@ describe("CI workflow contract", () => {
   });
 
   it("gives CI and release declaration builds enough worker heap", () => {
+    // `scripts/build.ts` carries the declaration-pipeline ceiling itself and
+    // passes it to both of its children, so a local `pnpm build` never depends
+    // on an ambient NODE_OPTIONS; the workflow-wide ceiling covers the
+    // remaining steps and must not fall below the pipeline's own.
+    const buildScript = (
+      JSON.parse(
+        readFileSync(
+          fileURLToPath(new URL("../package.json", import.meta.url)),
+          "utf8",
+        ),
+      ) as Readonly<{ scripts: Readonly<Record<string, string>> }>
+    ).scripts["build"];
+    expect(buildScript).toBe("node --import tsx scripts/build.ts");
+    expect(readFileSync(BUILD_PIPELINE_PATH, "utf8")).toContain(
+      "`--max-old-space-size=${DECLARATION_HEAP_MB}`",
+    );
+    expect(DECLARATION_HEAP_MB).toBe(8192);
     for (const workflowPath of [WORKFLOW_PATH, RELEASE_WORKFLOW_PATH]) {
       expect(readFileSync(workflowPath, "utf8")).toContain(
-        "NODE_OPTIONS: --max-old-space-size=6144",
+        `NODE_OPTIONS: --max-old-space-size=${DECLARATION_HEAP_MB}`,
       );
     }
   });

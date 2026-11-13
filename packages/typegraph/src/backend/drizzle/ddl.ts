@@ -53,6 +53,18 @@ type CustomColumnType = Readonly<{
 const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
 const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
 
+/**
+ * The columns {@link planSqliteEdgeMatchIdentityAdoption} can `ADD`, in the
+ * order it adds them. Exported so the adoption call sites classify a
+ * concurrent adopter's duplicate-column failure against this list instead of
+ * re-spelling the column names beside their own `isSqliteDuplicateColumnError`
+ * call.
+ */
+export const EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS: readonly string[] = [
+  EDGE_MATCH_IDENTITY_NAME_COLUMN,
+  EDGE_MATCH_IDENTITY_KEY_COLUMN,
+];
+
 export function quoteDdlIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }

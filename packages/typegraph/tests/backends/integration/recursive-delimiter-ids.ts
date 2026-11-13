@@ -133,7 +133,7 @@ export function registerRecursiveDelimiterIdIntegrationTests(
         .whereNode("start", (clip) => clip.id.eq(ROOT_ID))
         .traverse("linked", "link", { expand: "none" })
         .recursive({ maxHops: 20, depth: true, path: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           id: row.media.id,
           depth: row.media_depth,
@@ -158,7 +158,7 @@ export function registerRecursiveDelimiterIdIntegrationTests(
         .whereNode("show", (node) => node.id.eq(COMPOSITE_SHOW_ID))
         .traverse("linked", "link", { expand: "none" })
         .recursive({ maxHops: 4, path: true })
-        .to("Media", "media", { includeSubClasses: true })
+        .to("Media", "media", { expansion: "subclasses" })
         .select((row) => ({
           kind: row.media.kind,
           id: row.media.id,

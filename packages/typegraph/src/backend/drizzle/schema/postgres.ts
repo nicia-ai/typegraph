@@ -74,6 +74,8 @@ export type PostgresTableNames = Readonly<{
   recordedIdentityAssertions: string;
   identityClosure: string;
   identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   uniques: string;
   edgeClaims: string;
   baseSchemaVersions: string;
@@ -97,8 +99,7 @@ export type CreatePostgresTablesOptions = Readonly<{
   indexes?: readonly IndexDeclaration[] | undefined;
   /** Resolve graph index identifiers for an isolated physical namespace. */
   physicalIndexName?:
-    | ((index: RelationalIndexDeclaration) => string)
-    | undefined;
+    ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
@@ -273,7 +274,12 @@ export function createPostgresTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
-      index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
     ],
   );
 
@@ -287,7 +293,9 @@ export function createPostgresTables(
       operationDigest: text("operation_digest").notNull(),
       evidence: text("evidence").notNull(),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = pgTable(
@@ -310,7 +318,12 @@ export function createPostgresTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
@@ -463,6 +476,86 @@ export function createPostgresTables(
         sql`class_key_low COLLATE "C" < class_key_high COLLATE "C"`,
       ),
     ],
+  );
+
+  // The identity transition log: an append-only annotation on the recorded
+  // axis. Carries no membership — `class_kind`/`class_id` name the class
+  // canonical AFTER the transition, `prior_class_kind`/`prior_class_id` the
+  // canonical BEFORE (NULL when that class did not exist as a real row).
+  // Every membership answer still comes from `historicalIdentityReconstructionCtes`.
+  const identityTransitions = pgTable(
+    n.identityTransitions,
+    {
+      graphId: text("graph_id").notNull(),
+      transitionId: text("transition_id").notNull(),
+      recordedRevision: bigint("recorded_revision", {
+        mode: "number",
+      }).notNull(),
+      recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      validAt: timestamp("valid_at", { withTimezone: true }).notNull(),
+      cause: text("cause").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+      priorClassKind: text("prior_class_kind"),
+      priorClassId: text("prior_class_id"),
+      assertionIds: jsonb("assertion_ids").notNull(),
+      decision: jsonb("decision"),
+      txId: text("tx_id"),
+      // NULL for a row this graph recorded itself through the live capture
+      // flush; set to the restore's own wall time for a row an archival
+      // restore inserted verbatim. `identityReplay` uses ONLY this marker —
+      // never a revision comparison — to decide whether a row may be paired
+      // with a reconstructed before/after snapshot, because a restored row's
+      // `recorded_revision` is the SOURCE graph's own number and interleaves
+      // arbitrarily with this graph's (see `isRestoredTransitionRow`).
+      restoredAt: timestamp("restored_at", { withTimezone: true }),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.transitionId] }),
+      index(`${n.identityTransitions}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_revision_idx`).on(
+        t.graphId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_prior_class_idx`).on(
+        t.graphId,
+        t.priorClassKind,
+        t.priorClassId,
+        t.recordedRevision,
+      ),
+    ],
+  );
+
+  // One row per graph, holding two retention cuts on two axes: the
+  // watermark `pruneIdentityTransitions` advances on this graph's own
+  // recorded axis (`0` means nothing has been pruned), and the highest cut an
+  // archival restore carried in on the raw revisions restored rows keep
+  // (`NULL` means none). Each cut keeps the recorded time of the instant it
+  // was made at. An absent row means neither.
+  const identityTransitionRetention = pgTable(
+    n.identityTransitionRetention,
+    {
+      graphId: text("graph_id").notNull(),
+      prunedBeforeRevision: bigint("pruned_before_revision", {
+        mode: "number",
+      }).notNull(),
+      prunedBeforeRecordedAt: timestamp("pruned_before_recorded_at", {
+        withTimezone: true,
+      }),
+      restoredPrunedBeforeRevision: bigint("restored_pruned_before_revision", {
+        mode: "number",
+      }),
+      restoredPrunedBeforeRecordedAt: timestamp(
+        "restored_pruned_before_recorded_at",
+        { withTimezone: true },
+      ),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
   );
 
   const uniques = pgTable(
@@ -738,6 +831,8 @@ export function createPostgresTables(
     recordedIdentityAssertions,
     identityClosure,
     identitySeparation,
+    identityTransitions,
+    identityTransitionRetention,
     uniques,
     edgeClaims,
     fences,

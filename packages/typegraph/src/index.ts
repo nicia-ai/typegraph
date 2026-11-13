@@ -68,6 +68,7 @@ export {
   type EdgeKinds,
   // Embedding type for vector search
   embedding,
+  type EmbeddingBrand,
   type EmbeddingSchema,
   type EmbeddingValue,
   externalRef,
@@ -91,7 +92,6 @@ export {
   isGraphDef,
   isNodeType,
   isSearchableSchema,
-  metaEdge,
   type NodeKinds,
   type RecordedInstant,
   recordedInstant,
@@ -101,6 +101,7 @@ export {
   // Vector-slot enumeration for manual provisioning (the boot step
   // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
   resolveGraphVectorSlots,
+  type RestoredRecordedInstant,
   // Searchable type for fulltext search
   searchable,
   type SearchableMetadata,
@@ -114,24 +115,47 @@ export {
 
 export {
   asIdentityAssertionId,
+  IDENTITY_REPLAY_DEFAULT_LIMIT,
+  IDENTITY_REPLAY_MAX_LIMIT,
   type IdentityAssertion,
   type IdentityAssertionId,
+  // The governing decision a merge attaches to the identity transitions it
+  // causes — named on `StoreRuntime.applyIdentityMergeAtTarget`, so a backend
+  // or store author implementing the port needs it by name.
   type IdentityAssertionResult,
   type IdentityAssertionWriteFacade,
   type IdentityClass,
   type IdentityClassPage,
   type IdentityClassPageOptions,
+  type IdentityDecisionProvenance,
   type IdentityFacade,
+  type IdentityHistoryCompleteness,
+  type IdentityHistoryIncompleteReason,
   type IdentityNode,
   type IdentityNodeReference,
   type IdentityNodeRefInput,
   type IdentityPair,
   type IdentityReadFacade,
   type IdentityRelation,
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityReplayStep,
   type IdentitySamePathStep,
+  type IdentityTransition,
+  type IdentityTransitionCause,
+  type IdentityTransitionCursor,
+  type IdentityTransitionCut,
+  type IdentityTransitionHistory,
+  type IdentityTransitionPruneResult,
+  type IdentityTransitionRetention,
+  type IdentityTransitionTransfer,
   type IdentityValidityWindow,
   type IdentityWriteSummary,
+  pruneIdentityTransitions,
   rebuildIdentityClosure,
+  type RecordedIdentityTransition,
+  type RestoredIdentityTransition,
+  type TransitionPageCursor,
 } from "./identity";
 
 // ============================================================
@@ -179,6 +203,7 @@ export type {
   EdgeConvergenceMatch,
   EdgeCreateCommand,
   EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   FilteredApproximateSearch,
@@ -202,6 +227,7 @@ export type {
   GraphEntityReadBackend,
   GraphEntityWriteBackend,
   GraphLifecycleBackend,
+  GraphWriteFenceAcquisition,
   HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   IndexMaterializationBackend,
@@ -209,6 +235,7 @@ export type {
   ManagedEdgeCreatePlan,
   ManagedNodeCreateMode,
   ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
   NodeCreateCommand,
   NodeCreateCommandResult,
   NodeEntityReadBackend,
@@ -340,11 +367,11 @@ export type {
   JsonScalar,
   JsonValue,
   KindAnnotations,
-  MetaEdgeOptions,
   NodeId,
   NodeProps,
   NodeRegistration,
   NodeType,
+  TargetCardinality,
   TemporalMode,
   UniqueConstraint,
   UniquenessScope,
@@ -355,10 +382,18 @@ export type {
 // ============================================================
 
 export type {
-  InferenceType,
+  CompositionExistence,
+  CompositionOptions,
+  CompositionPartSide,
+  CompositionViaRef,
+  EquivalentToCheck,
   MetaEdge,
   MetaEdgeProperties,
   OntologyRelation,
+  PolymorphicNodeType,
+  StructuralSubtypeMismatch,
+  SubClassOfCheck,
+  TypedOntologyRelation,
 } from "./ontology";
 export {
   // Individual relation factories (for convenience)
@@ -367,8 +402,6 @@ export {
   computeTransitiveClosure,
   // Core ontology module
   core,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  differentFrom,
   disjointWith,
   equivalentTo,
   hasPart,
@@ -381,8 +414,6 @@ export {
   narrower,
   partOf,
   relatedTo,
-  // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
-  sameAs,
   subClassOf,
 } from "./ontology";
 
@@ -393,11 +424,17 @@ export {
 export type {
   BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
+  CompositionConfigurationCode,
+  CompositionCycleErrorDetails,
+  CompositionErrorDetails,
+  CompositionExistenceErrorDetails,
   ContributionRebuildRefusal,
   ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
   EagerMaterializationErrorDetails,
+  EdgeAcyclicityErrorDetails,
+  EdgeAcyclicityIndeterminateErrorDetails,
   EdgeNotFoundErrorDetails,
   EmbeddingDimensionChangedErrorDetails,
   EndpointErrorDetails,
@@ -406,7 +443,9 @@ export type {
   ErrorCategory,
   IdentityContradictionErrorDetails,
   IdentityEndpointValidityErrorDetails,
+  IdentityReplayErrorDetails,
   IdentitySeparationViolationErrorDetails,
+  IdentityTransitionLogOperation,
   IdentityValidityWindowErrorDetails,
   InvalidEdgeWeightErrorDetails,
   InvalidEdgeWeightReason,
@@ -414,6 +453,7 @@ export type {
   MigrationErrorDetails,
   MigrationFailureReason,
   NodeConstraintNotFoundErrorDetails,
+  NodeDeletePlanMismatchErrorDetails,
   NodeIndexNotFoundErrorDetails,
   NodeNotFoundErrorDetails,
   RecordedCaptureGuardCode,
@@ -422,6 +462,7 @@ export type {
   RuntimeKindTokenFailure,
   SchemaContentConflictErrorDetails,
   SchemaMismatchErrorDetails,
+  SchemaTighteningRefusalDetails,
   StaleVersionErrorDetails,
   StoreNotInitializedErrorDetails,
   StoreNotInitializedReason,
@@ -439,6 +480,10 @@ export {
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
+  CompositionConfigurationError,
+  CompositionCycleError,
+  CompositionError,
+  CompositionExistenceError,
   ConfigurationError,
   ContributionRebuildUnsupportedError,
   ContributionUnavailableError,
@@ -446,6 +491,8 @@ export {
   DisjointError,
   EagerMaterializationError,
   EDGE_IDENTITY_MISMATCH_CODE,
+  EdgeAcyclicityError,
+  EdgeAcyclicityIndeterminateError,
   EdgeMatchIdentityConflictError,
   EdgeNotFoundError,
   EmbeddingDimensionChangedError,
@@ -461,6 +508,7 @@ export {
   GraphAllocationMismatchError,
   IdentityContradictionError,
   IdentityEndpointValidityError,
+  IdentityReplayError,
   IdentitySeparationViolationError,
   IdentityValidityWindowError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
@@ -475,6 +523,7 @@ export {
   MIGRATION_FAILURE_REASONS,
   MigrationError,
   NodeConstraintNotFoundError,
+  NodeDeletePlanMismatchError,
   NodeIndexNotFoundError,
   NodeNotFoundError,
   RECORDED_CAPTURE_GUARD_CODES,
@@ -672,6 +721,28 @@ export {
   isSchemaInitialized,
   registerGraphTemplate,
 } from "./schema";
+// The constraints a schema commit refuses to strand, for a consumer
+// narrowing `MigrationErrorDetails` on
+// `reason: "unique-constraint-requires-empty-kind"`. Also available from the
+// "./schema" subpath.
+export type { UniquenessClaimGate } from "./schema";
+// The axes a schema commit's edge-cardinality tightening owes, for a
+// consumer narrowing `MigrationErrorDetails` on
+// `reason: "edge-cardinality-tightening-violated"` or
+// `"ontology-tightening-violated"`. Also available from the "./backend"
+// subpath.
+// `CompositionClaimScope` is exported alongside it: it is `EdgeCardinalityDeclaration.scope`'s
+// only non-`undefined` member, so a consumer narrowing that field needs it
+// too, without reaching into `./backend/types` directly.
+export type {
+  CompositionClaimScope,
+  EdgeCardinalityDeclaration,
+} from "./backend/types";
+// `EdgeCardinalityDeclaration` and `CardinalityErrorDetails.direction` are
+// both built from these two: a consumer narrowing either one needs to name
+// the intersection member (`EdgeCardinalityAxisRef`) or the bare direction
+// discriminant (`EdgeCardinalityDirection`) without reaching into
+// `store/claims/edge-claims` directly.
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,
@@ -698,8 +769,13 @@ export type {
   WeightedShortestPathResult,
 } from "./store/algorithms";
 export type {
+  EdgeCardinalityAxisRef,
+  EdgeCardinalityDirection,
+} from "./store/claims/edge-claims";
+export type {
   AnyEdge,
   AnyNode,
+  SubgraphCompositionSelection,
   SubgraphEdgeKey,
   SubgraphEdgeLookup,
   SubgraphEdgeResult,
@@ -710,6 +786,7 @@ export type {
   SubgraphNodeResult,
   SubgraphOptions,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./store/subgraph";
@@ -720,6 +797,13 @@ export type {
   BulkOperationHookContext,
   CompareAndSetAbsent,
   CompareAndSetExpected,
+  CompositionAttachment,
+  CompositionAttachmentProps,
+  CompositionCascadedPart,
+  CompositionHeldEdge,
+  CompositionNodeRef,
+  CompositionWholeInput,
+  CompositionWholeReference,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
@@ -732,12 +816,16 @@ export type {
   EdgeBulkFindEndpointOptions,
   EdgeBulkFindOptions,
   EdgeCollection,
+  EdgeEndpointRef,
   EdgeFindByEndpointsOptions,
   EdgeGetOrCreateByEndpointsOptions,
   EdgeGetOrCreateByEndpointsResult,
+  EdgeInGraph,
   GetOrCreateAction,
   GraphEdgeCollections,
   GraphNodeCollections,
+  GraphNodeForKinds,
+  GraphNodeReferenceInput,
   HeterogeneousNodeUpsertInput,
   HeterogeneousNodeUpsertResult,
   HistoryStoreOptions,
@@ -750,12 +838,21 @@ export type {
   MeasurableTransactionContext,
   Node,
   NodeBulkFindByIndexOptions,
+  NodeBulkGetOrCreateByConstraintItem,
+  NodeBulkGetOrCreateByConstraintOptions,
   NodeCollection,
+  NodeCreateOptions,
+  NodeDeleteOptions,
+  NodeDeletePlan,
   NodeGetOrCreateByConstraintOptions,
   NodeGetOrCreateByConstraintResult,
   NodeRef,
+  NodeReferenceLookup,
+  NodeReparentOptions,
+  NodeReparentResult,
   NoRecordedCoordinate,
   OperationHookContext,
+  PolymorphicNodeReference,
   QueryHookContext,
   QueryOptions,
   RecordedHeterogeneousNodeWriteBatch,
@@ -792,6 +889,7 @@ export { compareAndSetAbsent } from "./store/types";
 export type {
   AggregateResult,
   AliasMap,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
   CommonPropertyKeys,
@@ -799,6 +897,8 @@ export type {
   CompiledRowsSql,
   CompiledSelectSql,
   CompiledStatementSql,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
@@ -855,6 +955,7 @@ export type {
   SqlSchema,
   SqlTableNames,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./query";
 export type { ParameterRef } from "./query/ast";
@@ -909,6 +1010,22 @@ export {
   QueryBuilder,
   sum,
   UnionableQuery,
+} from "./query";
+
+// The one expansion axis a `from`/`to` alias, a store-wide default, and
+// `search()` state (the default and search forms exclude `"narrower"`), the
+// options bag a `from`/`to` wrapper forwards, and the alias type a forwarded
+// bag resolves to.
+export type {
+  AliasExpansionAxis,
+  AliasExpansionOptions,
+  DefaultAliasExpansionAxis,
+  ExpansionAliasNodeType,
+  ForwardedExpansionAxes,
+} from "./query";
+export {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  SEARCH_EXPANSION_DEFAULT,
 } from "./query";
 
 // Fragment composition types

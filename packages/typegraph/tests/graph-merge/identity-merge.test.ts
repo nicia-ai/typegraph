@@ -26,6 +26,7 @@ import {
   merge,
   mergeIncremental,
   planMerge,
+  planMergeIncremental,
 } from "../../src/graph-merge/merge";
 import {
   assertNoContradictoryIdentityClosure,
@@ -308,14 +309,14 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
   });
 
-  it("merges convergent retract + reassert of one pair", async () => {
+  it("refuses a retraction another branch overrules by retracting and reasserting", async () => {
     const { store, first, second, assertion } = await createBase(true);
     if (assertion === undefined) throw new Error("Missing base assertion");
     const retractBranch = unwrap(await branch(store, () => makeBackend()));
     const reassertBranch = unwrap(await branch(store, () => makeBackend()));
-    // Both branches AGREE the inherited assertion dies; one went further and
-    // re-asserted the pair under a new id. That is convergence, not a race, so
-    // both effects apply: the old id is retracted and the new one is asserted.
+    // One branch ends the pair; the other ends it and asserts it again under a
+    // new id. The branches disagree about whether the pair is the same at all,
+    // so keeping the reassertion would silently overrule the first branch.
     await retractBranch.store.identity.retractAssertion(assertion.id);
     await reassertBranch.store.identity.retractAssertion(assertion.id);
     const reasserted = await reassertBranch.store.identity.assertSame(
@@ -324,11 +325,78 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     );
 
     const result = await merge(store, [retractBranch, reassertBranch], {});
+    if (isOk(result)) {
+      console.info("merged", result.data.merged.identity);
+      throw new Error("Expected a retract/reassert race refusal");
+    }
+    console.info("refusal", result.error.message, result.error.details);
+    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    expect(result.error.message).toBe(
+      "Branches contain a retract/reassert race for one identity pair.",
+    );
+    expect(result.error.details).toMatchObject({
+      retractedAssertion: { id: assertion.id },
+      retractedBy: retractBranch.id,
+      reassertedAssertion: { id: reasserted.assertion.id },
+      reassertedBy: reassertBranch.id,
+    });
+    // Nothing applied: the base assertion is still the pair's only truth.
+    const current = await store.identity.assertionsOf(first);
+    expect(current.map((entry) => entry.id)).toEqual([assertion.id]);
+  });
+
+  it("merges a retraction the other branch reasserted and then ended itself", async () => {
+    const { store, first, second, assertion } = await createBase(true);
+    if (assertion === undefined) throw new Error("Missing base assertion");
+    const retractBranch = unwrap(await branch(store, () => makeBackend()));
+    const reassertBranch = unwrap(await branch(store, () => makeBackend()));
+    await retractBranch.store.identity.retractAssertion(assertion.id);
+    await reassertBranch.store.identity.retractAssertion(assertion.id);
+    const reasserted = await reassertBranch.store.identity.assertSame(
+      first,
+      second,
+    );
+    // An ending in the assertion's own millisecond leaves an empty window,
+    // which the merge drops rather than lands as history.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await reassertBranch.store.identity.retractAssertion(
+      reasserted.assertion.id,
+    );
+
+    const result = await merge(store, [retractBranch, reassertBranch], {});
+    if (isErr(result)) {
+      console.info("refusal", result.error.message, result.error.details);
+      throw result.error;
+    }
+    console.info("merged", result.data.merged.identity, result.data.dropped);
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 1 });
+    expect(await store.identity.assertionsOf(first)).toEqual([]);
+    expect(await store.identity.areSame(first, second)).toBe(false);
+    const archival = await storeRuntime(store).identityAssertionsAtTarget(
+      storeRuntime(store).backend,
+      "archival",
+    );
+    expect(
+      archival.find((row) => row.id === reasserted.assertion.id)?.validTo,
+    ).toBeDefined();
+  });
+
+  it("merges a retract and reassert every retracting branch agrees on", async () => {
+    const { store, first, second, assertion } = await createBase(true);
+    if (assertion === undefined) throw new Error("Missing base assertion");
+    const firstBranch = unwrap(await branch(store, () => makeBackend()));
+    const secondBranch = unwrap(await branch(store, () => makeBackend()));
+    await firstBranch.store.identity.retractAssertion(assertion.id);
+    const kept = await firstBranch.store.identity.assertSame(first, second);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await secondBranch.store.identity.retractAssertion(assertion.id);
+    await secondBranch.store.identity.assertSame(first, second);
+
+    const result = await merge(store, [firstBranch, secondBranch], {});
     if (isErr(result)) throw result.error;
     expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 1 });
-
     const current = await store.identity.assertionsOf(first);
-    expect(current.map((entry) => entry.id)).toEqual([reasserted.assertion.id]);
+    expect(current.map((entry) => entry.id)).toEqual([kept.assertion.id]);
     expect(await store.identity.areSame(first, second)).toBe(true);
   });
 
@@ -548,6 +616,246 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(await store.nodes.Person.getById(second.id)).toBeDefined();
     expect(await store.identity.assertionsOf(first)).toEqual([]);
   });
+
+  /**
+   * An assertion that ENDED claims nothing about its endpoint's present, so a
+   * deletion of that endpoint does not contradict it: the merge lands it as
+   * history. Covers the branch that ended it by deleting the endpoint itself,
+   * and a branch that retracted it while another branch deleted the endpoint.
+   */
+  it.each([
+    { relation: "same", ending: "own-delete" },
+    { relation: "different", ending: "own-delete" },
+    { relation: "same", ending: "retract" },
+    { relation: "different", ending: "retract" },
+  ] as const)(
+    "lands an ended $relation assertion over a deleted endpoint as history ($ending)",
+    async ({ relation, ending }) => {
+      const { store, first, second } = await createBase();
+      const assertBranch = unwrap(await branch(store, () => makeBackend()));
+      const deleteBranch = unwrap(await branch(store, () => makeBackend()));
+      const { assertion } =
+        relation === "same" ?
+          await assertBranch.store.identity.assertSame(first, second)
+        : await assertBranch.store.identity.assertDifferent(first, second);
+      // An ending in the assertion's own millisecond leaves an empty window,
+      // which the merge drops rather than lands as history.
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      if (ending === "own-delete") {
+        await assertBranch.store.nodes.Person.delete(second.id);
+      } else {
+        await assertBranch.store.identity.retractAssertion(assertion.id);
+        await deleteBranch.store.nodes.Person.delete(second.id);
+      }
+      expect(await assertBranch.store.identity.assertionsOf(first)).toEqual([]);
+
+      const branches =
+        ending === "own-delete" ? [assertBranch] : [assertBranch, deleteBranch];
+      const result = await merge(store, branches, {});
+      if (isErr(result)) {
+        console.info("refusal", result.error.message, result.error.details);
+        throw result.error;
+      }
+      expect(result.data.merged.identity).toEqual({
+        asserted: 1,
+        retracted: 0,
+      });
+      expect(await store.nodes.Person.getById(second.id)).toBeUndefined();
+      expect(await store.identity.assertionsOf(first)).toEqual([]);
+      const archival = await storeRuntime(store).identityAssertionsAtTarget(
+        storeRuntime(store).backend,
+        "archival",
+      );
+      const landed = archival.find((row) => row.id === assertion.id);
+      console.info("landed history", landed);
+      expect(landed).toMatchObject({ relation });
+      expect(landed?.validTo).toBeDefined();
+    },
+  );
+
+  /**
+   * A deletion the incremental TARGET made after the fork is not one this
+   * merge applies: it landed at the target's own, earlier instant (or removed
+   * the row outright), so even an ENDED branch assertion over it cannot be
+   * written. Planning refuses it with the typed conflict, and the merge
+   * refuses it the same way rather than dying inside the commit.
+   */
+  it.each([
+    { deletion: "soft-delete before the branch retracts" },
+    { deletion: "hard-delete" },
+  ] as const)(
+    "refuses an ended branch assertion over a node the target deleted ($deletion)",
+    async ({ deletion }) => {
+      // Planning an incremental merge needs durable revision tracking.
+      const [forkPoint] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { history: true },
+      );
+      const first = await forkPoint.nodes.Person.create(
+        { name: "First" },
+        { id: "first" },
+      );
+      const second = await forkPoint.nodes.Person.create(
+        { name: "Second" },
+        { id: "second" },
+      );
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+      ).store;
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      const { assertion } = await source.store.identity.assertSame(
+        first,
+        second,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      if (deletion === "hard-delete") {
+        await source.store.identity.retractAssertion(assertion.id);
+        await target.nodes.Person.hardDelete(second.id);
+      } else {
+        await target.nodes.Person.delete(second.id);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await source.store.identity.retractAssertion(assertion.id);
+      }
+      const request = {
+        forkPoint,
+        target,
+        branches: [source],
+        options: { branchOrder: [BRANCH_A] },
+      };
+
+      const planned = await planMergeIncremental(request);
+      const merged = await mergeIncremental(request);
+
+      for (const [label, result] of [
+        ["plan", planned],
+        ["merge", merged],
+      ] as const) {
+        if (result.success) throw new Error(`Expected a ${label} refusal`);
+        console.info(label, "refusal", result.error.message);
+        expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+        expect(result.error.message).toBe(
+          "A branch asserted an identity relation over a node another branch deleted.",
+        );
+        expect(result.error.details).toMatchObject({
+          assertion: { id: assertion.id },
+          deletedEndpoint: { kind: "Person", id: second.id },
+        });
+      }
+    },
+  );
+
+  it("merges incrementally when the target ended its own assertion by deleting the endpoint", async () => {
+    const { store: forkPoint, first, second } = await createBase();
+    const target = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+    ).store;
+    const { assertion } = await target.identity.assertSame(first, second);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await target.nodes.Person.delete(second.id);
+    const source = unwrap(
+      await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+    );
+    await source.store.nodes.Person.create({ name: "Third" }, { id: "third" });
+
+    const result = await mergeIncremental({
+      forkPoint,
+      target,
+      branches: [source],
+      options: { branchOrder: [BRANCH_A] },
+    });
+
+    if (isErr(result)) {
+      console.info("refusal", result.error.message, result.error.details);
+      throw result.error;
+    }
+    expect(result.data.dropped).not.toContainEqual(
+      expect.objectContaining({ id: assertion.id }),
+    );
+    expect(await target.nodes.Person.getById("third" as never)).toBeDefined();
+  });
+
+  /**
+   * Reconciliation that fuses the endpoints of a row the target already holds
+   * writes nothing for it: the row stays on the target as it is, so it must not
+   * be reported dropped. An incremental merge re-stages the target's own
+   * post-fork assertions, which is how such a row reaches the remap: a `same`
+   * the target asserted (exactly what a scorer re-matches), and a `different`
+   * it asserted and then retracted.
+   */
+  it.each(["same", "different"] as const)(
+    "keeps, unreported, a %s assertion the target holds when resolution fuses its endpoints",
+    async (relation) => {
+      const { store: forkPoint } = await createBase();
+      const target = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_B }),
+      ).store;
+      const n1 = await target.nodes.Person.create(
+        { name: "Ada" },
+        { id: "n1" },
+      );
+      const n2 = await target.nodes.Person.create(
+        { name: "Ada" },
+        { id: "n2" },
+      );
+      const { assertion } =
+        relation === "same" ?
+          await target.identity.assertSame(n1, n2)
+        : await target.identity.assertDifferent(n1, n2);
+      if (relation === "different") {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await target.identity.retractAssertion(assertion.id);
+      }
+      const targetRow = async () =>
+        (
+          await storeRuntime(target).identityAssertionsAtTarget(
+            storeRuntime(target).backend,
+            "archival",
+          )
+        ).find((row) => row.id === assertion.id);
+      const before = await targetRow();
+      expect(before).toBeDefined();
+      const source = unwrap(
+        await branch(forkPoint, () => makeBackend(), { id: BRANCH_A }),
+      );
+      await source.store.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+
+      const result = await mergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+        options: {
+          branchOrder: [BRANCH_A],
+          resolve: {
+            Person: {
+              block: () => "all",
+              threshold: 0.5,
+              similarity: {
+                kind: "custom",
+                score: (left, right) =>
+                  [left.id, right.id].toSorted().join(",") === "n1,n2" ? 1 : 0,
+              },
+            },
+          },
+        },
+      });
+
+      if (isErr(result)) {
+        console.info("refusal", result.error.message, result.error.details);
+        throw result.error;
+      }
+      console.info("dropped", result.data.dropped);
+      expect(result.data.resolutions).toEqual([
+        expect.objectContaining({ memberIds: ["n1", "n2"] }),
+      ]);
+      expect(result.data.dropped).not.toContainEqual(
+        expect.objectContaining({ id: assertion.id }),
+      );
+      expect(await targetRow()).toEqual(before);
+    },
+  );
 
   it("rejects a transitive same/different contradiction (#4)", async () => {
     const { store, first, second, third } = await createChainBase();
@@ -769,7 +1077,14 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     expect(report.warnings).toEqual(expectedWarnings);
   });
 
-  it("rejects opposing relations created by endpoint reconciliation", async () => {
+  /**
+   * Branch A asserts `p-anna` the same as `anchor`; branch B asserts `p-ana`
+   * different from `anchor`. Fusing the two staged patients would turn those
+   * into opposing relations on one endpoint pair, so the separation veto —
+   * which reads both branches' staged assertions — drops the scored match and
+   * reports it, and the merge lands both assertions with the patients apart.
+   */
+  it("vetoes a scored match endpoint reconciliation would turn into opposing relations", async () => {
     const backend = await makeBackend();
     const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const anchor = await baseStore.nodes.Patient.create(
@@ -805,12 +1120,21 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A, BRANCH_B],
     });
 
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected identity merge conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    if (isErr(result)) throw result.error;
+    console.info("identity conflicts", result.data.identityConflicts);
+    expect(result.data.identityConflicts).toMatchObject([
+      {
+        kind: "separation",
+        a: { kind: "Patient", id: "p-ana" },
+        b: { kind: "Patient", id: "p-anna" },
+      },
+    ]);
+    expect(await baseStore.identity.areSame(anna, anchor)).toBe(true);
+    expect(await baseStore.identity.areDifferent(ana, anchor)).toBe(true);
+    expect(await baseStore.identity.areSame(anna, ana)).toBe(false);
   });
 
-  it("rejects a different assertion collapsed to one reconciled survivor", async () => {
+  it("keeps apart a scored pair the merged branch itself asserts different", async () => {
     const backend = await makeBackend();
     const [baseStore] = await createStoreWithSchema(patientGraph, backend);
     const branchA = unwrap(
@@ -838,9 +1162,19 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
       branchOrder: [BRANCH_A],
     });
 
-    expect(isErr(result)).toBe(true);
-    if (isOk(result)) throw new Error("Expected identity merge conflict");
-    expect(result.error).toBeInstanceOf(IdentityMergeConflictError);
+    // The branch's own `different` assertion vetoes the scored match: the
+    // pair is reported, both rows land, and the assertion lands with them.
+    if (isErr(result)) throw result.error;
+    expect(result.data.identityConflicts).toEqual([
+      expect.objectContaining({ kind: "separation" }),
+    ]);
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 0 });
+    const patients = await baseStore.nodes.Patient.find();
+    expect(patients.map((patient) => patient.id).toSorted()).toEqual([
+      "p-ana",
+      "p-anna",
+    ]);
+    expect(await baseStore.identity.areDifferent(anna, ana)).toBe(true);
   });
 
   it("drops a same assertion collapsed to one reconciled survivor (#5)", async () => {
@@ -1001,12 +1335,34 @@ describe("planIdentityChanges retract/reassert rules", () => {
     ).toThrow(IdentityMergeConflictError);
   });
 
-  it("accepts a reassert by a branch that retracted the pair itself", () => {
-    // Convergent: branch B retracted the inherited assertion before re-asserting,
-    // so both branches agree the old id dies.
+  it("rejects a reassert when another branch only retracted the pair", () => {
+    // Branch B retracted and re-asserted; branch A retracted and stopped. The
+    // reassertion would overrule A's retraction, so the plan is refused.
+    expect(() =>
+      planIdentityChanges(
+        stagingWithIdentityChanges(
+          [{ branchId: BRANCH_B, assertion: reasserted }],
+          [
+            { branchId: BRANCH_A, assertion: inherited },
+            { branchId: BRANCH_B, assertion: inherited },
+          ],
+        ),
+        new Map(),
+      ),
+    ).toThrow(IdentityMergeConflictError);
+  });
+
+  it("accepts a reassert when every retracting branch reasserted the pair", () => {
+    const reassertedByA: IdentityTransferAssertion = {
+      ...SAME_PAIR,
+      id: "a-3",
+    };
     const planned = planIdentityChanges(
       stagingWithIdentityChanges(
-        [{ branchId: BRANCH_B, assertion: reasserted }],
+        [
+          { branchId: BRANCH_A, assertion: reassertedByA },
+          { branchId: BRANCH_B, assertion: reasserted },
+        ],
         [
           { branchId: BRANCH_A, assertion: inherited },
           { branchId: BRANCH_B, assertion: inherited },
@@ -1021,7 +1377,13 @@ describe("planIdentityChanges retract/reassert rules", () => {
     expect(planned.assertions.map((entry) => entry.id)).toEqual([
       reasserted.id,
     ]);
-    expect(planned.dropped).toEqual([]);
+    expect(planned.dropped).toEqual([
+      {
+        kind: "identity",
+        id: reassertedByA.id,
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
   });
 
   it("accepts a single branch that retracts then re-asserts the pair", () => {
@@ -1595,6 +1957,24 @@ describe("remapIdentityAssertionEndpoints validity", () => {
       },
     ]);
     expect(result.warnings).toEqual([]);
+  });
+
+  it("keeps, unreported, a committed row whose remapped window is empty", () => {
+    const result = remapIdentityAssertionEndpoints(
+      [assertion],
+      canonicalOf,
+      new Map<MergeKey, string>(),
+      new Map([[assertion.id, assertion]]),
+      new Map([
+        [
+          mergeKey("Person", "survivor"),
+          { validFrom: "2025-01-01T00:00:00.000Z" },
+        ],
+      ]),
+    );
+
+    expect(result.assertions).toEqual([]);
+    expect(result.dropped).toEqual([]);
   });
 
   it("honors a survivor window with only an upper bound", () => {

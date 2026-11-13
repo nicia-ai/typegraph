@@ -1,6 +1,5 @@
 import {
   asNodeId,
-  CardinalityError,
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -11,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
+import { MergeError } from "../../src/graph-merge/errors";
 import {
   applyMergePlanInTransaction,
   planMerge,
@@ -52,62 +52,65 @@ describe("adopted merge mid-apply rollback", () => {
     for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
   });
 
-  it.each([false, true])(
-    "rolls back node writes when the later edge batch fails (history: %s)",
-    async (history) => {
-      const { backend } = createLocalSqliteBackend();
-      cleanups.push(() => backend.close());
-      let attemptedEncounterWrites = 0;
-      const [target] = await createAdapterStoreWithSchema(graph, backend, {
-        revisionTracking: true,
-        history,
-        hooks: {
-          onOperationStart: (operation) => {
-            if (operation.entity === "node" && operation.kind === "Encounter")
-              attemptedEncounterWrites += 1;
-          },
+  async function mergeTarget(
+    history: boolean,
+    refuseEncounterWrites: () => boolean,
+  ) {
+    const { backend } = createLocalSqliteBackend();
+    cleanups.push(() => backend.close());
+    let attemptedEncounterWrites = 0;
+    const [target] = await createAdapterStoreWithSchema(graph, backend, {
+      revisionTracking: true,
+      history,
+      hooks: {
+        onOperationStart: (operation) => {
+          if (operation.entity !== "node" || operation.kind !== "Encounter")
+            return;
+          attemptedEncounterWrites += 1;
+          // The second encounter write fails, after the first has landed.
+          if (refuseEncounterWrites() && attemptedEncounterWrites > 1) {
+            throw new Error("encounter writes are refused by this test");
+          }
         },
-      });
-      await target.nodes.Patient.create({ name: "Robert" }, { id: "patient" });
+      },
+    });
+    await target.nodes.Patient.create({ name: "Robert" }, { id: "patient" });
+    const source = unwrap(
+      await branch(
+        target,
+        () => {
+          const fixture = createLocalSqliteBackend();
+          cleanups.push(() => fixture.backend.close());
+          return Promise.resolve(fixture.backend);
+        },
+        { id: asBranchId("source") },
+      ),
+    );
+    for (const id of ["encounter-a", "encounter-b"]) {
+      await source.store.nodes.Encounter.create({ reason: id }, { id });
+    }
+    await source.store.edges.primaryEncounter.create(
+      { kind: "Patient", id: "patient" },
+      { kind: "Encounter", id: "encounter-a" },
+      { on: "2026-01-01" },
+      { id: "edge-a" },
+    );
+    const artifact = unwrap(await planMerge(target, [source]));
+    return {
+      backend,
+      target,
+      artifact,
+      attemptedEncounterWrites: () => attemptedEncounterWrites,
+    };
+  }
 
-      async function makeBranch(id: string) {
-        return unwrap(
-          await branch(
-            target,
-            () => {
-              const fixture = createLocalSqliteBackend();
-              cleanups.push(() => fixture.backend.close());
-              return Promise.resolve(fixture.backend);
-            },
-            { id: asBranchId(id) },
-          ),
-        );
-      }
-
-      const left = await makeBranch("left");
-      const right = await makeBranch("right");
-      await left.store.nodes.Encounter.create(
-        { reason: "left" },
-        { id: "encounter-left" },
-      );
-      await left.store.edges.primaryEncounter.create(
-        { kind: "Patient", id: "patient" },
-        { kind: "Encounter", id: "encounter-left" },
-        { on: "2026-01-01" },
-        { id: "edge-left" },
-      );
-      await right.store.nodes.Encounter.create(
-        { reason: "right" },
-        { id: "encounter-right" },
-      );
-      await right.store.edges.primaryEncounter.create(
-        { kind: "Patient", id: "patient" },
-        { kind: "Encounter", id: "encounter-right" },
-        { on: "2026-01-02" },
-        { id: "edge-right" },
-      );
-      const artifact = unwrap(await planMerge(target, [left, right]));
-      attemptedEncounterWrites = 0;
+  it.each([false, true])(
+    "rolls back every write when the apply fails after writing (history: %s)",
+    async (history) => {
+      let refuse = false;
+      const { backend, target, artifact, attemptedEncounterWrites } =
+        await mergeTarget(history, () => refuse);
+      refuse = true;
 
       await expect(
         backend.transactionWithNative(async (_txBackend, nativeTransaction) =>
@@ -119,21 +122,61 @@ describe("adopted merge mid-apply rollback", () => {
             );
           }),
         ),
-      ).rejects.toMatchObject({
-        name: "MergeConstraintConflictError",
-        cause: expect.any(CardinalityError) as unknown,
-      });
+      ).rejects.toBeInstanceOf(MergeError);
 
-      expect(attemptedEncounterWrites).toBeGreaterThan(0);
+      expect(attemptedEncounterWrites()).toBe(2);
       await expect(
-        target.nodes.Encounter.getById(asNodeId("encounter-left")),
-      ).resolves.toBeUndefined();
-      await expect(
-        target.nodes.Encounter.getById(asNodeId("encounter-right")),
+        target.nodes.Encounter.getById(asNodeId("encounter-a")),
       ).resolves.toBeUndefined();
       await expect(
         target.nodes.Patient.getById(asNodeId("application")),
       ).resolves.toBeUndefined();
     },
   );
+
+  it.each([false, true])(
+    "keeps none of a failed apply when the caller catches the refusal and commits (history: %s)",
+    async (history) => {
+      let refuse = false;
+      const { backend, target, artifact, attemptedEncounterWrites } =
+        await mergeTarget(history, () => refuse);
+      const revisionBefore = await target.revisionNow();
+      refuse = true;
+
+      let refusal: unknown;
+      await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withRecordedTransaction(nativeTransaction, async (tx) => {
+            try {
+              await applyMergePlanInTransaction(target, tx, artifact);
+            } catch (error) {
+              refusal = error;
+            }
+            await tx.nodes.Patient.create(
+              { name: "Application" },
+              { id: "application" },
+            );
+          }),
+      );
+
+      expect(refusal).toBeInstanceOf(MergeError);
+      // The first encounter row was written before the second one failed;
+      // the apply's savepoint rolled it back before the refusal reached the
+      // caller, so the caller's own write is all its commit keeps.
+      expect(attemptedEncounterWrites()).toBe(2);
+      await expect(
+        target.nodes.Encounter.getById(asNodeId("encounter-a")),
+      ).resolves.toBeUndefined();
+      expect(await target.edges.primaryEncounter.find()).toEqual([]);
+      await expect(
+        target.nodes.Patient.getById(asNodeId("application")),
+      ).resolves.toBeDefined();
+      expect(await target.revisionNow()).not.toEqual(revisionBefore);
+      expect(await target.verifyConstraintFences()).toEqual([]);
+    },
+  );
+  // MUTATION CHECK (verified): calling `applyValidatedMergePlanInTransaction`
+  // directly instead of through `withAdoptedMergeApplySavepoint` in
+  // `applyMergePlanInTransaction` (src/graph-merge/merge.ts) leaves
+  // `encounter-a` committed in the second case.
 });

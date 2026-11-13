@@ -61,26 +61,31 @@ export function nodeWritePlan(
 }
 
 /**
- * The plan for a batched node write.
- *
- * Owns one decision the single-write builder does not: **a batch is
- * constrained when ANY member is.** One transaction means one fence, so a
- * single constrained member makes the whole write constrained, and the first
- * such member names the class a refusal would report.
- *
- * `node-operations.ts`'s private `nodeBatchFencesConstraintProbe` is the
- * pre-migration spelling of this fold; it is replaced by this builder in the
- * batch that moves those call sites (B1), not left as a second owner.
+ * THE "a batch is constrained when ANY member is" fold: one transaction
+ * means one fence, so a single constrained member makes the whole write
+ * constrained, and the first such member names the class a refusal would
+ * report. Every batched `WritePlan` builder below folds through this one
+ * function, so a call site can never re-spell its own `.find()`.
+ */
+function foldBatchConstraintProbe(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+): ConstraintFenceReason | undefined {
+  return constraintProbes.find((probe) => probe !== undefined);
+}
+
+/**
+ * The plan for a node write whose constraint probe folds several sources: a
+ * batch's members, or one update's own probe beside the restore probe a
+ * cleared tombstone owes.
  */
 export function nodeBatchWritePlan(
   constraintProbes: readonly (ConstraintFenceReason | undefined)[],
   requiresIdentityLock: boolean,
 ): WritePlan<"node"> {
-  return {
-    entity: "node",
-    constraintProbe: constraintProbes.find((probe) => probe !== undefined),
+  return nodeWritePlan(
+    foldBatchConstraintProbe(constraintProbes),
     requiresIdentityLock,
-  };
+  );
 }
 
 /**
@@ -94,10 +99,45 @@ export function edgeWritePlan(
   return { entity: "edge", constraintProbe, requiresIdentityLock: false };
 }
 
+/**
+ * The plan for an edge write whose constraint probe folds several sources: a
+ * batch's members, or one update's reopen probe beside the detach probe a
+ * stated window end owes. A batch of purely `many`, non-acyclic,
+ * non-composition edges still takes no lock.
+ */
+export function edgeBatchWritePlan(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+): WritePlan<"edge"> {
+  return edgeWritePlan(foldBatchConstraintProbe(constraintProbes));
+}
+
 /** A single frame that deliberately coordinates node and edge writes. */
 export function mixedWritePlan(
   constraintProbe: ConstraintFenceReason | undefined,
   requiresIdentityLock: boolean,
 ): WritePlan<"mixed"> {
   return { entity: "mixed", constraintProbe, requiresIdentityLock };
+}
+
+/**
+ * The plan for a mixed (node + composition edge) write whose constraint probe
+ * folds several sources.
+ *
+ * Widens {@link foldBatchConstraintProbe}'s fold to `entity: "mixed"`: a
+ * composition create or restore (`node-operations.ts`) folds the node
+ * writes' own constraint probes with the composition edges its
+ * `partOf`/required-existence items owe — one item or a whole batch — into
+ * one verdict. Passing every probe through ONE combined list keeps that a
+ * single fold instead of an independent `.find()` or `??` chain each call
+ * site would otherwise re-spell.
+ */
+export function mixedBatchWritePlan(
+  constraintProbes: readonly (ConstraintFenceReason | undefined)[],
+  requiresIdentityLock: boolean,
+): WritePlan<"mixed"> {
+  return {
+    entity: "mixed",
+    constraintProbe: foldBatchConstraintProbe(constraintProbes),
+    requiresIdentityLock,
+  };
 }

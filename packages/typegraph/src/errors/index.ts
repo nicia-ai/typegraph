@@ -22,12 +22,19 @@
  * ```
  */
 
+import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { KindEntity } from "../core/types";
+import type { OntologyChange } from "../schema/migration";
 import type { SchemaDiff } from "../schema/migration";
-// Type-only import: `materialize-indexes.ts` value-imports
-// `ConfigurationError` from this file, but type-only imports are erased
-// at runtime so this back-edge does not create a value cycle.
+import type { UniquenessClaimGate } from "../schema/uniqueness-claim-gate";
+import type { EdgeCardinalityDirection } from "../store/claims/edge-claims";
+import type { ConstraintFenceViolation } from "../store/claims/verify";
+// Type-only imports: `materialize-indexes.ts` and `claims/verify.ts`
+// value-import `ConfigurationError` / `MigrationError` from this file, but
+// type-only imports are erased at runtime so these back-edges do not create
+// a value cycle.
 import type { MaterializeIndexesResult } from "../store/materialize-indexes";
+import type { CompositionCascadedPart } from "../store/types";
 
 // ============================================================
 // Types
@@ -719,11 +726,37 @@ export class EdgeMatchIdentityConflictError extends TypeGraphError {
  */
 export type CardinalityErrorDetails = Readonly<{
   edgeKind: string;
+  /** Which endpoint's population the write overran. */
+  direction: EdgeCardinalityDirection;
   fromKind: string;
   fromId: string;
+  toKind: string;
+  toId: string;
   cardinality: string;
   existingCount: number;
+  /**
+   * The id of a stored edge that occupies the slot the write overran, so a
+   * caller can act on it without a second query: the claim holder, the edge
+   * a stored-edge read named, or the earlier edge of the same batch. Absent
+   * when the refusing check counted the population but no stored edge could
+   * be named (a pending row a backend overlay holds).
+   */
+  incumbentEdgeId?: string;
 }>;
+
+/**
+ * The remediation suggestion for a {@link CardinalityError}, naming the
+ * option the caller actually set rather than the source-side one by default:
+ * a `direction: "target"` violation is never fixed by setting `cardinality`,
+ * so the suggestion must name `targetCardinality` for it.
+ */
+function cardinalityErrorSuggestion(details: CardinalityErrorDetails): string {
+  const option =
+    details.direction === "target" ? "targetCardinality" : "cardinality";
+  return details.cardinality === "one" || details.cardinality === "unique" ?
+      `Delete the existing edge before creating a new one, or use ${option} "many".`
+    : `Check if the ${option} constraint "${details.cardinality}" is correct for your use case.`;
+}
 
 /**
  * Thrown when cardinality constraint is violated.
@@ -733,19 +766,100 @@ export class CardinalityError extends TypeGraphError {
 
   constructor(details: CardinalityErrorDetails, options?: { cause?: unknown }) {
     super(
-      `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
+      details.direction === "target" ?
+        `Cardinality violation: "${details.edgeKind}" targeting ${details.toKind}/${details.toId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`
+      : `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
       "CARDINALITY_ERROR",
       {
         details,
         category: "constraint",
-        suggestion:
-          details.cardinality === "one" || details.cardinality === "unique" ?
-            `Delete the existing edge before creating a new one, or use cardinality "many".`
-          : `Check if the cardinality constraint "${details.cardinality}" is correct for your use case.`,
+        suggestion: cardinalityErrorSuggestion(details),
         cause: options?.cause,
       },
     );
     this.name = "CardinalityError";
+  }
+}
+
+/**
+ * Details for EdgeAcyclicityError.
+ */
+export type EdgeAcyclicityErrorDetails = Readonly<{
+  relation: string;
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+  /** True when `from` and `to` are the same node: a cycle of length one. */
+  selfLoop: boolean;
+}>;
+
+/**
+ * Thrown when a write would give a declared `acyclic: true` edge relation a
+ * cycle. Carries no witness path — reconstructing one requires path
+ * tracking, which the set-semantics reachability check gives up in exchange
+ * for terminating with no depth bound (see `src/store/acyclicity.ts`).
+ */
+export class EdgeAcyclicityError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      details.selfLoop ?
+        `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} is a self-loop (${details.fromKind}/${details.fromId} -> ${details.toKind}/${details.toId}), a cycle of length one.`
+      : `Acyclicity violation: "${details.edgeKind}" edge ${details.edgeId} would close a cycle in the "${details.relation}" relation (${details.toKind}/${details.toId} already reaches ${details.fromKind}/${details.fromId}).`,
+      "EDGE_ACYCLICITY_ERROR",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Inspect store.verifyConstraintFences() for every offending edge in this relation, or run a .recursive() traversal from the endpoints to see the path a human should resolve.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityError";
+  }
+}
+
+/**
+ * Details for EdgeAcyclicityIndeterminateError.
+ */
+export type EdgeAcyclicityIndeterminateErrorDetails = Readonly<{
+  relation: string;
+  operation: string;
+  graphId: string;
+}>;
+
+/**
+ * Thrown when the engine cut an acyclicity reachability search short
+ * (statement timeout, resource exhaustion) before it could prove or refute a
+ * cycle. An incomplete search is never reported as "no cycle" — see
+ * `isStatementCutShortError` in `src/utils/sql-errors.ts`.
+ */
+export class EdgeAcyclicityIndeterminateError extends TypeGraphError {
+  declare readonly details: EdgeAcyclicityIndeterminateErrorDetails;
+
+  constructor(
+    details: EdgeAcyclicityIndeterminateErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Acyclicity check for "${details.relation}" could not complete: the engine cut the reachability search short during "${details.operation}".`,
+      "EDGE_ACYCLICITY_INDETERMINATE",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Raise the statement budget for this operation, or drop `acyclic: true` from the edge and enforce acyclicity in application code.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeAcyclicityIndeterminateError";
   }
 }
 
@@ -937,6 +1051,81 @@ export class IdentitySeparationViolationError extends TypeGraphError {
   }
 }
 
+/** The transition-log operation a store without a TypeGraph transition log refused. */
+export type IdentityTransitionLogOperation =
+  | "transitionsOf"
+  | "replay"
+  | "pruneIdentityTransitions"
+  | "archival transition restore";
+
+export type IdentityReplayErrorDetails =
+  | Readonly<{
+      code: "IDENTITY_REPLAY_REQUIRES_HISTORY";
+      graphId: string;
+      operation: IdentityTransitionLogOperation;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED";
+      graphId: string;
+      operation: IdentityTransitionLogOperation;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_HISTORY_TRUNCATED";
+      /**
+       * The caller's OWN `fromRecorded`, present only when the caller
+       * actually supplied one. `requestedTo` is `toRecorded`, always present
+       * (this refusal only fires when a bounded range — `toRecorded` given —
+       * lies entirely below the watermark). Never fabricated from the other:
+       * an open-ended request (no `fromRecorded`) must not read back a
+       * `requestedFrom` it never named.
+       */
+      requestedFrom?: string;
+      requestedTo: string;
+      /** The instant the prune that set the watermark was made at, on this graph's axis: pass it as `fromRecorded` to read the retained range. */
+      prunedBefore: string;
+    }>
+  | Readonly<{
+      code: "IDENTITY_REPLAY_WALK_INCOMPLETE";
+      ceiling: number;
+    }>
+  | Readonly<{
+      code: "IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK";
+      /** The caller's own `beforeRecorded`. */
+      requestedBefore: string;
+      requestedRevision: number;
+      /** The highest revision a prune can name: the next commit's revision, or one past the highest retained (possibly restored) transition. */
+      highestPrunableRevision: number;
+    }>;
+
+/**
+ * Thrown by `store.identity.replay` / `transitionsOf` (and
+ * `pruneIdentityTransitions`'s own history precondition) when the transition
+ * log cannot answer a request: history capture is off, the requested range
+ * lies entirely below the retention watermark, or the lineage walk's own
+ * internal read ceiling was reached before the seed set converged. A range
+ * with more boundaries than the caller's `limit` is NOT a refusal — it pages,
+ * through the `nextCursor` on the result. `pruneIdentityTransitions` also
+ * raises it for a `beforeRecorded` beyond the graph's recorded clock.
+ */
+export class IdentityReplayError extends TypeGraphError {
+  declare readonly details: IdentityReplayErrorDetails;
+
+  constructor(
+    message: string,
+    details: IdentityReplayErrorDetails,
+    options?: Readonly<{ suggestion?: string }>,
+  ) {
+    super(message, details.code, {
+      details,
+      category: "constraint",
+      ...(options?.suggestion === undefined ?
+        {}
+      : { suggestion: options.suggestion }),
+    });
+    this.name = "IdentityReplayError";
+  }
+}
+
 /**
  * Details for RestrictedDeleteError.
  */
@@ -969,6 +1158,543 @@ export class RestrictedDeleteError extends TypeGraphError {
       },
     );
     this.name = "RestrictedDeleteError";
+  }
+}
+
+/**
+ * Details for CompositionCycleError.
+ */
+export type CompositionCycleErrorDetails = Readonly<{
+  wholeKind: string;
+  wholeId: string;
+  revisitedKind: string;
+  revisitedId: string;
+}>;
+
+/**
+ * Thrown when a composition parts closure revisits a node already in the
+ * walk — an INSTANCE-level cycle, not a library invariant violation.
+ *
+ * Reflexive composition (a kind declaring `partOf`/`hasPart` against itself)
+ * is permitted at the kind level, and the store refuses the corresponding
+ * INSTANCE cycle at write time: every realizing edge kind belongs to the
+ * oriented composition union, which is probed for acyclicity on each
+ * composition edge write. A ring therefore only reaches this walk through
+ * rows that bypassed that fence — written before the `partOf`/`hasPart`
+ * pair was declared, by trusted import, or by direct SQL. The cascade's
+ * visited set catches it deterministically rather than looping or silently
+ * truncating, but the affected nodes stay undeletable through the ordinary
+ * delete path until the cycle is broken by hand.
+ */
+export class CompositionCycleError extends TypeGraphError {
+  declare readonly details: CompositionCycleErrorDetails;
+
+  constructor(
+    details: CompositionCycleErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Composition parts closure of "${details.wholeKind}/${details.wholeId}" revisited "${details.revisitedKind}/${details.revisitedId}": an instance-level cycle exists among reflexive composition edges.`,
+      "COMPOSITION_CYCLE_DETECTED",
+      {
+        details,
+        category: "constraint",
+        suggestion: `Delete or reassign one of the composition edges that closes this cycle (the "${details.revisitedKind}/${details.revisitedId}" ↔ ancestor link), then retry the delete.`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "CompositionCycleError";
+  }
+}
+
+/**
+ * Details for NodeDeletePlanMismatchError, one shape per `situation`.
+ *
+ * - `"notLive"`: the node is absent or already deleted, so the delete has no
+ *   plan to compare.
+ * - `"changed"`: the delete's own plan differs from `expect`. `addedParts` and
+ *   `addedEdgeIds` are in the delete's plan but not in `expect`;
+ *   `droppedParts` and `droppedEdgeIds` are in `expect` but no longer in the
+ *   delete's plan. A part is one entry per `(kind, id, whole, viaEdgeKind)`, so
+ *   a part whose whole or edge kind changed appears in both lists.
+ */
+export type NodeDeletePlanMismatchErrorDetails = Readonly<{
+  kind: string;
+  id: string;
+}> &
+  (
+    | Readonly<{ situation: "notLive" }>
+    | Readonly<{
+        situation: "changed";
+        addedParts: readonly CompositionCascadedPart[];
+        droppedParts: readonly CompositionCascadedPart[];
+        addedEdgeIds: readonly string[];
+        droppedEdgeIds: readonly string[];
+      }>
+  );
+
+function describeNodeDeletePlanMismatch(
+  details: NodeDeletePlanMismatchErrorDetails,
+): string {
+  const target = `${details.kind}/${details.id}`;
+  if (details.situation === "notLive") {
+    return `Delete of ${target} was given an expected plan, but the node is absent or already deleted.`;
+  }
+  return `Delete of ${target} no longer matches the expected plan: ${details.addedParts.length} part(s) added, ${details.droppedParts.length} dropped; ${details.addedEdgeIds.length} edge id(s) added, ${details.droppedEdgeIds.length} dropped.`;
+}
+
+/**
+ * Thrown by `nodes.<Kind>.delete(id, { expect })` when the plan the delete
+ * computes for itself is not the `expect` plan a caller took from
+ * `planDelete(id)` — parts or edges changed since the preview, or the node is
+ * no longer live. Reached before any write. Category `"constraint"`, like
+ * {@link RestrictedDeleteError}: the graph's current state refuses the delete
+ * the caller confirmed, and the remedy is a fresh preview the user confirms
+ * again.
+ */
+export class NodeDeletePlanMismatchError extends TypeGraphError {
+  declare readonly details: NodeDeletePlanMismatchErrorDetails;
+
+  constructor(
+    details: NodeDeletePlanMismatchErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      describeNodeDeletePlanMismatch(details),
+      "NODE_DELETE_PLAN_MISMATCH",
+      {
+        details,
+        category: "constraint",
+        suggestion: `Preview again with planDelete(id), confirm the new plan, and retry delete(id, { expect: newPlan }).`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "NodeDeletePlanMismatchError";
+  }
+}
+
+/**
+ * Details for CompositionError, one shape per `situation`.
+ *
+ * - `"occupied"` (`COMPOSITION_WHOLE_OCCUPIED`): the write would give the part
+ *   a second whole. `incumbentEdgeId` is omitted only when a caller builds
+ *   this error with no claim outcome in hand at all; every claim-issuing call
+ *   site has one and supplies it. It names the EDGE that already holds the
+ *   axis — the one fact the claim statement's `holder_edge_id` actually
+ *   reports — never the incumbent whole's own kind/id, which would need a
+ *   second read this refusal path does not make.
+ * - `"futureStart"` (`COMPOSITION_VALIDITY_FUTURE_START`) and `"futureEnd"`
+ *   (`COMPOSITION_VALIDITY_FUTURE_END`): a composition edge write states a
+ *   `validFrom` or `validTo` later than the operation clock. `bound` is the
+ *   stated value. `partId` is absent when the part is being created with a
+ *   generated id (`partOf` on a create), `edgeId` when the edge does not
+ *   exist yet.
+ * - `"futureMove"` (`COMPOSITION_MOVE_FUTURE`): `reparent`/`bulkReparent`
+ *   names an `at` later than the operation clock.
+ * - `"moveBeforeIncumbent"` (`COMPOSITION_MOVE_BEFORE_INCUMBENT`):
+ *   `reparent`/`bulkReparent` names an `at` earlier than the `validFrom` of
+ *   the `population: "oneActive"` attachment the move would end, so the
+ *   ended window would close before it opened. `incumbentEdgeKind` /
+ *   `incumbentEdgeId` name that attachment's realizing edge.
+ * - `"boundedAttachment"` (`COMPOSITION_ATTACHMENT_WINDOW_BOUNDED`): a stated
+ *   attachment (`partOf.validTo`) on a `population: "oneActive"` pair, where
+ *   only an open window is a membership, so the edge it would write would not
+ *   attach the part. `partId` is absent while the part is being created with
+ *   a generated id.
+ * - `"windowOverlap"` (`COMPOSITION_WINDOW_OVERLAP`): on a
+ *   `population: "oneActive"` pair, the write would leave two composition
+ *   edges of one part whose valid-time windows share an instant, so
+ *   `store.asOf(t)` would show the part with two wholes. `edgeKind` /
+ *   `edgeId` / `validFrom` / `validTo` are the written edge's window as the
+ *   write leaves it, and the `incumbent*` fields the other edge's — the one
+ *   the write would overlap. An omitted bound is unbounded on that side.
+ * - `"existing"` (`COMPOSITION_WHOLE_CONFLICT`): a `getOrCreateByConstraint`
+ *   call whose `partOf` postcondition the already-existing node CONTRADICTS.
+ *   `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` name both
+ *   sides so a caller can see the move it would have to make: the whole (and
+ *   realizing edge) the node holds now, and the one the call asked for.
+ *   `requestedVia` is the RESOLVED realizing edge of the pair the stated
+ *   `partOf` names (`resolveCompositionAttachment`), not an echo of a stated
+ *   `via`. `currentVia` is absent when the contradiction is a differing whole
+ *   rather than a differing realizing edge only.
+ * - `"props"` (`COMPOSITION_PROPS_CONFLICT`): a `getOrCreateByConstraint` or
+ *   `reparent` call whose attachment is already satisfied (same whole, same
+ *   realizing edge — named by `edgeKind`/`edgeId`) but whose stated
+ *   `partOf.props` are schema-valid and canonically DIFFERENT from the edge's
+ *   live stored props. Neither call writes on an already-satisfied
+ *   attachment, so a valid-but-different `props` is an accepted option this
+ *   API cannot honor — it is refused rather than silently dropped, exactly
+ *   like a differing whole or realizing edge.
+ * - `"window"` (`COMPOSITION_ATTACHMENT_WINDOW_CONFLICT`): the same refusal
+ *   for a stated window bound — a `getOrCreateByConstraint` whose
+ *   already-satisfied attachment stores a different `partOf.validFrom` /
+ *   `partOf.validTo`, or a `reparent` to the whole the part already holds
+ *   whose `at` is not the edge's stored `validFrom`. `option` names the stated
+ *   option, `stated` and `stored` both instants.
+ *
+ * Composition membership is a fact of a row, not of an instant: a row with
+ * no `validTo` is the part's current attachment and an ended row is history,
+ * which is what lets one claim row, the cascade and the acyclicity relation
+ * agree on it. A window scheduled to start or end later would make a row
+ * current at one read instant and history at another, so it is refused on
+ * every write path rather than half-honored.
+ */
+export type CompositionErrorDetails =
+  | Readonly<{
+      situation: "occupied";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      incumbentEdgeId?: string;
+    }>
+  | Readonly<{
+      situation: "futureStart" | "futureEnd";
+      partKind: string;
+      partId?: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      edgeId?: string;
+      bound: string;
+      operationInstant: string;
+    }>
+  | Readonly<{
+      situation: "futureMove";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      at: string;
+      operationInstant: string;
+    }>
+  | Readonly<{
+      situation: "moveBeforeIncumbent";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      incumbentEdgeKind: string;
+      incumbentEdgeId: string;
+      incumbentValidFrom: string;
+      at: string;
+    }>
+  | Readonly<{
+      situation: "boundedAttachment";
+      partKind: string;
+      partId?: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      validTo: string;
+    }>
+  | Readonly<{
+      situation: "windowOverlap";
+      partKind: string;
+      partId: string;
+      wholeKind: string;
+      wholeId: string;
+      edgeKind: string;
+      edgeId: string;
+      validFrom?: string;
+      validTo?: string;
+      incumbentEdgeKind: string;
+      incumbentEdgeId: string;
+      incumbentWholeKind: string;
+      incumbentWholeId: string;
+      incumbentValidFrom?: string;
+      incumbentValidTo?: string;
+    }>
+  | Readonly<{
+      situation: "existing";
+      partKind: string;
+      partId: string;
+      currentWhole: Readonly<{ kind: string; id: string }>;
+      currentVia?: string;
+      requestedWhole: Readonly<{ kind: string; id: string }>;
+      requestedVia: string;
+    }>
+  | Readonly<{
+      situation: "props";
+      partKind: string;
+      partId: string;
+      edgeKind: string;
+      edgeId: string;
+      currentProps: Record<string, unknown>;
+      requestedProps: Record<string, unknown>;
+    }>
+  | Readonly<{
+      situation: "window";
+      partKind: string;
+      partId: string;
+      edgeKind: string;
+      edgeId: string;
+      /** The option that stated the bound: `partOf.validFrom`, `partOf.validTo` or `options.at`. */
+      option: string;
+      /** The stated bound; `null` states "no lower bound". */
+      stated: string | null;
+      /** The bound the realizing edge stores; absent when it stores none. */
+      stored?: string;
+    }>;
+
+function compositionWindowLabel(
+  validFrom: string | undefined,
+  validTo: string | undefined,
+): string {
+  return `[${validFrom ?? "unbounded"}, ${validTo ?? "unbounded"})`;
+}
+
+function compositionPartLabel(
+  details: Readonly<{ partKind: string; partId?: string | undefined }>,
+): string {
+  return `${details.partKind}${details.partId === undefined ? "" : `/${details.partId}`}`;
+}
+
+function compositionRequestedWholeLabel(
+  details: Readonly<{ wholeKind: string; wholeId: string }>,
+): string {
+  return `${details.wholeKind}/${details.wholeId}`;
+}
+
+function compositionWholeLabel(
+  whole: Readonly<{ kind: string; id: string }>,
+  via: string | undefined,
+): string {
+  return `${whole.kind}/${whole.id}${via === undefined ? "" : ` (via "${via}")`}`;
+}
+
+/**
+ * What one {@link CompositionErrorDetails} situation reads as: its code, its
+ * message, and the way out — one switch, so a code never drifts from the
+ * message it is raised with.
+ */
+function describeCompositionRefusal(
+  details: CompositionErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = compositionPartLabel(details);
+  switch (details.situation) {
+    case "occupied": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_WHOLE_OCCUPIED",
+        message:
+          `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}": ` +
+          `it already has a whole${
+            details.incumbentEdgeId === undefined ?
+              ""
+            : ` (held by edge ${details.incumbentEdgeId})`
+          }, and composition allows exactly one.`,
+        suggestion:
+          "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to move the part — it retires the incumbent attachment and creates the new one in one transaction. A second composition edge create can never succeed while the first one holds the part.",
+      };
+    }
+    case "futureStart":
+    case "futureEnd": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      const field =
+        details.situation === "futureStart" ? "validFrom" : "validTo";
+      return {
+        code:
+          details.situation === "futureStart" ?
+            "COMPOSITION_VALIDITY_FUTURE_START"
+          : "COMPOSITION_VALIDITY_FUTURE_END",
+        message: `Cannot write composition edge "${details.edgeKind}"${
+          details.edgeId === undefined ? "" : ` ${details.edgeId}`
+        } between ${partLabel} and ${wholeLabel}: ${field} "${details.bound}" is later than the operation clock "${details.operationInstant}".`,
+        suggestion: `Use a ${field} at or before the current time. A composition attachment is current while its window is open and history once it ends; scheduling either transition for later is not supported — make the change when it happens, with \`reparent\` to move a part.`,
+      };
+    }
+    case "futureMove": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_MOVE_FUTURE",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": the move instant is later than the operation clock "${details.operationInstant}".`,
+        suggestion:
+          "Omit `at` to move the part now, or pass an instant at or before the current time. A move cannot be scheduled for later.",
+      };
+    }
+    case "moveBeforeIncumbent": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_MOVE_BEFORE_INCUMBENT",
+        message: `Cannot move ${partLabel} to ${wholeLabel} at "${details.at}": its current attachment (edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}) starts at "${details.incumbentValidFrom}", so ending it at the move instant would close it before it opened.`,
+        suggestion:
+          "Pass an `at` at or after the current attachment's validFrom, or omit `at` to move the part at the later of the current time and that validFrom.",
+      };
+    }
+    case "boundedAttachment": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_ATTACHMENT_WINDOW_BOUNDED",
+        message: `Cannot attach ${partLabel} to ${wholeLabel} via "${details.edgeKind}" with \`partOf.validTo\` "${details.validTo}": the pair's population is "oneActive", where only an open window is a membership, so the edge would not attach the part.`,
+        suggestion: `Omit \`partOf.validTo\` to attach the part. To record a bounded membership as history, write the edge itself with \`store.edges.${details.edgeKind}.create(...)\`.`,
+      };
+    }
+    case "windowOverlap": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      return {
+        code: "COMPOSITION_WINDOW_OVERLAP",
+        message: `Cannot write composition edge "${details.edgeKind}" ${details.edgeId} between ${partLabel} and ${wholeLabel} with window ${compositionWindowLabel(details.validFrom, details.validTo)}: it overlaps the window ${compositionWindowLabel(details.incumbentValidFrom, details.incumbentValidTo)} of edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which attaches the part to ${details.incumbentWholeKind}/${details.incumbentWholeId}. A part holds one whole at every valid-time instant.`,
+        suggestion:
+          "Give the edge a window that ends at or before the other edge's validFrom, or starts at or after its validTo (windows are half-open, so touching windows do not overlap). To move the part, call `store.nodes.<PartKind>.reparent(partId, { whole, at? })`, which ends the current window at the instant the new one opens. To correct recorded history, end or delete the overlapping edge first.",
+      };
+    }
+    case "existing": {
+      const held = `whole ${compositionWholeLabel(details.currentWhole, details.currentVia)}`;
+      const asked = compositionWholeLabel(
+        details.requestedWhole,
+        details.requestedVia,
+      );
+      return {
+        code: "COMPOSITION_WHOLE_CONFLICT",
+        message: `Cannot apply \`partOf\` to ${partLabel}: the node already exists with ${held}, not ${asked}.`,
+        suggestion: `Call \`store.nodes.<Kind>.reparent(id, { whole, via? })\` to MOVE the part to the requested whole; getOrCreateByConstraint's \`partOf\` asserts an attachment, it never re-homes one.`,
+      };
+    }
+    case "props": {
+      return {
+        code: "COMPOSITION_PROPS_CONFLICT",
+        message: `Cannot apply \`partOf.props\` to ${partLabel}: it already holds this whole via "${details.edgeKind}" (edge ${details.edgeId}) with different properties.`,
+        suggestion: `Call \`store.edges.${details.edgeKind}.update(${JSON.stringify(details.edgeId)}, props)\` to change the realizing edge's own properties directly — \`partOf\` on an already-satisfied attachment only asserts placement, it never rewrites the edge.`,
+      };
+    }
+    case "window": {
+      const stated =
+        details.stated === null ? "no lower bound" : `"${details.stated}"`;
+      const stored =
+        details.stored === undefined ? "no such bound" : `"${details.stored}"`;
+      return {
+        code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
+        message: `Cannot apply \`${details.option}\` to ${partLabel}: it already holds this whole via "${details.edgeKind}" (edge ${details.edgeId}), which stores ${stored}, not the stated ${stated}.`,
+        suggestion: `Omit \`${details.option}\` or restate the stored bound; an already-satisfied attachment only asserts placement. Change the window on the realizing edge with \`store.edges.${details.edgeKind}.update(${JSON.stringify(details.edgeId)}, ...)\`.`,
+      };
+    }
+  }
+}
+
+/**
+ * Thrown when a composition edge (`partOf`/`hasPart`) write breaks one of the
+ * rules that keep a part's attachment a fact of the row: a part holds exactly
+ * one whole across every declared composition relation (enforced by one
+ * claim row per part — `typegraph_edge_claims`, the reserved composition
+ * axis), at every valid-time instant on a `oneActive` pair (no two of a
+ * part's composition windows overlap), and an attachment's window never
+ * starts or ends later than the write that states it.
+ *
+ * Also thrown when a get-or-create or attach request disagrees with the
+ * attachment the part already has — a different whole, different edge
+ * `props`, or a different validity window (`"existing"`, `"props"`,
+ * `"window"`) — an accepted option the call cannot honor without silently
+ * dropping it.
+ *
+ * One class, one code per situation ({@link CompositionErrorDetails}), so a
+ * caller that routes on `code` can tell a second whole from a scheduled
+ * window.
+ */
+export class CompositionError extends TypeGraphError {
+  declare readonly details: CompositionErrorDetails;
+
+  constructor(details: CompositionErrorDetails, options?: { cause?: unknown }) {
+    const refusal = describeCompositionRefusal(details);
+    super(refusal.message, refusal.code, {
+      details,
+      category: "constraint",
+      suggestion: refusal.suggestion,
+      cause: options?.cause,
+    });
+    this.name = "CompositionError";
+  }
+}
+
+/**
+ * Details for CompositionExistenceError.
+ *
+ * `partId` is absent on a bare create refusal (`situation: "create"`): the
+ * node has not been assigned an id yet at the point the refusal is decided,
+ * since deciding it is what keeps the row from ever being written.
+ * `edgeKind`/`edgeId` are present only on `situation: "detach"`, where an
+ * existing composition edge row is what the caller is trying to end,
+ * soft-delete, or hard-delete.
+ *
+ * `situation` and the error's `code` say the same thing in two vocabularies —
+ * `"create"`/`COMPOSITION_WHOLE_REQUIRED`,
+ * `"detach"`/`COMPOSITION_DETACH_REFUSED` — from one owner
+ * ({@link describeCompositionExistenceRefusal}), so a caller may branch on
+ * either. The details are a union discriminated by `situation`, so narrowing
+ * on it types exactly the fields that situation carries.
+ */
+export type CompositionExistenceErrorDetails =
+  | Readonly<{ situation: "create"; partKind: string; partId?: string }>
+  | Readonly<{
+      situation: "detach";
+      partKind: string;
+      partId: string;
+      edgeKind: string;
+      edgeId: string;
+    }>;
+
+/**
+ * What one {@link CompositionExistenceErrorDetails} situation reads as: its
+ * machine-readable code, its message, and the way out.
+ *
+ * One switch rather than three parallel ones (a code map, a message builder,
+ * a suggestion ladder): a situation added to the union teaches exactly one
+ * function, and a code can never drift from the message it is raised with.
+ */
+function describeCompositionExistenceRefusal(
+  details: CompositionExistenceErrorDetails,
+): Readonly<{ code: string; message: string; suggestion: string }> {
+  const partLabel = compositionPartLabel(details);
+  switch (details.situation) {
+    case "create": {
+      return {
+        code: "COMPOSITION_WHOLE_REQUIRED",
+        message: `Cannot create ${partLabel}: this kind requires a whole (\`existence: "required"\`), and no \`partOf\` was given.`,
+        suggestion: `Pass \`partOf: { whole }\` naming a live, declared whole, or soft-delete/hard-delete the part instead of creating it bare.`,
+      };
+    }
+    case "detach": {
+      return {
+        code: "COMPOSITION_DETACH_REFUSED",
+        message: `Cannot detach ${partLabel} from its whole via "${details.edgeKind}" (edge ${details.edgeId}): this kind requires a whole (\`existence: "required"\`) and the part is still live.`,
+        suggestion: `Soft-delete or hard-delete the part itself first (which frees its composition edge), or call \`store.nodes.${details.partKind}.reparent(partId, { whole, via? })\` — reparent retires the old attachment and creates the new one in one transaction, so the part is never left detached.`,
+      };
+    }
+  }
+}
+
+/**
+ * Thrown when a write would leave a required-existence composition part
+ * (`existence: "required"`) with no live whole: a bare create with no
+ * `partOf` (`situation: "create"`), or a detach that would orphan a
+ * currently-live part (`situation: "detach"`).
+ *
+ * Its own class rather than a `CompositionError` code: `CompositionError` is
+ * the "at most one whole" refusal and the attachment-request conflicts; this
+ * is the "at least one whole while live" refusal — a different invariant with
+ * a different shape (no incumbent edge to name on the create leg). Shares
+ * `CompositionError`'s `"constraint"` category.
+ *
+ * One class, two codes — one per situation, since a bare create and a refused
+ * detach are different things to handle and a caller that routes on `code`
+ * alone must be able to tell them apart.
+ */
+export class CompositionExistenceError extends TypeGraphError {
+  declare readonly details: CompositionExistenceErrorDetails;
+
+  constructor(
+    details: CompositionExistenceErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    const refusal = describeCompositionExistenceRefusal(details);
+    super(refusal.message, refusal.code, {
+      details,
+      category: "constraint",
+      suggestion: refusal.suggestion,
+      cause: options?.cause,
+    });
+    this.name = "CompositionExistenceError";
   }
 }
 
@@ -1122,9 +1848,77 @@ export const MIGRATION_FAILURE_REASONS = [
   "kind-removal",
   /** A declared edge match identity changed while its edge kind held rows. */
   "edge-match-identity-rekey",
+  /**
+   * A schema tightening other than an edge cardinality is false against
+   * existing rows: an ontology axiom (`disjointWith` / `subClassOf` /
+   * `equivalentTo` / `sameAs` / `partOf` / `hasPart` added, or a
+   * `subClassOf` / `equivalentTo` / `sameAs` removed), `acyclic: true`, a
+   * narrowed edge endpoint declaration, a mid-chain kind removal, or an edge
+   * kind re-added over leftover rows. Inspect `details.violations` — in
+   * exactly the shape `store.verifyConstraintFences()` returns, every
+   * violated family included — for the rows that must be resolved before
+   * retrying.
+   */
+  "ontology-tightening-violated",
+  /**
+   * An edge cardinality tightening (`cardinality` or `targetCardinality`
+   * newly constrained, or moved to a stricter constrained value) is false
+   * against existing rows. Inspect `details.violations` — in exactly the
+   * shape `store.verifyConstraintFences()` returns, every violated family
+   * included, not only the cardinality rows — for the rows that must be
+   * resolved before retrying.
+   */
+  "edge-cardinality-tightening-violated",
+  /**
+   * The commit would leave a uniqueness constraint unenforced over existing
+   * rows: it adds or reshapes a unique constraint on a kind that holds rows,
+   * or moves a `kindWithSubClasses` claim axis away from where that kind's
+   * existing claims sit. A schema commit neither validates existing rows
+   * against a unique constraint nor rebuilds its claims, so the kind must be
+   * empty. Inspect `details.constraints`.
+   */
+  "unique-constraint-requires-empty-kind",
+  /**
+   * `store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would
+   * drop a stored relation whose meta-edge is not built in, the last copy of
+   * a relation the graph can no longer declare. Inspect `details.relations`,
+   * move them into `defineGraph({ annotations })`, then commit with
+   * `migrateSchema()`.
+   */
+  "custom-relation-removal",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
+
+/**
+ * The facts every schema-tightening refusal reports, whichever family
+ * refused first, so a caller repairs the rows once.
+ */
+export type SchemaTighteningRefusalDetails = Readonly<{
+  /**
+   * The ontology changes that required a data check — every classified
+   * relation change in the diff that owes one. A change that owes none (a
+   * `safe` or `breaking` one) never appears here. Empty when only an edge
+   * kind's own registration tightened.
+   */
+  changes: readonly OntologyChange[];
+  /**
+   * The edge kinds whose own registration this commit tightens: a newly
+   * constrained `cardinality` / `targetCardinality`, `acyclic: true`, or an
+   * endpoint pair no longer admitted. Sorted. Empty when only ontology
+   * relations tightened.
+   */
+  edgeKinds: readonly string[];
+  /** The edge-cardinality axes this commit newly constrains. */
+  axes: readonly EdgeCardinalityDeclaration[];
+  /**
+   * The rows that make the proposed schema false, in exactly the shape
+   * `store.verifyConstraintFences()` returns for it, EVERY violated family
+   * included — so the same rows that block the migration can be listed,
+   * resolved, and the migration retried once.
+   */
+  violations: readonly ConstraintFenceViolation[];
+}>;
 
 /**
  * Structured context for a {@link MigrationError}, discriminated on `reason`.
@@ -1179,6 +1973,70 @@ export type MigrationErrorDetails =
       toVersion: number;
       reason: "edge-match-identity-rekey";
       edgeKinds: readonly string[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "unique-constraint-requires-empty-kind";
+      /**
+       * The uniqueness constraints the commit would leave unenforced over
+       * existing rows — added, reshaped, or left reading a subclass component
+       * that lost a member their claims may sit at — on a kind that still
+       * holds rows. A
+       * gated constraint whose kind is empty is permitted and does NOT appear
+       * here. Never empty.
+       */
+      constraints: readonly UniquenessClaimGate[];
+    }>
+  | (SchemaTighteningRefusalDetails &
+      Readonly<{
+        graphId: string;
+        fromVersion: number;
+        toVersion: number;
+        /**
+         * Existing rows violate the proposed schema and NO edge-cardinality
+         * row does: an ontology axiom, an `acyclic: true`, an endpoint
+         * narrowing, a composition declaration, or an edge kind re-added over
+         * leftover rows.
+         */
+        reason: "ontology-tightening-violated";
+      }>)
+  | (SchemaTighteningRefusalDetails &
+      Readonly<{
+        graphId: string;
+        fromVersion: number;
+        toVersion: number;
+        /**
+         * At least one existing row violates a cardinality this commit newly
+         * constrains. `violations` still lists EVERY family the commit
+         * violates, so one repair covers the whole refusal.
+         */
+        reason: "edge-cardinality-tightening-violated";
+      }>)
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      /**
+       * `store.evolve()`, `store.planEvolution()` or `store.removeKinds()`
+       * would drop a stored relation whose meta-edge is not built in. The
+       * stored schema holds its last copy, so only an explicit
+       * `migrateSchema()` may drop it.
+       */
+      reason: "custom-relation-removal";
+      /**
+       * Each such relation as `{ metaEdge, from, to }`, such as
+       * `governs(Team, Project)` as `{ metaEdge: "governs", from: "Team",
+       * to: "Project" }`: the `removedCustomRelation` of every change that
+       * drops one, ready to move into `defineGraph({ annotations })`
+       * without parsing text.
+       */
+      relations: readonly Readonly<{
+        metaEdge: string;
+        from: string;
+        to: string;
+      }>[];
     }>;
 
 /**
@@ -1437,6 +2295,49 @@ export class ConfigurationError extends TypeGraphError {
       cause: options?.cause,
     });
     this.name = "ConfigurationError";
+  }
+}
+
+/** The composition codes a {@link CompositionConfigurationError} carries. */
+export type CompositionConfigurationCode =
+  | "COMPOSITION_WHOLE_NOT_DECLARED"
+  | "COMPOSITION_VIA_NOT_DECLARED"
+  | "COMPOSITION_VIA_AMBIGUOUS"
+  | "COMPOSITION_NOT_A_PART"
+  | "COMPOSITION_NO_PARTS_DECLARED"
+  | "COMPOSITION_NO_WHOLES_DECLARED"
+  | "COMPOSITION_UNKNOWN_ALIAS"
+  | "COMPOSITION_UNIT_INDETERMINATE";
+
+/**
+ * A composition call that names something the declared composition relation
+ * does not have — no pair between two kinds, a `via` that realizes none, an
+ * ambiguous attachment, a kind with no parts or wholes, an unknown alias — or
+ * a composition unit an engine cut short before it could be read whole.
+ *
+ * A `ConfigurationError`, so existing `instanceof ConfigurationError` checks
+ * and `details.code` reads still hold, whose `code` is the specific composition
+ * code rather than the generic `CONFIGURATION_ERROR`: every composition
+ * refusal — this class, `CompositionError` and `CompositionExistenceError` —
+ * carries its `COMPOSITION_*` code on `error.code`, so a caller routing on
+ * composition refusals reads one place.
+ */
+export class CompositionConfigurationError extends ConfigurationError {
+  declare readonly details: Readonly<
+    { code: CompositionConfigurationCode } & Record<string, unknown>
+  >;
+  override readonly code: CompositionConfigurationCode;
+
+  constructor(
+    message: string,
+    details: Readonly<
+      { code: CompositionConfigurationCode } & Record<string, unknown>
+    >,
+    options?: { cause?: unknown; suggestion?: string },
+  ) {
+    super(message, details, options);
+    this.code = details.code;
+    this.name = "CompositionConfigurationError";
   }
 }
 
@@ -1744,7 +2645,10 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
 
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
+  | "acyclicity_unsupported"
   | "backend_unsupported"
+  | "cardinality_unsupported"
+  | "composition_unsupported"
   | "database_not_empty"
   | "fulltext_unsupported"
   | "history_unsupported"

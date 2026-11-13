@@ -25,6 +25,7 @@ import {
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
+import { activeSchemaHash } from "../schema/manager";
 import { serializeSchemaProperties } from "../schema/serializer";
 import type { JsonSchema } from "../schema/types";
 import { chunk } from "../utils/array";
@@ -270,6 +271,8 @@ async function schemaCoordinateFor<G extends GraphDef>(
   ctx: AnalysisContext<G>,
 ): Promise<SchemaCoordinate> {
   const active = await ctx.backend.getActiveSchema(ctx.graphId);
+  const activeHash =
+    active === undefined ? undefined : await activeSchemaHash(active);
   const declaration = ctx.introspect();
   if (
     declaration.schemaVersion !== undefined &&
@@ -283,13 +286,13 @@ async function schemaCoordinateFor<G extends GraphDef>(
   }
   if (
     declaration.schemaHash !== undefined &&
-    active !== undefined &&
-    active.schema_hash !== declaration.schemaHash
+    activeHash !== undefined &&
+    activeHash !== declaration.schemaHash
   ) {
     throw new SchemaMismatchError({
       graphId: ctx.graphId,
       expectedHash: declaration.schemaHash,
-      actualHash: active.schema_hash,
+      actualHash: activeHash,
     });
   }
   const declarationShape = {
@@ -308,10 +311,7 @@ async function schemaCoordinateFor<G extends GraphDef>(
   const schemaFence = await sha256Hex(
     JSON.stringify(
       {
-        active:
-          active === undefined ? undefined : (
-            [active.version, active.schema_hash]
-          ),
+        active: active === undefined ? undefined : [active.version, activeHash],
         declaration: declarationShape,
       },
       sortedReplacer,
@@ -320,7 +320,7 @@ async function schemaCoordinateFor<G extends GraphDef>(
   );
   return {
     ...(active === undefined ? {} : { schemaVersion: active.version }),
-    ...(active === undefined ? {} : { schemaHash: active.schema_hash }),
+    ...(activeHash === undefined ? {} : { schemaHash: activeHash }),
     schemaFence,
   };
 }

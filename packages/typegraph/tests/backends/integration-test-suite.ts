@@ -5,128 +5,48 @@
  * TypeGraph query builder interface. All backends (SQLite, PostgreSQL, etc.)
  * must pass these tests.
  *
+ * The suite's contents and their assignment to slices live in
+ * `integration-registrations.ts`; each backend lane calls this once per slice
+ * file (see "Integration Tests" in `docs/TESTING.md`).
+ *
  * @example
  * ```typescript
  * import { createIntegrationTestSuite } from "./integration-test-suite";
  *
- * createIntegrationTestSuite("SQLite", () => {
- *   const db = createTestDatabase();
- *   return {
- *     backend: createSqliteBackend(db),
- *     createSerializedBackend: () => {
- *       const { backend } = createLocalSqliteBackend();
- *       return Promise.resolve({ backend, close: () => backend.close() });
- *     },
- *   };
- * });
+ * createIntegrationTestSuite(
+ *   "SQLite",
+ *   () => {
+ *     const db = createTestDatabase();
+ *     return {
+ *       backend: createSqliteBackend(db),
+ *       createSerializedBackend: () => {
+ *         const { backend } = createLocalSqliteBackend();
+ *         return Promise.resolve({ backend, close: () => backend.close() });
+ *       },
+ *     };
+ *   },
+ *   { slice: { index: 0, count: 2 } },
+ * );
  * ```
  */
 import { afterEach, beforeEach, describe } from "vitest";
 
 import { createAdapterStoreWithSchema } from "../../src";
 import type { AdapterBackend } from "../../src/backend/types";
-import type { IntegrationStore, IntegrationTestContext } from "./integration";
 import {
+  type IntegrationStore,
+  type IntegrationTestContext,
   integrationTestGraph,
-  registerAdoptedEvolutionConcurrencyTests,
-  registerAdoptedEvolutionIntegrationTests,
-  registerAdvancedEdgePropertyIntegrationTests,
-  registerAggregateIntegrationTests,
-  registerAlgorithmIntegrationTests,
-  registerBackendProvenanceIntegrationTests,
-  registerBulkFindByIndexIntegrationTests,
-  registerBulkFindEndpointIntegrationTests,
-  registerBulkFindHeterogeneousIntegrationTests,
-  registerBulkUpsertRepeatedIdIntegrationTests,
-  registerCapabilityBundleNoThrowIntegrationTests,
-  registerCapabilityMemberDropMatrixIntegrationTests,
-  registerCapabilityPortBindingIntegrationTests,
-  registerCapabilityRefusalIntegrationTests,
-  registerClaimCompensationIntegrationTests,
-  registerClaimLookupPreferenceIntegrationTests,
-  registerClaimOwnerIdentityIntegrationTests,
-  registerClearIntegrationTests,
-  registerCoalesceUpsertIntegrationTests,
-  registerCollectionAggregateIntegrationTests,
-  registerConstraintFenceErrorIntegrationTests,
-  registerConstraintFenceTransactionHealthTests,
-  registerConstraintFenceVerificationIntegrationTests,
-  registerContributionDiagnosticIntegrationTests,
-  registerCrossBackendConsistencyTests,
-  registerCurrentIdentityTraversalTests,
-  registerDatabaseExpressionQueryIntegrationTests,
-  registerDurableEdgeMatchIdentityIntegrationTests,
-  registerEdgeCaseIntegrationTests,
-  registerEdgeClaimSelfHealIntegrationTests,
-  registerEdgeOperationIntegrationTests,
-  registerEdgePropertyIntegrationTests,
-  registerExpressionSubqueryQueryIntegrationTests,
-  registerFulltextIntegrationTests,
-  registerGraphAnnotationsIntegrationTests,
-  registerGraphMergeCallbackIntegrationTests,
-  registerGraphMergePlanIntegrationTests,
-  registerGraphMergeReviewIntegrationTests,
-  registerGraphMergeReviewV2IntegrationTests,
-  registerGraphStorageIntegrationTests,
-  registerHistoricalIdentityTraversalTests,
-  registerIdentityImportIntegrationTests,
-  registerIdentityIntegrationTests,
-  registerIdentitySeparationIntegrationTests,
-  registerImportUniquenessIntegrationTests,
-  registerLateMaterializationIntegrationTests,
-  registerLegacyClaimAxisIntegrationTests,
-  registerLineageConformanceIntegrationTests,
-  registerMatchResultFilteringIntegrationTests,
-  registerMatchResultRankingIntegrationTests,
-  registerMigrateSchemaKindIntegrationTests,
-  registerMultiKindQueryIntegrationTests,
-  registerMultiRecursiveTraversalIntegrationTests,
-  registerMultiRootSubgraphBatchIntegrationTests,
-  registerMutationPlanningIntegrationTests,
-  registerOrderingIntegrationTests,
-  registerPaginationIntegrationTests,
-  registerPredicateIntegrationTests,
-  registerProvenanceIntegrationTests,
-  registerQueryHookIntegrationTests,
-  registerQueryTerminalIntegrationTests,
-  registerReadEfficiencyIntegrationTests,
-  registerReconciledSchemaIntegrationTests,
-  registerRecordedAdjacencyIntegrationTests,
-  registerRecordedReadBindingIntegrationTests,
-  registerRecordedTimeIntegrationTests,
-  registerRecursiveDelimiterIdIntegrationTests,
-  registerRecursiveIntegrationTests,
-  registerRecursiveSharedIdIntegrationTests,
-  registerRecursiveStopExpansionIntegrationTests,
-  registerRefusedCreateClaimIntegrationTests,
-  registerRelationalCompositionIntegrationTests,
-  registerReleasedClaimLookupIntegrationTests,
-  registerRemovalMaterializationIntegrationTests,
-  registerSavepointRecoveryIntegrationTests,
-  registerSchemaCheckedReadIntegrationTests,
-  registerSelectiveRetryIntegrationTests,
-  registerSetNodeMutationIntegrationTests,
-  registerSetOperationIntegrationTests,
-  registerStoreAnalysisIntegrationTests,
-  registerStoreOperationIntegrationTests,
-  registerStoreViewIntegrationTests,
-  registerSubgraphIntegrationTests,
-  registerSubgraphSharedIdIntegrationTests,
-  registerTemporalIntegrationTests,
-  registerTemporalOracleIntegrationTests,
-  registerTransactionReceiptIntegrationTests,
-  registerTraversalIntegrationTests,
-  registerTrustedImportIntegrationTests,
-  registerValidityEndClearingIntegrationTests,
-  registerValidityLowerBoundIntegrationTests,
-  registerWeightedShortestPathExtractionIntegrationTests,
-  registerWriteFenceConformanceIntegrationTests,
 } from "./integration";
 import type {
   InspectableHistoryStore,
   SerializedBackendHandle,
   SerializedBackendOverrides,
 } from "./integration/test-context";
+import {
+  type IntegrationSuiteSlice,
+  selectIntegrationRegistrations,
+} from "./integration-registrations";
 
 /**
  * Result from a backend factory, including optional cleanup function.
@@ -173,6 +93,12 @@ type IsolatedBackendFactory<TNativeTransaction> = () =>
  * Options for the integration test suite.
  */
 type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
+  /**
+   * Which part of the suite this file registers. Required: vitest parallelizes
+   * and shards by file, so a lane states its slices explicitly rather than
+   * falling back to the whole suite in one serial file.
+   */
+  slice: IntegrationSuiteSlice;
   /** Skip tests that require specific dialect features */
   skipDialectSpecific?: boolean;
   /**
@@ -196,7 +122,7 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
  *
  * @param name - Display name for the backend (e.g., "SQLite", "PostgreSQL")
  * @param createBackend - Factory function that returns a fresh backend
- * @param options - Optional test configuration
+ * @param options - The slice of the suite to register, plus lane configuration
  */
 export function createIntegrationTestSuite<
   TNativeTransaction,
@@ -204,7 +130,7 @@ export function createIntegrationTestSuite<
 >(
   name: string,
   createBackend: BackendFactory<TNativeTransaction>,
-  options: IntegrationTestSuiteOptions<TIsolatedTransaction> = {},
+  options: IntegrationTestSuiteOptions<TIsolatedTransaction>,
 ): void {
   describe(`${name} Integration Tests`, () => {
     let store: IntegrationStore | undefined;
@@ -302,98 +228,8 @@ export function createIntegrationTestSuite<
       }
     });
 
-    registerAggregateIntegrationTests(context);
-    registerCollectionAggregateIntegrationTests(context);
-    registerDatabaseExpressionQueryIntegrationTests(context);
-    registerRelationalCompositionIntegrationTests(context);
-    registerMatchResultRankingIntegrationTests(context);
-    registerMatchResultFilteringIntegrationTests(context);
-    registerMultiRecursiveTraversalIntegrationTests(context);
-    registerMultiKindQueryIntegrationTests(context);
-    registerMultiRootSubgraphBatchIntegrationTests(context);
-    registerExpressionSubqueryQueryIntegrationTests(context);
-    registerQueryTerminalIntegrationTests(context);
-    registerBackendProvenanceIntegrationTests(context);
-    registerBulkFindByIndexIntegrationTests(context);
-    registerBulkFindEndpointIntegrationTests(context);
-    registerBulkFindHeterogeneousIntegrationTests(context);
-    registerBulkUpsertRepeatedIdIntegrationTests(context);
-    registerCapabilityBundleNoThrowIntegrationTests(context);
-    registerCapabilityMemberDropMatrixIntegrationTests(context);
-    registerCapabilityPortBindingIntegrationTests(context);
-    registerCapabilityRefusalIntegrationTests(context);
-    registerCoalesceUpsertIntegrationTests(context);
-    registerGraphAnnotationsIntegrationTests(context);
-    registerValidityLowerBoundIntegrationTests(context);
-    registerValidityEndClearingIntegrationTests(context);
-    registerContributionDiagnosticIntegrationTests(context);
-    registerPredicateIntegrationTests(context);
-    registerProvenanceIntegrationTests(context);
-    registerQueryHookIntegrationTests(context);
-    registerReadEfficiencyIntegrationTests(context);
-    registerOrderingIntegrationTests(context);
-    registerLateMaterializationIntegrationTests(context);
-    registerTemporalIntegrationTests(context);
-    registerTemporalOracleIntegrationTests(context);
-    registerTransactionReceiptIntegrationTests(context);
-    registerAdoptedEvolutionIntegrationTests(context);
-    registerAdoptedEvolutionConcurrencyTests(context);
-    registerMigrateSchemaKindIntegrationTests(context);
-    registerReconciledSchemaIntegrationTests(context);
-    registerRecordedTimeIntegrationTests(context);
-    registerRecordedAdjacencyIntegrationTests(context);
-    registerMutationPlanningIntegrationTests(context);
-    registerStoreOperationIntegrationTests(context);
-    registerLineageConformanceIntegrationTests(context);
-    registerRemovalMaterializationIntegrationTests(context);
-    registerLegacyClaimAxisIntegrationTests(context);
-    registerClaimOwnerIdentityIntegrationTests(context);
-    registerClaimCompensationIntegrationTests(context);
-    registerClaimLookupPreferenceIntegrationTests(context);
-    registerReleasedClaimLookupIntegrationTests(context);
-    registerRefusedCreateClaimIntegrationTests(context);
-    registerConstraintFenceErrorIntegrationTests(context);
-    registerConstraintFenceTransactionHealthTests(context);
-    registerSavepointRecoveryIntegrationTests(context);
-    registerConstraintFenceVerificationIntegrationTests(context);
-    registerRecordedReadBindingIntegrationTests(context);
-    registerSetOperationIntegrationTests(context);
-    registerSetNodeMutationIntegrationTests(context);
-    registerSelectiveRetryIntegrationTests(context);
-    registerSchemaCheckedReadIntegrationTests(context);
-    registerEdgeOperationIntegrationTests(context);
-    registerRecursiveIntegrationTests(context);
-    registerRecursiveSharedIdIntegrationTests(context);
-    registerRecursiveDelimiterIdIntegrationTests(context);
-    registerRecursiveStopExpansionIntegrationTests(context);
-    registerPaginationIntegrationTests(context);
-    registerTraversalIntegrationTests(context);
-    registerEdgePropertyIntegrationTests(context);
-    registerAdvancedEdgePropertyIntegrationTests(context);
-    registerSubgraphIntegrationTests(context);
-    registerSubgraphSharedIdIntegrationTests(context);
-    registerStoreViewIntegrationTests(context);
-    registerStoreAnalysisIntegrationTests(context);
-    registerClearIntegrationTests(context);
-    registerGraphStorageIntegrationTests(context);
-    registerAlgorithmIntegrationTests(context);
-    registerWeightedShortestPathExtractionIntegrationTests(context);
-    registerFulltextIntegrationTests(context);
-    registerGraphMergeCallbackIntegrationTests(context);
-    registerGraphMergePlanIntegrationTests(context);
-    registerGraphMergeReviewIntegrationTests(context);
-    registerGraphMergeReviewV2IntegrationTests(context);
-    registerImportUniquenessIntegrationTests(context);
-    registerIdentityIntegrationTests(context);
-    registerIdentityImportIntegrationTests(context);
-    registerHistoricalIdentityTraversalTests(context);
-    registerCurrentIdentityTraversalTests(context);
-    registerIdentitySeparationIntegrationTests(context);
-    registerEdgeCaseIntegrationTests(context);
-    registerEdgeClaimSelfHealIntegrationTests(context);
-    registerCrossBackendConsistencyTests(context);
-    registerDurableEdgeMatchIdentityIntegrationTests(context);
-    registerTrustedImportIntegrationTests(context);
-    registerWriteFenceConformanceIntegrationTests(context);
+    for (const registration of selectIntegrationRegistrations(options.slice)) {
+      registration.register(context);
+    }
   });
 }

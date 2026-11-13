@@ -27,6 +27,7 @@ import {
   type MakeBackend,
   type MatchEvidence,
   type MergePlanArtifact,
+  type MergePlanArtifactV3,
   type MergePlanApplyOptions,
   type MergePlanApplied,
   type MergePlanReadContext,
@@ -139,10 +140,10 @@ expectType<Promise<Result<void, BranchError>>>(
 expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
   merge(store, branches, options),
 );
-expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+expectType<Promise<Result<MergePlanArtifactV3, MergeError>>>(
   planMerge(store, branches, options),
 );
-expectType<Promise<Result<MergePlanArtifact, MergeError>>>(
+expectType<Promise<Result<MergePlanArtifactV3, MergeError>>>(
   planMergeIncremental({
     forkPoint: store,
     target: store,
@@ -233,9 +234,9 @@ expectError(
 );
 declare const revalidation: MergeReviewRevalidation;
 if (revalidation.status === "compatible") {
-  expectType<MergePlanArtifact>(revalidation.plan);
+  expectType<MergePlanArtifactV3>(revalidation.plan);
 } else {
-  expectType<MergePlanArtifact | undefined>(revalidation.plan);
+  expectType<MergePlanArtifactV3 | undefined>(revalidation.plan);
 }
 declare const reviewError: MergeReviewError;
 expectAssignable<MergeError>(reviewError);
@@ -286,7 +287,14 @@ expectType<Promise<MergeReport<typeof graph>>>(
 );
 expectError(applyMergePlanInTransaction(store, store, mergePlan));
 expectError(applyMergePlanInTransaction(store, transaction, {} as unknown));
-expectError(applyMergePlanInTransaction(store, transaction, mergePlan, {}));
+expectType<Promise<MergeReport<typeof graph>>>(
+  applyMergePlanInTransaction(store, transaction, mergePlan, {}),
+);
+expectError(
+  applyMergePlanInTransaction(store, transaction, mergePlan, {
+    beforeApply: async () => {},
+  }),
+);
 
 const related = defineEdge("related", { schema: z.object({}) });
 const identityGraph = defineGraph({

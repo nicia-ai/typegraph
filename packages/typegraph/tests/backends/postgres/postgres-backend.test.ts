@@ -4,6 +4,9 @@
  * Tests the PostgreSQL adapter with a real database via Docker.
  * Requires: docker compose up -d
  *
+ * The shared cross-backend integration suite runs from this lane's
+ * `postgres-integration-slice-*.test.ts` files.
+ *
  * Run: pnpm test:postgres
  *
  * These tests are automatically skipped if PostgreSQL is not available.
@@ -35,15 +38,11 @@ import {
   ValidationError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
-import {
-  generatePostgresDDL,
-  generatePostgresMigrationSQL,
-} from "../../../src/backend/drizzle/ddl";
+import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
-import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -71,7 +70,11 @@ import {
 } from "../../concurrency-utils";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { createIntegrationTestSuite } from "../integration-test-suite";
+import {
+  clearPostgresLaneData,
+  connectPostgresLanePool,
+  recreatePostgresLaneTables,
+} from "./postgres-lane-database";
 
 // ============================================================
 // Test Configuration
@@ -115,82 +118,12 @@ function createConnection(): { pool: Pool; db: NodePgDatabase } {
 
 /**
  * Checks if PostgreSQL is available and sets up the shared connection.
- * Retries connection to handle CI timing issues.
  */
 async function initializePostgres(): Promise<boolean> {
-  const maxRetries = 5;
-  const retryDelayMs = 1000;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const testPool = new Pool({
-      connectionString: TEST_DATABASE_URL,
-      connectionTimeoutMillis: 5000,
-    });
-
-    try {
-      await testPool.query("SELECT 1");
-      sharedPool = testPool;
-      sharedDb = drizzle(sharedPool);
-      return true;
-    } catch {
-      await testPool.end().catch(() => {
-        // Ignore cleanup errors
-      });
-
-      if (attempt < maxRetries) {
-        // Wait before retrying
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
- * Creates a clean test database.
- */
-async function setupTestDatabase(): Promise<void> {
-  if (!sharedPool) return;
-
-  await sharedPool.query(`
-    DROP TABLE IF EXISTS typegraph_revision_origins CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
-    DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
-    DROP TABLE IF EXISTS typegraph_edges CASCADE;
-    DROP TABLE IF EXISTS typegraph_nodes CASCADE;
-    DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
-  `);
-
-  // Per-(kind, field) vector tables are created lazily with a fixed,
-  // dimension-typed embedding column (`vector(N)`). They are not in the
-  // base migration, so the base DROP above leaves them behind. Truncating
-  // (as `clearTestData` does for row isolation) keeps the column type, so a
-  // leftover `vector(3)` table from a prior run would reject a later test's
-  // `vector(4)` insert. DROP them here — once, before any backend/latch is
-  // created for this file — so the suite is re-runnable against a persistent
-  // database (e.g. the shared dev Postgres) and order-independent across the
-  // serially-run PG test files.
-  await dropPerFieldVectorTables(sharedPool);
-
-  await sharedPool.query(generatePostgresMigrationSQL());
-}
-
-/**
- * Drops every strategy-owned per-field vector table (`tg_vec_*`), including
- * its DiskANN/HNSW index. Used at file setup to clear stale typed tables
- * whose embedding dimension may differ from this run's schema.
- */
-async function dropPerFieldVectorTables(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<{ tablename: string }>(
-    String.raw`SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
-  );
-  for (const row of rows) {
-    await pool.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
-  }
+  sharedPool = await connectPostgresLanePool(TEST_DATABASE_URL);
+  if (!sharedPool) return false;
+  sharedDb = drizzle(sharedPool);
+  return true;
 }
 
 /**
@@ -198,60 +131,7 @@ async function dropPerFieldVectorTables(pool: Pool): Promise<void> {
  */
 async function clearTestData(): Promise<void> {
   if (!sharedPool) return;
-
-  // Fulltext tables have no FKs to typegraph_nodes, so truncating the
-  // parent tables alone leaves orphaned rows that leak into subsequent
-  // integration tests (particularly fulltext search, where orphan rows
-  // can outrank fresh ones and cause missing hits). The materialization
-  // status tables also carry graph-id scoped completion markers, so stale
-  // rows there can make a fresh graph cleanup look already completed.
-  //
-  // The durable contribution markers (#135) are cleared alongside the data so
-  // each test starts genuinely un-provisioned and the integration suite's
-  // per-test createStoreWithSchema re-materializes every per-field vector
-  // table + marker in lockstep. Otherwise a marker could outlive a dropped
-  // table and a later boot in this database would skip the CREATE.
-  await sharedPool.query(
-    `TRUNCATE typegraph_index_materializations,
-              typegraph_contribution_materializations,
-              typegraph_kind_removals,
-              typegraph_reconciliation_markers,
-              typegraph_node_fulltext,
-              typegraph_revision_origins,
-              typegraph_recorded_clock,
-              typegraph_recorded_anchors,
-              typegraph_store_operations,
-              typegraph_recorded_nodes,
-              typegraph_recorded_edges,
-              typegraph_recorded_identity_assertions,
-              typegraph_identity_closure,
-              typegraph_identity_assertions,
-              typegraph_nodes,
-              typegraph_edges,
-              typegraph_node_uniques,
-              typegraph_contribution_materializations,
-              typegraph_schema_versions CASCADE`,
-  );
-
-  // Per-(kind, field) vector tables are materialized per field, so enumerate
-  // and truncate any that exist to keep embedding rows from leaking across
-  // tests that reuse graph ids; createStoreWithSchema re-creates any missing.
-  await truncatePerFieldVectorTables(sharedPool);
-}
-
-/**
- * Truncates every strategy-owned per-field vector table (`tg_vec_*`)
- * currently present. Used by test cleanup since the tables are
- * materialized lazily and there is no single shared embeddings table.
- */
-async function truncatePerFieldVectorTables(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<{ tablename: string }>(
-    String.raw`SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
-  );
-  for (const row of rows) {
-    await pool.query(`TRUNCATE "${row.tablename}" CASCADE`);
-  }
+  await clearPostgresLaneData(sharedPool);
 }
 
 // ============================================================
@@ -265,9 +145,7 @@ beforeAll(async () => {
   // DROP+CREATE schema setup below during `pnpm test:unit`.
   if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
-  if (isPostgresAvailable) {
-    await setupTestDatabase();
-  }
+  if (sharedPool) await recreatePostgresLaneTables(sharedPool);
 });
 
 afterAll(async () => {
@@ -434,59 +312,6 @@ describe("PostgreSQL Adapter", () => {
         return createPostgresBackend(db);
       },
       { skipRawQueries: false },
-    );
-  });
-
-  // Run the shared integration test suite for PostgreSQL
-  describe.runIf(process.env["POSTGRES_URL"])("Integration Test Suite", () => {
-    beforeEach(async () => {
-      await clearTestData();
-    });
-
-    createIntegrationTestSuite(
-      "PostgreSQL",
-      () => {
-        // Create a fresh connection for each backend instance
-        const { pool, db } = createConnection();
-        return {
-          backend: createPostgresBackend(db),
-          cleanup: async () => {
-            await pool.end();
-          },
-          // The suite's own pool is default-sized and therefore audited
-          // `independent`. A `max: 1` pool against the same provisioned
-          // database is the serialized shape. `overrides.capabilities` is
-          // forwarded into `createPostgresBackend` itself — applied at
-          // construction, before this connection's write-fence target and
-          // derived `unitOfWork` are resolved — for a test that needs a
-          // real second connection declaring a non-default write fence.
-          createSerializedBackend: (overrides) => {
-            const serializedPool = new Pool({
-              connectionString: TEST_DATABASE_URL,
-              max: 1,
-            });
-            return Promise.resolve({
-              backend: createPostgresBackend(drizzle(serializedPool), {
-                ...(overrides?.capabilities === undefined ?
-                  {}
-                : { capabilities: overrides.capabilities }),
-                schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
-              }),
-              close: () => serializedPool.end(),
-            });
-          },
-        };
-      },
-      {
-        createIsolatedBackend: async () => {
-          const { backend } = await createLocalPgliteBackend();
-          return { backend, cleanup: () => backend.close() };
-        },
-        // A default-sized pool against a real, provisioned PostgreSQL
-        // server: two `createSerializedBackend()` handles are genuinely
-        // independent physical connections.
-        serverLaneConcurrency: true,
-      },
     );
   });
 });

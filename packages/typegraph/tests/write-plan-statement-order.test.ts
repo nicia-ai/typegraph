@@ -251,12 +251,23 @@ function indexOfSchemaFence(): number {
  * The first statement that WRITES a row — the work every lock above exists to
  * protect. Lock statements are `SELECT`s, so they cannot be mistaken for one.
  */
+/**
+ * A lock acquisition is not row work, even though the per-graph write fence
+ * advances its fence row in the statement that takes the advisory lock.
+ */
+function isAdvisoryLockAcquisition(statement: LoggedStatement): boolean {
+  return statement.query.includes("pg_advisory_xact_lock");
+}
+
 function indexOfFirstRowStatement(): number {
   return statements.findIndex(
     (statement) =>
-      /^\s*(insert|update|delete)\b/iu.test(statement.query) ||
-      (/^\s*with\b/iu.test(statement.query) &&
-        /\b(?:insert\s+into|update|delete\s+from)\b/iu.test(statement.query)),
+      !isAdvisoryLockAcquisition(statement) &&
+      (/^\s*(insert|update|delete)\b/iu.test(statement.query) ||
+        (/^\s*with\b/iu.test(statement.query) &&
+          /\b(?:insert\s+into|update|delete\s+from)\b/iu.test(
+            statement.query,
+          ))),
   );
 }
 
@@ -598,12 +609,14 @@ describe("generated node ids avoid identity lock round trips", () => {
     );
     const callerSuppliedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
 
-    // The caller-supplied path acquires the write-frame lock and the identity
-    // fold helper's lock. Generated ids cannot collide across kinds, so it
-    // needs neither. This is the measured RTT reduction for the common
-    // generated-id create path, not a statement-count estimate.
+    // The caller-supplied path acquires the write-frame lock, under which its
+    // identity fold is decided before the insert; no live node of another
+    // kind shares the id, so the fold writes nothing and takes no lock of its
+    // own. Generated ids cannot collide across kinds, so they need neither.
+    // This is the measured RTT reduction for the common generated-id create
+    // path, not a statement-count estimate.
     expect(generatedIdentityLocks).toBe(0);
-    expect(callerSuppliedIdentityLocks).toBe(2);
+    expect(callerSuppliedIdentityLocks).toBe(1);
   });
 });
 

@@ -171,7 +171,7 @@ describe("bounded candidate planning", () => {
               );
               expect(isErr(bounded)).toBe(false);
               if (!isErr(bounded))
-                expect(canonicalMergePlanJson(bounded.data)).toBe(
+                expect(canonicalMergePlanJson(bounded.data.plan)).toBe(
                   canonicalMergePlanJson(expected),
                 );
             } finally {
@@ -305,7 +305,7 @@ describe("bounded candidate planning", () => {
                 successfulPlans += 1;
                 expect(isErr(bounded)).toBe(false);
                 if (!isErr(bounded))
-                  expect(canonicalMergePlanJson(bounded.data)).toBe(
+                  expect(canonicalMergePlanJson(bounded.data.plan)).toBe(
                     canonicalMergePlanJson(unwrap(fullPlan)),
                   );
               }
@@ -445,7 +445,7 @@ describe("bounded candidate planning", () => {
                 successfulPlans += 1;
                 expect(isErr(bounded)).toBe(false);
                 if (!isErr(bounded))
-                  expect(canonicalMergePlanJson(bounded.data)).toBe(
+                  expect(canonicalMergePlanJson(bounded.data.plan)).toBe(
                     canonicalMergePlanJson(unwrap(fullPlan)),
                   );
               }

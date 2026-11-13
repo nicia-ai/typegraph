@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   asNodeId,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   type Store,
@@ -22,13 +23,23 @@ import {
 import { branch } from "../../../src/graph-merge/branch";
 import {
   BranchError,
+  CandidatePlanningScopeError,
+  MergeCompositionOrphanError,
   MergePlanCapabilityError,
   MergePlanningStaleError,
   MergePlanSchemaMismatchError,
   StaleMergePlanError,
 } from "../../../src/graph-merge/errors";
 import { applyMergePlan, planMerge } from "../../../src/graph-merge/merge";
-import { constructMergePlanArtifact } from "../../../src/graph-merge/plan-wire";
+import { computeMergePlanDigest } from "../../../src/graph-merge/plan-canonical";
+import type {
+  MergePlanArtifact,
+  MergePlanArtifactInput,
+} from "../../../src/graph-merge/plan-schema";
+import {
+  constructMergePlanArtifact,
+  parseMergePlanArtifact,
+} from "../../../src/graph-merge/plan-wire";
 import { isErr, isOk, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId, type GraphBranch } from "../../../src/graph-merge/types";
 import { requireDefined } from "../../../src/utils/presence";
@@ -58,6 +69,37 @@ const graph = defineGraph({
 
 type TestStore = Store<typeof graph>;
 
+const Binder = defineNode("PlanBinder", { schema: z.object({}) });
+const Sheet = defineNode("PlanSheet", { schema: z.object({}) });
+const filedIn = defineEdge("planFiledIn", { schema: z.object({}) });
+/** No composition yet: the evolution below is what declares the pair. */
+const compositionEvolutionGraph = defineGraph({
+  id: "graph_merge_plan_composition_evolution",
+  nodes: {
+    PlanBinder: { type: Binder },
+    PlanSheet: { type: Sheet },
+  },
+  edges: {
+    planFiledIn: {
+      type: filedIn,
+      from: [Sheet],
+      to: [Binder],
+      cardinality: "one",
+    },
+  },
+});
+const requiredFilingExtension = defineGraphExtension({
+  ontology: [
+    {
+      metaEdge: "partOf",
+      from: "PlanSheet",
+      to: "PlanBinder",
+      via: "planFiledIn",
+      existence: "required",
+    },
+  ],
+});
+
 async function makeBranch(
   context: IntegrationTestContext,
   base: TestStore,
@@ -74,7 +116,7 @@ export function registerGraphMergePlanIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("graph merge plan lifecycle", () => {
-    it("parses a legacy plan but refuses application without changing the graph", async () => {
+    it("parses legacy plans but refuses applying them without changing the graph", async () => {
       const base = await context.createStore(graph, { revisionTracking: true });
       const source = await makeBranch(context, base, "legacy");
       try {
@@ -83,33 +125,47 @@ export function registerGraphMergePlanIntegrationTests(
           { id: "legacy" },
         );
         const current = unwrap(await planMerge(base, [source]));
-        const { digest: _digest, ...input } = current;
+        const { digest: _digest, review, ...input } = current;
+        const { identityConflicts: _conflicts, ...legacyReview } = review;
         const { owner: _owner, ...revision } = input.target.revision;
-        const legacy = await constructMergePlanArtifact({
-          ...input,
-          formatVersion: 1,
-          target: { ...input.target, revision },
-        });
+        const legacyInputs = [
+          {
+            ...input,
+            formatVersion: 1,
+            target: { ...input.target, revision },
+            review: legacyReview,
+          },
+          { ...input, formatVersion: 2, review: legacyReview },
+        ] as unknown as readonly MergePlanArtifactInput[];
         const before = await base.revisionNow();
-        // Exercise the serialized wire boundary, including legacy parsing before refusal.
-        // eslint-disable-next-line unicorn/prefer-structured-clone
-        const serialized = JSON.parse(JSON.stringify(legacy)) as typeof legacy;
-        const refused = await applyMergePlan(base, serialized);
-        expect(refused).toMatchObject({
-          success: false,
-          error: { details: { code: "RECORDED_ANCHOR_UNBOUND" } },
-        });
+        for (const legacyInput of legacyInputs) {
+          const legacy = {
+            ...legacyInput,
+            digest: {
+              algorithm: "sha256",
+              value: await computeMergePlanDigest(legacyInput),
+            },
+          } as MergePlanArtifact;
+          // Exercise the serialized wire boundary: the legacy grammar parses,
+          // and applying it is refused before any write.
+          // eslint-disable-next-line unicorn/prefer-structured-clone
+          const serialized = JSON.parse(
+            JSON.stringify(legacy),
+          ) as typeof legacy;
+          expect(parseMergePlanArtifact(serialized).success).toBe(true);
+          const refused = await applyMergePlan(base, serialized);
+          expect(refused).toMatchObject({
+            success: false,
+            error: {
+              code: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED",
+              details: { received: legacyInput.formatVersion },
+            },
+          });
+        }
         expect(await base.revisionNow()).toBe(before);
         expect(
           await base.nodes.Person.getById(asNodeId("legacy")),
         ).toBeUndefined();
-        await expect(
-          constructMergePlanArtifact({
-            ...input,
-            formatVersion: 2,
-            target: { ...input.target, revision },
-          }),
-        ).rejects.toThrow();
       } finally {
         await source.close();
       }
@@ -432,7 +488,28 @@ export function registerGraphMergePlanIntegrationTests(
         ],
         edges: [],
       };
-      const mergePlan = unwrap(
+      const scopedBackend = vi.fn(() => context.createIsolatedBackend());
+      // The evolution planner requires `planningScope: "full"`; an untyped
+      // caller that states the bounded default is refused.
+      const untypedArguments = {
+        target,
+        evolutionPlan,
+        makeBackend: scopedBackend,
+        writeSet,
+        planningScope: "candidate",
+      } as unknown as Parameters<typeof planCandidateWriteSetForEvolution>[0];
+      const scoped = await planCandidateWriteSetForEvolution(untypedArguments);
+      if (!isErr(scoped))
+        throw new Error("expected a candidate planning scope refusal");
+      expect(scoped.error).toBeInstanceOf(CandidatePlanningScopeError);
+      expect(scoped.error.details).toEqual({
+        capability: "boundedCandidatePlanning",
+        requiredPlanningScope: "full",
+        planningScope: { scope: "full", reason: "planned-evolution" },
+      });
+      expect(scopedBackend).not.toHaveBeenCalled();
+
+      const { plan: mergePlan, planningScope } = unwrap(
         await planCandidateWriteSetForEvolution({
           planningScope: "full",
           target,
@@ -441,6 +518,10 @@ export function registerGraphMergePlanIntegrationTests(
           writeSet,
         }),
       );
+      expect(planningScope).toEqual({
+        scope: "full",
+        reason: "planned-evolution",
+      });
       expect(mergePlan.target.schema).toEqual({
         managed: true,
         version: evolutionPlan.result.version,
@@ -540,7 +621,7 @@ export function registerGraphMergePlanIntegrationTests(
             },
           },
         }),
-      );
+      ).plan;
       expect(mergePlan.review.conflicts).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -677,6 +758,38 @@ export function registerGraphMergePlanIntegrationTests(
       expect(
         await target.nodes.Person.getById(asNodeId("stale-source-ada")),
       ).toBeUndefined();
+    });
+
+    it("refuses composition orphans under the resulting schema's registry", async () => {
+      const [target] = await createAdapterStoreWithSchema(
+        compositionEvolutionGraph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      const binder = await target.nodes.PlanBinder.create({}, { id: "binder" });
+      const sheet = await target.nodes.PlanSheet.create({}, { id: "sheet" });
+      const filing = await target.edges.planFiledIn.create(sheet, binder, {});
+      const source = unwrap(
+        await branch(target, () => context.createIsolatedBackend(), {
+          id: asBranchId("drops-filing"),
+        }),
+      );
+      await source.store.edges.planFiledIn.delete(filing.id);
+      const evolutionPlan = await target.planEvolution(requiredFilingExtension);
+
+      const planned = await planMergeForEvolution(target, evolutionPlan, [
+        source,
+      ]);
+
+      // Under the baseline registry the sheet owes no whole, so a merge that
+      // drops its only filing edge would plan cleanly here.
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(MergeCompositionOrphanError);
+      expect(planned.error.details).toEqual({
+        part: { kind: "PlanSheet", id: "sheet" },
+        viaEdgeKind: "planFiledIn",
+        cause: "unattached",
+      });
     });
 
     it("preserves branch failures when forking a resulting-schema branch", async () => {

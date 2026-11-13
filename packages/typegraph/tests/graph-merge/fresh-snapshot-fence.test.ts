@@ -14,9 +14,14 @@ const EXECUTION_CAPABILITIES = {
   unitOfWork: "interactive",
 } as const;
 
+/**
+ * A transaction whose fence statement reports `isolation` and, when
+ * `generation` is given, an advanced fence row.
+ */
 function transactionBackend(
   writeFence: BackendCapabilities["writeFence"],
   isolation: unknown,
+  generation?: number,
 ): TransactionBackend {
   return {
     dialect: "postgres",
@@ -26,7 +31,13 @@ function transactionBackend(
     },
     fenceSql: postgresFenceSql,
     lockSchemaVersionForWrite: () => Promise.resolve(),
-    execute: () => Promise.resolve([{ transaction_isolation: isolation }]),
+    execute: () =>
+      Promise.resolve([
+        {
+          transaction_isolation: isolation,
+          ...(generation === undefined ? {} : { generation }),
+        },
+      ]),
   } as unknown as TransactionBackend;
 }
 
@@ -82,4 +93,48 @@ describe("graph-merge fresh-snapshot fences", () => {
     );
     expect(witness.mutated).toBe(false);
   });
+  const ADVISORY_FENCE = {
+    mechanism: "advisory",
+    drain: "table-lock",
+  } as const;
+
+  // The fence row is advanced by the holders that make a lock-only decision,
+  // not by every holder, so advancing it shows nothing about a holder that
+  // only captured history or a revision. The applier reads the whole target:
+  // only a per-statement snapshot observes every earlier holder.
+  it.each([
+    ["repeatable read", "repeatable_read"],
+    ["serializable", "serializable"],
+  ])(
+    "refuses a %s session even when its acquisition advanced the fence row",
+    async (isolation, reported) => {
+      const backend = transactionBackend(ADVISORY_FENCE, isolation, 7);
+      const witness = { mutated: false };
+
+      await expect(mutateAfterFreshFence(backend, witness)).rejects.toEqual(
+        expect.objectContaining({
+          name: "MergePlanCapabilityError",
+          details: expect.objectContaining({
+            capability: "mergeCallbackIsolation",
+            isolation: reported,
+          }) as unknown,
+        }),
+      );
+      expect(witness.mutated).toBe(false);
+    },
+  );
+
+  it.each([undefined, 7])(
+    "accepts a read-committed session (fence-row generation: %s)",
+    async (generation) => {
+      const witness = { mutated: false };
+
+      await mutateAfterFreshFence(
+        transactionBackend(ADVISORY_FENCE, "read committed", generation),
+        witness,
+      );
+
+      expect(witness.mutated).toBe(true);
+    },
+  );
 });

@@ -1,6 +1,8 @@
 export type {
+  CompatibleMergeReview,
   MergePlanApplied,
   MergePlanApplyOptions,
+  MergePlanDecisionOptions,
   MergePlanReadContext,
 } from "./apply-callbacks";
 // Public barrel for @nicia-ai/typegraph/graph-merge.
@@ -32,6 +34,7 @@ export {
 } from "./candidate-review";
 export type {
   CandidateWriteSet,
+  CandidateWriteSetPlan,
   CandidateWriteSetTarget,
   PlanCandidateWriteSetArgs,
   PlanCandidateWriteSetForEvolutionArgs,
@@ -87,12 +90,23 @@ export {
   scanDurableOperations,
 } from "./durable-operation";
 export { DURABLE_OPERATION_KEY_MAX_BYTES } from "./durable-operation";
-export type { MergeConstraintConflictErrorDetails } from "./errors";
+export type {
+  AcyclicityMergeConflictDetails,
+  IdentityMergeConflictCode,
+  MergeConflictEdge,
+  MergeConstraintConflictErrorDetails,
+  MergeErrorOptions,
+  StructuralMergeConflictDetails,
+} from "./errors";
 export {
+  AcyclicityMergeConflictError,
   BaseVersionMismatchError,
   BranchError,
+  CandidatePlanningScopeError,
   CandidateSourceError,
   CandidateWriteSetError,
+  CardinalityMergeConflictError,
+  CompositionWindowMergeConflictError,
   DurableEvidenceUndeliveredError,
   DurableOperationConflictError,
   DurableOperationError,
@@ -105,6 +119,7 @@ export {
   InvalidMergePlanError,
   MatchEvidenceError,
   MERGE_ERROR_CODES,
+  MergeCompositionOrphanError,
   MergeConflictError,
   MergeConstraintConflictError,
   MergeError,
@@ -115,6 +130,7 @@ export {
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
   MergeReviewError,
+  RestrictedDeleteMergeConflictError,
   SimilarityUnavailableError,
   StaleMergePlanError,
   StoreOperationError,
@@ -123,6 +139,7 @@ export {
 export type {
   CandidateDiagnostic,
   CandidateDiagnostics,
+  ClusterExclusionReason,
   EntityRef,
   MatchEvidence,
   MatchSource,
@@ -162,6 +179,7 @@ export {
 export type { NormalizedMergeOptions } from "./options";
 export { MERGE_OPTION_DEFAULTS, normalizeMergeOptions } from "./options";
 export type {
+  LegacyMergePlanReview,
   MergePlanAnchors,
   MergePlanArtifact,
   MergePlanArtifactInput,
@@ -169,9 +187,12 @@ export type {
   MergePlanArtifactV1Input,
   MergePlanArtifactV2,
   MergePlanArtifactV2Input,
+  MergePlanArtifactV3,
+  MergePlanArtifactV3Input,
   MergePlanBranchAnchor,
   MergePlanCandidateDiagnostic,
   MergePlanCanonicalMapping,
+  MergePlanCompositionOrphan,
   MergePlanDiagnostics,
   MergePlanDigest,
   MergePlanEdgeDelete,
@@ -223,8 +244,7 @@ export type {
 } from "./review-schema";
 export {
   MERGE_REVIEW_FORMAT_VERSION,
-  MERGE_REVIEW_FORMAT_VERSION_V1,
-  MERGE_REVIEW_FORMAT_VERSION_V2,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
 } from "./review-schema";
 export type {
   BaseNodeLookup,
@@ -232,6 +252,11 @@ export type {
   KeylessConfig,
   SourceScope,
 } from "./sources";
+export type {
+  CandidatePlanningScope,
+  CandidatePlanningScopeReason,
+  FullPlanningScope,
+} from "./sparse-candidate-branch";
 export {
   captureStoreOperationTarget,
   getStoreOperation,
@@ -243,7 +268,12 @@ export {
   type StoreOperationRequest,
   type StoreOperationTarget,
 } from "./store-operation";
-export type { IdentityAssertionWriteFacade } from "./typegraph-internal";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityDecisionProvenance,
+  IdentityRelation,
+  IdentityTransferAssertion,
+} from "./typegraph-internal";
 export type {
   AppliedMergeReport,
   BaseAmbiguity,
@@ -260,6 +290,7 @@ export type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityUnresolvedConflict,
   IngestionBranch,
   IngestionNodeCollections,
   MergeBranch,

@@ -15,7 +15,12 @@
 import type { RecordedInstant } from "../core/temporal";
 import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 import type { TransactionReceipt } from "../store/types";
-import type { CandidateDiagnostics, MatchEvidence } from "./evidence";
+import type {
+  CandidateDiagnostics,
+  EntityRef,
+  MatchEvidence,
+  MatchSource,
+} from "./evidence";
 import type {
   EdgeId,
   EngineRevision,
@@ -481,6 +486,12 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
 export type EntityResolution = Readonly<{
   canonicalId: NodeId<NodeType>;
   memberIds: readonly NodeId<NodeType>[];
+  /**
+   * The kind the canonical survivor is written under: its staged kind, or,
+   * when `reconcileTypes: "ontology"` retypes the cluster, the reconciled
+   * kind {@link TypeReconciliation.toType} names — the same kind the committed
+   * row carries.
+   */
   kind: string;
   branchOrigins: readonly BranchId[];
   /** Deterministic minimal accepted-edge witness for this resolution. */
@@ -550,6 +561,32 @@ export type DroppedItem =
   | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
   | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
   | Readonly<{ kind: "identity"; id: string; reason: string }>;
+
+/**
+ * A candidate match the identity ledger vetoed, recorded on
+ * {@link MergeReport.identityConflicts} instead of silently dropped. A plan
+ * carrying one is still APPLICABLE: the vetoed match is simply not made, and
+ * both entities land as they were staged.
+ *
+ * Discriminated on `kind` so an exhaustive `switch` stays exhaustive.
+ */
+export type IdentityUnresolvedConflict = Readonly<{
+  /**
+   * A SCORED match between two entities whose identity classes a `different`
+   * assertion holds apart. `assertionIds` name the separating assertion.
+   */
+  kind: "separation";
+  a: EntityRef;
+  b: EntityRef;
+  assertionIds: readonly string[];
+  /**
+   * The recall path that proposed the vetoed match. Absent only for a
+   * candidate edge carrying no attribution at all, which no shipped source
+   * produces — modelled as optional rather than asserted so a future
+   * source cannot make this a crash.
+   */
+  source?: MatchSource | undefined;
+}>;
 
 /**
  * The {@link ValidityEndResolution.precedence} of an entry the INCREMENTAL TARGET
@@ -722,4 +759,9 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * persistence was off or failed (a failure adds a {@link MergeReport.warnings}).
    */
   provenancePersisted?: Readonly<{ graphId: string; count: number }>;
+  /**
+   * Scored candidate matches the always-on identity separation veto dropped
+   * because a `different` assertion holds the two entities' classes apart.
+   */
+  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;

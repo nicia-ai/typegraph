@@ -117,11 +117,13 @@ describe("serializedSchemaZod", () => {
 
       const parsed = parseSerializedSchema(JSON.stringify(document));
 
+      // The scope the store enforced for the declaration that wrote this
+      // document: any scope but "kind" is subclass-wide.
       expect(parsed.nodes["Person"]?.uniqueConstraints).toEqual([
         {
           name: "email_unique",
           fields: ["email"],
-          scope: "kind",
+          scope: "kindWithSubClasses",
           collation: "binary",
         },
       ]);

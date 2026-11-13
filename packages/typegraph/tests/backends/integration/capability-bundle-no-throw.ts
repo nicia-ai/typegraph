@@ -19,6 +19,8 @@
  * SQLite lane would exercise the strategy's own shape rather than the bundle
  * model this test targets, and no pilot bundle reads `capabilities.vector`.
  */
+import { fileURLToPath } from "node:url";
+
 import { drizzle as drizzlePgProxy } from "drizzle-orm/pg-proxy";
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { describe, expect, it } from "vitest";
@@ -46,6 +48,21 @@ import {
   tsvectorStrategy,
 } from "../../../src/query/dialect/fulltext-strategy";
 import { type IntegrationTestContext } from "./test-context";
+
+/**
+ * The decisions depend on the dialect alone, so they are recorded once per
+ * dialect beside this suite rather than in a per-test-file snapshot: every
+ * backend lane of a dialect asserts the same file, whichever of its test files
+ * registers this suite.
+ */
+function decisionsSnapshotPath(dialect: string): string {
+  return fileURLToPath(
+    new URL(
+      `__snapshots__/capability-bundle-no-throw.${dialect}.json`,
+      import.meta.url,
+    ),
+  );
+}
 
 type CapabilityOverrideKey = "none" | "fulltext" | "vector" | "contributions";
 const OVERRIDES: readonly CapabilityOverrideKey[] = [
@@ -171,7 +188,7 @@ export function registerCapabilityBundleNoThrowIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("capability bundle construction never throws unexpectedly (T9b)", () => {
-    it("resolves all six bundles against the factory matrix", () => {
+    it("resolves all six bundles against the factory matrix", async () => {
       const dialect = context.getBackend().dialect;
       const rows =
         dialect === "sqlite" ? buildSqliteBackends() : buildPostgresBackends();
@@ -224,7 +241,9 @@ export function registerCapabilityBundleNoThrowIntegrationTests(
         decisions.push({ label: row.label, outcome: verdict.outcome });
       }
       // Snapshot every decision (the spec's own requirement).
-      expect(decisions).toMatchSnapshot();
+      await expect(
+        `${JSON.stringify(decisions, undefined, 2)}\n`,
+      ).toMatchFileSnapshot(decisionsSnapshotPath(dialect));
     });
   });
 }

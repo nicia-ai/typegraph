@@ -56,7 +56,7 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
-import { PgTransaction } from "drizzle-orm/pg-core";
+import { PgTransaction, type PgTransactionConfig } from "drizzle-orm/pg-core";
 
 import {
   CompilerInvariantError,
@@ -142,6 +142,11 @@ import {
   type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
+import {
+  FENCE_ISOLATION_COLUMN,
+  observesEveryEarlierFenceHolder,
+  readGraphWriteFenceAcquisition,
+} from "../command-contract";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -174,6 +179,7 @@ import {
   type DatabaseExtensionName,
   type EngineRecordedTimeMembers,
   type GraphBackend,
+  type GraphWriteFenceAcquisition,
   type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -198,6 +204,7 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
+import { assertBaseSchemaVersionCurrent } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -513,14 +520,19 @@ END; $tg$`;
     EXECUTE $definition$ ${functionDdl} $definition$;
   END IF;
 END; $install$`;
-  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
-    const triggerName = revisionChangeTriggerName(entity, table);
-    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
-    const trigger = triggerName.replaceAll("'", "''");
-    const journal = names.revisionChanges.replaceAll("'", "''");
-    const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
-  });
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
   return [installFunctionDdl, ...triggerDdl];
 }
 
@@ -658,6 +670,41 @@ function extensionDdlLockKey(extension: DatabaseExtensionName): string {
  * these two standalone statements take the fence row.
  */
 const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
+
+/** The transaction TypeGraph opens for a schema write under the advisory fence. */
+const SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION = {
+  isolationLevel: "read committed",
+} as const satisfies PgTransactionConfig;
+
+/**
+ * Refuses a schema write, under the advisory schema fence, whose session
+ * cannot observe every managed writer that held the fence before it. Those
+ * writers lock the active schema row `FOR SHARE` and change nothing, so only
+ * an isolation that takes a fresh snapshot per statement sees what they
+ * committed while the schema writer waited — the rows a tightening preflight
+ * or an emptiness probe must check. `acquisition` is what the fence statement
+ * itself read on the session.
+ *
+ * @throws ConfigurationError `SCHEMA_WRITE_REQUIRES_READ_COMMITTED`
+ */
+function assertSchemaWriteObservesEarlierWriters(
+  graphId: string,
+  acquisition: GraphWriteFenceAcquisition,
+): void {
+  if (observesEveryEarlierFenceHolder(acquisition)) return;
+  throw new ConfigurationError(
+    "A PostgreSQL schema write requires read_committed isolation on the session that holds the schema fence.",
+    {
+      code: "SCHEMA_WRITE_REQUIRES_READ_COMMITTED",
+      graphId,
+      isolation: acquisition.isolation,
+    },
+    {
+      suggestion:
+        "Run the schema write in a read_committed transaction. A snapshot isolation keeps a snapshot older than the writers the schema fence waited for, so its data checks would miss their rows.",
+    },
+  );
+}
 
 /** PostgreSQL renders lock_timeout with a duration suffix, except zero. */
 function postgresLockTimeoutMilliseconds(value: string): number | undefined {
@@ -1142,9 +1189,9 @@ function buildPostgresEngineProfileInternal(
   // DDL this backend issues then runs where the allocation lives.
   const allocationSchema = allocationSchemaOfTables(tables);
   const allocationPin =
-    allocationSchema === undefined ?
-      undefined
-    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
+    allocationSchema === undefined ? undefined : (
+      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
+    );
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1274,13 +1321,17 @@ function buildPostgresEngineProfileInternal(
   );
   const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
   const bareClient =
-    typeof rawClient === "object" &&
-    rawClient !== null &&
-    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
       rawClient
     : undefined;
   const queueOwner =
-    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
@@ -1310,6 +1361,10 @@ function buildPostgresEngineProfileInternal(
     recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
     identityClosure: getTableName(tables.identityClosure),
     identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
@@ -1317,7 +1372,9 @@ function buildPostgresEngineProfileInternal(
     baseSchemaVersions: getTableName(tables.baseSchemaVersions),
     graphTemplates: getTableName(tables.graphTemplates),
     indexMaterializations: getTableName(tables.indexMaterializations),
-    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
     kindRemovals: getTableName(tables.kindRemovals),
     reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies PostgresTableNames;
@@ -1610,8 +1667,9 @@ function buildPostgresEngineProfileInternal(
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
     async revisionChangesJournalReady(): Promise<boolean> {
       const expectedTriggers = portableSql.join(
-        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
-          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
         ),
         portableSql`, `,
       );
@@ -1723,9 +1781,15 @@ function buildPostgresEngineProfileInternal(
     }
   }
 
-  async function readBaseSchemaVersion(): Promise<number | undefined> {
+  /**
+   * Reads the base-schema marker on `session`: the root connection by
+   * default, or a caller-owned transaction a schema-write adoption checks on.
+   */
+  async function readBaseSchemaVersion(
+    session: Pick<AnyPgDatabase, "select"> = db,
+  ): Promise<number | undefined> {
     try {
-      const rows = await db
+      const rows = await session
         .select({ version: tables.baseSchemaVersions.version })
         .from(tables.baseSchemaVersions)
         .where(eq(tables.baseSchemaVersions.installation, 1));
@@ -1944,6 +2008,13 @@ function buildPostgresEngineProfileInternal(
     graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
       generateGraphIdOrderIndexDDL(table),
     ),
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -2029,6 +2100,36 @@ function buildPostgresEngineProfileInternal(
     const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
 
     /**
+     * THE one resolution of the PostgreSQL schema-commit fence, refusing an
+     * unfenced backend. Shared by the transaction a schema write opens, whose
+     * isolation it decides, and by {@link acquireSchemaWriteFence}, which takes
+     * it, so the two cannot disagree about which fence is in force.
+     */
+    function resolveSchemaCommitFence() {
+      return requireWriteFence(
+        resolveWriteFencePlan(fenceTarget),
+        "The PostgreSQL schema-commit fence",
+        "keyed",
+      );
+    }
+    type SchemaCommitFence = ReturnType<typeof resolveSchemaCommitFence>;
+
+    /**
+     * Where the advisory schema fence learns the session's isolation, which it
+     * must check before trusting the data checks that follow it.
+     *
+     * - `read-with-lock`: a transaction TypeGraph opened reads it in the lock
+     *   statement itself. A refusal there rolls that transaction (or, on a
+     *   transaction-scoped backend, its savepoint) back, and the lock with it.
+     * - `observed`: a caller's adopted transaction outlives a refusal, so its
+     *   isolation is read before anything is acquired or changed on it and the
+     *   fence refuses before its first statement.
+     */
+    type SchemaFenceIsolationSource =
+      | Readonly<{ kind: "read-with-lock" }>
+      | Readonly<{ kind: "observed"; acquisition: GraphWriteFenceAcquisition }>;
+
+    /**
      * The per-graph schema-commit fence.
      *
      * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
@@ -2060,17 +2161,20 @@ function buildPostgresEngineProfileInternal(
     async function acquireSchemaWriteFence(
       tx: AnyPgTransaction,
       graphId: string,
+      plan: SchemaCommitFence,
+      isolation: SchemaFenceIsolationSource,
       beforeAcquisition?: (
         phase: "schema-advisory" | "schema-row",
       ) => Promise<void>,
     ): Promise<void> {
-      const plan = requireWriteFence(
-        resolveWriteFencePlan(fenceTarget),
-        "The PostgreSQL schema-commit fence",
-        "keyed",
-      );
       switch (plan.kind) {
         case "lock": {
+          if (isolation.kind === "observed") {
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              isolation.acquisition,
+            );
+          }
           await beforeAcquisition?.("schema-advisory");
           // Advisory lock: hashtext($graphId) is collision-tolerant for the
           // size of an active graph set; collisions just serialize unrelated
@@ -2093,12 +2197,40 @@ function buildPostgresEngineProfileInternal(
           // takes the same fence row this fence's `"row"` arm takes, as a
           // preceding statement in its own transaction — no advisory lock is
           // in play on either side.
-          await tx.execute(
-            toDrizzleSql(
-              portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
-              "postgres",
-            ),
-          );
+          //
+          // The session's isolation is checked before the data checks that
+          // follow: a managed writer holds this schema's row `FOR SHARE`
+          // without changing it, so a schema writer whose snapshot predates
+          // that writer's commit gets no serialization failure when its
+          // `FOR UPDATE` below is granted. Only a fresh snapshot per statement
+          // lets those checks — a tightening preflight, an emptiness probe —
+          // see the rows that writer committed while this one waited. A
+          // transaction TypeGraph opened reads it in this same statement.
+          if (isolation.kind === "read-with-lock") {
+            const isolationFactExpression = requireDefined(
+              plan.sql.isolationFactExpression,
+              "acquireSchemaWriteFence: isolationFactExpression was validated present by the resolved advisory plan",
+            );
+            const [acquired] = await createPostgresExecutionAdapter(
+              tx,
+              adapterOptions,
+            ).execute<Record<string, unknown>>(
+              asCompiledRowsSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
+              ),
+            );
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              readGraphWriteFenceAcquisition(acquired),
+            );
+          } else {
+            await tx.execute(
+              toDrizzleSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
+                "postgres",
+              ),
+            );
+          }
           await beforeAcquisition?.("schema-row");
           // Managed entity writers lock this row FOR SHARE. Locking it FOR
           // UPDATE before any emptiness probe makes a writer-first commit
@@ -2150,7 +2282,8 @@ function buildPostgresEngineProfileInternal(
 
     /**
      * Runs `fn` inside a Postgres transaction, under whatever fence
-     * {@link acquireSchemaWriteFence} resolves. On a `lock` backend that is an
+     * {@link resolveSchemaCommitFence} resolves and {@link acquireSchemaWriteFence}
+     * takes. On a `lock` backend that is an
      * `pg_advisory_xact_lock` keyed on the graph id, which serializes all
      * schema commits per-graph: the read-then-write CAS in
      * `commitSchemaVersion` is safe even for the initial-commit case where
@@ -2208,9 +2341,24 @@ function buildPostgresEngineProfileInternal(
       // Fresh `tx`/`txBackend` every call, so a replayed attempt never reuses
       // a rolled-back attempt's connection state (the attempt-factory
       // contract `runRetriedUnit` requires of `attempt`).
+      //
+      // Under the advisory fence the transaction asks for read committed
+      // rather than inheriting the server's default: that fence refuses a
+      // session at any other isolation (`acquireSchemaWriteFence`), and a
+      // deployment whose default is a snapshot isolation would otherwise have
+      // every schema write refused. The fence-row form needs no such request:
+      // every managed writer advances the row it takes, so a stale snapshot
+      // fails there with a serialization failure at any isolation.
+      const fence = resolveSchemaCommitFence();
+      const transactionConfig =
+        fence.kind === "lock" ?
+          SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
+        : undefined;
       const attempt = (): Promise<T> =>
         db.transaction(async (tx) => {
-          await acquireSchemaWriteFence(tx, graphId);
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
           // Schema writes run DDL: over an allocation, where it lives.
           await bindSchemaWriteSessionToAllocation(tx);
           // The fence resolved above is held here, so the schema-write-capable
@@ -2240,7 +2388,7 @@ function buildPostgresEngineProfileInternal(
           } finally {
             await drainAndClose();
           }
-        });
+        }, transactionConfig);
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
       return runRetriedUnit(
@@ -2505,6 +2653,19 @@ function buildPostgresEngineProfileInternal(
                     { tableName: schemaVersionsTableName },
                   );
                 }
+                // The commit this adoption admits must not land on a database
+                // an earlier release still opens. The marker is read on the
+                // caller's session: a root read would wait for the connection
+                // this very transaction holds. A missing marker table is
+                // checked first, since a failed read would abort the caller's
+                // transaction rather than refuse it.
+                assertBaseSchemaVersionCurrent(
+                  (await privilegedBackend.tableExists(
+                    getTableName(tables.baseSchemaVersions),
+                  )) ?
+                    await readBaseSchemaVersion(externalTx)
+                  : undefined,
+                );
 
                 const settingAdapter = createPostgresExecutionAdapter(
                   externalTx,
@@ -2517,10 +2678,25 @@ function buildPostgresEngineProfileInternal(
                     "Schema adoption",
                   );
                 }
-                const [setting] = await settingAdapter.execute<{
-                  value: string;
-                }>(sql`SELECT current_setting('lock_timeout') AS value`);
-                const previousTimeout = setting?.value;
+                // The caller's transaction outlives a refusal, so its
+                // isolation is read here — already fixed by the statements
+                // above, and before anything is acquired or changed on it —
+                // for the schema fence to refuse before its first statement.
+                const isolationFactExpression =
+                  schemaFencePlan.sql.isolationFactExpression;
+                const [setting] = await settingAdapter.execute<
+                  Record<string, unknown>
+                >(
+                  asCompiledRowsSql(
+                    isolationFactExpression === undefined ?
+                      portableSql`SELECT current_setting('lock_timeout') AS value`
+                    : portableSql`SELECT current_setting('lock_timeout') AS value, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
+                  ),
+                );
+                const previousTimeout =
+                  typeof setting?.["value"] === "string" ?
+                    setting["value"]
+                  : undefined;
                 const callerTimeout =
                   previousTimeout === undefined ? undefined : (
                     postgresLockTimeoutMilliseconds(previousTimeout)
@@ -2541,6 +2717,11 @@ function buildPostgresEngineProfileInternal(
                   await acquireSchemaWriteFence(
                     externalTx,
                     graphId,
+                    schemaFencePlan,
+                    {
+                      kind: "observed",
+                      acquisition: readGraphWriteFenceAcquisition(setting),
+                    },
                     async (acquisitionPhase) => {
                       phase = acquisitionPhase;
                       const remainingMs = deadline - performance.now();

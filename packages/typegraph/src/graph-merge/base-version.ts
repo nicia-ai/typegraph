@@ -57,6 +57,7 @@ import type {
   GraphDef,
   IdentityTransferAssertion,
   LineageDelta,
+  SchemaVersionRow,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
@@ -74,7 +75,11 @@ import {
   storeCaptureEnabled,
   storeRuntime,
 } from "./typegraph-internal";
-import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
+import {
+  activeSchemaHash,
+  computeSchemaHash,
+  serializeSchema,
+} from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
 
@@ -132,6 +137,18 @@ export async function readActiveSchemaVersion(
 ): Promise<number> {
   const active = await backend.getActiveSchema(graphId);
   return active?.version ?? FALLBACK_SCHEMA_VERSION;
+}
+
+/**
+ * The schema hash merge compares for a schema row, or `undefined` when the
+ * store has no managed schema. Read through `activeSchemaHash`, never the
+ * row's `schema_hash` column, so a row written by an earlier release compares
+ * equal to the graph it describes.
+ */
+export async function optionalActiveSchemaHash(
+  row: SchemaVersionRow | undefined,
+): Promise<string | undefined> {
+  return row === undefined ? undefined : activeSchemaHash(row);
 }
 
 /**

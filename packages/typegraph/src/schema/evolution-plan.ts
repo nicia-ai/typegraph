@@ -1,4 +1,5 @@
 /** Pure preparation for a schema evolution; database-dependent guards run at apply time. */
+import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { classifyModifications } from "../graph-extension/classify";
@@ -9,6 +10,11 @@ import type { VectorSlot } from "../query/dialect/vector-strategy";
 import { freezeDeep } from "../utils/object";
 import { canonicalEqual } from "./canonical";
 import { prepareNewSchemaVersion } from "./new-schema-version";
+import type { OntologyChange } from "./ontology-change";
+import {
+  prepareStoreVerbSchemaTighteningPreflight,
+  type SchemaTighteningPreflight,
+} from "./tightening-preflight";
 import type { SchemaHash, SchemaIdentity, SerializedSchema } from "./types";
 
 /** A planned schema delta, database-dependent check, or provisioning requirement. */
@@ -30,6 +36,28 @@ export type EvolutionRequirement =
       fieldPath: string;
     }>
   | Readonly<{
+      /**
+       * Existing rows must satisfy an ontology axiom this delta newly
+       * declares; apply refuses with the same `MigrationError`
+       * `Store.evolve()` raises when they do not. Never empty: present only
+       * when a relation change owes the check.
+       */
+      kind: "ontology-tightening";
+      changes: readonly OntologyChange[];
+    }>
+  | Readonly<{
+      /**
+       * Existing rows must satisfy a constraint this delta newly declares on
+       * an edge kind's own registration: a cardinality or `targetCardinality`
+       * (named in `edgeCardinalityAxes`), `acyclic: true`, or an endpoint
+       * pair it stops admitting. Apply refuses with the same `MigrationError`
+       * `Store.evolve()` raises when they do not. `edgeKinds` is never empty.
+       */
+      kind: "edge-tightening";
+      edgeKinds: readonly string[];
+      edgeCardinalityAxes: readonly EdgeCardinalityDeclaration[];
+    }>
+  | Readonly<{
       kind: "identity";
       nodeKinds: readonly string[];
     }>;
@@ -49,6 +77,8 @@ export type EvolutionPlanRequirements = Readonly<{
     { kind: "vector-slot" }
   >[];
   identityAffectedKinds: readonly string[];
+  /** The data preflight the delta's ontology or edge-cardinality tightening owes. */
+  schemaTightening: SchemaTighteningPreflight | undefined;
 }>;
 
 declare const evolutionPlanBrand: unique symbol;
@@ -95,6 +125,35 @@ function mintEvolutionPlan(
         Readonly<{ status: "change"; requirements: EvolutionRequirements }>),
 ): EvolutionPlan {
   return Object.freeze(fields) as EvolutionPlan;
+}
+
+/** One requirement per family the preflight owes, each present only when non-empty. */
+function tighteningRequirementsOf(
+  tightening: SchemaTighteningPreflight | undefined,
+): readonly Extract<
+  EvolutionRequirement,
+  { kind: "ontology-tightening" | "edge-tightening" }
+>[] {
+  if (tightening === undefined) return [];
+  return [
+    ...(tightening.probedChanges.length > 0 ?
+      [
+        freezeDeep({
+          kind: "ontology-tightening" as const,
+          changes: tightening.probedChanges,
+        }),
+      ]
+    : []),
+    ...(tightening.tightenedEdgeKinds.length > 0 ?
+      [
+        freezeDeep({
+          kind: "edge-tightening" as const,
+          edgeKinds: tightening.tightenedEdgeKinds,
+          edgeCardinalityAxes: tightening.newlyConstrainedAxes,
+        }),
+      ]
+    : []),
+  ];
 }
 
 function newlyAddedKinds(
@@ -226,6 +285,16 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
   const schemaDocument = freezeDeep(prepared.schemaDocument);
   const resultingHash = prepared.schemaHash;
   const addedKinds = newlyAddedKinds(existingExtension, extension);
+  // Derived from the exact before/after documents this plan commits, the
+  // same pair `Store.evolve()` hands the same preflight.
+  const schemaTightening = prepareStoreVerbSchemaTighteningPreflight({
+    verb: "store.planEvolution()",
+    graphId: baselineGraph.id,
+    fromVersion: baselineVersion,
+    toVersion: resultingVersion,
+    before: storedSchema,
+    after: schemaDocument,
+  });
   const groupedRequirements: EvolutionPlanRequirements = Object.freeze({
     requireEmpty: Object.freeze(
       classification.requireEmpty.map((entry) =>
@@ -241,11 +310,36 @@ export async function prepareEvolutionPlan<G extends GraphDef>(
     identityAffectedKinds: Object.freeze(
       identityKindsRequiringPreflight(baselineGraph, mergedGraph),
     ),
+    schemaTightening,
   });
+  // A uniqueness claim gate is an emptiness requirement on its kind, so it is
+  // listed as one. A kind the extension classifier already requires empty is
+  // not listed twice, and a kind this extension adds is already listed as new:
+  // its gate only guards rows an earlier removal left in the table, which the
+  // commit's own probe refuses.
+  const classifiedEmptyNodeKinds = new Set(
+    [...groupedRequirements.requireEmpty, ...groupedRequirements.addedKinds]
+      .filter((requirement) => requirement.entity === "node")
+      .map((requirement) => requirement.kindName),
+  );
+  const uniquenessGatedKinds = [
+    ...new Set(
+      (schemaTightening?.uniquenessClaimGates ?? []).map((gate) => gate.kind),
+    ),
+  ].filter((kindName) => !classifiedEmptyNodeKinds.has(kindName));
+  const tighteningRequirements = tighteningRequirementsOf(schemaTightening);
   const requirements: EvolutionRequirements = Object.freeze([
     ...groupedRequirements.requireEmpty,
+    ...uniquenessGatedKinds.map((kindName) =>
+      Object.freeze({
+        kind: "require-empty" as const,
+        entity: "node" as const,
+        kindName,
+      }),
+    ),
     ...groupedRequirements.addedKinds,
     ...groupedRequirements.vectorSlots,
+    ...tighteningRequirements,
     ...(groupedRequirements.identityAffectedKinds.length > 0 ?
       [
         Object.freeze({

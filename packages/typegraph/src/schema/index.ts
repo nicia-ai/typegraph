@@ -99,6 +99,31 @@ export {
   type SchemaChangeClassification,
   type SchemaDiff,
 } from "./migration";
+export type { UniquenessClaimGate } from "./uniqueness-claim-gate";
+
+// ============================================================
+// Structural Subtyping
+// ============================================================
+
+export {
+  isStructuralSubtype,
+  isTypeLevelSubtype,
+  type StructuralSubsumptionVerdict,
+} from "./structural-subsumption";
+export {
+  type StructuralIncomparableReason,
+  type StructuralSubtypeReason,
+  type StructuralSubtypeResult,
+} from "./structural-subtype";
+
+// ============================================================
+// Ontology change classification (data-validated tightening)
+// ============================================================
+
+export {
+  classifyOntologyChanges,
+  type OntologySnapshot,
+} from "./ontology-change";
 
 // ============================================================
 // Validation Utilities

@@ -396,7 +396,7 @@ describe("Interchange Round-Trip", () => {
 
     expect(exported.nodes).toHaveLength(0);
     expect(exported.edges).toHaveLength(0);
-    expect(exported.formatVersion).toBe("2.0");
+    expect(exported.formatVersion).toBe("3.0");
     expect(exported.source.type).toBe("typegraph-export");
 
     const targetBackend = createTestBackend();
@@ -926,6 +926,77 @@ describe("Export Options", () => {
 // ============================================================
 // Import Conflict Strategy Tests
 // ============================================================
+
+function expectUnknownOption(
+  error: unknown,
+  operation: string,
+  option: string,
+): void {
+  expect(error).toBeInstanceOf(ConfigurationError);
+  expect((error as ConfigurationError).details).toEqual({
+    code: "INTERCHANGE_OPTION_UNKNOWN",
+    operation,
+    option,
+  });
+}
+
+describe("Interchange option keys", () => {
+  let store: TestStore;
+
+  beforeEach(async () => {
+    store = createStore(testGraph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+  });
+
+  it("refuses an undeclared importGraph option instead of dropping it", async () => {
+    const data = await exportGraph(store);
+    const target = createStore(testGraph, createTestBackend());
+
+    const refusal = await importGraph(target, data, {
+      onConflict: "error",
+      validateReference: false,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraph", "validateReference");
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses an undeclared importGraphStream option before reading a chunk", async () => {
+    const target = createStore(testGraph, createTestBackend());
+    let pulled = false;
+    async function* chunks(): AsyncIterable<GraphInterchangeChunk> {
+      pulled = true;
+      yield* await Promise.resolve([]);
+    }
+
+    const refusal = await importGraphStream(target, chunks(), {
+      onConflict: "error",
+      bogus: true,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraphStream", "bogus");
+    expect(pulled).toBe(false);
+  });
+
+  it("refuses an undeclared exportGraph option, including a stream-only one", async () => {
+    for (const option of ["bogus", "batchSize"]) {
+      const refusal = await exportGraph(store, { [option]: 10 }).catch(
+        (error: unknown) => error,
+      );
+      expectUnknownOption(refusal, "exportGraph", option);
+    }
+  });
+
+  it("refuses an undeclared exportGraphStream option", async () => {
+    const chunks = exportGraphStream(store, {
+      includeMetadata: true,
+    } as never)[Symbol.asyncIterator]();
+    // The refusal arrives with the first chunk request.
+    const refusal = await chunks.next().catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "exportGraphStream", "includeMetadata");
+  });
+});
 
 describe("Import Conflict Strategies", () => {
   let sourceBackend: GraphBackend;
@@ -1711,18 +1782,18 @@ describe("Interchange import property fidelity", () => {
 // ============================================================
 
 describe("Interchange format version compatibility", () => {
-  it("exports always carry formatVersion 2.0", async () => {
+  it("exports always carry formatVersion 3.0", async () => {
     const store = createStore(testGraph, createTestBackend());
     await store.nodes.Person.create({ name: "Alice" });
 
     const exported = await exportGraph(store);
-    expect(exported.formatVersion).toBe("2.0");
+    expect(exported.formatVersion).toBe("3.0");
 
     const [headerChunk] = await collectChunks(exportGraphStream(store));
     if (headerChunk?.type !== "header") {
       throw new Error("Expected the export stream to start with a header.");
     }
-    expect(headerChunk.header.formatVersion).toBe("2.0");
+    expect(headerChunk.header.formatVersion).toBe("3.0");
   });
 
   it("accepts a 1.0 document (no identity section) via schema and import", async () => {
@@ -1763,6 +1834,30 @@ describe("Interchange format version compatibility", () => {
     };
 
     expect(GraphDataSchema.safeParse(document).success).toBe(true);
+  });
+
+  it("accepts a 2.0 document (no transitions/retention) via schema and import", async () => {
+    // A pre-existing 2.0 export is structurally a valid 3.0 document; the
+    // documented GraphDataSchema.parse path must keep accepting it.
+    const document = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+    };
+
+    const parsed = GraphDataSchema.parse(document);
+    expect(parsed.formatVersion).toBe("2.0");
+
+    const store = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      store,
+      parsed,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
   });
 });
 

@@ -14,10 +14,11 @@ concurrency:
 permissions:
   contents: read
 
-# Declaration bundling traverses the full public backend and store type graph.
-# Keep its worker above Node's default old-space ceiling as that API grows.
+# scripts/build.ts gives its tsc and tsup children their own declaration heap
+# (DECLARATION_HEAP_MB); this workflow-wide ceiling covers the remaining steps
+# and must not fall below it (see tests/ci-workflow-contract.test.ts).
 env:
-  NODE_OPTIONS: --max-old-space-size=6144
+  NODE_OPTIONS: --max-old-space-size=8192
 
 jobs:
   detect-release-metadata-push:
@@ -101,11 +102,11 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/4", "2/4", "3/4", "4/4"]
+        shard: ["1/5", "2/5", "3/5", "4/5", "5/5"]
     steps:
       - uses: actions/checkout@v7
 
@@ -122,6 +123,11 @@ jobs:
       - name: Run unit tests
         env:
           TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: pnpm turbo run test:unit -- --shard=${{ matrix.shard }}
 
   test-sqlite-property:
@@ -203,14 +209,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: "1/4"
+          - shard: "1/5"
             artifact: coverage-blob-1
-          - shard: "2/4"
+          - shard: "2/5"
             artifact: coverage-blob-2
-          - shard: "3/4"
+          - shard: "3/5"
             artifact: coverage-blob-3
-          - shard: "4/4"
+          - shard: "4/5"
             artifact: coverage-blob-4
+          - shard: "5/5"
+            artifact: coverage-blob-5
     steps:
       - uses: actions/checkout@v7
 
@@ -227,12 +235,19 @@ jobs:
       - name: Run coverage shard
         env:
           TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: >-
           pnpm --filter @nicia-ai/typegraph exec vitest run --coverage
           --shard=${{ matrix.shard }}
           --reporter=default
           --reporter=blob
           --outputFile.blob=.vitest-reports/blob-${{ matrix.artifact }}.json
+          --reporter=json
+          --outputFile.json=.vitest-durations/${{ matrix.artifact }}.json
           --coverage.thresholds.branches=0
           --coverage.thresholds.functions=0
           --coverage.thresholds.lines=0
@@ -244,6 +259,17 @@ jobs:
           name: ${{ matrix.artifact }}
           path: packages/typegraph/.vitest-reports/*.json
           if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+
+      # Per-file durations, the input `scripts/update-shard-weights.ts` records
+      # the shard split's weights from (docs/TESTING.md, "Shard balance").
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-sqlite-${{ matrix.artifact }}
+          path: packages/typegraph/.vitest-durations/*.json
           include-hidden-files: true
           overwrite: true
 
@@ -341,11 +367,11 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/2", "2/2"]
+        shard: ["1/3", "2/3", "3/3"]
     services:
       postgres:
         image: pgvector/pgvector:pg18
@@ -404,7 +430,10 @@ jobs:
           fi
 
       - name: Run PostgreSQL integration tests
-        run: pnpm --filter @nicia-ai/typegraph test:postgres
+        run: >-
+          pnpm --filter @nicia-ai/typegraph test:postgres
+          --reporter=json
+          --outputFile.json=.vitest-durations/postgres.json
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
@@ -415,15 +444,24 @@ jobs:
           # cap that budget affords (the runners have 4 cores).
           TYPEGRAPH_PG_MAX_WORKERS: 4
 
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-postgres-${{ strategy.job-index }}
+          path: packages/typegraph/.vitest-durations/*.json
+          include-hidden-files: true
+          overwrite: true
+
       - name: Run PostgreSQL perf sanity
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
       - name: Run PostgreSQL example
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm test:examples:postgres
         env:
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test

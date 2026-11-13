@@ -129,10 +129,12 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * `findActiveEdgesBySourceV1` (137→138) is an optional graph-entity read.
  * The optional durable edge identity owner read (138→139) joins the read
  * surface: it is a bounded lookup and never mutates rows.
- * `lockNodes` (139→140) is a read too: it row-locks what it returns for the
+ * `setActiveVersionWithPreflight` (139→140) joined the schema-version
+ * lifecycle beside `setActiveVersion`, owned by the schema manager.
+ * `lockNodes` (140→141) is a read too: it row-locks what it returns for the
  * edge-endpoint / delete pairing and writes no row.
  */
-const MEMBER_COUNT = 140;
+const MEMBER_COUNT = 141;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

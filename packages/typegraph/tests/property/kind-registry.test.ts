@@ -20,6 +20,8 @@ import {
   createEmptyClosures,
   KindRegistry,
 } from "../../src/registry/kind-registry";
+import { requireDefined } from "../../src/utils/presence";
+import { propertyRuns } from "./run-budget";
 
 // ============================================================
 // Helpers for Test Data Generation
@@ -67,6 +69,26 @@ function createRelation(
     from: getNodeType(from),
     to: getNodeType(to),
   };
+}
+
+/**
+ * Creates an ontology relation with a RAW endpoint — a plain string used
+ * as-is rather than resolved to a registered `NodeType`. Needed to author an
+ * external-IRI endpoint (e.g. `"https://schema.org/Person"`): `getKindName`
+ * passes a string straight through, so this reaches the same closure code a
+ * graph-extension document's untyped `from`/`to` strings do, without routing
+ * an IRI through `defineNode`.
+ */
+function createRawRelation(
+  from: string,
+  metaEdgeName: string,
+  to: string,
+): OntologyRelation {
+  const metaEdge = metaEdgeMap[metaEdgeName];
+  if (!metaEdge) {
+    throw new Error(`Unknown meta-edge: ${metaEdgeName}`);
+  }
+  return { metaEdge, from, to };
 }
 
 /**
@@ -190,6 +212,73 @@ describe("KindRegistry Subsumption Properties", () => {
         { numRuns: 20 },
       );
     });
+
+    it("irreflexivity survives equivalentTo folding into a subsumption cycle", () => {
+      // The empty-ontology irreflexivity case above cannot catch a regression
+      // in `withoutSelfMembership`: with no relations, `subClassAncestors` has
+      // no cycles to strip in the first place. A plain `equivalentTo(A, B)`
+      // with no other subClassOf relation doesn't cycle either under the
+      // registry's collapse-to-one-representative construction (see
+      // `computeEquivalenceRepresentatives`) — the class collapses to ONE
+      // node with no self-edge. A genuine cross-class subClassOf CYCLE
+      // between two equivalence classes' representatives (`A ⊑ X` and
+      // `X ⊑ A`, with `A ≡ B` and `X ≡ Y`) DOES make each representative
+      // reach itself in the collapsed closure, which then propagates into
+      // every member of both classes — exactly where a missing
+      // self-membership strip would surface. (Such an ontology is separately
+      // rejected as `ONTOLOGY_CYCLE` by `validateOntologyRelations`, but
+      // `detectDisjointExpansionConflicts` still runs the registry's closure
+      // builder on a cyclic ontology before that rejection is enforced, per
+      // its own documented contract.)
+      const kindArb = fc.constantFrom("A", "B", "X", "Y");
+      fc.assert(
+        fc.property(kindArb, (kind) => {
+          const relations = [
+            createRelation("A", META_EDGE_EQUIVALENT_TO, "B"),
+            createRelation("X", META_EDGE_EQUIVALENT_TO, "Y"),
+            createRelation("A", META_EDGE_SUB_CLASS_OF, "X"),
+            createRelation("X", META_EDGE_SUB_CLASS_OF, "A"),
+          ];
+          const registry = createRegistry(relations);
+          expect(registry.isSubClassOf(kind, kind)).toBe(false);
+          const expanded = registry.expandSubClasses(kind);
+          expect(new Set(expanded).size).toBe(expanded.length);
+        }),
+        { numRuns: 10 },
+      );
+    });
+
+    it("irreflexivity survives a LEGAL ontology whose fold creates a cycle", () => {
+      // Unlike the case above, this ontology is never rejected:
+      // `validateOntologyRelations` only inspects raw `subClassOf` edges
+      // (A subClassOf C, C subClassOf B — not a cycle, since B and A are
+      // different names at that layer), so this graph builds cleanly. The
+      // cycle only appears AFTER `equivalentTo(A, B)` collapses A and B to one
+      // representative: C's representative then reaches A's representative
+      // and back. This is the shape `withoutSelfMembership`'s docstring leads
+      // with; the sibling test above exercises the separately-rejected
+      // directly-cyclic shape instead.
+      const kindArb = fc.constantFrom("A", "B", "C");
+      fc.assert(
+        fc.property(kindArb, (kind) => {
+          const relations = [
+            createRelation("A", META_EDGE_EQUIVALENT_TO, "B"),
+            createRelation("A", META_EDGE_SUB_CLASS_OF, "C"),
+            createRelation("C", META_EDGE_SUB_CLASS_OF, "B"),
+          ];
+          const registry = createRegistry(relations);
+          expect(registry.isSubClassOf(kind, kind)).toBe(false);
+          const expanded = registry.expandSubClasses(kind);
+          expect(new Set(expanded).size).toBe(expanded.length);
+          // The forced consequence: C sits strictly between two equivalents,
+          // so it collapses into the same class as A and B.
+          expect(registry.isAssignableTo("A", "C")).toBe(true);
+          expect(registry.isAssignableTo("C", "A")).toBe(true);
+          expect(registry.isAssignableTo("B", "C")).toBe(true);
+        }),
+        { numRuns: 10 },
+      );
+    });
   });
 
   describe("expandSubClasses", () => {
@@ -242,6 +331,93 @@ describe("KindRegistry Subsumption Properties", () => {
 
       // Animal is in Dog's ancestors iff Dog is in Animal's descendants
       expect(registry.getDescendants("Animal").has("Dog")).toBe(true);
+    });
+
+    // Regression coverage for a defect found reviewing the equivalence fold: an `equivalentTo`
+    // class routed through an external IRI that is ALSO a `subClassOf`
+    // endpoint made `subClassAncestors`/`subClassDescendants` stop being
+    // inverses of each other, so `isSubClassOf`/`isAssignableTo` disagreed
+    // with `expandSubClasses`/`getDescendants` about the very same pair. Both
+    // shapes below reproduced the divergence before `representativeOf`
+    // mapped an IRI to its class's representative (kind-registry.ts,
+    // `computeEquivalenceRepresentatives`): reverting that fix — dropping the
+    // IRI from `representativeOf` again — makes both cases below fail.
+    it("keeps ancestors/descendants exact inverses when a subClassOf endpoint is an equivalence-routed IRI", () => {
+      const externalIri = "https://schema.org/Person";
+
+      // Shape 1: Student subClassOf <IRI>, with Person and Individual both
+      // equivalentTo the SAME IRI (so Person, Individual, and — transitively
+      // through the IRI — Student's ancestor chain all fold together).
+      const shapeOne = createRegistry([
+        createRawRelation("Person", META_EDGE_EQUIVALENT_TO, externalIri),
+        createRawRelation("Individual", META_EDGE_EQUIVALENT_TO, externalIri),
+        createRawRelation("Student", META_EDGE_SUB_CLASS_OF, externalIri),
+      ]);
+
+      expect(shapeOne.isSubClassOf("Student", "Person")).toBe(true);
+      expect(shapeOne.expandSubClasses("Person")).toContain("Student");
+      expect(shapeOne.getDescendants("Person").has("Student")).toBe(true);
+      // The IRI itself is an inert reference — it must never surface as a
+      // member of any subsumption-reading result.
+      for (const kind of ["Student", "Person", "Individual"]) {
+        expect(shapeOne.getAncestors(kind).has(externalIri)).toBe(false);
+        expect(shapeOne.getDescendants(kind).has(externalIri)).toBe(false);
+        expect(shapeOne.expandSubClasses(kind)).not.toContain(externalIri);
+      }
+
+      // Shape 2 (mirror): the IRI is the CHILD side of subClassOf instead of
+      // the parent, and is equivalentTo a kind that never subclasses
+      // anything else.
+      const shapeTwo = createRegistry([
+        createRawRelation(externalIri, META_EDGE_SUB_CLASS_OF, "C"),
+        createRawRelation(externalIri, META_EDGE_EQUIVALENT_TO, "A"),
+      ]);
+      expect(shapeTwo.isAssignableTo("A", "C")).toBe(true);
+      expect(shapeTwo.expandSubClasses("C")).toContain("A");
+      expect(shapeTwo.expandSubClasses("C")).not.toContain(externalIri);
+    });
+
+    it("ancestors and descendants stay exact inverses over random subClassOf/equivalentTo/IRI ontologies", () => {
+      const kindArb = fc.constantFrom("A", "B", "C", "D", "E");
+      const endpointArb = fc.oneof(
+        kindArb,
+        fc.constant("https://example.com/shared"),
+      );
+      const relationArb = fc
+        .tuple(
+          fc.constantFrom(META_EDGE_SUB_CLASS_OF, META_EDGE_EQUIVALENT_TO),
+          endpointArb,
+          endpointArb,
+        )
+        .filter(([, from, to]) => from !== to);
+      const ontologyArb = fc.array(relationArb, { maxLength: 10 });
+
+      fc.assert(
+        fc.property(ontologyArb, (tuples) => {
+          const relations = tuples.map(([metaEdge, from, to]) =>
+            createRawRelation(from, metaEdge, to),
+          );
+          const registry = createRegistry(relations);
+          // The external IRI is deliberately EXCLUDED from this set: a
+          // `subClassOf` edge naming an IRI that belongs to no equivalence
+          // class at all is a separate, pre-existing gap (the IRI can still
+          // leak into one side's member set) that these confirmed findings
+          // do not cover. What this property pins is the one the findings
+          // DO cover: ancestors/descendants agree about every pair of real
+          // kinds, regardless of how an IRI-routed equivalence class
+          // reshuffles the closure around them.
+          const namedKinds = ["A", "B", "C", "D", "E"];
+
+          for (const left of namedKinds) {
+            for (const right of namedKinds) {
+              expect(registry.getAncestors(left).has(right)).toBe(
+                registry.getDescendants(right).has(left),
+              );
+            }
+          }
+        }),
+        { numRuns: 500 },
+      );
     });
   });
 });
@@ -730,5 +906,151 @@ describe("computeClosuresFromOntology Properties", () => {
     expect(component).toEqual(["Alpha", "Contractor", "Employee", "Zeta"]);
     expect(registry.getSubClassComponent("Alpha")).toBe(component);
     expect(registry.getSubClassComponent("Zeta")).toBe(component);
+  });
+});
+
+// ============================================================
+// Closures against an independent reference model
+// ============================================================
+
+const MODEL_KINDS = ["K0", "K1", "K2", "K3", "K4", "K5"] as const;
+
+type ModelOntology = Readonly<{
+  subClassOf: readonly (readonly [string, string])[];
+  equivalentTo: readonly (readonly [string, string])[];
+}>;
+
+/**
+ * A `subClassOf` DAG (a child only ever names a parent declared before it)
+ * plus random `equivalentTo` pairs, which may fold the DAG into cycles.
+ */
+const modelOntologyArb: fc.Arbitrary<ModelOntology> = fc.record({
+  subClassOf: fc.uniqueArray(
+    fc
+      .tuple(
+        fc.integer({ min: 0, max: MODEL_KINDS.length - 1 }),
+        fc.integer({ min: 0, max: MODEL_KINDS.length - 1 }),
+      )
+      .filter(([child, parent]) => child > parent)
+      .map(
+        ([child, parent]) =>
+          [
+            requireDefined(MODEL_KINDS[child]),
+            requireDefined(MODEL_KINDS[parent]),
+          ] as const,
+      ),
+    { selector: ([child, parent]) => `${child}>${parent}`, maxLength: 8 },
+  ),
+  equivalentTo: fc.uniqueArray(
+    fc
+      .tuple(fc.constantFrom(...MODEL_KINDS), fc.constantFrom(...MODEL_KINDS))
+      .filter(([left, right]) => left !== right),
+    { selector: ([left, right]) => `${left}=${right}`, maxLength: 3 },
+  ),
+});
+
+/** Equivalence classes by union-find over the declared pairs alone. */
+function referenceEquivalence(
+  ontology: ModelOntology,
+): (left: string, right: string) => boolean {
+  const parentOf = new Map<string, string>(
+    MODEL_KINDS.map((kind) => [kind, kind]),
+  );
+  const find = (kind: string): string => {
+    const parent = requireDefined(parentOf.get(kind));
+    if (parent === kind) return kind;
+    const root = find(parent);
+    parentOf.set(kind, root);
+    return root;
+  };
+  for (const [left, right] of ontology.equivalentTo) {
+    parentOf.set(find(left), find(right));
+  }
+  return (left, right) => left !== right && find(left) === find(right);
+}
+
+/**
+ * Every kind reachable from `kind` in at least one step, where a
+ * `subClassOf` edge leads from child to parent and an `equivalentTo` pair
+ * leads both ways, by breadth-first search. `kind` itself is never its own
+ * ancestor.
+ */
+function referenceAncestors(
+  ontology: ModelOntology,
+  kind: string,
+  direction: "up" | "down",
+): ReadonlySet<string> {
+  const steps = new Map<string, string[]>();
+  const step = (from: string, to: string) => {
+    steps.set(from, [...(steps.get(from) ?? []), to]);
+  };
+  for (const [child, parent] of ontology.subClassOf) {
+    if (direction === "up") step(child, parent);
+    else step(parent, child);
+  }
+  for (const [left, right] of ontology.equivalentTo) {
+    step(left, right);
+    step(right, left);
+  }
+  const reached = new Set<string>();
+  const queue = [...(steps.get(kind) ?? [])];
+  while (queue.length > 0) {
+    const next = requireDefined(queue.shift());
+    if (reached.has(next)) continue;
+    reached.add(next);
+    queue.push(...(steps.get(next) ?? []));
+  }
+  reached.delete(kind);
+  return reached;
+}
+
+describe("KindRegistry closures against a reference model", () => {
+  it("ancestors, descendants, equivalence and assignability match breadth-first search and union-find", () => {
+    fc.assert(
+      fc.property(modelOntologyArb, (ontology) => {
+        const registry = createRegistry([
+          ...ontology.subClassOf.map(([child, parent]) =>
+            createRelation(child, META_EDGE_SUB_CLASS_OF, parent),
+          ),
+          ...ontology.equivalentTo.map(([left, right]) =>
+            createRelation(left, META_EDGE_EQUIVALENT_TO, right),
+          ),
+        ]);
+        const equivalent = referenceEquivalence(ontology);
+
+        for (const kind of MODEL_KINDS) {
+          const ancestors = referenceAncestors(ontology, kind, "up");
+          const descendants = referenceAncestors(ontology, kind, "down");
+          expect({
+            kind,
+            ancestors: [...registry.getAncestors(kind)].toSorted(),
+          }).toEqual({ kind, ancestors: [...ancestors].toSorted() });
+          expect({
+            kind,
+            descendants: [...registry.getDescendants(kind)].toSorted(),
+          }).toEqual({ kind, descendants: [...descendants].toSorted() });
+          expect(registry.expandSubClasses(kind).toSorted()).toEqual(
+            [kind, ...descendants].toSorted(),
+          );
+          for (const other of MODEL_KINDS) {
+            expect({
+              kind,
+              other,
+              equivalent: registry.areEquivalent(kind, other),
+            }).toEqual({ kind, other, equivalent: equivalent(kind, other) });
+            expect({
+              kind,
+              other,
+              assignable: registry.isAssignableTo(kind, other),
+            }).toEqual({
+              kind,
+              other,
+              assignable: kind === other || ancestors.has(other),
+            });
+          }
+        }
+      }),
+      { numRuns: propertyRuns({ ci: 300, local: 1000 }) },
+    );
   });
 });
