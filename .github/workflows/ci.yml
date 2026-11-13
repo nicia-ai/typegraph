@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -342,7 +342,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
