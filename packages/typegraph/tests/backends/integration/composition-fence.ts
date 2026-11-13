@@ -14,7 +14,7 @@
  * The genuine-concurrency case (below, "two concurrent attaches") is what
  * stands in for a real-PostgreSQL contention test: this suite already runs
  * against the repo's PGlite lane (`tests/backends/postgres/
- * pglite-integration-suite.test.ts`), which is a real PostgreSQL SQL engine,
+ * pglite-integration-slice-*.test.ts`), which is a real PostgreSQL SQL engine,
  * in-process. PGlite is single-connection and cannot demonstrate genuine
  * OS-level interleaving (see `tests/constraint-write-fence.test.ts`'s
  * docblock for the same caveat stated for cardinality), but composition's

@@ -4,7 +4,8 @@
  * Mirrors `postgres-backend.test.ts` but wires the backend through
  * `drizzle-orm/postgres-js` + the `postgres` (porsager) driver. We run
  * the full adapter + integration suites against both drivers to prove
- * driver-agnostic behavior end-to-end.
+ * driver-agnostic behavior end-to-end; the integration suite runs from this
+ * lane's `postgres-js-integration-slice-*.test.ts` files.
  *
  * Skipped automatically unless `POSTGRES_URL` is set (or the
  * `scripts/test-postgres.sh` harness is used). Runs against its own
@@ -17,9 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { count, defineEdge, defineGraph, defineNode } from "../../../src";
-import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import {
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -34,8 +33,12 @@ import { createStore } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { createIntegrationTestSuite } from "../integration-test-suite";
-import { TRUNCATE_RESETTABLE_TABLES_SQL } from "./managed-tables";
+import {
+  clearPostgresJsLaneData,
+  connectPostgresJsLaneClient,
+  migratePostgresJsLaneTables,
+  POSTGRES_JS_LANE_MAX_CONNECTIONS,
+} from "./postgres-js-lane-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -55,72 +58,23 @@ function requirePostgres(ctx: { skip: () => void }): {
 }
 
 function createConnection(): { sql: Sql; db: PostgresJsDatabase } {
-  const sql = postgres(TEST_DATABASE_URL, { max: 4 });
+  const sql = postgres(TEST_DATABASE_URL, {
+    max: POSTGRES_JS_LANE_MAX_CONNECTIONS,
+  });
   const db = drizzle(sql);
   return { sql, db };
 }
 
 async function initializePostgres(): Promise<boolean> {
-  const maxRetries = 5;
-  const retryDelayMs = 1000;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const sql = postgres(TEST_DATABASE_URL, {
-      max: 4,
-      connect_timeout: 5,
-      onnotice: () => {
-        // Silence NOTICE messages from CREATE IF NOT EXISTS so test
-        // output stays readable.
-      },
-    });
-
-    try {
-      await sql`SELECT 1`;
-      sharedSql = sql;
-      sharedDb = drizzle(sql);
-      return true;
-    } catch {
-      await sql.end().catch(() => {
-        // Ignore cleanup errors
-      });
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-      }
-    }
-  }
-
-  return false;
-}
-
-async function setupTestDatabase(): Promise<void> {
-  if (!sharedSql) return;
-  // Run the generated migration SQL. It uses CREATE TABLE IF NOT EXISTS
-  // and CREATE EXTENSION IF NOT EXISTS, so it's safe to run alongside the
-  // node-postgres test file — we don't drop tables here.
-  const migrationSql = generatePostgresMigrationSQL();
-  await sharedSql.unsafe(migrationSql);
+  sharedSql = await connectPostgresJsLaneClient(TEST_DATABASE_URL);
+  if (!sharedSql) return false;
+  sharedDb = drizzle(sharedSql);
+  return true;
 }
 
 async function clearTestData(): Promise<void> {
   if (!sharedSql) return;
-  // Clear the durable contribution markers (#135) alongside the data so each
-  // test starts genuinely un-provisioned: `createStoreWithSchema` (run per
-  // test by the integration suite) then re-materializes every per-field
-  // vector table + marker in lockstep. Leaving markers behind on this shared,
-  // long-lived test database would let a marker outlive a dropped table, so a
-  // later boot would trust the marker, skip the CREATE, and writes would hit a
-  // missing relation.
-  await sharedSql.unsafe(TRUNCATE_RESETTABLE_TABLES_SQL);
-  // Per-(kind, field) vector tables are materialized per field, so enumerate
-  // and truncate any that exist (there is no single shared embeddings table).
-  // createStoreWithSchema re-creates any that are missing (markers cleared).
-  const rows = await sharedSql.unsafe<{ tablename: string }[]>(
-    String.raw`SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
-  );
-  for (const row of rows) {
-    await sharedSql.unsafe(`TRUNCATE "${row.tablename}" CASCADE`);
-  }
+  await clearPostgresJsLaneData(sharedSql);
 }
 
 beforeAll(async () => {
@@ -129,9 +83,7 @@ beforeAll(async () => {
   // Docker Postgres happens to be reachable.
   if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
-  if (isPostgresAvailable) {
-    await setupTestDatabase();
-  }
+  if (sharedSql) await migratePostgresJsLaneTables(sharedSql);
 });
 
 afterAll(async () => {
@@ -141,7 +93,7 @@ afterAll(async () => {
 });
 
 // ============================================================
-// Shared Adapter + Integration Test Suites
+// Shared Adapter Test Suite
 // ============================================================
 
 describe("PostgreSQL Adapter (postgres-js driver)", () => {
@@ -168,54 +120,6 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
         return createPostgresBackend(db);
       },
       { skipRawQueries: false },
-    );
-  });
-
-  describe.runIf(process.env["POSTGRES_URL"])("Integration Test Suite", () => {
-    beforeEach(async () => {
-      await clearTestData();
-    });
-
-    createIntegrationTestSuite(
-      "PostgreSQL (postgres-js)",
-      () => {
-        const { sql, db } = createConnection();
-        return {
-          backend: createPostgresBackend(db),
-          cleanup: async () => {
-            await sql.end();
-          },
-          // The suite's own client runs at `max: 4` and is audited
-          // `independent`; `{ max: 1 }` is its serialized shape.
-          // `overrides.capabilities` is forwarded into `createPostgresBackend`
-          // itself — applied at construction, before this connection's
-          // write-fence target and derived `unitOfWork` are resolved — for a
-          // test that needs a real second connection declaring a non-default
-          // write fence.
-          createSerializedBackend: (overrides) => {
-            const serializedSql = postgres(TEST_DATABASE_URL, { max: 1 });
-            return Promise.resolve({
-              backend: createPostgresBackend(drizzle(serializedSql), {
-                ...(overrides?.capabilities === undefined ?
-                  {}
-                : { capabilities: overrides.capabilities }),
-                schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
-              }),
-              close: () => serializedSql.end(),
-            });
-          },
-        };
-      },
-      {
-        createIsolatedBackend: async () => {
-          const { backend } = await createLocalPgliteBackend();
-          return { backend, cleanup: () => backend.close() };
-        },
-        // A real `postgres-js` client against a real, provisioned
-        // PostgreSQL server: two `createSerializedBackend()` handles are
-        // genuinely independent physical connections.
-        serverLaneConcurrency: true,
-      },
     );
   });
 });

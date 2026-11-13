@@ -82,18 +82,19 @@ before returning the engine to the pool. The file's `afterAll` closes the pool.
 Keep this lifecycle when adding cases to these suites.
 
 The PGlite integration suite also uses this pool for physically isolated merge
-branches and review targets. Its primary fixture still shares one engine and
-resets data before each test; serialized-backend tests intentionally use that
-primary engine. Isolated fixtures are released by the shared integration suite's
-cleanup hook, and the file closes both the primary engine and pool at completion.
+branches and review targets. Each of its slice files still shares one primary
+engine across its tests and resets data before each test; serialized-backend
+tests intentionally use that primary engine. Isolated fixtures are released by
+the shared integration suite's cleanup hook, and each slice file closes both its
+primary engine and its pool at completion.
 
-The libSQL adapter and integration suite uses temporary database files. CI sets
+The libSQL adapter and integration suites use temporary database files. CI sets
 `TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
 disposable files on the Linux runner's RAM-backed filesystem. This preserves
 file-client behavior, close/reopen persistence, and default journal/synchronous
 settings while avoiding variable disk flush latency. Locally the suite defaults
 to the OS temporary directory; the override must name an existing directory.
-It affects only this suite's database files, not other tools' temporary files.
+It affects only these suites' database files, not other tools' temporary files.
 
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
@@ -102,6 +103,46 @@ import { createAdapterTestSuite } from "./adapter-test-suite";
 
 createAdapterTestSuite("SQLite", () => createTestBackend());
 ```
+
+The **shared integration suite** (`integration-test-suite.ts`) runs the
+cross-backend query, write, and merge cases registered under
+`tests/backends/integration/`. Vitest parallelizes and shards by file, so each
+backend lane registers the suite from several slice files rather than one:
+
+| Lane | Slice files | Shared setup |
+| --- | --- | --- |
+| better-sqlite3 | `sqlite/sqlite-integration-slice-{0,1}.test.ts` | `sqlite/sqlite-integration-lane.ts` |
+| libSQL | `sqlite/libsql-integration-slice-{0..3}.test.ts` | `sqlite/libsql-integration-lane.ts` |
+| PGlite | `postgres/pglite-integration-slice-{0..3}.test.ts` | `postgres/pglite-integration-lane.ts` |
+| node-postgres | `postgres/postgres-integration-slice-{0..3}.test.ts` | `postgres/postgres-integration-lane.ts` |
+| postgres-js | `postgres/postgres-js-integration-slice-{0..3}.test.ts` | `postgres/postgres-js-integration-lane.ts` |
+
+A slice file only states `slice: { index, count }`; the lane module owns the
+backend factories and lifecycle hooks, so every slice of a lane is set up
+identically. Each slice file is its own worker and therefore owns its own
+engine, pool, temporary files, or provisioned PostgreSQL database.
+
+`tests/backends/integration-registrations.ts` is the single list of what the
+suite contains. To add a sub-suite, export its `register…` function from
+`tests/backends/integration/index.ts` and add one `{ register }` entry to
+`INTEGRATION_REGISTRATIONS`. It is assigned to a slice automatically: the
+slicer packs registrations heaviest-first into the lightest slice, using each
+entry's optional `weight` (measured share of suite wall time) and a default for
+entries without one. Weights only affect balance, never coverage, so they need
+no upkeep; re-measure them only when one slice of a lane becomes a clear long
+pole. `tests/integration-suite-slices.test.ts` fails when a lane's slice files
+do not cover indexes `0..count-1` exactly once or when the slices of a lane do
+not add up to the full registration list.
+
+Because a registration can move to a different slice file when the list, a
+weight, or a slice count changes, shared suites must not call
+`toMatchSnapshot()`, which keys its snapshot to the running test file. Record a
+per-dialect expectation with `toMatchFileSnapshot()` and a path beside the
+suite instead (see `capability-bundle-no-throw.ts`); the same guard enforces
+this.
+
+To change a lane's slice count, add or remove slice files and state the new
+`count` in every slice file of that lane.
 
 ### Oracle suites
 

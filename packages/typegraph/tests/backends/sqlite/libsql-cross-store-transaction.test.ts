@@ -8,7 +8,7 @@
  *
  * libsql opens transactions on a separate connection, so in-memory
  * databases break (tursodatabase/libsql-client-ts#229) — use a temp
- * file, mirroring `libsql-backend.test.ts`.
+ * file, mirroring `libsql-temporary-database.ts`.
  */
 import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";

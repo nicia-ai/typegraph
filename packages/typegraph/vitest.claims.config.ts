@@ -13,7 +13,8 @@ import baseConfig from "./vitest.config";
  *
  *  - the cross-backend integration suite on SQLite, where every claim behavior
  *    test lives (`tests/backends/integration/**`, registered through
- *    `createIntegrationTestSuite`). The libSQL and PGlite runs of that same
+ *    `createIntegrationTestSuite` by the lane's
+ *    `sqlite-integration-slice-*.test.ts` files). The libSQL and PGlite runs of that same
  *    suite are omitted: they assert the same cases through another driver, so
  *    they would multiply the run without killing a mutant the SQLite run
  *    misses;
@@ -35,6 +36,7 @@ export default defineConfig({
     globals: false,
     include: [
       "tests/backends/sqlite/sqlite-backend.test.ts",
+      "tests/backends/sqlite/sqlite-integration-slice-*.test.ts",
       // The moved removal builders (`buildHardDeleteUniquesByConcreteKind`,
       // `buildHardDeleteEdgeClaimsByEdgeKind`,
       // `buildHardDeleteEdgeClaimsByNodeKind`) and `claimOwnerMatchesSql`'s
