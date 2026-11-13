@@ -1,12 +1,11 @@
 /**
  * Records per-file test durations for the duration-balanced shard split
- * (`vitest.shard-sequencer.ts`) from a vitest JSON report of a full lane run:
+ * (`vitest.shard-sequencer.ts`) from the vitest JSON reports of one full lane
+ * run — one report per shard job, which CI uploads as `shard-durations-*`
+ * artifacts:
  *
- *   pnpm exec vitest run --reporter=json --outputFile=report.json
- *   node --import tsx scripts/update-shard-weights.ts sqlite report.json
- *
- *   pnpm test:postgres --reporter=json --outputFile=report.json
- *   node --import tsx scripts/update-shard-weights.ts postgres report.json
+ *   gh run download <run-id> --pattern 'shard-durations-sqlite-*' --dir durations/sqlite
+ *   node --import tsx scripts/update-shard-weights.ts sqlite durations/sqlite/*\/*.json
  *
  * The lane's recorded weights are replaced, not merged, so a deleted test
  * file drops out. Stale weights cost balance, never coverage: the split
@@ -35,36 +34,58 @@ const PACKAGE_ROOT = path.resolve(
   "..",
 );
 const USAGE =
-  "Usage: update-shard-weights.ts <sqlite|postgres> <vitest-json-report>";
+  "Usage: update-shard-weights.ts <sqlite|postgres> <vitest-json-report>...";
+
+/**
+ * The package directory as it appears inside any checkout's absolute path. A
+ * report names files by the absolute path of the machine that ran them, so a
+ * CI report cannot be resolved against this checkout's root.
+ */
+const PACKAGE_PATH_MARKER = `/${path.basename(path.dirname(PACKAGE_ROOT))}/${path.basename(PACKAGE_ROOT)}/`;
+
+function packageRelativePath(reportedPath: string): string {
+  const normalized = reportedPath.split(path.sep).join("/");
+  const markerStart = normalized.lastIndexOf(PACKAGE_PATH_MARKER);
+  if (markerStart === -1) {
+    throw new Error(
+      `Report path ${reportedPath} is not under ${PACKAGE_PATH_MARKER}.`,
+    );
+  }
+  return normalized.slice(markerStart + PACKAGE_PATH_MARKER.length);
+}
 
 function isLane(value: string | undefined): value is ShardWeightLane {
   return value === "sqlite" || value === "postgres";
 }
 
-function weightsFromReport(report: JsonReport): ShardWeights {
-  const entries = report.testResults.map(
-    (file) =>
-      [
-        path.relative(PACKAGE_ROOT, file.name).split(path.sep).join("/"),
-        Math.max(0, Math.round(file.endTime - file.startTime)),
-      ] as const,
-  );
+function weightsFromReports(reports: readonly JsonReport[]): ShardWeights {
+  const entries = reports
+    .flatMap((report) => report.testResults)
+    .map(
+      (file) =>
+        [
+          packageRelativePath(file.name),
+          Math.max(0, Math.round(file.endTime - file.startTime)),
+        ] as const,
+    );
   return Object.fromEntries(
     entries.toSorted(([left], [right]) => (left < right ? -1 : 1)),
   );
 }
 
 function main(): void {
-  const [lane, reportPath] = process.argv.slice(2);
-  if (!isLane(lane) || reportPath === undefined) {
+  const [lane, ...reportPaths] = process.argv.slice(2);
+  if (!isLane(lane) || reportPaths.length === 0) {
     throw new Error(USAGE);
   }
 
-  const report = JSON.parse(readFileSync(reportPath, "utf8")) as JsonReport;
+  const reports = reportPaths.map(
+    (reportPath) => JSON.parse(readFileSync(reportPath, "utf8")) as JsonReport,
+  );
   const recorded = JSON.parse(
     readFileSync(SHARD_WEIGHTS_FILE, "utf8"),
   ) as Record<ShardWeightLane, ShardWeights>;
-  const weights = weightsFromReport(report);
+  const weights = weightsFromReports(reports);
   writeFileSync(
     SHARD_WEIGHTS_FILE,
     `${JSON.stringify({ ...recorded, [lane]: weights }, undefined, 2)}\n`,

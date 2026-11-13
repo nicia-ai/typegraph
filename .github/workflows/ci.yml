@@ -209,14 +209,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: "1/4"
+          - shard: "1/5"
             artifact: coverage-blob-1
-          - shard: "2/4"
+          - shard: "2/5"
             artifact: coverage-blob-2
-          - shard: "3/4"
+          - shard: "3/5"
             artifact: coverage-blob-3
-          - shard: "4/4"
+          - shard: "4/5"
             artifact: coverage-blob-4
+          - shard: "5/5"
+            artifact: coverage-blob-5
     steps:
       - uses: actions/checkout@v7
 
@@ -244,6 +246,8 @@ jobs:
           --reporter=default
           --reporter=blob
           --outputFile.blob=.vitest-reports/blob-${{ matrix.artifact }}.json
+          --reporter=json
+          --outputFile.json=.vitest-durations/${{ matrix.artifact }}.json
           --coverage.thresholds.branches=0
           --coverage.thresholds.functions=0
           --coverage.thresholds.lines=0
@@ -255,6 +259,17 @@ jobs:
           name: ${{ matrix.artifact }}
           path: packages/typegraph/.vitest-reports/*.json
           if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+
+      # Per-file durations, the input `scripts/update-shard-weights.ts` records
+      # the shard split's weights from (docs/TESTING.md, "Shard balance").
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-sqlite-${{ matrix.artifact }}
+          path: packages/typegraph/.vitest-durations/*.json
           include-hidden-files: true
           overwrite: true
 
@@ -415,7 +430,10 @@ jobs:
           fi
 
       - name: Run PostgreSQL integration tests
-        run: pnpm --filter @nicia-ai/typegraph test:postgres
+        run: >-
+          pnpm --filter @nicia-ai/typegraph test:postgres
+          --reporter=json
+          --outputFile.json=.vitest-durations/postgres.json
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
@@ -425,6 +443,15 @@ jobs:
           # raised max_connections to 400 in the step above, so it states the
           # cap that budget affords (the runners have 4 cores).
           TYPEGRAPH_PG_MAX_WORKERS: 4
+
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-postgres-${{ strategy.job-index }}
+          path: packages/typegraph/.vitest-durations/*.json
+          include-hidden-files: true
+          overwrite: true
 
       - name: Run PostgreSQL perf sanity
         if: ${{ matrix.shard == '1/3' }}

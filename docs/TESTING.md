@@ -543,7 +543,7 @@ only SQLite unit/property tests). The jobs are:
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
 | **Test (SQLite)** | Five `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
-| **Test (Coverage)** | Four V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
+| **Test (Coverage)** | Five V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
 | **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3; packed-consumer checks against 7.0.2 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
@@ -572,17 +572,22 @@ The split depends only on the file list, the recorded weights, and the shard
 count, so the jobs of one commit agree on it; `tests/shard-sequencer.test.ts`
 checks that the shards add up to every test file exactly once. A file with no
 recorded duration is placed at the mean, so adding a test file needs no
-bookkeeping. Stale weights cost balance, never coverage. Refresh them when a
-shard drifts well above the others:
+bookkeeping. Stale weights cost balance, never coverage.
+
+Durations are recorded from CI, since a runner's relative file costs differ
+from a workstation's (server-backed suites share the runner's cores with the
+PostgreSQL service). The coverage and PostgreSQL jobs upload a JSON report per
+shard as `shard-durations-*` artifacts. Refresh the weights from a green run
+when a shard drifts well above the others:
 
 ```bash
 cd packages/typegraph
 
-pnpm exec vitest run --reporter=json --outputFile=report.json
-node --import tsx scripts/update-shard-weights.ts sqlite report.json
+gh run download <run-id> --pattern 'shard-durations-sqlite-*' --dir durations/sqlite
+node --import tsx scripts/update-shard-weights.ts sqlite durations/sqlite/*/*.json
 
-pnpm test:postgres --reporter=json --outputFile=report.json
-node --import tsx scripts/update-shard-weights.ts postgres report.json
+gh run download <run-id> --pattern 'shard-durations-postgres-*' --dir durations/postgres
+node --import tsx scripts/update-shard-weights.ts postgres durations/postgres/*/*.json
 ```
 
 ## Type-level consumer contracts
