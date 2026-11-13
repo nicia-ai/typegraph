@@ -24,7 +24,7 @@ permissions:
 jobs:
   deploy:
     name: Deploy to Cloudflare
-    runs-on: latchkey-small
+    runs-on: latchkey-large
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
