@@ -98,10 +98,16 @@ describe("CI workflow contract", () => {
     rmSync(fixtureDirectory, { force: true, recursive: true });
   });
 
-  it("runs four coverage shards with timeout headroom", () => {
+  it("runs five coverage shards with timeout headroom", () => {
     const workflow = readFileSync(WORKFLOW_PATH, "utf8");
 
-    for (const [index, shard] of ["1/4", "2/4", "3/4", "4/4"].entries()) {
+    for (const [index, shard] of [
+      "1/5",
+      "2/5",
+      "3/5",
+      "4/5",
+      "5/5",
+    ].entries()) {
       expect(workflow).toContain(`shard: "${shard}"`);
       expect(workflow).toContain(`artifact: coverage-blob-${index + 1}`);
     }
