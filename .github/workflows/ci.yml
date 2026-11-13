@@ -123,6 +123,11 @@ jobs:
       - name: Run unit tests
         env:
           TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: pnpm turbo run test:unit -- --shard=${{ matrix.shard }}
 
   test-sqlite-property:
@@ -228,6 +233,11 @@ jobs:
       - name: Run coverage shard
         env:
           TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: >-
           pnpm --filter @nicia-ai/typegraph exec vitest run --coverage
           --shard=${{ matrix.shard }}
