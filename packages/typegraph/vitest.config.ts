@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 
 import { PGLITE_GLOBS } from "./vitest.pglite-project";
+import { DurationBalancedSequencer } from "./vitest.shard-sequencer";
 
 /**
  * Test globs for the graph-merge subsystem. These suites exercise an in-process
@@ -110,6 +111,8 @@ export default defineConfig({
   },
   test: {
     globals: false,
+    // `--shard` splits by recorded duration, not by vitest's path hash.
+    sequence: { sequencer: DurationBalancedSequencer },
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "json-summary"],

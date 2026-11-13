@@ -12,6 +12,7 @@
  * `tests/integration-suite-slices.test.ts` fails if any registration is ever
  * dropped or duplicated across a lane's slices.
  */
+import { assignBalancedBins } from "../balanced-partition";
 import {
   registerAdoptedEvolutionConcurrencyTests,
   registerAdoptedEvolutionIntegrationTests,
@@ -296,11 +297,10 @@ function assertValidSlice(slice: IntegrationSuiteSlice): void {
 /**
  * The registrations slice `slice.index` of `slice.count` runs, in suite order.
  *
- * Longest-processing-time bin packing: registrations are placed heaviest
- * first, each into the currently lightest slice (ties go to the earlier
- * registration and the lower slice index), so the result depends only on the
- * registration list and `count`. Every registration lands in exactly one
- * slice, and a newly added one is placed like any other.
+ * Slices are balanced by weight through {@link assignBalancedBins}, so the
+ * result depends only on the registration list and `count`. Every
+ * registration lands in exactly one slice, and a newly added one is placed
+ * like any other.
  */
 export function selectIntegrationRegistrations(
   slice: IntegrationSuiteSlice,
@@ -308,25 +308,13 @@ export function selectIntegrationRegistrations(
 ): readonly IntegrationRegistration[] {
   assertValidSlice(slice);
 
-  const weighted = registrations.map((registration, position) => ({
-    registration,
-    position,
-    weight: registration.weight ?? DEFAULT_REGISTRATION_WEIGHT,
-  }));
-  const heaviestFirst = weighted.toSorted(
-    (left, right) =>
-      right.weight - left.weight || left.position - right.position,
+  const bins = assignBalancedBins(
+    registrations.map(
+      (registration) => registration.weight ?? DEFAULT_REGISTRATION_WEIGHT,
+    ),
+    slice.count,
   );
-
-  const sliceLoads = Array.from({ length: slice.count }, () => 0);
-  const selected: (typeof weighted)[number][] = [];
-  for (const entry of heaviestFirst) {
-    const lightestSlice = sliceLoads.indexOf(Math.min(...sliceLoads));
-    sliceLoads[lightestSlice] = (sliceLoads[lightestSlice] ?? 0) + entry.weight;
-    if (lightestSlice === slice.index) selected.push(entry);
-  }
-
-  return selected
-    .toSorted((left, right) => left.position - right.position)
-    .map((entry) => entry.registration);
+  return registrations.filter(
+    (_registration, position) => bins[position] === slice.index,
+  );
 }

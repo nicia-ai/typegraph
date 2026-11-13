@@ -559,6 +559,32 @@ typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
 
+### Shard balance
+
+The sharded jobs split test files by recorded duration, not by Vitest's default
+path hash, which evens out file counts and leaves one shard several times
+slower than another. `vitest.shard-sequencer.ts` assigns each file to a shard
+from the durations in `vitest.shard-weights.json`, which holds one map per lane
+(`sqlite` for the default lanes, `postgres` when `POSTGRES_URL` is set, since a
+suite with a server leg costs far more there).
+
+The split depends only on the file list, the recorded weights, and the shard
+count, so the jobs of one commit agree on it; `tests/shard-sequencer.test.ts`
+checks that the shards add up to every test file exactly once. A file with no
+recorded duration is placed at the mean, so adding a test file needs no
+bookkeeping. Stale weights cost balance, never coverage. Refresh them when a
+shard drifts well above the others:
+
+```bash
+cd packages/typegraph
+
+pnpm exec vitest run --reporter=json --outputFile=report.json
+node --import tsx scripts/update-shard-weights.ts sqlite report.json
+
+pnpm test:postgres --reporter=json --outputFile=report.json
+node --import tsx scripts/update-shard-weights.ts postgres report.json
+```
+
 ## Type-level consumer contracts
 
 Runtime and property tests execute transpiled JavaScript. They cannot establish
