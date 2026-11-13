@@ -214,6 +214,14 @@ type ConformanceStatement = Readonly<{
 }>;
 
 /**
+ * Each case that calls `createConformancePostgresFixture` boots an in-process
+ * PGlite, up to four in one test. On the server lanes those cases run in the
+ * default project, whose budget is sized for statements against a running
+ * server, not for WASM Postgres boots under file-parallel load.
+ */
+const PGLITE_FIXTURE_TIMEOUT_MS = 60_000;
+
+/**
  * A real, in-process PostgreSQL-dialect connection (PGlite, no Docker), built
  * from the one shared capture primitive
  * (`tests/lock-fence-test-utils.ts`'s `createLoggedPgliteClient`) rather than
@@ -385,229 +393,251 @@ export function registerWriteFenceConformanceIntegrationTests(
       await expect(attempt).resolves.toBeUndefined();
     });
 
-    it('derived PostgreSQL profile {advisory, quiescent}: resolves "quiescent" and the drain site takes no table lock', async (ctx) => {
-      if (context.getBackend().dialect !== "postgres") {
-        ctx.skip();
-        return;
-      }
-      const fixture = await createConformancePostgresFixture();
-      try {
-        const backend = createSqlBackend(
-          deriveWriteFenceProfile(fixture.profile, {
-            mechanism: "advisory",
-            drain: "quiescent",
-          }),
-        );
-        expect(resolveWriteFencePlan(backend)).toEqual(
-          expect.objectContaining({
-            kind: "lock",
-            drain: "quiescent",
-          }),
-        );
-
-        fixture.statements.splice(0);
-        const schema = createSqlSchema();
-        await backend.transaction((tx) =>
-          lockIdentityEnablementNodes(tx, schema),
-        );
-        expect(capturedLockTableStatement(fixture.statements)).toBe(false);
-      } finally {
-        await fixture.close();
-      }
-    });
-
-    it('derived PostgreSQL profile {caller-serialized}: resolves "caller-serialized" and the drain site takes no statement', async (ctx) => {
-      if (context.getBackend().dialect !== "postgres") {
-        ctx.skip();
-        return;
-      }
-      const fixture = await createConformancePostgresFixture();
-      try {
-        const backend = createSqlBackend(
-          deriveWriteFenceProfile(fixture.profile, {
-            mechanism: "caller-serialized",
-          }),
-        );
-        expect(resolveWriteFencePlan(backend)).toEqual({
-          kind: "caller-serialized",
-        });
-
-        fixture.statements.splice(0);
-        const schema = createSqlSchema();
-        await backend.transaction((tx) =>
-          lockIdentityEnablementNodes(tx, schema),
-        );
-        expect(
-          fixture.statements.some(
-            (statement) =>
-              statement.query.includes("LOCK TABLE") ||
-              statement.query.includes("pg_advisory"),
-          ),
-        ).toBe(false);
-      } finally {
-        await fixture.close();
-      }
-    });
-
-    it('derived PostgreSQL profile {advisory, none}: resolves "none" and the drain site refuses, naming the drain', async (ctx) => {
-      if (context.getBackend().dialect !== "postgres") {
-        ctx.skip();
-        return;
-      }
-      const fixture = await createConformancePostgresFixture();
-      try {
-        const backend = createSqlBackend(
-          deriveWriteFenceProfile(fixture.profile, {
-            mechanism: "advisory",
-            drain: "none",
-          }),
-        );
-        expect(resolveWriteFencePlan(backend)).toEqual(
-          expect.objectContaining({
-            kind: "lock",
-            drain: "none",
-          }),
-        );
-
-        const schema = createSqlSchema();
-        await expect(
-          backend.transaction((tx) => lockIdentityEnablementNodes(tx, schema)),
-        ).rejects.toEqual(
-          expect.objectContaining({
-            details: expect.objectContaining({
-              code: "WRITE_FENCE_UNAVAILABLE",
-            }) as unknown,
-          }),
-        );
-      } finally {
-        await fixture.close();
-      }
-    });
-
-    it("the session's real isolation reaches the coordination token for every advisory-mechanism config, and never for caller-serialized", async (ctx) => {
-      if (context.getBackend().dialect !== "postgres") {
-        ctx.skip();
-        return;
-      }
-      const advisoryDrains: readonly Extract<
-        WriteFenceDeclaration,
-        { mechanism: "advisory" }
-      >["drain"][] = ["table-lock", "quiescent", "none"];
-      for (const drain of advisoryDrains) {
+    it(
+      'derived PostgreSQL profile {advisory, quiescent}: resolves "quiescent" and the drain site takes no table lock',
+      { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+      async (ctx) => {
+        if (context.getBackend().dialect !== "postgres") {
+          ctx.skip();
+          return;
+        }
         const fixture = await createConformancePostgresFixture();
         try {
           const backend = createSqlBackend(
             deriveWriteFenceProfile(fixture.profile, {
               mechanism: "advisory",
-              drain,
+              drain: "quiescent",
             }),
           );
-          const graphId = `write-fence-conformance-${generateId()}`;
-          await backend.transaction(async (tx) => {
-            const lock = await lockRecordedGraphWrite(tx, graphId);
-            const coordination = requireDefined(
-              lock.coordination,
-              "an advisory-mechanism lock always mints coordination",
+          expect(resolveWriteFencePlan(backend)).toEqual(
+            expect.objectContaining({
+              kind: "lock",
+              drain: "quiescent",
+            }),
+          );
+
+          fixture.statements.splice(0);
+          const schema = createSqlSchema();
+          await backend.transaction((tx) =>
+            lockIdentityEnablementNodes(tx, schema),
+          );
+          expect(capturedLockTableStatement(fixture.statements)).toBe(false);
+        } finally {
+          await fixture.close();
+        }
+      },
+    );
+
+    it(
+      'derived PostgreSQL profile {caller-serialized}: resolves "caller-serialized" and the drain site takes no statement',
+      { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+      async (ctx) => {
+        if (context.getBackend().dialect !== "postgres") {
+          ctx.skip();
+          return;
+        }
+        const fixture = await createConformancePostgresFixture();
+        try {
+          const backend = createSqlBackend(
+            deriveWriteFenceProfile(fixture.profile, {
+              mechanism: "caller-serialized",
+            }),
+          );
+          expect(resolveWriteFencePlan(backend)).toEqual({
+            kind: "caller-serialized",
+          });
+
+          fixture.statements.splice(0);
+          const schema = createSqlSchema();
+          await backend.transaction((tx) =>
+            lockIdentityEnablementNodes(tx, schema),
+          );
+          expect(
+            fixture.statements.some(
+              (statement) =>
+                statement.query.includes("LOCK TABLE") ||
+                statement.query.includes("pg_advisory"),
+            ),
+          ).toBe(false);
+        } finally {
+          await fixture.close();
+        }
+      },
+    );
+
+    it(
+      'derived PostgreSQL profile {advisory, none}: resolves "none" and the drain site refuses, naming the drain',
+      { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+      async (ctx) => {
+        if (context.getBackend().dialect !== "postgres") {
+          ctx.skip();
+          return;
+        }
+        const fixture = await createConformancePostgresFixture();
+        try {
+          const backend = createSqlBackend(
+            deriveWriteFenceProfile(fixture.profile, {
+              mechanism: "advisory",
+              drain: "none",
+            }),
+          );
+          expect(resolveWriteFencePlan(backend)).toEqual(
+            expect.objectContaining({
+              kind: "lock",
+              drain: "none",
+            }),
+          );
+
+          const schema = createSqlSchema();
+          await expect(
+            backend.transaction((tx) =>
+              lockIdentityEnablementNodes(tx, schema),
+            ),
+          ).rejects.toEqual(
+            expect.objectContaining({
+              details: expect.objectContaining({
+                code: "WRITE_FENCE_UNAVAILABLE",
+              }) as unknown,
+            }),
+          );
+        } finally {
+          await fixture.close();
+        }
+      },
+    );
+
+    it(
+      "the session's real isolation reaches the coordination token for every advisory-mechanism config, and never for caller-serialized",
+      { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+      async (ctx) => {
+        if (context.getBackend().dialect !== "postgres") {
+          ctx.skip();
+          return;
+        }
+        const advisoryDrains: readonly Extract<
+          WriteFenceDeclaration,
+          { mechanism: "advisory" }
+        >["drain"][] = ["table-lock", "quiescent", "none"];
+        for (const drain of advisoryDrains) {
+          const fixture = await createConformancePostgresFixture();
+          try {
+            const backend = createSqlBackend(
+              deriveWriteFenceProfile(fixture.profile, {
+                mechanism: "advisory",
+                drain,
+              }),
             );
-            expect(
-              graphCommandCoordinationAcquisition(
-                tx.commands,
-                coordination,
-                graphId,
-              ).isolation,
-            ).toBe("read_committed");
+            const graphId = `write-fence-conformance-${generateId()}`;
+            await backend.transaction(async (tx) => {
+              const lock = await lockRecordedGraphWrite(tx, graphId);
+              const coordination = requireDefined(
+                lock.coordination,
+                "an advisory-mechanism lock always mints coordination",
+              );
+              expect(
+                graphCommandCoordinationAcquisition(
+                  tx.commands,
+                  coordination,
+                  graphId,
+                ).isolation,
+              ).toBe("read_committed");
+            });
+          } finally {
+            await fixture.close();
+          }
+        }
+
+        const fixture = await createConformancePostgresFixture();
+        try {
+          const backend = createSqlBackend(
+            deriveWriteFenceProfile(fixture.profile, {
+              mechanism: "caller-serialized",
+            }),
+          );
+          await backend.transaction(async (tx) => {
+            const lock = await lockRecordedGraphWrite(
+              tx,
+              `write-fence-conformance-${generateId()}`,
+            );
+            // No key was ever acquired, so there is nothing to certify: a
+            // caller-serialized mechanism never mints a coordination token.
+            expect(lock.coordination).toBeUndefined();
           });
         } finally {
           await fixture.close();
         }
-      }
+      },
+    );
 
-      const fixture = await createConformancePostgresFixture();
-      try {
-        const backend = createSqlBackend(
-          deriveWriteFenceProfile(fixture.profile, {
-            mechanism: "caller-serialized",
-          }),
-        );
-        await backend.transaction(async (tx) => {
-          const lock = await lockRecordedGraphWrite(
-            tx,
-            `write-fence-conformance-${generateId()}`,
-          );
-          // No key was ever acquired, so there is nothing to certify: a
-          // caller-serialized mechanism never mints a coordination token.
-          expect(lock.coordination).toBeUndefined();
-        });
-      } finally {
-        await fixture.close();
-      }
-    });
+    it(
+      "a target with no isolationFactExpression refuses at construction, and an uncertified coordination refuses convergence",
+      { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+      async (ctx) => {
+        if (context.getBackend().dialect !== "postgres") {
+          ctx.skip();
+          return;
+        }
+        const fixture = await createConformancePostgresFixture();
+        try {
+          const incompleteFenceSql = {
+            advisoryLockExpression: postgresFenceSql.advisoryLockExpression,
+            lockTables: postgresFenceSql.lockTables,
+          } as unknown as FenceSql;
 
-    it("a target with no isolationFactExpression refuses at construction, and an uncertified coordination refuses convergence", async (ctx) => {
-      if (context.getBackend().dialect !== "postgres") {
-        ctx.skip();
-        return;
-      }
-      const fixture = await createConformancePostgresFixture();
-      try {
-        const incompleteFenceSql = {
-          advisoryLockExpression: postgresFenceSql.advisoryLockExpression,
-          lockTables: postgresFenceSql.lockTables,
-        } as unknown as FenceSql;
-
-        // `createSqlBackend` resolves the write-fence plan eagerly at
-        // construction (the same gate that lets both bundled factories
-        // refuse an incomplete `fenceSql` before a caller can reach it), so
-        // this declaration never produces a usable backend to test
-        // `lockRecordedGraphWrite` against — the refusal is synchronous,
-        // right here.
-        expect(() =>
-          createSqlBackend(
-            deriveWriteFenceProfile(
-              fixture.profile,
-              { mechanism: "advisory", drain: "table-lock" },
-              incompleteFenceSql,
+          // `createSqlBackend` resolves the write-fence plan eagerly at
+          // construction (the same gate that lets both bundled factories
+          // refuse an incomplete `fenceSql` before a caller can reach it), so
+          // this declaration never produces a usable backend to test
+          // `lockRecordedGraphWrite` against — the refusal is synchronous,
+          // right here.
+          expect(() =>
+            createSqlBackend(
+              deriveWriteFenceProfile(
+                fixture.profile,
+                { mechanism: "advisory", drain: "table-lock" },
+                incompleteFenceSql,
+              ),
             ),
-          ),
-        ).toThrow(
-          expect.objectContaining({
-            details: expect.objectContaining({
-              code: "WRITE_FENCE_SQL_UNAVAILABLE",
-              member: "isolationFactExpression",
-            }) as unknown,
-          }),
-        );
+          ).toThrow(
+            expect.objectContaining({
+              details: expect.objectContaining({
+                code: "WRITE_FENCE_SQL_UNAVAILABLE",
+                member: "isolationFactExpression",
+              }) as unknown,
+            }),
+          );
 
-        // A coordination that never had a real isolation fact read into it
-        // (exactly what the target above could never have produced, since it
-        // cannot even be constructed) fails match-key convergence's own gate
-        // the same way — the fact never reaches the token, so convergence
-        // never trusts it. Any working command port demonstrates the gate;
-        // this reuses the fixture's own default-declared backend rather than
-        // building a third one.
-        const backend = createSqlBackend(fixture.profile);
-        const uncertified = mintGraphCommandCoordination(
-          backend.commands,
-          "write-fence-conformance-uncertified",
-          { isolation: "unknown", fenceRow: "advanced" },
-        );
-        expect(() => {
-          assertGraphCommandConvergenceIsolation(
+          // A coordination that never had a real isolation fact read into it
+          // (exactly what the target above could never have produced, since it
+          // cannot even be constructed) fails match-key convergence's own gate
+          // the same way — the fact never reaches the token, so convergence
+          // never trusts it. Any working command port demonstrates the gate;
+          // this reuses the fixture's own default-declared backend rather than
+          // building a third one.
+          const backend = createSqlBackend(fixture.profile);
+          const uncertified = mintGraphCommandCoordination(
             backend.commands,
             "write-fence-conformance-uncertified",
-            uncertified,
+            { isolation: "unknown", fenceRow: "advanced" },
           );
-        }).toThrow(
-          expect.objectContaining({
-            details: expect.objectContaining({
-              code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
-            }) as unknown,
-          }),
-        );
-      } finally {
-        await fixture.close();
-      }
-    });
+          expect(() => {
+            assertGraphCommandConvergenceIsolation(
+              backend.commands,
+              "write-fence-conformance-uncertified",
+              uncertified,
+            );
+          }).toThrow(
+            expect.objectContaining({
+              details: expect.objectContaining({
+                code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+              }) as unknown,
+            }),
+          );
+        } finally {
+          await fixture.close();
+        }
+      },
+    );
 
     describe("server-lane concurrency (requires genuinely independent connections: a single process cannot demonstrate one session blocking another)", () => {
       it("a keyed advisory acquisition blocks a concurrent acquisition of the same key and then sees its commit, under every advisory-mechanism drain", async (ctx) => {
@@ -786,86 +816,90 @@ export function registerWriteFenceConformanceIntegrationTests(
     });
 
     describe("row mechanism: {row, quiescent, wait} and {row, quiescent, commit-time}", () => {
-      it('derived PostgreSQL profile {row, quiescent, wait} on PGlite: resolves "row"/"wait"; a read after re-acquiring a key observes the previous holder\'s commit (assertion 2), the drain site takes no table lock under "quiescent" (assertion 3), and the session\'s real isolation reaches the coordination token (assertion 4)', async (ctx) => {
-        if (context.getBackend().dialect !== "postgres") {
-          ctx.skip();
-          return;
-        }
-        const fixture = await createConformancePostgresFixture();
-        try {
-          const backend = createSqlBackend(
-            deriveWriteFenceProfile(
-              fixture.profile,
-              ROW_QUIESCENT_WAIT_WRITE_FENCE,
-            ),
-          );
-          expect(resolveWriteFencePlan(backend)).toEqual(
-            expect.objectContaining({
-              kind: "row",
-              drain: "quiescent",
-              conflict: "wait",
-            }),
-          );
-
-          // Assertion 2: a transaction that re-acquires the SAME key
-          // observes the write the previous holder already committed.
-          const graphId = `write-fence-conformance-row-${generateId()}`;
-          const nodeId = generateId();
-          const marker = generateId();
-          await backend.transaction(async (tx) => {
-            await lockIdentityGraph(tx, graphId);
-            await tx.execute(
-              asCompiledRowsSql(sql`
-                INSERT INTO typegraph_nodes
-                  (graph_id, kind, id, props, created_at, updated_at)
-                VALUES
-                  ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, ${JSON.stringify({ marker })}::jsonb, now(), now())
-              `),
+      it(
+        'derived PostgreSQL profile {row, quiescent, wait} on PGlite: resolves "row"/"wait"; a read after re-acquiring a key observes the previous holder\'s commit (assertion 2), the drain site takes no table lock under "quiescent" (assertion 3), and the session\'s real isolation reaches the coordination token (assertion 4)',
+        { timeout: PGLITE_FIXTURE_TIMEOUT_MS },
+        async (ctx) => {
+          if (context.getBackend().dialect !== "postgres") {
+            ctx.skip();
+            return;
+          }
+          const fixture = await createConformancePostgresFixture();
+          try {
+            const backend = createSqlBackend(
+              deriveWriteFenceProfile(
+                fixture.profile,
+                ROW_QUIESCENT_WAIT_WRITE_FENCE,
+              ),
             );
-          });
-          const observedMarker = await backend.transaction(async (tx) => {
-            await lockIdentityGraph(tx, graphId);
-            const rows = await tx.execute<{ props: { marker: string } }>(
-              asCompiledRowsSql(sql`
-                SELECT props FROM typegraph_nodes
-                WHERE graph_id = 'write-fence-conformance' AND id = ${nodeId}
-              `),
+            expect(resolveWriteFencePlan(backend)).toEqual(
+              expect.objectContaining({
+                kind: "row",
+                drain: "quiescent",
+                conflict: "wait",
+              }),
             );
-            return rows[0]?.props.marker;
-          });
-          expect(observedMarker).toBe(marker);
 
-          // Assertion 3: drain "quiescent" — a table-lock site takes no
-          // statement.
-          fixture.statements.splice(0);
-          const schema = createSqlSchema();
-          await backend.transaction((tx) =>
-            lockIdentityEnablementNodes(tx, schema),
-          );
-          expect(capturedLockTableStatement(fixture.statements)).toBe(false);
+            // Assertion 2: a transaction that re-acquires the SAME key
+            // observes the write the previous holder already committed.
+            const graphId = `write-fence-conformance-row-${generateId()}`;
+            const nodeId = generateId();
+            const marker = generateId();
+            await backend.transaction(async (tx) => {
+              await lockIdentityGraph(tx, graphId);
+              await tx.execute(
+                asCompiledRowsSql(sql`
+                  INSERT INTO typegraph_nodes
+                    (graph_id, kind, id, props, created_at, updated_at)
+                  VALUES
+                    ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, ${JSON.stringify({ marker })}::jsonb, now(), now())
+                `),
+              );
+            });
+            const observedMarker = await backend.transaction(async (tx) => {
+              await lockIdentityGraph(tx, graphId);
+              const rows = await tx.execute<{ props: { marker: string } }>(
+                asCompiledRowsSql(sql`
+                  SELECT props FROM typegraph_nodes
+                  WHERE graph_id = 'write-fence-conformance' AND id = ${nodeId}
+                `),
+              );
+              return rows[0]?.props.marker;
+            });
+            expect(observedMarker).toBe(marker);
 
-          // Assertion 4: the session's real isolation reaches the
-          // coordination token `lockRecordedGraphWrite` mints — the row
-          // mechanism's `isolationFactExpression` rides the SAME acquisition
-          // statement `postgresFenceSql` already supplies.
-          await backend.transaction(async (tx) => {
-            const lock = await lockRecordedGraphWrite(tx, graphId);
-            const coordination = requireDefined(
-              lock.coordination,
-              "a row-mechanism lock always mints coordination",
+            // Assertion 3: drain "quiescent" — a table-lock site takes no
+            // statement.
+            fixture.statements.splice(0);
+            const schema = createSqlSchema();
+            await backend.transaction((tx) =>
+              lockIdentityEnablementNodes(tx, schema),
             );
-            expect(
-              graphCommandCoordinationAcquisition(
-                tx.commands,
-                coordination,
-                graphId,
-              ).isolation,
-            ).toBe("read_committed");
-          });
-        } finally {
-          await fixture.close();
-        }
-      });
+            expect(capturedLockTableStatement(fixture.statements)).toBe(false);
+
+            // Assertion 4: the session's real isolation reaches the
+            // coordination token `lockRecordedGraphWrite` mints — the row
+            // mechanism's `isolationFactExpression` rides the SAME acquisition
+            // statement `postgresFenceSql` already supplies.
+            await backend.transaction(async (tx) => {
+              const lock = await lockRecordedGraphWrite(tx, graphId);
+              const coordination = requireDefined(
+                lock.coordination,
+                "a row-mechanism lock always mints coordination",
+              );
+              expect(
+                graphCommandCoordinationAcquisition(
+                  tx.commands,
+                  coordination,
+                  graphId,
+                ).isolation,
+              ).toBe("read_committed");
+            });
+          } finally {
+            await fixture.close();
+          }
+        },
+      );
 
       it('{row, quiescent, wait} on the server lane: resolves "row"/"wait" on a real connection; a read after re-acquiring a key observes the previous holder\'s commit (assertion 2), the drain site under "quiescent" resolves cleanly (assertion 3 — the "no LOCK TABLE statement" proof itself runs above, on PGlite, which supports statement capture), and the session\'s real isolation reaches the coordination token (assertion 4)', async (ctx) => {
         if (
