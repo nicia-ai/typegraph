@@ -28,7 +28,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success')
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -43,9 +43,23 @@ jobs:
           cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
+      - name: Restore pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        id: latchkey-cache-pnpm
+        with:
+          action: restore
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Save pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        if: steps.latchkey-cache-pnpm.outputs.cache-hit != 'true'
+        with:
+          action: save
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Smoke test npm tarball
         run: |
           pnpm --filter @nicia-ai/typegraph build

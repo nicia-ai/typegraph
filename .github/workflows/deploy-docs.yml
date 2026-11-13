@@ -24,7 +24,7 @@ permissions:
 jobs:
   deploy:
     name: Deploy to Cloudflare
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -36,6 +36,13 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Restore pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        id: latchkey-cache-pnpm
+        with:
+          action: restore
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -45,6 +52,13 @@ jobs:
       # invalidated. The first attempt warms node_modules/.vite, so a retry
       # clears it. The warning fires even on eventual success so the flake
       # frequency stays visible in run summaries.
+      - name: Save pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        if: steps.latchkey-cache-pnpm.outputs.cache-hit != 'true'
+        with:
+          action: save
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Build docs
         run: |
           for attempt in 1 2 3; do
