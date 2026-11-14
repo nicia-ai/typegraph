@@ -720,7 +720,8 @@ async function allocateRecordedCommitInternal(
     ClockRow & RevisionOriginRow & Readonly<{ has_origin: unknown }>
   >(
     asCompiledRowsSql(sql`
-      SELECT COALESCE(clock.revision, 0) AS revision, clock.recorded_at, origins.origin,
+      SELECT CASE WHEN clock.graph_id IS NULL THEN 0 ELSE clock.revision END AS revision,
+        clock.recorded_at, origins.origin,
         CASE WHEN origins.graph_id IS NULL THEN 0 ELSE 1 END AS has_origin
       FROM (SELECT 1) seed
       LEFT JOIN ${schema.recordedClockTable} clock ON clock.graph_id = ${graphId}

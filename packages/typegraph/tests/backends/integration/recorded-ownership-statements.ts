@@ -7,7 +7,13 @@ import type {
   TransactionBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
-import { type CompiledRowsSql } from "../../../src/query/sql-intent";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledStatementSql,
+  type CompiledRowsSql,
+} from "../../../src/query/sql-intent";
+import { advanceRevisionClock } from "../../../src/store/recorded-capture";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -153,6 +159,40 @@ export function registerRecordedOwnershipStatementIntegrationTests(
       expect(
         reads.some((read) => /SELECT\s+origin\s+FROM/u.test(read.sql)),
       ).toBe(false);
+    });
+
+    it("distinguishes an absent clock from a malformed persisted clock", async () => {
+      const writer = await context.createHistoryStore(integrationTestGraph);
+      await writer.allocationOwner();
+      const base = context.getBackend();
+      const schema = createSqlSchema({
+        ...base.tableNames,
+        recordedClock: "ownership_nullable_clock",
+      });
+      const statement = requireDefined(base.executeStatement);
+      await statement(
+        asCompiledStatementSql(
+          sql`CREATE TABLE ${schema.recordedClockTable} (graph_id TEXT PRIMARY KEY, revision BIGINT, recorded_at TEXT)`,
+        ),
+      );
+      try {
+        await statement(
+          asCompiledStatementSql(
+            sql`INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at) VALUES (${writer.graphId}, NULL, ${"2026-01-01T00:00:00.000Z"})`,
+          ),
+        );
+        await expect(
+          base.transaction((target) =>
+            advanceRevisionClock(target, schema, writer.graphId, false),
+          ),
+        ).rejects.toThrow(
+          "Recorded clock row contained an invalid revision or wall time",
+        );
+      } finally {
+        await statement(
+          asCompiledStatementSql(sql`DROP TABLE ${schema.recordedClockTable}`),
+        );
+      }
     });
 
     it("uses actual session isolation when a backend rewrites the requested snapshot", async () => {
