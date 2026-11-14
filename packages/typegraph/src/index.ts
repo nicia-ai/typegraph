@@ -436,6 +436,7 @@ export type {
 export {
   // Error classes
   BackendDisposedError,
+  BaseSchemaAdoptionTimeoutError,
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,

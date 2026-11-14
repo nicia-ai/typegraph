@@ -1205,12 +1205,21 @@ try {
 }
 ```
 
+### `BaseSchemaAdoptionTimeoutError`
+
+PostgreSQL raises this error when additive base-schema adoption cannot acquire the
+recorded clock's table lock within its bounded wait. `details.tableName` identifies
+the table and `details.waitBudgetMs` gives the maximum adoption wait. Its code is
+`BASE_SCHEMA_ADOPTION_TIMEOUT`; it has no graph ID or graph fence phase. The
+installation marker is not advanced. Retry privileged adoption after transactions
+using that table finish. A stricter caller `lock_timeout` remains effective.
+
 ### `BaseSchemaMigrationError`
 
-Recorded-instant lookup and pruning also raise this error when the version 9
-`anchor_retention` column is absent. In that refusal, `details.missingColumn`
-names the column and `details.installedVersion` is unknown: the failed read does
-not add a deployment-marker probe or guess the installed version.
+`pruneRecordedInstants` also raises this error when the installed base schema is
+older than version 9. Its backend lifecycle assertion reads the marker and reports
+the actual installed version. `resolveRecordedInstant` can read pre-v9 allocation
+logs without this assertion and treats absent retention metadata as unpruned storage.
 
 Thrown by zero-DDL verified and graph-template entry points when the
 deployment-wide physical TypeGraph schema has not been adopted to the version

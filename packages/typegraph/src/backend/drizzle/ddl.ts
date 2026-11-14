@@ -29,7 +29,10 @@ import {
   type GraphRelationKey,
   isGraphRelationKey,
 } from "../graph-relations";
-import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../recorded-storage";
+import {
+  RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+} from "../recorded-storage";
 import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
@@ -853,11 +856,18 @@ function planRecordedAnchorRetentionAdoption(
     : [recordedAnchorRetentionColumnDDL(tableName)];
 }
 
-/** Fail immediately instead of queueing ACCESS EXCLUSIVE behind captured writes. */
+/** Queue the additive ALTER briefly, preserving any stricter caller timeout. */
 export function postgresRecordedAnchorRetentionAdoptionDDL(
   tableName: string,
 ): string {
-  const body = `BEGIN LOCK TABLE ${quoteDdlIdentifier(tableName)} IN ACCESS EXCLUSIVE MODE NOWAIT; ${recordedAnchorRetentionColumnDDL(tableName, true)} END`;
+  const timeout = `${RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS}ms`;
+  const body = `DECLARE previous_timeout TEXT := current_setting('lock_timeout'); BEGIN
+    IF previous_timeout::interval = INTERVAL '0' OR previous_timeout::interval > '${timeout}'::interval THEN
+      PERFORM set_config('lock_timeout', '${timeout}', true);
+    END IF;
+    ${recordedAnchorRetentionColumnDDL(tableName, true)}
+    PERFORM set_config('lock_timeout', previous_timeout, true);
+  END`;
   return `DO E'${body.replaceAll("\\", "\\\\").replaceAll("'", "''")}';`;
 }
 

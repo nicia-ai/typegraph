@@ -1246,6 +1246,28 @@ export class BaseSchemaMigrationError extends TypeGraphError {
   }
 }
 
+/** Deployment-wide additive adoption could not acquire its table lock within the wait budget. */
+export class BaseSchemaAdoptionTimeoutError extends TypeGraphError {
+  declare readonly details: Readonly<{
+    tableName: string;
+    waitBudgetMs: number;
+  }>;
+  constructor(tableName: string, waitBudgetMs: number, cause?: unknown) {
+    super(
+      `Timed out adopting base-schema table ${tableName}.`,
+      "BASE_SCHEMA_ADOPTION_TIMEOUT",
+      {
+        category: "system",
+        details: { tableName, waitBudgetMs },
+        suggestion:
+          "Retry privileged base-schema adoption after transactions using this table have completed.",
+        cause,
+      },
+    );
+    this.name = "BaseSchemaAdoptionTimeoutError";
+  }
+}
+
 /**
  * Details for EagerMaterializationError.
  */
@@ -1461,42 +1483,29 @@ export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
 
 /** Identifies the graph, lock phase, and requested wait budget for a timeout. */
 export type SchemaFenceTimeoutErrorDetails = Readonly<{
-  /** Deployment-wide adoption uses the reserved scope @base-schema. */
   graphId: string;
-  baseSchemaTable?: string;
   phase: SchemaFencePhase;
   waitBudgetMs: number;
 }>;
 
-/** A graph schema fence or deployment-wide base-schema adoption exceeded its lock budget. */
+/** The caller-owned transaction could not acquire its schema fence in time. */
 export class SchemaFenceTimeoutError extends TypeGraphError {
   /** The graph and lock acquisition that exceeded the caller's budget. */
   declare readonly details: SchemaFenceTimeoutErrorDetails;
-
   constructor(
     graphId: string,
     phase: SchemaFencePhase,
     waitBudgetMs: number,
     cause?: unknown,
-    baseSchemaTable?: string,
   ) {
     super(
-      baseSchemaTable === undefined ?
-        `Timed out acquiring the schema fence for graph ${graphId}.`
-      : `Timed out adopting base-schema table ${baseSchemaTable}.`,
+      `Timed out acquiring the schema fence for graph ${graphId}.`,
       "SCHEMA_FENCE_TIMEOUT",
       {
         category: "system",
-        details: {
-          graphId,
-          phase,
-          waitBudgetMs,
-          ...(baseSchemaTable === undefined ? {} : { baseSchemaTable }),
-        },
+        details: { graphId, phase, waitBudgetMs },
         suggestion:
-          baseSchemaTable === undefined ?
-            "Roll back the complete caller transaction before retrying it."
-          : "Retry base-schema adoption after transactions using this table have completed.",
+          "Roll back the complete caller transaction before retrying it.",
         cause,
       },
     );

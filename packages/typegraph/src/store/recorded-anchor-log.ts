@@ -11,7 +11,11 @@ import {
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+  ValidationError,
+} from "../errors";
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
@@ -71,11 +75,11 @@ type RecordedAnchorRetentionState = Readonly<
 
 type RecordedAnchorSnapshot = Readonly<{
   origin: unknown;
-  revision: unknown;
-  recorded_at: unknown;
+  anchor_revision: unknown;
+  anchor_recorded_at: unknown;
   first_revision: unknown;
   first_recorded_at: unknown;
-  anchor_retention: unknown;
+  [RECORDED_ANCHOR_RETENTION_COLUMN]?: unknown;
 }>;
 
 async function readRecordedAnchorSnapshot(
@@ -85,6 +89,9 @@ async function readRecordedAnchorSnapshot(
   wallTime: string,
   surface: string,
 ): Promise<RecordedAnchorSnapshot | undefined> {
+  // Selecting the complete clock row keeps pre-v9 allocations readable without
+  // probing a marker or naming a column their storage does not have yet.
+  // Candidate coordinates have distinct aliases: the clock time may be timestamptz.
   const rows = await withRecordedRelationsPrecondition(
     target.execute<RecordedAnchorSnapshot>(
       asCompiledRowsSql(sql`
@@ -93,9 +100,9 @@ async function readRecordedAnchorSnapshot(
           WHERE ${recordedAnchorScope(schema, graphId)}
           ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
         )
-        SELECT origins.origin, candidate.revision, candidate.recorded_at,
-          first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at,
-          clock.${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)} AS anchor_retention
+        SELECT clock.*, origins.origin,
+          candidate.revision AS anchor_revision, candidate.recorded_at AS anchor_recorded_at,
+          first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at
         FROM ${schema.recordedClockTable} clock
         LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
         LEFT JOIN candidate ON candidate.origin=origins.origin
@@ -112,13 +119,16 @@ function retentionState(
   row: RecordedAnchorSnapshot,
   graphId: string,
 ): RecordedAnchorRetentionState | undefined {
-  if (row.anchor_retention === undefined || row.anchor_retention === null)
+  if (
+    row[RECORDED_ANCHOR_RETENTION_COLUMN] === undefined ||
+    row[RECORDED_ANCHOR_RETENTION_COLUMN] === null
+  )
     return undefined;
   try {
-    if (typeof row.anchor_retention !== "string")
+    if (typeof row[RECORDED_ANCHOR_RETENTION_COLUMN] !== "string")
       throw new TypeError("Expected serialized retention state");
     const state = RetentionStateSchema.parse(
-      JSON.parse(row.anchor_retention) as unknown,
+      JSON.parse(row[RECORDED_ANCHOR_RETENTION_COLUMN]) as unknown,
     );
     validateCanonicalIsoDate(state.loggedFrom, "loggedFrom");
     validateCanonicalIsoDate(state.prunedBefore, "prunedBefore");
@@ -167,12 +177,8 @@ export async function lookupRecordedAnchor(
   context: RecordedAnchorLogContext,
   wallTime: string,
 ): Promise<RecordedInstant | undefined> {
-  const assertStorage = requireRecordedAnchorLog(
-    context,
-    "resolveRecordedInstant",
-  );
+  requireRecordedAnchorLog(context, "resolveRecordedInstant");
   validateCanonicalIsoDate(wallTime, "wallTime");
-  await assertStorage();
   const { backend, schema, graphId } = context;
   const row = await readRecordedAnchorSnapshot(
     backend,
@@ -204,19 +210,23 @@ export async function lookupRecordedAnchor(
       },
     );
   if (
-    row.revision === undefined ||
-    row.revision === null ||
-    (state !== undefined && Number(row.revision) < state.retainedRevision)
+    row.anchor_revision === undefined ||
+    row.anchor_revision === null ||
+    (state !== undefined &&
+      Number(row.anchor_revision) < state.retainedRevision)
   )
     return historyNotLogged(graphId, wallTime);
-  if (typeof row.origin !== "string" || typeof row.recorded_at !== "string")
+  if (
+    typeof row.origin !== "string" ||
+    typeof row.anchor_recorded_at !== "string"
+  )
     throw new ConfigurationError(
       "Retained recorded anchor storage contains an invalid coordinate.",
       { graphId },
     );
   return createRecordedInstant(
-    Number(row.revision),
-    row.recorded_at,
+    Number(row.anchor_revision),
+    row.anchor_recorded_at,
     await recordedAnchorOwner(schema, row.origin),
   );
 }
@@ -239,14 +249,18 @@ export async function pruneRecordedAnchors(
   before: string,
   options: PruneRecordedInstantsOptions = {},
 ): Promise<PruneRecordedInstantsResult> {
-  const assertStorage = requireRecordedAnchorLog(
-    context,
-    "pruneRecordedInstants",
-  );
+  requireRecordedAnchorLog(context, "pruneRecordedInstants");
+  const { backend, schema, graphId } = context;
+  const assertStorage = backend.assertBaseSchemaCurrent;
+  if (assertStorage === undefined)
+    throw new UnsupportedBackendCapabilityError(
+      "pruneRecordedInstants",
+      "assertBaseSchemaCurrent",
+      { graphId, dialect: backend.dialect },
+    );
   validateCanonicalIsoDate(before, "before");
   const limit = pruneLimit(options);
   await assertStorage();
-  const { backend, schema, graphId } = context;
   return runRetriedUnit(
     {
       target: backend,
@@ -272,9 +286,9 @@ export async function pruneRecordedAnchors(
           };
         const previous = retentionState(row, graphId);
         const candidate =
-          row.revision === undefined || row.revision === null ?
+          row.anchor_revision === undefined || row.anchor_revision === null ?
             undefined
-          : Number(row.revision);
+          : Number(row.anchor_revision);
         if (candidate === undefined && previous === undefined)
           return {
             deletedCount: 0,
@@ -287,7 +301,9 @@ export async function pruneRecordedAnchors(
         const revision =
           advance ? candidate : requireDefined(previous).retainedRevision;
         const recordedAt =
-          advance ? row.recorded_at : requireDefined(previous).prunedBefore;
+          advance ?
+            row.anchor_recorded_at
+          : requireDefined(previous).prunedBefore;
         if (typeof row.origin !== "string" || typeof recordedAt !== "string")
           throw new ConfigurationError(
             "Recorded pruning has no valid allocation owner or boundary.",

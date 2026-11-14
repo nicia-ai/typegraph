@@ -322,7 +322,7 @@ export type {
 export type BackendCapabilities = Readonly<{
   /**
    * Retains TypeGraph allocation anchors atomically, with an indexed time lookup.
-   * Allocation-log operations also require assertBaseSchemaCurrent.
+   * Pruning also requires assertBaseSchemaCurrent; lookup reads pre-v9 storage.
    */
   recordedAnchorLookup?: boolean;
   /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */

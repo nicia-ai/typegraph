@@ -381,6 +381,16 @@ type BaseFieldAccessor<T = unknown> = Readonly<{
 }>;
 
 // @public
+export class BaseSchemaAdoptionTimeoutError extends TypeGraphError {
+    constructor(tableName: string, waitBudgetMs: number, cause?: unknown);
+    // (undocumented)
+    readonly details: Readonly<{
+        tableName: string;
+        waitBudgetMs: number;
+    }>;
+}
+
+// @public
 export class BaseSchemaMigrationError extends TypeGraphError {
     constructor(details: BaseSchemaMigrationErrorDetails, options?: Readonly<{
         cause?: unknown;
@@ -7910,14 +7920,13 @@ export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
 
 // @public
 export class SchemaFenceTimeoutError extends TypeGraphError {
-    constructor(graphId: string, phase: SchemaFencePhase, waitBudgetMs: number, cause?: unknown, baseSchemaTable?: string);
+    constructor(graphId: string, phase: SchemaFencePhase, waitBudgetMs: number, cause?: unknown);
     readonly details: SchemaFenceTimeoutErrorDetails;
 }
 
 // @public
 export type SchemaFenceTimeoutErrorDetails = Readonly<{
     graphId: string;
-    baseSchemaTable?: string;
     phase: SchemaFencePhase;
     waitBudgetMs: number;
 }>;

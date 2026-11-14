@@ -1565,7 +1565,7 @@ export function registerRecordedTimeIntegrationTests(
                       const rows = await target.execute<T>(query);
                       if (
                         requireDefined(base.compileSql)(query).sql.includes(
-                          'clock."anchor_retention"',
+                          "SELECT clock.*",
                         )
                       ) {
                         await advanceRevisionClock(
@@ -2002,7 +2002,7 @@ export function registerRecordedTimeIntegrationTests(
       });
     });
 
-    it("requires a backend lifecycle assertion before reading retention storage", async () => {
+    it("reads existing allocation logs without requiring a pruning lifecycle port", async () => {
       const base = context.getBackend();
       await createHistoryStore(context);
       const missingLifecycle = createStore(
@@ -2010,12 +2010,19 @@ export function registerRecordedTimeIntegrationTests(
         projectBackendWithout(base, ["assertBaseSchemaCurrent"]),
         { history: true },
       );
-      await expect(
-        missingLifecycle.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
-      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
-      await expect(
-        missingLifecycle.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
-      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      expect(
+        await missingLifecycle.resolveRecordedInstant(
+          "2099-01-01T00:00:00.000Z",
+        ),
+      ).toBeUndefined();
+      for (const time of ["2099-01-01T00:00:00.000Z", "not-a-date"]) {
+        await expect(
+          missingLifecycle.pruneRecordedInstants(time),
+        ).rejects.toMatchObject({
+          name: "UnsupportedBackendCapabilityError",
+          details: { capability: "assertBaseSchemaCurrent" },
+        });
+      }
     });
 
     it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {

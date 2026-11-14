@@ -47,7 +47,6 @@ import {
   edgeMatchIdentityColumnAdoption,
   generateSqliteMigrationSQL,
   quoteDdlIdentifier,
-  recordedAnchorRetentionColumnAdoption,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -94,9 +93,8 @@ function installLocalSqliteBaseSchema(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
-  // Generated DDL installs new relations/indexes. Existing clock tables need
-  // v9's nullable retention column before asynchronous adoption advances the marker; the shared
-  // planner below also serves asynchronous/offline SQLite adoption.
+  // Generated DDL installs fresh relations/indexes. Existing clock tables and
+  // their marker are upgraded together by privileged asynchronous adoption.
   if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
     throw new CompilerInvariantError(
       "The synchronous managed SQLite installation path only implements base-schema v1 through v9 adoption.",
@@ -113,16 +111,6 @@ function installLocalSqliteBaseSchema(
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
   }
-  const clockTable = getTableName(tables.recordedClock);
-  adoptSqliteColumnsSync(recordedAnchorRetentionColumnAdoption(clockTable), {
-    readColumns: () =>
-      sqlite
-        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(clockTable)})`)
-        .all() as readonly SqliteColumnRow[],
-    execute: (statement) => {
-      sqlite.exec(statement);
-    },
-  });
   const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
   try {
     sqlite.exec(installationSql);

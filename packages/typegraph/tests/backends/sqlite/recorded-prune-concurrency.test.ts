@@ -15,7 +15,6 @@ import {
   recordedInstantRevision,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
-import { generateSqliteDDL } from "../../../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../../../src/backend/drizzle/sqlite";
 import { requireDefined } from "../../../src/utils/presence";
 import { isSqliteWriterSlotBusy } from "../../../src/utils/sql-errors";
@@ -38,8 +37,8 @@ it("publishes pruning atomically while another WAL connection contends for the w
   try {
     first.pragma("journal_mode = WAL");
     second.pragma("busy_timeout = 0");
-    for (const statement of generateSqliteDDL()) first.exec(statement);
     const base = createSqliteBackend(drizzle(first));
+    await requireDefined(base.bootstrapTables)();
     const writer = createStore(graph, createSqliteBackend(drizzle(second)), {
       history: true,
     });
@@ -56,7 +55,7 @@ it("publishes pruning atomically while another WAL connection contends for the w
                     const text = requireDefined(base.compileSql)(query).sql;
                     if (
                       text.trimStart().startsWith("UPDATE") &&
-                      text.includes("anchor_retention=")
+                      text.includes('"anchor_retention"=')
                     ) {
                       reached.open();
                       await release.opened;

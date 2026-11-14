@@ -1131,23 +1131,28 @@ declaration.
 
 ### Base-schema version 9: allocation retention watermark
 
-Both `resolveRecordedInstant` and `pruneRecordedInstants` require version 9.
+`pruneRecordedInstants` requires version 9. `resolveRecordedInstant` continues to
+read existing pre-v9 allocation logs in one statement without a marker probe.
 Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
 (`typegraph_recorded_clock`, or its configured name). Existing rows retain their
 clock coordinates and start with no retention watermark. Privileged adoption adds
 the column before publishing version 9; externally managed deployments must apply
-that additive migration before DML-only attach. Custom schema providers must include
-the column, supply the version 9 adoption step, and implement the backend-owned
-`assertBaseSchemaCurrent` lifecycle assertion. Allocation-log entrypoints check the
-installation marker before reading retention storage and report its actual installed
-version in `BaseSchemaMigrationError`. Upgrade every reader before
-enabling a retention job so all lookups honor retired coverage. PostgreSQL
-checks the column catalog before requesting DDL. If the column is missing and
-captured transactions hold conflicting locks, adoption retries `NOWAIT` requests
-for up to one second without queueing an exclusive lock ahead of new writers.
-Persistent contention raises `SchemaFenceTimeoutError` with
-`details.baseSchemaTable`; the deployment marker stays at its old version.
-Retry privileged adoption after those transactions finish.
+that additive migration before pruning. Synchronous local SQLite opening leaves
+an existing clock and its marker unchanged until asynchronous privileged adoption.
+Custom schema providers must include the column and supply the version 9 adoption
+step. Pruning requires the backend-owned `assertBaseSchemaCurrent` lifecycle
+assertion, which reports the actual installed version in `BaseSchemaMigrationError`.
+Upgrade every reader before enabling a retention job so lookups honor retired coverage.
+
+PostgreSQL checks the column catalog and skips unnecessary DDL. A required ALTER
+queues for its exclusive table lock with a one-second maximum `lock_timeout`,
+honoring a stricter caller timeout. Queuing lets adoption proceed ahead of later
+writers even when captured transactions overlap; new writes may wait briefly behind
+adoption. The previous setting is restored on success, and caller-owned transactions
+use a savepoint so failure restores their session too. Persistent contention raises
+`BaseSchemaAdoptionTimeoutError` with `details.tableName` and `details.waitBudgetMs`;
+the deployment marker stays at its old version. Retry privileged adoption after
+transactions using the table have completed.
 
 `pruneRecordedInstants(before, { limit })` persists the coverage boundary and deletes
 one bounded revision range per transaction. Its result reports `deletedCount`,

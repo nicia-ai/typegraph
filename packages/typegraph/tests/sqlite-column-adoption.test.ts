@@ -75,3 +75,15 @@ describe.each(["sync", "async"] as const)(
     });
   },
 );
+
+it("ignores a synchronous writer's native return value", () => {
+  const statements: string[] = [];
+  adoptSqliteColumnsSync(
+    { addedColumns: ["a"], statements: () => ["add-a"] },
+    {
+      readColumns: () => [],
+      execute: (statement) => statements.push(statement),
+    },
+  );
+  expect(statements).toEqual(["add-a"]);
+});

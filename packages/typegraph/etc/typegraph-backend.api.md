@@ -4331,8 +4331,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly assertBaseSchemaCurrent: {
         readonly kind: "reasoned";
-        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.";
-        readonly accesses: 4;
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus recorded pruning and the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; lookup preserves the legacy no-gate contract, while pruning explicitly refuses a missing lifecycle assertion.";
+        readonly accesses: 5;
     };
     readonly ensureEdgeMatchIdentityStorage: {
         readonly kind: "reasoned";

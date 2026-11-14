@@ -50,10 +50,7 @@ import {
 } from "drizzle-orm";
 import { BaseSQLiteDatabase, SQLiteTransaction } from "drizzle-orm/sqlite-core";
 
-import {
-  ConfigurationError,
-  SchemaFenceTimeoutError,
-} from "../../errors";
+import { ConfigurationError, SchemaFenceTimeoutError } from "../../errors";
 import {
   adjacencyIndexAdoptionDdl,
   sinceIndexAdoptionDdl,
@@ -1624,6 +1621,18 @@ export function buildSqliteEngineProfile(
     });
   }
 
+  function columnAdoptionDriver(tableName: string) {
+    return {
+      readColumns: () =>
+        executionAdapter.execute<{ name?: unknown }>(
+          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
+        ),
+      execute: async (statement: string) => {
+        await db.run(sql.raw(statement));
+      },
+    };
+  }
+
   async function ensureRecordedAnchorRetentionStorage(
     clockProvisioned: boolean,
   ): Promise<void> {
@@ -1632,28 +1641,18 @@ export function buildSqliteEngineProfile(
         generateSqliteCreateTableSQL(tables.recordedClock),
       );
     const tableName = getTableName(tables.recordedClock);
-    await adoptSqliteColumns(recordedAnchorRetentionColumnAdoption(tableName), {
-      readColumns: () =>
-        executionAdapter.execute<{ name?: unknown }>(
-          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
-        ),
-      execute: async (statement) => {
-        await db.run(sql.raw(statement));
-      },
-    });
+    await adoptSqliteColumns(
+      recordedAnchorRetentionColumnAdoption(tableName),
+      columnAdoptionDriver(tableName),
+    );
   }
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
     const tableName = getTableName(tables.edges);
-    await adoptSqliteColumns(edgeMatchIdentityColumnAdoption(tableName), {
-      readColumns: () =>
-        executionAdapter.execute<{ name?: unknown }>(
-          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
-        ),
-      execute: async (statement) => {
-        await db.run(sql.raw(statement));
-      },
-    });
+    await adoptSqliteColumns(
+      edgeMatchIdentityColumnAdoption(tableName),
+      columnAdoptionDriver(tableName),
+    );
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {

@@ -3,12 +3,13 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import { RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS } from "../../../src/backend/recorded-storage";
 import {
+  BaseSchemaAdoptionTimeoutError,
   BaseSchemaMigrationError,
-  SchemaFenceTimeoutError,
 } from "../../../src/errors";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
-import { lookupRecordedAnchor } from "../../../src/store/recorded-anchor-log";
+import { pruneRecordedAnchors } from "../../../src/store/recorded-anchor-log";
 import { delay } from "../../../src/utils/delay";
 import { requireDefined } from "../../../src/utils/presence";
 import { isPostgresLockTimeout } from "../../../src/utils/sql-errors";
@@ -18,20 +19,19 @@ import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 const databaseUrl = await provisionPostgresTestDatabase(import.meta.url);
 
 describe.skipIf(!process.env["POSTGRES_URL"])(
-  "recorded retention adoption behind a captured writer",
+  "recorded retention adoption under captured writes",
   () => {
     const pool = new Pool({ connectionString: databaseUrl });
     const statements: string[] = [];
-    const backend = createPostgresBackend(
-      drizzle(pool, {
-        logger: {
-          logQuery(query) {
-            statements.push(query);
-          },
-        },
-      }),
-      { vector: false, fulltext: false },
-    );
+    const logger = {
+      logQuery(query: string) {
+        statements.push(query);
+      },
+    };
+    const backend = createPostgresBackend(drizzle(pool, { logger }), {
+      vector: false,
+      fulltext: false,
+    });
     beforeAll(async () => {
       await requireDefined(backend.bootstrapTables)();
     });
@@ -40,7 +40,7 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
         "ALTER TABLE typegraph_recorded_clock ADD COLUMN IF NOT EXISTS anchor_retention TEXT",
       );
       await pool.query(
-        "INSERT INTO typegraph_recorded_clock (graph_id, revision, recorded_at) VALUES ('held', 1, '2026-06-01T00:00:00.000Z') ON CONFLICT DO NOTHING",
+        "INSERT INTO typegraph_recorded_clock (graph_id, revision, recorded_at) VALUES ('held', 1, '2026-06-01T00:00:00.000Z'), ('overlap', 1, '2026-06-01T00:00:00.000Z') ON CONFLICT DO NOTHING",
       );
       await pool.query(
         "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
@@ -51,32 +51,52 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       await pool.end();
     });
 
-    async function holdWriter() {
+    async function holdWriter(graphId = "held") {
       const writer = await pool.connect();
       await writer.query("BEGIN");
       await writer.query(
-        "UPDATE typegraph_recorded_clock SET revision=revision WHERE graph_id='held'",
+        "UPDATE typegraph_recorded_clock SET revision=revision WHERE graph_id=$1",
+        [graphId],
       );
+      let released = false;
       return async () => {
+        if (released) return;
+        released = true;
         await writer.query("ROLLBACK");
         writer.release();
       };
     }
     function adoptionAttempts() {
-      return statements.filter((query) =>
-        query.includes("ACCESS EXCLUSIVE MODE NOWAIT"),
+      return statements.filter(
+        (query) =>
+          query.includes("ALTER TABLE") && query.includes('"anchor_retention"'),
       ).length;
     }
-    async function waitForAttempts(minimum = 2) {
+    async function waitForQueuedLock(
+      mode = "AccessExclusiveLock",
+      minimum = 1,
+    ) {
       await raceTimeout(
         (async () => {
-          while (adoptionAttempts() < minimum) await delay(5);
+          for (;;) {
+            const result = await pool.query<{ count: number }>(
+              "SELECT count(*)::int AS count FROM pg_locks WHERE relation='typegraph_recorded_clock'::regclass AND mode=$1 AND NOT granted",
+              [mode],
+            );
+            if (requireDefined(result.rows[0]).count >= minimum) return;
+            await delay(5);
+          }
         })(),
-        1000,
+        750,
+      );
+    }
+    async function dropRetention() {
+      await pool.query(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
       );
     }
 
-    it("skips column DDL when the watermark column is already installed", async () => {
+    it("skips adoption DDL when the retention column is already installed", async () => {
       const release = await holdWriter();
       try {
         await raceTimeout(requireDefined(backend.adoptBaseSchema)(), 500);
@@ -86,67 +106,67 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       expect(adoptionAttempts()).toBe(0);
     });
 
-    it("retries transient contention without queueing other graphs' writes", async () => {
-      await pool.query(
-        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+    it("queues ahead of new writers and makes progress through overlapping transactions", async () => {
+      await dropRetention();
+      const releaseFirst = await holdWriter();
+      const releaseSecond = await holdWriter("overlap");
+      const lateWriter = await pool.connect();
+      await lateWriter.query("BEGIN");
+      const adopting = requireDefined(backend.adoptBaseSchema)().catch(
+        (error: unknown) => error,
       );
-      const release = await holdWriter();
-      const adopting = requireDefined(backend.adoptBaseSchema)();
       try {
-        await waitForAttempts();
-        const independent = await pool.connect();
-        try {
-          await independent.query("BEGIN");
-          await independent.query(
-            "LOCK TABLE typegraph_recorded_clock IN ROW EXCLUSIVE MODE NOWAIT",
+        await waitForQueuedLock();
+        // This writer arrives while two older transactions still hold the table.
+        // It must queue behind adoption instead of perpetually denying a NOWAIT poll.
+        const writing = lateWriter.query(
+          "UPDATE typegraph_recorded_clock SET revision=revision WHERE graph_id='held'",
+        );
+        await waitForQueuedLock("RowExclusiveLock");
+        await releaseFirst();
+        await releaseSecond();
+        expect(await raceTimeout(adopting, 1500)).toBeUndefined();
+        await writing;
+      } finally {
+        await releaseFirst();
+        await releaseSecond();
+        await lateWriter.query("ROLLBACK");
+        lateWriter.release();
+      }
+      expect(adoptionAttempts()).toBe(1);
+      await requireDefined(backend.assertBaseSchemaCurrent)();
+    });
+
+    it("preserves caller settings after queued adoption inside a savepoint", async () => {
+      await dropRetention();
+      const release = await holdWriter();
+      const adopting = drizzle(pool, { logger })
+        .transaction(async (transaction) => {
+          await transaction.execute("SET LOCAL lock_timeout = '2500ms'");
+          const attached = createPostgresBackend(transaction, {
+            vector: false,
+            fulltext: false,
+          });
+          await requireDefined(attached.adoptBaseSchema)();
+          const setting = await transaction.execute<{ value: string }>(
+            "SELECT current_setting('lock_timeout') AS value",
           );
-        } finally {
-          await independent.query("ROLLBACK");
-          independent.release();
-        }
-      } finally {
-        await release();
-      }
-      await adopting;
-      expect(adoptionAttempts()).toBeGreaterThan(1);
-      await requireDefined(backend.assertBaseSchemaCurrent)();
-    });
-
-    it("retries contention inside a caller transaction without reusing an aborted session", async () => {
-      await pool.query(
-        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
-      );
-      const release = await holdWriter();
-      const adopting = drizzle(pool, {
-        logger: {
-          logQuery(query) {
-            statements.push(query);
-          },
-        },
-      }).transaction(async (transaction) => {
-        const attached = createPostgresBackend(transaction, {
-          vector: false,
-          fulltext: false,
-        });
-        await requireDefined(attached.adoptBaseSchema)();
-        await transaction.execute("SELECT 1");
-      });
+          return setting.rows;
+        })
+        .catch((error: unknown) => error);
       try {
-        await waitForAttempts();
+        await waitForQueuedLock();
       } finally {
         await release();
       }
-      await adopting;
-      expect(adoptionAttempts()).toBeGreaterThan(1);
-      await requireDefined(backend.assertBaseSchemaCurrent)();
+      expect(await adopting).toEqual([{ value: "2500ms" }]);
+      expect(adoptionAttempts()).toBe(1);
     });
 
-    it("bounds persistent contention with a typed timeout and leaves adoption resumable", async () => {
-      await pool.query(
-        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
-      );
+    it("bounds persistent contention with a table-specific error and permits resumption", async () => {
+      await dropRetention();
       await expect(
-        lookupRecordedAnchor(
+        pruneRecordedAnchors(
           {
             backend,
             schema: createSqlSchema(backend.tableNames),
@@ -166,15 +186,17 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       } finally {
         await release();
       }
-      expect(outcome).toBeInstanceOf(SchemaFenceTimeoutError);
+      expect(outcome).toBeInstanceOf(BaseSchemaAdoptionTimeoutError);
       expect(outcome).toMatchObject({
+        code: "BASE_SCHEMA_ADOPTION_TIMEOUT",
         details: {
-          baseSchemaTable: "typegraph_recorded_clock",
-          waitBudgetMs: 1000,
+          tableName: "typegraph_recorded_clock",
+          waitBudgetMs: RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
         },
       });
+      expect(outcome).not.toHaveProperty("details.graphId");
       expect(isPostgresLockTimeout(outcome)).toBe(true);
-      expect(adoptionAttempts()).toBeGreaterThan(1);
+      expect(adoptionAttempts()).toBe(1);
       const marker = await pool.query(
         "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
       );
@@ -183,32 +205,50 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       await requireDefined(backend.assertBaseSchemaCurrent)();
     });
 
-    it("converges concurrent cold adopters after a captured writer releases", async () => {
-      await pool.query(
-        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
-      );
+    it("honors a stricter caller timeout and rolls back the failed savepoint", async () => {
+      await dropRetention();
+      const release = await holdWriter();
+      try {
+        await drizzle(pool, { logger }).transaction(async (transaction) => {
+          await transaction.execute("SET LOCAL lock_timeout = '50ms'");
+          const attached = createPostgresBackend(transaction, {
+            vector: false,
+            fulltext: false,
+          });
+          await expect(
+            requireDefined(attached.adoptBaseSchema)(),
+          ).rejects.toBeInstanceOf(BaseSchemaAdoptionTimeoutError);
+          const setting = await transaction.execute<{ value: string }>(
+            "SELECT current_setting('lock_timeout') AS value",
+          );
+          expect(setting.rows).toEqual([{ value: "50ms" }]);
+        });
+      } finally {
+        await release();
+      }
+      await requireDefined(backend.adoptBaseSchema)();
+    });
+
+    it("converges two cold adopters waiting behind an existing writer", async () => {
+      await dropRetention();
       const release = await holdWriter();
       const adopting = Promise.all([
         requireDefined(backend.adoptBaseSchema)(),
         requireDefined(backend.adoptBaseSchema)(),
-      ]);
+      ]).catch((error: unknown) => error);
       try {
-        await waitForAttempts(3);
+        await waitForQueuedLock("AccessExclusiveLock", 2);
       } finally {
         await release();
       }
-      await adopting;
+      expect(await adopting).toEqual([undefined, undefined]);
       await requireDefined(backend.assertBaseSchemaCurrent)();
     });
 
-    it("does not request an exclusive adoption lock after creating a missing clock", async () => {
+    it("does not run adoption DDL after creating a missing clock", async () => {
       await pool.query("DROP TABLE typegraph_recorded_clock");
       await requireDefined(backend.adoptBaseSchema)();
       expect(adoptionAttempts()).toBe(0);
-      const clock = await pool.query(
-        "SELECT anchor_retention FROM typegraph_recorded_clock",
-      );
-      expect(clock.rows).toEqual([]);
       await requireDefined(backend.assertBaseSchemaCurrent)();
     });
   },

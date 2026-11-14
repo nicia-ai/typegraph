@@ -376,12 +376,11 @@ export function requireRecordedAnchorLog(
     captureEnabled: boolean;
   }>,
   surface: string,
-): () => Promise<void> {
+): void {
   if (
     !context.captureEnabled ||
     resolveRecordedTimeOwnership(context.backend) !== "typegraph-relations" ||
-    context.backend.capabilities.recordedAnchorLookup !== true ||
-    context.backend.assertBaseSchemaCurrent === undefined
+    context.backend.capabilities.recordedAnchorLookup !== true
   )
     throw new UnsupportedBackendCapabilityError(
       surface,
@@ -393,5 +392,4 @@ export function requireRecordedAnchorLog(
       },
     );
   assertCapturableBackend(context.backend);
-  return context.backend.assertBaseSchemaCurrent;
 }

@@ -105,6 +105,24 @@ fi
 # tests/backends/integration/ is deliberately absent: it holds suite
 # definitions registered via createIntegrationTestSuite, not *.test.ts files,
 # so listing it matches nothing and reads as coverage that is not there.
+# Explicit test paths replace the default roots. Option-only invocations keep
+# the full lane; option values (notably -t/--exclude) are not positional filters.
+has_explicit_paths=0
+skip_option_value=0
+for argument in "$@"; do
+  if [[ "$skip_option_value" == "1" ]]; then
+    skip_option_value=0
+    continue
+  fi
+  case "$argument" in
+    -t|--testNamePattern|--exclude|--reporter|--project|--config|--pool|--shard|--testTimeout|--hookTimeout|--maxWorkers|--minWorkers)
+      skip_option_value=1 ;;
+    -*) ;;
+    *.test.ts|*.test.mts|*.spec.ts|tests/*)
+      has_explicit_paths=1 ;;
+  esac
+done
+if [[ "$has_explicit_paths" == "0" ]]; then
 vitest_args+=(
   tests/backends/postgres/
   tests/graph-merge/
@@ -129,6 +147,8 @@ vitest_args+=(
   tests/perf/identity-current-traversal-scaling.test.ts
   tests/perf/identity-historical-traversal-scaling.test.ts
 )
+
+fi
 
 # PGlite-only files and local merge-matrix entries already run in the default
 # lanes. Keep mixed files loaded so their server-specific cases still execute.

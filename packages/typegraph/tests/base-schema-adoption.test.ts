@@ -11,7 +11,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import type { GraphBackend, ReconciledSchema } from "../src";
+import type { CompiledRowsSql, GraphBackend, ReconciledSchema } from "../src";
 import {
   BaseSchemaMigrationError,
   createStore,
@@ -1427,19 +1427,32 @@ describe("version 9: recorded allocation retention watermark", () => {
         await executeDdl(
           "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
         );
-        for (const operation of [
-          () => store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
-          () => store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
-        ]) {
-          await expect(operation()).rejects.toMatchObject({
-            name: "BaseSchemaMigrationError",
-            details: {
-              installedVersion: 8,
-              requiredVersion: 9,
-              reason: "stale",
+        const statements: CompiledRowsSql[] = [];
+        const assertStorage = vi.fn(
+          requireDefined(backend.assertBaseSchemaCurrent),
+        );
+        const existing = createStore(
+          graph,
+          deriveBackend(backend, {
+            assertBaseSchemaCurrent: assertStorage,
+            execute<T>(query: CompiledRowsSql) {
+              statements.push(query);
+              return backend.execute<T>(query);
             },
-          });
-        }
+          }),
+          { history: true },
+        );
+        expect(
+          await existing.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(statements).toHaveLength(1);
+        expect(assertStorage).not.toHaveBeenCalled();
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          name: "BaseSchemaMigrationError",
+          details: { installedVersion: 8, requiredVersion: 9, reason: "stale" },
+        });
         // Error shape and server language cannot change lifecycle refusal.
         for (const driverError of [
           Object.assign(new Error("SQLITE_ERROR"), { code: "SQLITE_ERROR" }),
@@ -1452,15 +1465,12 @@ describe("version 9: recorded allocation retention watermark", () => {
             deriveBackend(backend, { execute }),
             { history: true },
           );
-          for (const operation of [
-            () => attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
-            () => attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
-          ]) {
-            await expect(operation()).rejects.toMatchObject({
-              name: "BaseSchemaMigrationError",
-              details: { installedVersion: 8, reason: "stale" },
-            });
-          }
+          await expect(
+            attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+          ).rejects.toMatchObject({
+            name: "BaseSchemaMigrationError",
+            details: { installedVersion: 8, reason: "stale" },
+          });
           expect(execute).not.toHaveBeenCalled();
         }
         await requireDefined(backend.adoptBaseSchema)();
@@ -1495,17 +1505,19 @@ describe("version 9: recorded allocation retention watermark", () => {
     },
   );
 
-  it("adds the retention column when reopening a version 8 SQLite file", async () => {
+  it("keeps synchronous local SQLite lookups working before privileged v9 adoption", async () => {
     const directory = mkdtempSync(
       path.join(tmpdir(), "typegraph-retention-upgrade-"),
     );
     const filename = path.join(directory, "graph.db");
     try {
       const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "existing" });
+      const anchor = requireDefined(await store.recordedNow());
       const client = sqliteClient(original.db);
-      client.exec(
-        "INSERT INTO typegraph_recorded_clock (graph_id, revision, recorded_at) VALUES ('preserved', 7, '2026-01-01T00:00:00.000Z')",
-      );
       client.exec(
         "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
       );
@@ -1515,20 +1527,38 @@ describe("version 9: recorded allocation retention watermark", () => {
       await original.backend.close();
       const upgraded = createLocalSqliteBackend({ path: filename });
       try {
+        const reopened = createStore(graph, upgraded.backend, {
+          history: true,
+        });
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
         expect(
           sqliteClient(upgraded.db)
-            .prepare(
-              "SELECT graph_id, revision, recorded_at, anchor_retention IS NULL AS unpruned FROM typegraph_recorded_clock",
-            )
+            .prepare("PRAGMA table_info(typegraph_recorded_clock)")
             .all(),
-        ).toEqual([
-          {
-            graph_id: "preserved",
-            revision: 7,
-            recorded_at: "2026-01-01T00:00:00.000Z",
-            unpruned: 1,
-          },
-        ]);
+        ).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "anchor_retention" }),
+          ]),
+        );
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(8);
+        await expect(
+          reopened.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({ details: { installedVersion: 8 } });
+        await reopened.nodes.Person.create({ name: "written after upgrade" });
+        const advanced = await reopened.recordedNow();
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
         await requireDefined(upgraded.backend.adoptBaseSchema)();
         expect(
           markerVersion(
@@ -1536,6 +1566,9 @@ describe("version 9: recorded allocation retention watermark", () => {
             "typegraph_base_schema_versions",
           ),
         ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
       } finally {
         await upgraded.backend.close();
       }

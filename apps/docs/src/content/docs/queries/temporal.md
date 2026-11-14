@@ -364,13 +364,17 @@ monotonically. Lookup reads the watermark and candidate in one database snapshot
 The existing time and revision indexes serve candidate selection and bounded deletion
 on SQLite and PostgreSQL, including custom table namespaces.
 
-Upgrade to base-schema version 9 before using either `resolveRecordedInstant` or
-`pruneRecordedInstants`. It adds the nullable
-`anchor_retention` column to the recorded clock. If it is absent, both APIs raise `BaseSchemaMigrationError`
-with `details.missingColumn`; no marker probe is added to successful lookups.
-Adoption preserves existing rows
-and does not infer earlier pruning. Upgrade all applications sharing the database
-before enabling a retention job, so every reader honors the persisted watermark.
+Only `pruneRecordedInstants` requires base-schema version 9. It adds the nullable
+`anchor_retention` column to the recorded clock. Pruning checks the installation
+marker through the backend lifecycle assertion and raises `BaseSchemaMigrationError`
+with the actual installed version if adoption is required.
+`resolveRecordedInstant` remains usable on pre-v9 allocations: it reads the clock
+row, candidate, and optional watermark in one statement, without checking the marker.
+An absent watermark means no recorded pruning on that storage. This supports
+synchronous local SQLite upgrades and previously allocated PostgreSQL working copies.
+Adoption preserves existing rows and does not infer earlier pruning. Upgrade all
+applications sharing the database before enabling a retention job, so every reader
+honors the persisted watermark.
 
 Pruning affects only wall-clock-to-anchor lookup metadata. It does not rotate
 the allocation owner, advance the graph clock, remove captured node or edge

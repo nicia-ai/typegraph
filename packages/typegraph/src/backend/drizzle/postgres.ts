@@ -59,6 +59,7 @@ import {
 import { PgTransaction } from "drizzle-orm/pg-core";
 
 import {
+  BaseSchemaAdoptionTimeoutError,
   CompilerInvariantError,
   ConfigurationError,
   SchemaFenceTimeoutError,
@@ -95,7 +96,6 @@ import {
   type CompiledRowsSql,
 } from "../../query/sql-intent";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
-import { delay } from "../../utils/delay";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -146,7 +146,10 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
-import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../recorded-storage";
+import {
+  RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+} from "../recorded-storage";
 import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
 import {
   createEdgeRowMapper,
@@ -1937,8 +1940,8 @@ function buildPostgresEngineProfileInternal(
         allocationSchema === undefined ?
           postgresIdentifierRegclassName(tableName)
         : `${postgresIdentifierRegclassName(allocationSchema)}.${postgresIdentifierRegclassName(tableName)}`;
-      // NOWAIT never queues an exclusive request ahead of captured writers.
-      // Re-probe on every attempt so concurrent adopters converge without more DDL.
+      // Existing storage needs no DDL. Missing storage uses a bounded queued
+      // ALTER, allowing it to make progress through overlapping writers.
       const readStorage = async () => {
         const [storage] = await executionAdapter.execute<{
           table_name?: unknown;
@@ -1951,46 +1954,35 @@ function buildPostgresEngineProfileInternal(
         `);
         return storage;
       };
-      const waitBudgetMs = 1000;
-      const deadline = performance.now() + waitBudgetMs;
-      for (;;) {
-        const storage = await readStorage();
-        if (storage?.has_retention === true) return;
-        if (!clockProvisioned && typeof storage?.table_name !== "string") {
-          await executeConcurrentCreateDdl(
-            generatePgCreateTableSQL(tables.recordedClock),
+      const storage = await readStorage();
+      if (storage?.has_retention === true) return;
+      if (!clockProvisioned && typeof storage?.table_name !== "string") {
+        await executeConcurrentCreateDdl(
+          generatePgCreateTableSQL(tables.recordedClock),
+        );
+        const createdStorage = await readStorage();
+        if (createdStorage?.has_retention === true) return;
+      }
+      try {
+        const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
+        if (db instanceof PgTransaction) {
+          // Savepoint rollback restores both the caller's session and GUC after a timeout.
+          await withConcurrentCreateRetry(() =>
+            db.transaction(async (transaction: AnyPgTransaction) => {
+              await bindSchemaWriteSessionToAllocation(transaction);
+              await transaction.execute(sql.raw(ddl));
+            }),
           );
-          // CREATE includes the column. Re-check for a concurrent creator's schema.
-          const createdStorage = await readStorage();
-          if (createdStorage?.has_retention === true) return;
+        } else {
+          await executeConcurrentCreateDdl(ddl);
         }
-        try {
-          const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
-          if (db instanceof PgTransaction) {
-            // A failed NOWAIT aborts a transaction: isolate each attempt in a
-            // savepoint so retrying does not reuse an aborted caller session.
-            await withConcurrentCreateRetry(() =>
-              db.transaction(async (transaction: AnyPgTransaction) => {
-                await bindSchemaWriteSessionToAllocation(transaction);
-                await transaction.execute(sql.raw(ddl));
-              }),
-            );
-          } else {
-            await executeConcurrentCreateDdl(ddl);
-          }
-          return;
-        } catch (error) {
-          if (!isPostgresLockTimeout(error)) throw error;
-          if (performance.now() >= deadline)
-            throw new SchemaFenceTimeoutError(
-              "@base-schema",
-              "schema-row",
-              waitBudgetMs,
-              error,
-              tableName,
-            );
-          await delay(Math.min(25, Math.max(0, deadline - performance.now())));
-        }
+      } catch (error) {
+        if (!isPostgresLockTimeout(error)) throw error;
+        throw new BaseSchemaAdoptionTimeoutError(
+          tableName,
+          RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+          error,
+        );
       }
     },
     recordedAnchorsDdl: [
