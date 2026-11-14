@@ -93,18 +93,17 @@ async function readRecordedAnchorSnapshot(
   // probing a marker or naming a column their storage does not have yet.
   // Candidate coordinates have distinct aliases: the clock time may be timestamptz.
   const query = asCompiledRowsSql(sql`
-    WITH candidate AS (${recordedAnchorCandidate(schema, graphId, wallTime)}), first_retained AS (
-      SELECT anchors.revision, anchors.recorded_at FROM ${recordedAnchorsTable(schema)} anchors
-      WHERE ${recordedAnchorScope(schema, graphId)}
-      ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
-    )
     SELECT clock.*, origins.origin,
       candidate.revision AS anchor_revision, candidate.recorded_at AS anchor_recorded_at,
       first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at
     FROM ${schema.recordedClockTable} clock
     LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
-    LEFT JOIN candidate ON candidate.origin=origins.origin
-    LEFT JOIN first_retained ON 1=1
+    LEFT JOIN (${recordedAnchorCandidate(schema, graphId, wallTime)}) candidate ON candidate.origin=origins.origin
+    LEFT JOIN (
+      SELECT anchors.revision, anchors.recorded_at FROM ${recordedAnchorsTable(schema)} anchors
+      WHERE ${recordedAnchorScope(schema, graphId)}
+      ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
+    ) first_retained ON 1=1
     WHERE clock.graph_id=${graphId}
   `);
   // The clock projection changes after ADD COLUMN. Reparse it on each call
@@ -332,14 +331,32 @@ export async function pruneRecordedAnchors(
             "Recorded pruning has no logged coverage start.",
             { graphId },
           );
-        const victims = await target.execute<Readonly<{ revision: unknown }>>(
+        const batches = await target.execute<
+          Readonly<{
+            deleted_count: unknown;
+            first_revision: unknown;
+            last_revision: unknown;
+            has_more: unknown;
+          }>
+        >(
           asCompiledRowsSql(sql`
-            SELECT anchors.revision FROM ${recordedAnchorsTable(schema)} anchors
-            WHERE ${recordedAnchorScope(schema, graphId, row.origin)} AND anchors.revision < ${revision}
-            ORDER BY anchors.revision ASC LIMIT ${limit + 1}
+            SELECT deletion_range.*, EXISTS (
+              SELECT 1 FROM ${recordedAnchorsTable(schema)} anchors
+              WHERE ${recordedAnchorScope(schema, graphId, row.origin)}
+                AND anchors.revision > deletion_range.last_revision AND anchors.revision < ${revision}
+            ) AS has_more
+            FROM (
+              SELECT COUNT(*) AS deleted_count, MIN(revision) AS first_revision, MAX(revision) AS last_revision
+              FROM (
+                SELECT anchors.revision FROM ${recordedAnchorsTable(schema)} anchors
+                WHERE ${recordedAnchorScope(schema, graphId, row.origin)} AND anchors.revision < ${revision}
+                ORDER BY anchors.revision ASC LIMIT ${limit}
+              ) victims
+            ) deletion_range
           `),
         );
-        const deletedCount = Math.min(victims.length, limit);
+        const batch = requireDefined(batches[0]);
+        const deletedCount = Number(batch.deleted_count);
         if (advance) {
           const state: RecordedAnchorRetentionState = {
             version: RETENTION_STATE_VERSION,
@@ -364,10 +381,8 @@ export async function pruneRecordedAnchors(
             );
         }
         if (deletedCount > 0) {
-          const firstRevision = Number(requireDefined(victims[0]).revision);
-          const lastRevision = Number(
-            requireDefined(victims[deletedCount - 1]).revision,
-          );
+          const firstRevision = Number(batch.first_revision);
+          const lastRevision = Number(batch.last_revision);
           const deleted = await target.execute(
             asCompiledRowsSql(sql`
               DELETE FROM ${recordedAnchorsTable(schema)} AS anchors
@@ -390,7 +405,7 @@ export async function pruneRecordedAnchors(
         return {
           deletedCount,
           retainedBoundary,
-          hasMore: victims.length > limit,
+          hasMore: Number(batch.has_more) > 0,
         };
       }),
   );

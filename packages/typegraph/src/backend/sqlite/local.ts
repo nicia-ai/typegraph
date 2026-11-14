@@ -98,7 +98,7 @@ function installLocalSqliteBaseSchema(
   // bootstrap must finish current storage before installation SQL stamps it.
   if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v9 adoption.",
+      "The synchronous managed SQLite bootstrap plan must be reviewed when the current base-schema version changes.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }

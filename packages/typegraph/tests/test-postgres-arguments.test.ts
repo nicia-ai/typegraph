@@ -32,37 +32,45 @@ function laneArguments(args: readonly string[]): readonly string[] {
     rmSync(directory, { force: true, recursive: true });
   }
 }
-describe("PostgreSQL lane argument forwarding", () => {
-  it("replaces the full lane with explicitly selected files", () => {
-    const file = "tests/backends/postgres/recorded-retention-adoption.test.ts";
-    const args = laneArguments([file, "-t", "queued"]);
-    expect(args).toContain(file);
-    expect(args).not.toContain("tests/backends/postgres/");
-    expect(args).not.toContain("tests/graph-merge/");
-    expect(args.slice(-4, -1)).toEqual([file, "-t", "queued"]);
-  });
-  it("keeps the default lane for option-only filters", () => {
-    const args = laneArguments([
-      "-t",
-      "tests/example.test.ts",
-      "--exclude",
-      "tests/ignored.test.ts",
-    ]);
-    expect(args).toContain("tests/backends/postgres/");
-    expect(args).toContain("tests/graph-merge/");
-  });
-  it("narrows bare filename filters without expanding the default lane", () => {
-    const args = laneArguments(["recorded-retention-adoption"]);
-    expect(args).toContain("recorded-retention-adoption");
-    expect(args).not.toContain("tests/backends/postgres/");
-    expect(args).not.toContain("tests/graph-merge/");
-  });
-  it.each([
-    ["--dir", "tests/backends/postgres"],
-    ["--dir=tests/backends/postgres"],
-  ])("keeps default roots when --dir is an option value (%j)", (...options) => {
-    const args = laneArguments(options);
-    expect(args).toContain("tests/backends/postgres/");
-    expect(args).toContain("tests/graph-merge/");
-  });
-});
+// This suite tests a Bash script. Bash is optional for the portable unit lane.
+describe.skipIf(spawnSync("bash", ["--version"]).status !== 0)(
+  "PostgreSQL lane argument forwarding",
+  () => {
+    it("replaces the full lane with explicitly selected files", () => {
+      const file =
+        "tests/backends/postgres/recorded-retention-adoption.test.ts";
+      const args = laneArguments([file, "-t", "queued"]);
+      expect(args).toContain(file);
+      expect(args).not.toContain("tests/backends/postgres/");
+      expect(args).not.toContain("tests/graph-merge/");
+      expect(args.slice(-4, -1)).toEqual([file, "-t", "queued"]);
+    });
+    it("keeps the default lane for option-only filters", () => {
+      const args = laneArguments([
+        "-t",
+        "tests/example.test.ts",
+        "--exclude",
+        "tests/ignored.test.ts",
+      ]);
+      expect(args).toContain("tests/backends/postgres/");
+      expect(args).toContain("tests/graph-merge/");
+    });
+    it("narrows bare filename filters without expanding the default lane", () => {
+      const args = laneArguments(["recorded-retention-adoption"]);
+      expect(args).toContain("recorded-retention-adoption");
+      expect(args).not.toContain("tests/backends/postgres/");
+      expect(args).not.toContain("tests/graph-merge/");
+    });
+    it.each([
+      ["--dir", "tests/backends/postgres"],
+      ["--dir=tests/backends/postgres"],
+    ])(
+      "keeps default roots when --dir is an option value (%j)",
+      (...options) => {
+        const args = laneArguments(options);
+        expect(args).toContain("tests/backends/postgres/");
+        expect(args).toContain("tests/graph-merge/");
+      },
+    );
+  },
+);

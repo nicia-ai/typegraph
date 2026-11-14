@@ -366,7 +366,9 @@ and candidate in one database snapshot.
 The existing time and revision indexes serve candidate selection and bounded deletion
 on SQLite and PostgreSQL, including custom table namespaces.
 
-Only `pruneRecordedInstants` requires base-schema version 9. It adds the nullable
+Among recorded-time APIs, only `pruneRecordedInstants` requires base-schema version 9.
+As with every base-schema bump, verified-schema loading, graph-template entry points,
+and working-copy cloning require adoption to the current version. Version 9 adds the nullable
 `anchor_retention` column to the recorded clock. Pruning checks the installation
 marker through the backend lifecycle assertion and raises `BaseSchemaMigrationError`
 with the actual installed version if adoption is required.
@@ -376,6 +378,9 @@ PostgreSQL executes this schema-sensitive projection unnamed so a warm connectio
 can read before and after column adoption without a stale prepared result type.
 An absent watermark means no recorded pruning on that storage. This supports
 synchronous local SQLite upgrades and previously allocated PostgreSQL working copies.
+For an existing versioned local SQLite file, run `await backend.adoptBaseSchema()`
+or `createStoreWithSchema()` with DDL privileges before pruning; synchronous opening
+preserves its marker. The managed libSQL factory is asynchronous and adopts on open.
 Adoption preserves existing rows and does not infer earlier pruning. Upgrade all
 applications sharing the database before enabling a retention job, so every reader
 honors the persisted watermark.

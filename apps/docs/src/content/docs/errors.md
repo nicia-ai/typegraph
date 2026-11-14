@@ -1209,7 +1209,8 @@ try {
 
 PostgreSQL raises this error when additive base-schema adoption cannot acquire the
 recorded clock's table lock within its bounded wait. `details.tableName` identifies
-the table and `details.waitBudgetMs` gives the maximum adoption wait. Its code is
+the table and `details.waitBudgetMs` gives the effective session lock timeout
+(at most 1000 ms, or the caller's stricter timeout). Its code is
 `BASE_SCHEMA_ADOPTION_TIMEOUT`; it has no graph ID or graph fence phase. The
 installation marker is not advanced. Retry privileged adoption after transactions
 using that table finish. A stricter caller `lock_timeout` remains effective.

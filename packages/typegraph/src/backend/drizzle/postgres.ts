@@ -147,8 +147,8 @@ import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
-  RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
   RECORDED_ANCHOR_RETENTION_COLUMN,
+  recordedAnchorAdoptionTimeoutBudget,
 } from "../recorded-storage";
 import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
 import {
@@ -1977,10 +1977,11 @@ function buildPostgresEngineProfileInternal(
           await executeConcurrentCreateDdl(ddl);
         }
       } catch (error) {
-        if (!isPostgresLockTimeout(error)) throw error;
+        const waitBudgetMs = recordedAnchorAdoptionTimeoutBudget(error);
+        if (waitBudgetMs === undefined) throw error;
         throw new BaseSchemaAdoptionTimeoutError(
           tableName,
-          RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+          waitBudgetMs,
           error,
         );
       }

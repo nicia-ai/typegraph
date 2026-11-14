@@ -30,6 +30,7 @@ import {
   isGraphRelationKey,
 } from "../graph-relations";
 import {
+  RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT,
   RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
   RECORDED_ANCHOR_RETENTION_COLUMN,
 } from "../recorded-storage";
@@ -861,11 +862,18 @@ export function postgresRecordedAnchorRetentionAdoptionDDL(
   tableName: string,
 ): string {
   const timeout = `${RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS}ms`;
-  const body = `DECLARE previous_timeout TEXT := current_setting('lock_timeout'); BEGIN
+  const body = `DECLARE previous_timeout TEXT := current_setting('lock_timeout'); wait_budget_ms NUMERIC; BEGIN
     IF previous_timeout::interval = INTERVAL '0' OR previous_timeout::interval > '${timeout}'::interval THEN
       PERFORM set_config('lock_timeout', '${timeout}', true);
     END IF;
-    ${recordedAnchorRetentionColumnDDL(tableName, true)}
+    wait_budget_ms := EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000;
+    BEGIN
+      ${recordedAnchorRetentionColumnDDL(tableName, true)}
+    EXCEPTION WHEN lock_not_available THEN
+      RAISE USING ERRCODE = SQLSTATE, MESSAGE = SQLERRM,
+        DETAIL = json_build_object('waitBudgetMs', wait_budget_ms)::TEXT,
+        HINT = '${RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT}';
+    END;
     PERFORM set_config('lock_timeout', previous_timeout, true);
   END`;
   return `DO E'${body.replaceAll("\\", "\\\\").replaceAll("'", "''")}';`;

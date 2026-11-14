@@ -264,7 +264,13 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
           });
           await expect(
             requireDefined(attached.adoptBaseSchema)(),
-          ).rejects.toBeInstanceOf(BaseSchemaAdoptionTimeoutError);
+          ).rejects.toMatchObject({
+            code: "BASE_SCHEMA_ADOPTION_TIMEOUT",
+            details: {
+              tableName: "typegraph_recorded_clock",
+              waitBudgetMs: 50,
+            },
+          });
           const setting = await transaction.execute<{ value: string }>(
             "SELECT current_setting('lock_timeout') AS value",
           );

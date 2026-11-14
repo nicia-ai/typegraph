@@ -1131,7 +1131,9 @@ declaration.
 
 ### Base-schema version 9: allocation retention watermark
 
-`pruneRecordedInstants` requires version 9. `resolveRecordedInstant` continues to
+Among recorded-time APIs, only `pruneRecordedInstants` requires version 9.
+As with every base-schema bump, verified-schema loading, graph-template entry points,
+and working-copy cloning require adoption to the current version. `resolveRecordedInstant` continues to
 read existing pre-v9 allocation logs in one statement without a marker probe.
 Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
 (`typegraph_recorded_clock`, or its configured name). Existing rows retain their
@@ -1140,7 +1142,10 @@ the column before publishing version 9; externally managed deployments must appl
 that additive migration before pruning. Synchronous local SQLite opening preserves
 an existing versioned clock and marker until asynchronous privileged adoption. Marker-less SQLite
 bootstrap upgrades an existing clock before it stamps the current marker, including
-when legacy edge-identity columns also need adoption.
+when legacy edge-identity columns also need adoption. Before pruning an existing
+versioned local SQLite file, run `await backend.adoptBaseSchema()` or
+`createStoreWithSchema()` with DDL privileges. The managed libSQL factory is
+asynchronous and adopts on open.
 Custom schema providers must include the column and supply the version 9 adoption
 step. Pruning requires both `recordedAnchorLookup` and `recordedAnchorPruning` capabilities, plus the backend-owned
 `assertBaseSchemaCurrent` lifecycle assertion, which reports the actual installed
@@ -1160,7 +1165,8 @@ on every graph sharing that clock table can block throughout that period. Run
 privileged adoption separately from long migrations, or commit the caller transaction
 promptly. The previous timeout setting is restored on success; a failed savepoint
 also restores the caller's session. Persistent contention raises
-`BaseSchemaAdoptionTimeoutError` with `details.tableName` and `details.waitBudgetMs`;
+`BaseSchemaAdoptionTimeoutError` with `details.tableName` and the effective session
+lock timeout in `details.waitBudgetMs` (including a stricter caller timeout);
 the deployment marker stays at its old version. Retry privileged adoption after
 transactions using the table have completed.
 

@@ -2050,6 +2050,98 @@ export function registerRecordedTimeIntegrationTests(
       });
     });
 
+    it.each(["candidate", "first_retained", "victims", "deletion_range"])(
+      "supports an allocation table named %s without SQL scope collisions",
+      async (tableName) => {
+        const base = context.getBackend();
+        const store = await createHistoryStore(context);
+        for (const name of ["one", "two", "three"])
+          await store.nodes.Person.create({ name, age: 1 });
+        const names = requireDefined(base.tableNames);
+        const original = requireDefined(names.recordedAnchors);
+        const rename = (from: string, to: string) =>
+          requireDefined(base.executeStatement)(
+            asCompiledStatementSql(
+              sql`ALTER TABLE ${sql.identifier(from)} RENAME TO ${sql.identifier(to)}`,
+            ),
+          );
+        await rename(original, tableName);
+        try {
+          const renamed = createStore(
+            integrationTestGraph,
+            deriveBackend(base, {
+              tableNames: { ...names, recordedAnchors: tableName },
+            }),
+            { history: true },
+          );
+          const boundary = requireDefined(
+            await renamed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          );
+          expect(recordedInstantRevision(boundary)).toBe(3);
+          expect(
+            await renamed.pruneRecordedInstants("2099-01-01T00:00:00.000Z", {
+              limit: 1,
+            }),
+          ).toEqual({
+            deletedCount: 1,
+            retainedBoundary: boundary,
+            hasMore: true,
+          });
+          expect(
+            await renamed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          ).toBe(boundary);
+        } finally {
+          await rename(tableName, original);
+        }
+      },
+    );
+
+    it("returns a constant-size summary for bounded prune selection", async () => {
+      const base = context.getBackend();
+      const selectionRows: number[] = [];
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    async execute<T>(query: CompiledRowsSql) {
+                      const text = requireDefined(base.compileSql)(
+                        query,
+                      ).sql.trimStart();
+                      const rows = await target.execute<T>(query);
+                      if (
+                        text.startsWith("SELECT anchors.revision") ||
+                        text.startsWith("SELECT deletion_range.")
+                      )
+                        selectionRows.push(rows.length);
+                      return rows;
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      for (const name of ["one", "two", "three", "four"])
+        await store.nodes.Person.create({ name, age: 1 });
+      const boundary = await store.recordedNow();
+      expect(
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z", {
+          limit: 2,
+        }),
+      ).toEqual({
+        deletedCount: 2,
+        retainedBoundary: boundary,
+        hasMore: true,
+      });
+      expect(selectionRows).toEqual([1]);
+    });
+
     it("does not rewrite an unchanged watermark while draining bounded batches", async () => {
       const base = context.getBackend();
       const writes: string[] = [];
