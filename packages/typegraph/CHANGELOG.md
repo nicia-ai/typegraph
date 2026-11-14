@@ -1,5 +1,21 @@
 # @nicia-ai/typegraph
 
+## 0.75.0
+
+### Minor Changes
+
+- [#835](https://github.com/nicia-ai/typegraph/pull/835) [`f974258`](https://github.com/nicia-ai/typegraph/commit/f9742583dd360afe30f26b937f3455216487e9a8) Thanks [@pdlug](https://github.com/pdlug)! - Compile compatible `batchOnce()` subgraph reads through one origin-keyed recursive traversal even when `shareSubgraphs` is false, avoiding hundreds of independent PostgreSQL recursive plans at the 500-read cap. Default batches retain per-request entity payloads; `shareSubgraphs: true` still deduplicates payloads with request memberships.
+  
+  Preserve the default per-request JSON aggregation limit and avoid deep-copying already independent payloads. PostgreSQL now refuses batches with more than 25 independent subgraph plans after compatible reads are combined, using a typed `ConfigurationError` that recommends aligning options or explicitly splitting the batch. This planner budget applies in both payload modes.
+  
+  ### Upgrade notes
+  
+  - PostgreSQL `batchOnce()` now refuses more than 25 independent subgraph plans after compatible reads are combined. Align subgraph options or split the batch into explicit `batchOnce()` calls.
+
+### Patch Changes
+
+- [#834](https://github.com/nicia-ai/typegraph/pull/834) [`0e40bb6`](https://github.com/nicia-ai/typegraph/commit/0e40bb6bcc127b3f861f7828248b3577986af533) Thanks [@pdlug](https://github.com/pdlug)! - Reduce recorded ownership metadata round trips by reading allocation origins with the clock and checking iterative read ownership once per verified database snapshot. Preserve per-statement checks for weaker isolation and external owner providers, and reject origins retired during an operation.
+
 ## 0.74.0
 
 ### Highlights
