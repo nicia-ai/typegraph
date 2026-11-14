@@ -947,10 +947,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     // connected backend's names to fence physical target bindings.
     accesses: 28,
   },
+  // The session expression is shared by inventory counts and recorded owner
+  // reads; both use the session snapshot predicate in backend/graph-storage.ts.
   fenceSql: {
     kind: "reasoned",
     reason:
-      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). Session-fact reads need no resolved write-fence plan: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) observes capture isolation directly, and `sessionIsolationExpression` (`backend/graph-storage.ts`) folds isolation into the first inventory count or the recorded owner SELECT. The shared snapshot predicate requires interactive execution on a transaction-bound command port, then uses the dialect snapshot guarantee or observed session isolation.",
+      "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.",
     accesses: 3,
   },
   commitSchemaVersionIfKindsEmpty: {
