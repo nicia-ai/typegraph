@@ -413,7 +413,14 @@ export async function readRevisionOrigin(
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
+  return revisionOriginFromRow(rows[0], graphId);
+}
+
+/** One validation of persisted origin state for readers and allocators. */
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined {
   if (first === undefined) return undefined;
   if (typeof first.origin !== "string" || first.origin.length === 0) {
     throw new ConfigurationError(
@@ -706,9 +713,26 @@ async function allocateRecordedCommitInternal(
   retainAnchor = false,
 ): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
+  // Observe origin and clock on the allocating session in one statement. The
+  // seed preserves an empty clock/origin so initialization still takes the
+  // complete mint-and-reread path, including concurrent first writers.
+  const rows = await target.execute<
+    ClockRow & RevisionOriginRow & Readonly<{ has_origin: unknown }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT COALESCE(clock.revision, 0) AS revision, clock.recorded_at, origins.origin,
+        CASE WHEN origins.graph_id IS NULL THEN 0 ELSE 1 END AS has_origin
+      FROM (SELECT 1) seed
+      LEFT JOIN ${schema.recordedClockTable} clock ON clock.graph_id = ${graphId}
+      LEFT JOIN ${schema.revisionOriginsTable} origins ON origins.graph_id = ${graphId}
+    `),
+  );
+  const row = rows[0];
   const previous =
     previousRevision === undefined ?
-      await readRecordedClockParts(target, schema, graphId)
+      row === undefined ?
+        undefined
+      : recordedClockParts(row)
     : requireTypeGraphClockParts(
         parseRecordedInstant(previousRevision, "previous recorded revision"),
       );
@@ -723,7 +747,11 @@ async function allocateRecordedCommitInternal(
       },
     );
   }
-  const origin = await ensureRevisionOriginRow(target, schema, graphId);
+  const origin =
+    revisionOriginFromRow(
+      Number(row?.has_origin) === 1 ? row : undefined,
+      graphId,
+    ) ?? (await ensureRevisionOriginRow(target, schema, graphId));
   const instant = createRecordedInstant(
     revision,
     recordedAt,

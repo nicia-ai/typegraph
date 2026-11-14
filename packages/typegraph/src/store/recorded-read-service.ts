@@ -1,3 +1,4 @@
+import { normalizeGraphCommandIsolation } from "../backend/command-contract";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   type EdgeRow,
@@ -164,17 +165,17 @@ function withRelationsPrecondition<T>(
 function recordedReadExecutionMembers(
   backend: TransactionBackend,
   surface: string,
-  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+  assertOrigin?: (target: Pick<GraphBackend, "execute">) => Promise<void>,
 ): Pick<TransactionBackend, "execute" | "executeRaw"> {
   return {
     execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
-      await assertOrigin(backend);
+      await assertOrigin?.(backend);
       const rows = await withRelationsPrecondition(
         backend,
         backend.execute<T>(query),
         surface,
       );
-      await assertOrigin(backend);
+      await assertOrigin?.(backend);
       return rows;
     },
     ...(backend.executeRaw === undefined ?
@@ -184,13 +185,13 @@ function recordedReadExecutionMembers(
           text: string,
           params: readonly unknown[],
         ): Promise<readonly T[]> => {
-          await assertOrigin(backend);
+          await assertOrigin?.(backend);
           const rows = await withRelationsPrecondition(
             backend,
             requireDefined(backend.executeRaw)<T>(text, params),
             surface,
           );
-          await assertOrigin(backend);
+          await assertOrigin?.(backend);
           return rows;
         },
       }),
@@ -201,6 +202,7 @@ function createRecordedReadBackend(
   backend: GraphBackend,
   surface: string,
   assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+  assertSnapshotOrigin: (target: TransactionBackend) => Promise<boolean>,
 ): GraphBackend {
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
@@ -211,10 +213,17 @@ function createRecordedReadBackend(
     ): Promise<T> => {
       await assertOrigin(backend);
       const result = await backend.transaction(async (target) => {
-        await assertOrigin(target);
+        // The owner and isolation were observed together on THIS target.
+        // Its snapshot covers every subsequent read until this callback ends;
+        // the root check below still rejects retirement outside that snapshot.
+        const pinned = await assertSnapshotOrigin(target);
         const guarded = deriveBackend(
           target,
-          recordedReadExecutionMembers(target, surface, assertOrigin),
+          recordedReadExecutionMembers(
+            target,
+            surface,
+            pinned ? undefined : assertOrigin,
+          ),
         );
         return fn(guarded);
       }, options);
@@ -650,8 +659,52 @@ export function createRecordedReadService(
     ): GraphBackend {
       if (coordinate.recorded === undefined) return backend;
       requireRecordedReadBinding(recordedReadBinding, surface);
-      return createRecordedReadBackend(backend, surface, (target) =>
-        assertOrigin(coordinate, target),
+      return createRecordedReadBackend(
+        backend,
+        surface,
+        (target) => assertOrigin(coordinate, target),
+        async (target) => {
+          const fact = target.fenceSql?.isolationFactExpression;
+          // External providers need not share the database snapshot. A backend
+          // without an observable session fact keeps the per-statement checks.
+          if (
+            fact === undefined ||
+            (recordedReadBinding?.kind === "external" &&
+              recordedReadBinding.owner !== undefined)
+          ) {
+            await assertOrigin(coordinate, target);
+            return false;
+          }
+          let pinned = false;
+          // Decorate only the native ownership SELECT, keeping its existing
+          // parsing and namespace comparison authoritative. There is no extra
+          // isolation probe, and no evidence survives this transaction target.
+          await assertOrigin(
+            coordinate,
+            deriveBackend(target, {
+              execute: async <T>(
+                query: CompiledRowsSql,
+              ): Promise<readonly T[]> => {
+                const rows = await target.execute<
+                  T & Readonly<{ transaction_isolation: unknown }>
+                >(
+                  asCompiledRowsSql(sql`
+                    SELECT owner.*, ${fact()} AS transaction_isolation
+                    FROM (${query}) owner
+                  `),
+                );
+                const isolation = normalizeGraphCommandIsolation(
+                  rows[0]?.transaction_isolation,
+                );
+                pinned =
+                  isolation === "repeatable_read" ||
+                  isolation === "serializable";
+                return rows;
+              },
+            }),
+          );
+          return pinned;
+        },
       );
     },
 
