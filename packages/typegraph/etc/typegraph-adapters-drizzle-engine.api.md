@@ -171,6 +171,7 @@ type AtomicSqlBatchExecutor = <TRow>(statements: readonly CompiledAtomicSqlState
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

@@ -325,6 +325,8 @@ export type BackendCapabilities = Readonly<{
    * Pruning also requires assertBaseSchemaCurrent; lookup reads pre-v9 storage.
    */
   recordedAnchorLookup?: boolean;
+  /** Supports bounded allocation-log retention; requires recordedAnchorLookup and assertBaseSchemaCurrent. */
+  recordedAnchorPruning?: boolean;
   /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */
   durableStoreOperations?: boolean;
   /** How this backend executes work and establishes atomicity. */

@@ -37,6 +37,7 @@ export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

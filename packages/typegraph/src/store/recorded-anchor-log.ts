@@ -18,7 +18,7 @@ import {
 } from "../errors";
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
-import { asCompiledRowsSql } from "../query/sql-intent";
+import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
@@ -92,24 +92,26 @@ async function readRecordedAnchorSnapshot(
   // Selecting the complete clock row keeps pre-v9 allocations readable without
   // probing a marker or naming a column their storage does not have yet.
   // Candidate coordinates have distinct aliases: the clock time may be timestamptz.
+  const query = asCompiledRowsSql(sql`
+    WITH candidate AS (${recordedAnchorCandidate(schema, graphId, wallTime)}), first_retained AS (
+      SELECT anchors.revision, anchors.recorded_at FROM ${recordedAnchorsTable(schema)} anchors
+      WHERE ${recordedAnchorScope(schema, graphId)}
+      ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
+    )
+    SELECT clock.*, origins.origin,
+      candidate.revision AS anchor_revision, candidate.recorded_at AS anchor_recorded_at,
+      first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at
+    FROM ${schema.recordedClockTable} clock
+    LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
+    LEFT JOIN candidate ON candidate.origin=origins.origin
+    LEFT JOIN first_retained ON 1=1
+    WHERE clock.graph_id=${graphId}
+  `);
+  // The clock projection changes after ADD COLUMN. Reparse it on each call
+  // rather than retaining a named statement with the old result descriptor.
+  markForceCustomPlan(query);
   const rows = await withRecordedRelationsPrecondition(
-    target.execute<RecordedAnchorSnapshot>(
-      asCompiledRowsSql(sql`
-        WITH candidate AS (${recordedAnchorCandidate(schema, graphId, wallTime)}), first_retained AS (
-          SELECT anchors.revision, anchors.recorded_at FROM ${recordedAnchorsTable(schema)} anchors
-          WHERE ${recordedAnchorScope(schema, graphId)}
-          ORDER BY anchors.recorded_at ASC, anchors.revision ASC LIMIT 1
-        )
-        SELECT clock.*, origins.origin,
-          candidate.revision AS anchor_revision, candidate.recorded_at AS anchor_recorded_at,
-          first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at
-        FROM ${schema.recordedClockTable} clock
-        LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
-        LEFT JOIN candidate ON candidate.origin=origins.origin
-        LEFT JOIN first_retained ON 1=1
-        WHERE clock.graph_id=${graphId}
-      `),
-    ),
+    target.execute<RecordedAnchorSnapshot>(query),
     { dialect: target.dialect, surface },
   );
   return rows[0];
@@ -250,13 +252,23 @@ export async function pruneRecordedAnchors(
   options: PruneRecordedInstantsOptions = {},
 ): Promise<PruneRecordedInstantsResult> {
   requireRecordedAnchorLog(context, "pruneRecordedInstants");
+  if (context.backend.capabilities.recordedAnchorPruning !== true)
+    throw new UnsupportedBackendCapabilityError(
+      "pruneRecordedInstants",
+      "recordedAnchorPruning",
+      { graphId: context.graphId, dialect: context.backend.dialect },
+    );
   const { backend, schema, graphId } = context;
   const assertStorage = backend.assertBaseSchemaCurrent;
   if (assertStorage === undefined)
-    throw new UnsupportedBackendCapabilityError(
-      "pruneRecordedInstants",
-      "assertBaseSchemaCurrent",
-      { graphId, dialect: backend.dialect },
+    throw new ConfigurationError(
+      "recordedAnchorPruning requires backend.assertBaseSchemaCurrent.",
+      {
+        capability: "recordedAnchorPruning",
+        missingMember: "assertBaseSchemaCurrent",
+        graphId,
+        dialect: backend.dialect,
+      },
     );
   validateCanonicalIsoDate(before, "before");
   const limit = pruneLimit(options);
@@ -320,13 +332,6 @@ export async function pruneRecordedAnchors(
             "Recorded pruning has no logged coverage start.",
             { graphId },
           );
-        const state: RecordedAnchorRetentionState = {
-          version: RETENTION_STATE_VERSION,
-          loggedFromFirstAllocation: first !== undefined,
-          loggedFrom: previous?.loggedFrom ?? String(row.first_recorded_at),
-          prunedBefore: recordedAt,
-          retainedRevision: revision,
-        };
         const victims = await target.execute<Readonly<{ revision: unknown }>>(
           asCompiledRowsSql(sql`
             SELECT anchors.revision FROM ${recordedAnchorsTable(schema)} anchors
@@ -335,20 +340,29 @@ export async function pruneRecordedAnchors(
           `),
         );
         const deletedCount = Math.min(victims.length, limit);
-        // Publish the logical coverage floor in the SAME commit as this bounded deletion.
-        const written = await target.execute(
-          asCompiledRowsSql(sql`
-            UPDATE ${schema.recordedClockTable} SET ${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)}=${JSON.stringify(state)} WHERE graph_id=${graphId}
-              AND revision>=${revision}
-              AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
-            RETURNING graph_id
-          `),
-        );
-        if (written.length !== 1)
-          throw new ConfigurationError(
-            "Recorded pruning could not persist its coverage watermark.",
-            { code: "RECORDED_RETENTION_WRITE_REFUSED", graphId },
+        if (advance) {
+          const state: RecordedAnchorRetentionState = {
+            version: RETENTION_STATE_VERSION,
+            loggedFromFirstAllocation: first !== undefined,
+            loggedFrom: previous?.loggedFrom ?? String(row.first_recorded_at),
+            prunedBefore: recordedAt,
+            retainedRevision: revision,
+          };
+          // Publish the logical coverage floor in the SAME commit as this bounded deletion.
+          const written = await target.execute(
+            asCompiledRowsSql(sql`
+              UPDATE ${schema.recordedClockTable} SET ${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)}=${JSON.stringify(state)} WHERE graph_id=${graphId}
+                AND revision>=${revision}
+                AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
+              RETURNING graph_id
+            `),
           );
+          if (written.length !== 1)
+            throw new ConfigurationError(
+              "Recorded pruning could not persist its coverage watermark.",
+              { code: "RECORDED_RETENTION_WRITE_REFUSED", graphId },
+            );
+        }
         if (deletedCount > 0) {
           const firstRevision = Number(requireDefined(victims[0]).revision);
           const lastRevision = Number(

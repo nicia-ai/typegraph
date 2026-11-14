@@ -360,7 +360,9 @@ pruning. If logging began after revision one, earlier unlogged times still raise
 Each batch uses the same graph write fence as captured writers and owner rotation.
 Serialization conflicts retry the complete bounded transaction. Concurrent
 writers keep their newer revisions, and competing prunes advance coverage
-monotonically. Lookup reads the watermark and candidate in one database snapshot.
+monotonically. Resuming a drain at the same boundary skips the watermark rewrite.
+Each independent batch still checks schema compatibility. Lookup reads the watermark
+and candidate in one database snapshot.
 The existing time and revision indexes serve candidate selection and bounded deletion
 on SQLite and PostgreSQL, including custom table namespaces.
 
@@ -370,6 +372,8 @@ marker through the backend lifecycle assertion and raises `BaseSchemaMigrationEr
 with the actual installed version if adoption is required.
 `resolveRecordedInstant` remains usable on pre-v9 allocations: it reads the clock
 row, candidate, and optional watermark in one statement, without checking the marker.
+PostgreSQL executes this schema-sensitive projection unnamed so a warm connection
+can read before and after column adoption without a stale prepared result type.
 An absent watermark means no recorded pruning on that storage. This supports
 synchronous local SQLite upgrades and previously allocated PostgreSQL working copies.
 Adoption preserves existing rows and does not infer earlier pruning. Upgrade all
@@ -385,8 +389,9 @@ coordinate allocation-log retention with backups, replication, external history
 retention, and any independent entity-history cleanup. A saved anchor needs its
 underlying entity history as well as its original owner and recording namespace.
 Pruning does not manage durable operation outcome evidence or schedule itself.
-It requires the same TypeGraph capture and `recordedAnchorLookup` capability as
-`resolveRecordedInstant`; live-only and engine-native stores refuse it.
+It requires TypeGraph capture and `recordedAnchorLookup`, plus the additional
+`recordedAnchorPruning` capability and `assertBaseSchemaCurrent`.
+Like `resolveRecordedInstant`, it refuses live-only and engine-native stores.
 
 ### Anchor ownership and checkpoint upgrades
 

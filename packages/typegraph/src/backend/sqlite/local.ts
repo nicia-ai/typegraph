@@ -47,6 +47,7 @@ import {
   edgeMatchIdentityColumnAdoption,
   generateSqliteMigrationSQL,
   quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -93,23 +94,47 @@ function installLocalSqliteBaseSchema(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
-  // Generated DDL installs fresh relations/indexes. Existing clock tables and
-  // their marker are upgraded together by privileged asynchronous adoption.
+  // Versioned installations use privileged asynchronous adoption. Marker-less
+  // bootstrap must finish current storage before installation SQL stamps it.
   if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
     throw new CompilerInvariantError(
       "The synchronous managed SQLite installation path only implements base-schema v1 through v9 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }
-  try {
-    const marker = sqlite
-      .prepare(
-        `SELECT version FROM ${quoteDdlIdentifier(getTableName(tables.baseSchemaVersions))} WHERE installation=1`,
-      )
-      .get() as Readonly<{ version: number }> | undefined;
-    assertBaseSchemaVersionNotNewer(marker?.version);
-  } catch (error) {
-    if (!isMissingTableError(error)) throw error;
+  const installedVersion = (() => {
+    try {
+      const marker = sqlite
+        .prepare(
+          `SELECT version FROM ${quoteDdlIdentifier(getTableName(tables.baseSchemaVersions))} WHERE installation=1`,
+        )
+        .get() as Readonly<{ version: number }> | undefined;
+      assertBaseSchemaVersionNotNewer(marker?.version);
+      return marker?.version;
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+      return;
+    }
+  })();
+  function columnDriver(tableName: string) {
+    return {
+      readColumns: () =>
+        sqlite
+          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(tableName)})`)
+          .all() as readonly SqliteColumnRow[],
+      execute: (statement: string) => {
+        sqlite.exec(statement);
+      },
+    };
+  }
+  // Marker-less bootstrap publishes the current release, so finish its clock
+  // upgrade first. A versioned installation stays on asynchronous adoption.
+  if (installedVersion === undefined) {
+    const clockTable = getTableName(tables.recordedClock);
+    adoptSqliteColumnsSync(
+      recordedAnchorRetentionColumnAdoption(clockTable),
+      columnDriver(clockTable),
+    );
   }
   const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
   try {
@@ -117,15 +142,10 @@ function installLocalSqliteBaseSchema(
   } catch (error) {
     if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
     const edgeTableName = getTableName(tables.edges);
-    adoptSqliteColumnsSync(edgeMatchIdentityColumnAdoption(edgeTableName), {
-      readColumns: () =>
-        sqlite
-          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
-          .all() as readonly SqliteColumnRow[],
-      execute: (statement) => {
-        sqlite.exec(statement);
-      },
-    });
+    adoptSqliteColumnsSync(
+      edgeMatchIdentityColumnAdoption(edgeTableName),
+      columnDriver(edgeTableName),
+    );
     sqlite.exec(installationSql);
   }
 }

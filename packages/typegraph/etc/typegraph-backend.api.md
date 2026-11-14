@@ -494,6 +494,7 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
 // @public
 export type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

@@ -51,4 +51,18 @@ describe("PostgreSQL lane argument forwarding", () => {
     expect(args).toContain("tests/backends/postgres/");
     expect(args).toContain("tests/graph-merge/");
   });
+  it("narrows bare filename filters without expanding the default lane", () => {
+    const args = laneArguments(["recorded-retention-adoption"]);
+    expect(args).toContain("recorded-retention-adoption");
+    expect(args).not.toContain("tests/backends/postgres/");
+    expect(args).not.toContain("tests/graph-merge/");
+  });
+  it.each([
+    ["--dir", "tests/backends/postgres"],
+    ["--dir=tests/backends/postgres"],
+  ])("keeps default roots when --dir is an option value (%j)", (...options) => {
+    const args = laneArguments(options);
+    expect(args).toContain("tests/backends/postgres/");
+    expect(args).toContain("tests/graph-merge/");
+  });
 });

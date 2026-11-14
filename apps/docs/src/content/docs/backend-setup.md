@@ -1137,25 +1137,37 @@ Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
 (`typegraph_recorded_clock`, or its configured name). Existing rows retain their
 clock coordinates and start with no retention watermark. Privileged adoption adds
 the column before publishing version 9; externally managed deployments must apply
-that additive migration before pruning. Synchronous local SQLite opening leaves
-an existing clock and its marker unchanged until asynchronous privileged adoption.
+that additive migration before pruning. Synchronous local SQLite opening preserves
+an existing versioned clock and marker until asynchronous privileged adoption. Marker-less SQLite
+bootstrap upgrades an existing clock before it stamps the current marker, including
+when legacy edge-identity columns also need adoption.
 Custom schema providers must include the column and supply the version 9 adoption
-step. Pruning requires the backend-owned `assertBaseSchemaCurrent` lifecycle
-assertion, which reports the actual installed version in `BaseSchemaMigrationError`.
+step. Pruning requires both `recordedAnchorLookup` and `recordedAnchorPruning` capabilities, plus the backend-owned
+`assertBaseSchemaCurrent` lifecycle assertion, which reports the actual installed
+version in `BaseSchemaMigrationError`. `recordedAnchorLookup` advertises lookup only;
+a backend claiming pruning without the required member raises `ConfigurationError`.
 Upgrade every reader before enabling a retention job so lookups honor retired coverage.
 
 PostgreSQL checks the column catalog and skips unnecessary DDL. A required ALTER
 queues for its exclusive table lock with a one-second maximum `lock_timeout`,
 honoring a stricter caller timeout. Queuing lets adoption proceed ahead of later
-writers even when captured transactions overlap; new writes may wait briefly behind
-adoption. The previous setting is restored on success, and caller-owned transactions
-use a savepoint so failure restores their session too. Persistent contention raises
+writers even when captured transactions overlap. The timeout bounds lock acquisition,
+not how long the acquired lock is held. A required ALTER holds its exclusive table
+lock until the enclosing transaction commits or rolls back. On a root backend this
+is the adoption statement's transaction. Inside a caller-owned transaction, releasing
+the savepoint keeps the lock until the outer COMMIT or ROLLBACK: writes and lookups
+on every graph sharing that clock table can block throughout that period. Run
+privileged adoption separately from long migrations, or commit the caller transaction
+promptly. The previous timeout setting is restored on success; a failed savepoint
+also restores the caller's session. Persistent contention raises
 `BaseSchemaAdoptionTimeoutError` with `details.tableName` and `details.waitBudgetMs`;
 the deployment marker stays at its old version. Retry privileged adoption after
 transactions using the table have completed.
 
 `pruneRecordedInstants(before, { limit })` persists the coverage boundary and deletes
-one bounded revision range per transaction. Its result reports `deletedCount`,
+one bounded revision range per transaction. Each call asserts schema compatibility;
+resumed batches do not rewrite a watermark whose boundary has not advanced.
+Its result reports `deletedCount`,
 `retainedBoundary`, and `hasMore`; resume until cleanup finishes. See
 [allocation metadata retention](/queries/temporal#retain-and-prune-allocation-metadata).
 
@@ -2597,7 +2609,7 @@ TypeGraph choosing separate query semantics per backend:
 | Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
 | Engine-native recorded time (`backend.recordedTime`)    | ✗ (TypeGraph-owned recorded relations via `history`) | ✗ (TypeGraph-owned recorded relations via `history`) | Neither bundled profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives `"typegraph-relations"` for both — `history: true` captures into TypeGraph's own recorded relations and clock, identically on both dialects, and every recorded-time integration suite and the parity snapshot run unchanged. A backend that supplies `recordedTime` (and the co-required `lineage`) reads and writes recorded time through its own engine instead: no TypeGraph capture, clock, or recorded relations, `RecordedInstant` anchors in the `e1:` form, and several TypeGraph-relation-specific surfaces refused — see [Engine-native recorded time](/queries/temporal#engine-native-recorded-time) and [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime). No bundled backend implements this today; the capability is proven by a PostgreSQL-family simulation (shared by the always-running `tests/backends/postgres/pglite-engine-native-recorded-time.test.ts` and the `POSTGRES_URL`-gated `tests/backends/postgres/engine-native-recorded-time.test.ts`, both built on `engine-native-recorded-time-simulation.ts`) that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a simulation rather than a real third engine |
 | Durable ordinary mutation outcomes | ✓ (`revisionTracking` or `history`) | ✓ (`revisionTracking` or `history`) | Atomic caller-key outcomes through `operateStore`; requires `durableStoreOperations`, interactive transactions, and protected revision origins. |
-| Wall-clock recorded-anchor lookup | ✓ (`history: true`) | ✓ (`history: true`) | Indexed retained allocation-time lookup via `resolveRecordedInstant`; bounded metadata retention with progress via `pruneRecordedInstants` (base schema 9). Requires `recordedAnchorLookup`; engine-native histories refuse. |
+| Wall-clock recorded-anchor lookup | ✓ (`history: true`) | ✓ (`history: true`) | Indexed retained allocation-time lookup via `resolveRecordedInstant`; bounded metadata retention with progress via `pruneRecordedInstants` (base schema 9). Lookup requires `recordedAnchorLookup`; pruning additionally requires `recordedAnchorPruning`. Engine-native histories refuse. |
 | Recorded adjacency paging | ✓ (`history: true`) | ✓ (`history: true`) | Candidate-bounded incident edge/neighbor pages. Engine-native and external recorded sources refuse with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`. See [temporal queries](/queries/temporal). |
 
 Identity support also has a **driver** dimension inside each dialect:

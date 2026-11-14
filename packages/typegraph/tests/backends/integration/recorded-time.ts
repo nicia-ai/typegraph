@@ -1958,7 +1958,7 @@ export function registerRecordedTimeIntegrationTests(
       const [unsupported] = await createStoreWithSchema(
         integrationTestGraph,
         deriveBackend(base, {
-          capabilities: { ...base.capabilities, recordedAnchorLookup: false },
+          capabilities: { ...base.capabilities, recordedAnchorPruning: false },
         }),
         { history: true },
       );
@@ -2019,10 +2019,92 @@ export function registerRecordedTimeIntegrationTests(
         await expect(
           missingLifecycle.pruneRecordedInstants(time),
         ).rejects.toMatchObject({
-          name: "UnsupportedBackendCapabilityError",
-          details: { capability: "assertBaseSchemaCurrent" },
+          name: "ConfigurationError",
+          details: {
+            capability: "recordedAnchorPruning",
+            missingMember: "assertBaseSchemaCurrent",
+          },
         });
       }
+    });
+
+    it("requires a separate pruning capability in addition to allocation lookup", async () => {
+      const base = context.getBackend();
+      await createHistoryStore(context);
+      const { recordedAnchorPruning, ...legacyCapabilities } =
+        base.capabilities;
+      expect(recordedAnchorPruning).toBe(true);
+      const legacy = createStore(
+        integrationTestGraph,
+        deriveBackend(base, { capabilities: legacyCapabilities }),
+        { history: true },
+      );
+      expect(
+        await legacy.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBeUndefined();
+      await expect(
+        legacy.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        name: "UnsupportedBackendCapabilityError",
+        details: { capability: "recordedAnchorPruning" },
+      });
+    });
+
+    it("does not rewrite an unchanged watermark while draining bounded batches", async () => {
+      const base = context.getBackend();
+      const writes: string[] = [];
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    execute<T>(query: CompiledRowsSql) {
+                      const text = requireDefined(base.compileSql)(query).sql;
+                      if (
+                        text.trimStart().startsWith("UPDATE") &&
+                        text.includes('"anchor_retention"=')
+                      )
+                        writes.push(text);
+                      return target.execute<T>(query);
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      for (const name of ["one", "two", "three"])
+        await store.nodes.Person.create({ name, age: 1 });
+      const cutoff = "2099-01-01T00:00:00.000Z";
+      const boundary = await store.recordedNow();
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: true,
+      });
+      expect(writes).toHaveLength(1);
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 0,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(writes).toHaveLength(1);
+      await store.nodes.Person.create({ name: "four", age: 1 });
+      expect(await store.pruneRecordedInstants(cutoff)).toMatchObject({
+        deletedCount: 1,
+        hasMore: false,
+      });
+      expect(writes).toHaveLength(2);
     });
 
     it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {

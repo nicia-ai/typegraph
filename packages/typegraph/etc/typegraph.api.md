@@ -307,6 +307,7 @@ export function avg<const Alias extends string, const Property extends string>(a
 // @public
 export type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

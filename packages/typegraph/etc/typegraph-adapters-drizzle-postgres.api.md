@@ -43,6 +43,7 @@ export type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, un
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

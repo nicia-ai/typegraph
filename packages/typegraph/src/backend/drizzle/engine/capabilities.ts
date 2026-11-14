@@ -112,9 +112,15 @@ export function finalizeEngineCapabilities(
     createAtomicSqlProgramExecutor(deps.execution) === undefined ? "none" : (
       "root"
     );
+  const recordedAnchorLookup = declared.recordedAnchorLookup ?? true;
   return assertBundledCapabilityDeclarations({
     ...declaredWithoutStrategyCapabilities,
-    recordedAnchorLookup: declared.recordedAnchorLookup ?? true,
+    recordedAnchorLookup,
+    recordedAnchorPruning:
+      declared.recordedAnchorPruning ??
+      (recordedAnchorLookup &&
+        declared.execution.interactiveTransactions &&
+        declared.returning !== false),
     durableStoreOperations:
       declared.durableStoreOperations ??
       (declared.execution.interactiveTransactions &&

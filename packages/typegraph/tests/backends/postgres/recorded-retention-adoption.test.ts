@@ -1,7 +1,9 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import { RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS } from "../../../src/backend/recorded-storage";
 import {
@@ -95,6 +97,51 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
         "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
       );
     }
+
+    it("keeps warm node-postgres lookups working across v9 adoption on one connection", async () => {
+      const warmPool = new Pool({ connectionString: databaseUrl, max: 1 });
+      try {
+        const warmBackend = createPostgresBackend(drizzle(warmPool), {
+          vector: false,
+          fulltext: false,
+        });
+        const Person = defineNode("Person", {
+          schema: z.object({ name: z.string() }),
+        });
+        const graph = defineGraph({
+          id: "warm_lookup_adoption",
+          nodes: { Person: { type: Person } },
+          edges: {},
+        });
+        const [store] = await createStoreWithSchema(graph, warmBackend, {
+          history: true,
+        });
+        await store.nodes.Person.create({ name: "preserved" });
+        const anchor = await store.recordedNow();
+        await warmPool.query(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        await warmPool.query(
+          "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+        );
+        const before = await warmPool.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid",
+        );
+        expect(
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await requireDefined(warmBackend.adoptBaseSchema)();
+        expect(
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        const after = await warmPool.query<{ pid: number }>(
+          "SELECT pg_backend_pid() AS pid",
+        );
+        expect(after.rows).toEqual(before.rows);
+      } finally {
+        await warmPool.end();
+      }
+    });
 
     it("skips adoption DDL when the retention column is already installed", async () => {
       const release = await holdWriter();

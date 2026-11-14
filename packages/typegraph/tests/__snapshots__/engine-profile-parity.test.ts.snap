@@ -41,6 +41,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "maxBindParameters": 32767,
   "orderedAggregates": true,
   "recordedAnchorLookup": true,
+  "recordedAnchorPruning": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -258,6 +259,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "maxBindParameters": 32767,
   "orderedAggregates": true,
   "recordedAnchorLookup": true,
+  "recordedAnchorPruning": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -478,6 +480,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "maxBindParameters": 32766,
   "orderedAggregates": true,
   "recordedAnchorLookup": true,
+  "recordedAnchorPruning": true,
   "recursiveTraversal": {
     "supported": true,
   },
@@ -675,6 +678,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "maxBindParameters": 32766,
   "orderedAggregates": true,
   "recordedAnchorLookup": true,
+  "recordedAnchorPruning": true,
   "recursiveTraversal": {
     "supported": true,
   },

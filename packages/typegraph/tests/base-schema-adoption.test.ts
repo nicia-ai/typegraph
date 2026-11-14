@@ -1505,6 +1505,56 @@ describe("version 9: recorded allocation retention watermark", () => {
     },
   );
 
+  it("upgrades marker-less SQLite history before stamping the current version", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-unstamped-retention-"),
+    );
+    const filename = path.join(directory, "legacy.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "preserved legacy history" });
+      const anchor = await store.recordedNow();
+      const client = sqliteClient(original.db);
+      client.exec("DROP TABLE typegraph_base_schema_versions");
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec("DROP TABLE typegraph_edges");
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      await original.backend.close();
+      const reopened = createLocalSqliteBackend({ path: filename });
+      try {
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        expect(
+          markerVersion(
+            sqliteClient(reopened.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await expect(
+          attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).resolves.toEqual({
+          deletedCount: 0,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        await reopened.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps synchronous local SQLite lookups working before privileged v9 adoption", async () => {
     const directory = mkdtempSync(
       path.join(tmpdir(), "typegraph-retention-upgrade-"),
