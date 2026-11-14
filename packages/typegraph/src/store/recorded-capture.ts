@@ -681,7 +681,8 @@ export function inheritRecordedTransactionBindings(
 /**
  * Runs one TypeGraph-owned savepoint without letting recorded state drift from
  * live state. A rollback restores pending capture, graph-lock memos and all
- * registered transaction state, and discards savepoint-local success hooks.
+ * registered transaction state, and reports savepoint-local successes through
+ * their error hooks with the rollback cause.
  * Callers never receive the raw transaction target, so they cannot roll back
  * SQL while forgetting the TypeGraph sidecars that mirror it.
  *
@@ -736,9 +737,9 @@ export async function runRecordedTransactionSavepoint<T>(
       },
       savepoint,
       fn,
-      () => {
+      (cause) => {
         restoreCapture();
-        restoreState();
+        restoreState(cause);
       },
     ),
   );

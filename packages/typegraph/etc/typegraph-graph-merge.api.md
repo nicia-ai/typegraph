@@ -9598,11 +9598,6 @@ type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readon
 }>;
 
 // @public
-type TransactionEffectsMark = Readonly<{
-    discard: (cause: unknown) => void;
-}>;
-
-// @public
 type TransactionOptions = Readonly<{
     isolationLevel?: "read_uncommitted" | "read_committed" | "repeatable_read" | "serializable";
     accessMode?: "read_only" | "read_write";
@@ -9640,7 +9635,6 @@ type TransactionRuntime = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
-    markEffects: () => TransactionEffectsMark;
 }>;
 
 // @public (undocumented)

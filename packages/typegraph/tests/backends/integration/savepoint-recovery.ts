@@ -34,6 +34,7 @@ import { type GraphBackend } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
 import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
 import { transactionBackend } from "../../../src/store/runtime-port";
+import { type MeasurableTransactionContext } from "../../../src/store/types";
 import { type IntegrationTestContext } from "./test-context";
 
 const SavepointStamp = defineNode("SavepointStamp", {
@@ -192,6 +193,7 @@ export function registerSavepointRecoveryIntegrationTests(
         expect(await store.nodes.SavepointNote.find()).toHaveLength(
           priorWrite ? 1 : 0,
         );
+        expect(receipt.writes.total).toBe(priorWrite ? 1 : 0);
         expect(receipt.recorded === undefined).toBe(!history || !priorWrite);
         expect((await store.revisionNow()) === revision).toBe(!priorWrite);
       },
@@ -263,6 +265,170 @@ export function registerSavepointRecoveryIntegrationTests(
       });
       expect(await store.nodes.SavepointNote.find()).toHaveLength(3);
     });
+
+    it.each(
+      [false, true].flatMap((adopted) =>
+        [false, true].flatMap((history) =>
+          ["rollback", "throw"].map((decision) => ({
+            adopted,
+            history,
+            decision,
+          })),
+        ),
+      ),
+    )(
+      "settles hooks and nested receipts at the savepoint seam (adopted: $adopted, history: $history, decision: $decision)",
+      async ({ adopted, history, decision }) => {
+        const backend = context.getBackend();
+        const started: string[] = [];
+        const terminal: string[] = [];
+        const ended: string[] = [];
+        const errors: Error[] = [];
+        const cause = new Error("savepoint refusal");
+        const [store] = await createAdapterStoreWithSchema(
+          stampGraph,
+          backend,
+          {
+            history,
+            revisionTracking: true,
+            hooks: {
+              onOperationStart: (operation) => {
+                started.push(operation.operationId);
+              },
+              onBulkOperationStart: (operation) => {
+                started.push(operation.operationId);
+              },
+              onOperationEnd: (operation) => {
+                terminal.push(operation.operationId);
+                ended.push(operation.id);
+              },
+              onBulkOperationEnd: (operation) => {
+                terminal.push(operation.operationId);
+                ended.push("bulk");
+              },
+              onError: (operation, error) => {
+                terminal.push(operation.operationId);
+                errors.push(error);
+                throw new Error(
+                  "an error observer must not replace the refusal",
+                );
+              },
+            },
+          },
+        );
+        const statements = statementExecutionVerdict(backend);
+        if (!statements.supported)
+          throw new Error("Fixture requires statement execution");
+        const run = async (
+          tx: MeasurableTransactionContext<typeof stampGraph>,
+        ) => {
+          const { receipt: measured } = await tx.measure(async (scoped) => {
+            await scoped.nodes.SavepointNote.create(
+              { body: "before" },
+              { id: "before" },
+            );
+            const { receipt: nested } = await scoped.measure(async (inner) => {
+              const result = await runRecordedTransactionSavepoint(
+                transactionBackend(tx),
+                statements,
+                "test_effects_outer",
+                async () => {
+                  await inner.nodes.SavepointNote.create(
+                    { body: "rolled back" },
+                    { id: "rolled-back" },
+                  );
+                  await inner.nodes.SavepointNote.updateWhere({
+                    all: true,
+                    patch: { body: "rolled back update" },
+                  });
+                  await runRecordedTransactionSavepoint(
+                    transactionBackend(tx),
+                    statements,
+                    "test_effects_inner",
+                    async () => {
+                      await inner.nodes.SavepointNote.create(
+                        { body: "released inside outer" },
+                        { id: "nested" },
+                      );
+                      return { action: "release", value: undefined };
+                    },
+                  );
+                  if (decision === "throw") throw cause;
+                  return { action: "rollback", value: "refused", cause };
+                },
+              ).catch((error: unknown) => error);
+              expect(result).toBe(decision === "throw" ? cause : "refused");
+            });
+            expect(nested.writes.total).toBe(0);
+            expect(ended).toEqual(adopted ? ["before"] : []);
+            expect(errors).toHaveLength(3);
+            expect(errors.every((error) => error === cause)).toBe(true);
+            await scoped.nodes.SavepointNote.create(
+              { body: "after" },
+              { id: "after" },
+            );
+          });
+          expect(measured.writes.total).toBe(2);
+        };
+        const { receipt } =
+          adopted ?
+            await backend.transactionWithNative(async (_target, native) =>
+              store.withRecordedTransaction(native, run),
+            )
+          : await store.transactionWithReceipt(run);
+        expect(receipt.writes.total).toBe(2);
+        expect(ended).toEqual(["before", "after"]);
+        expect(terminal.toSorted()).toEqual(started.toSorted());
+        const notes = await store.nodes.SavepointNote.find();
+        expect(notes.map((note) => note.body).toSorted()).toEqual([
+          "after",
+          "before",
+        ]);
+      },
+    );
+
+    it.each([false, true])(
+      "reports a savepoint failure once when the transaction also aborts (adopted: %s)",
+      async (adopted) => {
+        const backend = context.getBackend();
+        const errors: Error[] = [];
+        const cause = new Error("abort savepoint and transaction");
+        const [store] = await createAdapterStoreWithSchema(
+          stampGraph,
+          backend,
+          {
+            hooks: {
+              onError: (_operation, error) => {
+                errors.push(error);
+              },
+            },
+          },
+        );
+        const statements = statementExecutionVerdict(backend);
+        if (!statements.supported)
+          throw new Error("Fixture requires statement execution");
+        const run = (tx: MeasurableTransactionContext<typeof stampGraph>) =>
+          runRecordedTransactionSavepoint(
+            transactionBackend(tx),
+            statements,
+            "test_uncaught_failure",
+            async () => {
+              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              throw cause;
+            },
+          );
+        const attempt =
+          adopted ?
+            backend.transactionWithNative(async (_target, native) =>
+              store.withRecordedTransaction(native, run),
+            )
+          : store.transactionWithReceipt(run);
+        await expect(attempt).rejects.toBe(cause);
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toBe(cause);
+        expect(await store.nodes.SavepointNote.find()).toEqual([]);
+      },
+    );
 
     it("lets a caller transaction commit after bulkReplaceById loses a unique key", async () => {
       const store = await context.createStore(stampGraph);

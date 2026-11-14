@@ -10,11 +10,7 @@ import {
   hasPendingRecordedGraphWrites,
   runRecordedTransactionSavepoint,
 } from "../store/recorded-capture";
-import {
-  markTransactionEffects,
-  storeBackend,
-  transactionBackend,
-} from "../store/runtime-port";
+import { storeBackend, transactionBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import type { TransactionContext } from "../store/types";
 import { MergePlanCapabilityError } from "./errors";
@@ -80,20 +76,10 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
       { details: { capability: "mergeTransactionSavepoint" } },
     );
   }
-  // The rows are not the apply's only effects: the transaction context has
-  // also buffered `onOperationEnd` outcomes and receipt counts for them.
-  // Those are forgotten with the rows, so a caller that commits reports only
-  // what it commits.
-  const effects = markTransactionEffects(tx);
-  try {
-    return await runRecordedTransactionSavepoint(
-      transactionBackend(tx),
-      statements,
-      ADOPTED_MERGE_APPLY_SAVEPOINT,
-      async () => ({ action: "release", value: await apply() }),
-    );
-  } catch (error) {
-    effects.discard(error);
-    throw error;
-  }
+  return runRecordedTransactionSavepoint(
+    transactionBackend(tx),
+    statements,
+    ADOPTED_MERGE_APPLY_SAVEPOINT,
+    async () => ({ action: "release", value: await apply() }),
+  );
 }
