@@ -61,10 +61,7 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
-  revisionOrigin: (
-    target?: TransactionBackend,
-  ) => Promise<RecordedAnchorOwner | undefined>;
-  revisionOriginSession?: (
+  revisionOriginSession: (
     target: TransactionBackend,
     execution: OptionalTransactionExecution,
   ) => Promise<GraphAllocationOwnerRead>;
@@ -218,8 +215,8 @@ function createRecordedReadBackend(
     ): Promise<T> => {
       await assertOrigin(backend);
       const result = await backend.transaction(async (target) => {
-        // The owner and isolation were observed together on THIS target.
-        // Its snapshot covers every subsequent read until this callback ends;
+        // The owner read resolves snapshot evidence on THIS target. A confirmed
+        // snapshot covers every subsequent read until this callback ends;
         // the root check below still rejects retirement outside that snapshot.
         const pinned = await assertSnapshotOrigin(target);
         const guarded = deriveBackend(
@@ -421,17 +418,22 @@ export function createRecordedReadService(
     mapRecordedEdgeRow,
   } = params;
 
+  async function revisionOrigin(
+    target: TransactionBackend = backend,
+  ): Promise<RecordedAnchorOwner | undefined> {
+    const read = await params.revisionOriginSession(target, {
+      mode: "sequential",
+    });
+    return read.owner;
+  }
+
   async function assertOrigin(
     coordinate: ReadCoordinate,
     target?: TransactionBackend,
   ): Promise<void> {
     const parts = requireRecordedRevision(coordinate);
     if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;
-    assertRecordedAnchorOrigin(
-      parts,
-      await params.revisionOrigin(target),
-      graphId,
-    );
+    assertRecordedAnchorOrigin(parts, await revisionOrigin(target), graphId);
   }
 
   /**
@@ -651,7 +653,7 @@ export function createRecordedReadService(
         graphId,
         backend,
         binding: recordedReadBinding,
-        origin: params.revisionOrigin,
+        origin: revisionOrigin,
         root,
         coordinate,
         edgeKinds,
@@ -672,10 +674,9 @@ export function createRecordedReadService(
           const parts = requireRecordedRevision(coordinate);
           if (requireRecordedAnchorOwner(parts, graphId) === undefined)
             return false;
-          if (params.revisionOriginSession === undefined) {
-            await assertOrigin(coordinate, target);
-            return false;
-          }
+          // This callback is entered by backend.transaction(), so the mode
+          // records that execution boundary. Snapshot reuse additionally needs
+          // the actual target's transaction port and snapshot evidence.
           const read = await params.revisionOriginSession(target, {
             mode: "interactive-transaction",
           });

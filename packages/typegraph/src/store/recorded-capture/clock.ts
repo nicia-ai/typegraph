@@ -398,7 +398,6 @@ export async function readRecordedClock(
   const parts = recordedClockParts(state.clock);
   if (parts === undefined) return undefined;
   const origin = revisionOriginFromRow(state.originRow, graphId);
-  if (origin === undefined) return undefined;
   return createRecordedInstant(
     parts.revision,
     parts.recordedAt,
@@ -459,6 +458,14 @@ export async function readRevisionOriginState(
 }
 
 /** One validation of persisted origin state for readers and allocators. */
+function revisionOriginFromRow(
+  first: RevisionOriginRow,
+  graphId: string,
+): string;
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined;
 function revisionOriginFromRow(
   first: RevisionOriginRow | undefined,
   graphId: string,

@@ -476,7 +476,7 @@ export function sessionIsolationExpression(
   execution: OptionalTransactionExecution,
 ): SqlFragment | undefined {
   if (!isInteractiveTransactionSession(target, execution)) return undefined;
-  if (sessionReadsShareOneSnapshot(target, execution, undefined))
+  if (getDialect(target.dialect).capabilities.transactionReadsShareOneSnapshot)
     return undefined;
   return target.fenceSql?.isolationFactExpression?.();
 }

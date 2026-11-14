@@ -1558,10 +1558,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
-      revisionOrigin: async (target = this.#backend) => {
-        const read = await this.#readRecordedReadOwner(target);
-        return read.owner;
-      },
       revisionOriginSession: (target, execution) =>
         this.#readRecordedReadOwner(target, execution),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
