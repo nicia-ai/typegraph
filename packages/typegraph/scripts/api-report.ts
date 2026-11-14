@@ -680,6 +680,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // lock-bearing builders reach RowLockClause and the strategy's own
 // NodeRowLockClauses. Both are dialect SQL plumbing, not authoring contracts,
 // so the engine fingerprint books exactly those two names.
+// Allocation retention exports PruneRecordedInstantsOptions and
+// PruneRecordedInstantsResult from the root. The seven Store-bearing secondary
+// entrypoints gain exactly these two transitive names (+2 each); subtracting
+// them reproduces every preceding fingerprint. Their narrower exports stay intact.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 500,
@@ -702,8 +706,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // visible here. Keep that large type graph isolated from the established
   // PostgreSQL adapter and pin its exact symbol set.
   "./adapters/drizzle/postgres/working-copy": {
-    count: 880,
-    sha256: "325fe11416402e1912454c7b6146690a46d02e826793fb9a226681373c96897a",
+    count: 882,
+    sha256: "50a0c2c38dae212712d9571ce16bb8d98ed12089566c4f85e20a361ceb1878d2",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 271,
@@ -740,36 +744,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Exact apply receipts expose TransactionReceipt as a named export here:
   // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 873,
-    sha256: "603e70b572498badb6079e928e8e6eefd6940d51e325949d66e3f6aaa5547ca4",
+    count: 875,
+    sha256: "073e9dc1b25b698c96b4de72dda20e35f629d504b686616f0c25bea4bff5aaaf",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 859,
-    sha256: "1300da0693612bd7fa50abe00225639ac1054b9e1c3144db2c9b2030cec6f2a5",
+    count: 861,
+    sha256: "0fe359ba3f0fa451e2bbe189f7c0e34909927b13c4e548280665957d4cbe037f",
   },
   "./postgres/pglite": {
-    count: 865,
-    sha256: "128bb1201a7c17c296c7a90fc9f17a6dba6aed53087af8069521c29a0fa9c132",
+    count: 867,
+    sha256: "b6b256f4f2a16c8979b5f2c42813ba2075cb45c7cf19d12f216a686f38fb9f8c",
   },
   "./profiler": {
-    count: 861,
-    sha256: "68398e3f8b194c8f34286fb13deccf9abfc6a4798287421445d9f76ea515ba75",
+    count: 863,
+    sha256: "799fb9c5b6e16e551f8354a4a2d96d9f63741faa4982a1b5fc80f6dda7e303a1",
   },
   "./provenance": {
-    count: 874,
-    sha256: "2a33b39703f60ffae89a52a87de9bbeeeee11665846948af6be9e7c6516f2ecd",
+    count: 876,
+    sha256: "f297ae0d5317026de1e0d9ebd3ea5f17dfc50c7cdcf392916f5329ca3b33f997",
   },
   "./schema": {
     count: 290,
     sha256: "c4030c73857791586eb0134a1947ed4a5c540176d83103437b9d7cbbc2d62a16",
   },
   "./sqlite/local": {
-    count: 865,
-    sha256: "128bb1201a7c17c296c7a90fc9f17a6dba6aed53087af8069521c29a0fa9c132",
+    count: 867,
+    sha256: "b6b256f4f2a16c8979b5f2c42813ba2075cb45c7cf19d12f216a686f38fb9f8c",
   },
 };
 

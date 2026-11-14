@@ -1153,6 +1153,10 @@ a retry against the same retired owner cannot repair it.
 | `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
 | `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
 | `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_RETENTION_STATE_INVALID` | Persisted allocation retention metadata is malformed or inconsistent. Repair storage before retrying. |
+| `RECORDED_RETENTION_WRITE_REFUSED` | The pruning transaction could not persist its watermark against the observed clock and owner; the batch rolls back. |
+| `RECORDED_RETENTION_DELETE_REFUSED` | The deletion count differs from the bounded batch selection; the batch rolls back. |
+| `RECORDED_LOOKUP_HISTORY_PRUNED` | The requested wall time falls within pruned allocation coverage. Use a saved anchor or a time within the retained suffix. |
 | `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
 | `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
 | `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |
@@ -1202,6 +1206,11 @@ try {
 ```
 
 ### `BaseSchemaMigrationError`
+
+Recorded-instant lookup and pruning also raise this error when the version 9
+`anchor_retention` column is absent. In that refusal, `details.missingColumn`
+names the column and `details.installedVersion` is unknown: the failed read does
+not add a deployment-marker probe or guess the installed version.
 
 Thrown by zero-DDL verified and graph-template entry points when the
 deployment-wide physical TypeGraph schema has not been adopted to the version

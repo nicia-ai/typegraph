@@ -34,18 +34,26 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isMissingTableError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
-import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
+  assertBaseSchemaVersionNotNewer,
+  CURRENT_BASE_SCHEMA_VERSION,
+} from "../drizzle/base-schema";
+import {
+  edgeMatchIdentityColumnAdoption,
   generateSqliteMigrationSQL,
-  planSqliteEdgeMatchIdentityAdoption,
   quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
+import {
+  adoptSqliteColumnsSync,
+  type SqliteColumnRow,
+} from "../drizzle/sqlite-column-adoption";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
@@ -86,56 +94,51 @@ function installLocalSqliteBaseSchema(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
-  // v2 (the fences relation), v3 (the recorded-relations' and recorded
-  // identity-assertions relation's `since_idx` indexes), v4 (the revision
-  // changes relation) and v5 (PostgreSQL's byte-ordered `graph_id` indexes,
-  // which SQLite has no counterpart for), and v6 (the recorded adjacency
-  // indexes), v7 (the retained allocation-anchor log), and v8 (durable Store outcomes) need no adoption
-  // logic beyond what `generateSqliteMigrationSQL` already emits: a
-  // brand-new relation or index is fully covered by its own `CREATE TABLE
-  // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, on both a fresh database
-  // and one that already has every OTHER base table or index. Only v1's
-  // edge-match-identity `ADD COLUMN` migration — handled by the catch block
-  // below — needed runtime introspection this synchronous path writes by
-  // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 8) {
+  // Generated DDL installs new relations/indexes. Existing clock tables need
+  // v9's nullable retention column before asynchronous adoption advances the marker; the shared
+  // planner below also serves asynchronous/offline SQLite adoption.
+  if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v8 adoption.",
+      "The synchronous managed SQLite installation path only implements base-schema v1 through v9 adoption.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }
+  try {
+    const marker = sqlite
+      .prepare(
+        `SELECT version FROM ${quoteDdlIdentifier(getTableName(tables.baseSchemaVersions))} WHERE installation=1`,
+      )
+      .get() as Readonly<{ version: number }> | undefined;
+    assertBaseSchemaVersionNotNewer(marker?.version);
+  } catch (error) {
+    if (!isMissingTableError(error)) throw error;
+  }
+  const clockTable = getTableName(tables.recordedClock);
+  adoptSqliteColumnsSync(recordedAnchorRetentionColumnAdoption(clockTable), {
+    readColumns: () =>
+      sqlite
+        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(clockTable)})`)
+        .all() as readonly SqliteColumnRow[],
+    execute: (statement) => {
+      sqlite.exec(statement);
+    },
+  });
   const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
   try {
     sqlite.exec(installationSql);
   } catch (error) {
     if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
     const edgeTableName = getTableName(tables.edges);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const rows = sqlite
-        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
-        .all() as readonly Readonly<{ name?: unknown }>[];
-      const columns = new Set(
-        rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-      );
-      const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
-        edgeTableName,
-        columns,
-      );
-      try {
-        sqlite.exec([...adoptionSql, installationSql].join("\n"));
-        return;
-      } catch (repairError) {
-        if (
-          attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
-        ) {
-          throw repairError;
-        }
-      }
-    }
-    throw new CompilerInvariantError(
-      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
+    adoptSqliteColumnsSync(edgeMatchIdentityColumnAdoption(edgeTableName), {
+      readColumns: () =>
+        sqlite
+          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
+          .all() as readonly SqliteColumnRow[],
+      execute: (statement) => {
+        sqlite.exec(statement);
+      },
+    });
+    sqlite.exec(installationSql);
   }
 }
 

@@ -110,6 +110,10 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   recordedAnchorsDdl?: readonly string[];
   /** Version-8 durable ordinary Store operation outcomes. */
   storeOperationsDdl?: readonly string[];
+  /** Version-9 persisted recorded-allocation retention state. */
+  ensureRecordedAnchorRetentionStorage?: (
+    clockProvisioned: boolean,
+  ) => Promise<void>;
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -149,7 +153,19 @@ export function createBaseSchemaMembers(
     adjacencyIndexDdl,
     recordedAnchorsDdl,
     storeOperationsDdl,
+    ensureRecordedAnchorRetentionStorage,
   } = deps;
+
+  async function adoptRecordedAnchorRetention(
+    clockProvisioned: boolean,
+  ): Promise<void> {
+    if (ensureRecordedAnchorRetentionStorage === undefined)
+      throw new ConfigurationError(
+        "Base-schema version 9 requires recorded-retention storage adoption.",
+        { missingDependencies: ["ensureRecordedAnchorRetentionStorage"] },
+      );
+    await ensureRecordedAnchorRetentionStorage(clockProvisioned);
+  }
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
     readVersion,
@@ -238,10 +254,11 @@ export function createBaseSchemaMembers(
       {
         version: 7,
         async adopt(): Promise<void> {
-          if (recordedAnchorsDdl === undefined) throw new ConfigurationError(
-            "Base-schema version 7 adoption requires recorded-anchor log DDL.",
-            { missingDependencies: ["recordedAnchorsDdl"] },
-          );
+          if (recordedAnchorsDdl === undefined)
+            throw new ConfigurationError(
+              "Base-schema version 7 adoption requires recorded-anchor log DDL.",
+              { missingDependencies: ["recordedAnchorsDdl"] },
+            );
           for (const ddl of recordedAnchorsDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
@@ -249,13 +266,22 @@ export function createBaseSchemaMembers(
       {
         version: 8,
         async adopt(): Promise<void> {
-          if (storeOperationsDdl === undefined) throw new ConfigurationError(
-            "Base-schema version 8 adoption requires durable Store-operation DDL.",
-            { missingDependencies: ["storeOperationsDdl"] },
-          );
+          if (storeOperationsDdl === undefined)
+            throw new ConfigurationError(
+              "Base-schema version 8 adoption requires durable Store-operation DDL.",
+              { missingDependencies: ["storeOperationsDdl"] },
+            );
           for (const ddl of storeOperationsDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 9,
+        adopt: () => adoptRecordedAnchorRetention(false),
+        bootstrap: {
+          phase: "after",
+          adopt: () => adoptRecordedAnchorRetention(true),
+        },
       },
     ],
   });

@@ -316,10 +316,73 @@ returned anchor, and a subsequent graph reset makes that anchor refuse reads.
 
 Base-schema version 7 installs the log and time index. Coverage begins with
 captured transactions after installation; earlier allocations are not guessed
-from entity rows or timestamps. The log is retained until `clear()`; direct
-editing or partial pruning of TypeGraph history storage is unsupported. A backend
+from entity rows or timestamps. The log is retained until `clear()` unless explicitly pruned as described below.
+Direct editing of TypeGraph history storage is unsupported. A backend
 without `recordedAnchorLookup`, a store without TypeGraph capture, and an
 engine-native history refuse with `UnsupportedBackendCapabilityError`.
+
+### Retain and prune allocation metadata
+
+Long-running captured graphs accumulate allocation-log rows. Use a canonical UTC
+ISO timestamp and a bounded batch size to retire old wall-clock lookup coverage:
+
+```typescript
+const before = "2026-06-01T00:00:00.000Z";
+let progress;
+do {
+  progress = await store.pruneRecordedInstants(before, { limit: 1000 });
+  console.log(progress.deletedCount, progress.retainedBoundary);
+} while (progress.hasMore);
+```
+
+Each call deletes at most `limit` rows in one transaction (default 1,000;
+maximum 10,000). It keeps the highest revision allocated at or before `before`
+and every later allocation. Equal timestamps select the highest revision,
+using exactly the same candidate selection as `resolveRecordedInstant`.
+The result reports the actual deleted count, the owned `RecordedInstant` at
+the retained boundary, and whether physical cleanup has more work.
+
+The first successful batch atomically persists a coverage watermark and retires
+all wall-clock lookup coverage below that boundary, even if some old rows remain
+for later batches. `hasMore` describes pending physical cleanup, not continued
+lookup availability. A retention job can resume with the same cutoff after an
+interruption; older cutoffs cannot move the watermark backward and can finish
+previously retired cleanup. Pruning before the first allocation does nothing
+when no coverage was previously retired. A future cutoff keeps the latest allocation.
+
+The watermark preserves the first allocation time when known, so a request before
+that time returns `undefined`; requests within explicitly retired coverage raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`. Naturally gapped logs are valid and do not imply
+pruning. If logging began after revision one, earlier unlogged times still raise
+`RECORDED_LOOKUP_HISTORY_NOT_LOGGED`, while explicitly retired logged times raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`.
+
+Each batch uses the same graph write fence as captured writers and owner rotation.
+Serialization conflicts retry the complete bounded transaction. Concurrent
+writers keep their newer revisions, and competing prunes advance coverage
+monotonically. Lookup reads the watermark and candidate in one database snapshot.
+The existing time and revision indexes serve candidate selection and bounded deletion
+on SQLite and PostgreSQL, including custom table namespaces.
+
+Upgrade to base-schema version 9 before using either `resolveRecordedInstant` or
+`pruneRecordedInstants`. It adds the nullable
+`anchor_retention` column to the recorded clock. If it is absent, both APIs raise `BaseSchemaMigrationError`
+with `details.missingColumn`; no marker probe is added to successful lookups.
+Adoption preserves existing rows
+and does not infer earlier pruning. Upgrade all applications sharing the database
+before enabling a retention job, so every reader honors the persisted watermark.
+
+Pruning affects only wall-clock-to-anchor lookup metadata. It does not rotate
+the allocation owner, advance the graph clock, remove captured node or edge
+history, or invalidate saved `RecordedInstant` strings. Save exact anchors
+before pruning when checkpoints, cursors, branch bases, or downstream consumers
+must revisit old states. TypeGraph does not register or pin those consumers:
+coordinate allocation-log retention with backups, replication, external history
+retention, and any independent entity-history cleanup. A saved anchor needs its
+underlying entity history as well as its original owner and recording namespace.
+Pruning does not manage durable operation outcome evidence or schedule itself.
+It requires the same TypeGraph capture and `recordedAnchorLookup` capability as
+`resolveRecordedInstant`; live-only and engine-native stores refuse it.
 
 ### Anchor ownership and checkpoint upgrades
 

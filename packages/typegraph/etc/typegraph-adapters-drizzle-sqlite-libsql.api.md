@@ -1607,6 +1607,25 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
             }, {}, {
                 length: number | undefined;
             }>;
+            anchorRetention: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "anchor_retention";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
         };
         dialect: "sqlite";
     }>;

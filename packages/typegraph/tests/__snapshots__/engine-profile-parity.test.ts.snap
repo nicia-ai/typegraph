@@ -1083,6 +1083,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   "graph_id" TEXT NOT NULL,
   "revision" BIGINT NOT NULL,
   "recorded_at" TIMESTAMPTZ NOT NULL,
+  "anchor_retention" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -1526,6 +1527,36 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       8,
       "<<TIMESTAMP>>",
       8,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      ""typegraph_recorded_clock"",
+      ""typegraph_recorded_clock"",
+      "anchor_retention",
+    ],
+    "sql": "
+          SELECT to_regclass($1) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass($2)
+                AND attname=$3 AND NOT attisdropped) AS has_retention
+        ",
+  },
+  {
+    "params": [
+      1,
+      9,
+      "<<TIMESTAMP>>",
+      9,
+      "<<TIMESTAMP>>",
+      9,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -2569,6 +2600,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   "graph_id" TEXT NOT NULL,
   "revision" BIGINT NOT NULL,
   "recorded_at" TIMESTAMPTZ NOT NULL,
+  "anchor_retention" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -3012,6 +3044,36 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       8,
       "<<TIMESTAMP>>",
       8,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      ""typegraph_recorded_clock"",
+      ""typegraph_recorded_clock"",
+      "anchor_retention",
+    ],
+    "sql": "
+          SELECT to_regclass($1) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass($2)
+                AND attname=$3 AND NOT attisdropped) AS has_retention
+        ",
+  },
+  {
+    "params": [
+      1,
+      9,
+      "<<TIMESTAMP>>",
+      9,
+      "<<TIMESTAMP>>",
+      9,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -3609,6 +3671,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   "graph_id" TEXT NOT NULL,
   "revision" INTEGER NOT NULL,
   "recorded_at" TEXT NOT NULL,
+  "anchor_retention" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -4036,6 +4099,27 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       8,
       "<<TIMESTAMP>>",
       8,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [],
+    "sql": "PRAGMA table_info("typegraph_recorded_clock")",
+  },
+  {
+    "params": [
+      1,
+      9,
+      "<<TIMESTAMP>>",
+      9,
+      "<<TIMESTAMP>>",
+      9,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
@@ -4883,6 +4967,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   "graph_id" TEXT NOT NULL,
   "revision" INTEGER NOT NULL,
   "recorded_at" TEXT NOT NULL,
+  "anchor_retention" TEXT,
   PRIMARY KEY ("graph_id")
 );",
   },
@@ -5310,6 +5395,27 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       8,
       "<<TIMESTAMP>>",
       8,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [],
+    "sql": "PRAGMA table_info("typegraph_recorded_clock")",
+  },
+  {
+    "params": [
+      1,
+      9,
+      "<<TIMESTAMP>>",
+      9,
+      "<<TIMESTAMP>>",
+      9,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },

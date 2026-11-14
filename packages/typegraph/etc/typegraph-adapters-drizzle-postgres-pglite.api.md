@@ -1502,6 +1502,23 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
+            anchorRetention: drizzle_orm_pg_core.PgColumn<{
+                name: "anchor_retention";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
         };
         dialect: "pg";
     }>;

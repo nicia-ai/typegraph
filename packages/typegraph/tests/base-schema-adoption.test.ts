@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { GraphBackend, ReconciledSchema } from "../src";
 import {
   BaseSchemaMigrationError,
+  createStore,
   createStoreWithSchema,
   createVerifiedStore,
   defineEdge,
@@ -22,6 +23,7 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
 import {
   edgeMatchIdentityPairCheckName,
@@ -1399,4 +1401,146 @@ describe("version 6: recorded adjacency indexes", () => {
       }
     },
   );
+});
+
+describe("version 9: recorded allocation retention watermark", () => {
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts a populated version 8 clock on %s without inventing pruning",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        const [store] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        const anchor = requireDefined(await store.recordedNow());
+        const owner = await store.allocationOwner();
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        await executeDdl(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+        );
+        for (const operation of [
+          () => store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          () => store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ]) {
+          await expect(operation()).rejects.toMatchObject({
+            name: "BaseSchemaMigrationError",
+            details: {
+              installedVersion: 8,
+              requiredVersion: 9,
+              reason: "stale",
+            },
+          });
+        }
+        // Error shape and server language cannot change lifecycle refusal.
+        for (const driverError of [
+          Object.assign(new Error("SQLITE_ERROR"), { code: "SQLITE_ERROR" }),
+          Object.assign(new Error("colonne inexistante"), { code: "42703" }),
+          new Error("custom backend reshaped the driver error"),
+        ]) {
+          const execute = vi.fn(() => Promise.reject(driverError));
+          const attached = createStore(
+            graph,
+            deriveBackend(backend, { execute }),
+            { history: true },
+          );
+          for (const operation of [
+            () => attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+            () => attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+          ]) {
+            await expect(operation()).rejects.toMatchObject({
+              name: "BaseSchemaMigrationError",
+              details: { installedVersion: 8, reason: "stale" },
+            });
+          }
+          expect(execute).not.toHaveBeenCalled();
+        }
+        await requireDefined(backend.adoptBaseSchema)();
+        await requireDefined(backend.adoptBaseSchema)();
+        expect(
+          await executeRaw(
+            "SELECT CASE WHEN anchor_retention IS NULL THEN 1 ELSE 0 END AS unpruned FROM typegraph_recorded_clock",
+            [],
+          ),
+        ).toEqual([{ unpruned: 1 }]);
+        expect(
+          await executeRaw(
+            "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+            [],
+          ),
+        ).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
+        const [reopened] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        expect(await reopened.nodes.Person.getById(person.id)).toEqual(person);
+        expect(await reopened.recordedNow()).toBe(anchor);
+        expect(await reopened.allocationOwner()).toEqual(owner);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+
+  it("adds the retention column when reopening a version 8 SQLite file", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-retention-upgrade-"),
+    );
+    const filename = path.join(directory, "graph.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const client = sqliteClient(original.db);
+      client.exec(
+        "INSERT INTO typegraph_recorded_clock (graph_id, revision, recorded_at) VALUES ('preserved', 7, '2026-01-01T00:00:00.000Z')",
+      );
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+      );
+      await original.backend.close();
+      const upgraded = createLocalSqliteBackend({ path: filename });
+      try {
+        expect(
+          sqliteClient(upgraded.db)
+            .prepare(
+              "SELECT graph_id, revision, recorded_at, anchor_retention IS NULL AS unpruned FROM typegraph_recorded_clock",
+            )
+            .all(),
+        ).toEqual([
+          {
+            graph_id: "preserved",
+            revision: 7,
+            recorded_at: "2026-01-01T00:00:00.000Z",
+            unpruned: 1,
+          },
+        ]);
+        await requireDefined(upgraded.backend.adoptBaseSchema)();
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      } finally {
+        await upgraded.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

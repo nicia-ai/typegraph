@@ -95,6 +95,7 @@ import {
   type CompiledRowsSql,
 } from "../../query/sql-intent";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
+import { delay } from "../../utils/delay";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -145,6 +146,7 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../recorded-storage";
 import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
 import {
   createEdgeRowMapper,
@@ -217,6 +219,7 @@ import {
   generatePostgresEdgeMatchIdentityUpgradeDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
+  postgresRecordedAnchorRetentionAdoptionDDL,
 } from "./ddl";
 import {
   type BaseSchemaRuntime,
@@ -513,14 +516,19 @@ END; $tg$`;
     EXECUTE $definition$ ${functionDdl} $definition$;
   END IF;
 END; $install$`;
-  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
-    const triggerName = revisionChangeTriggerName(entity, table);
-    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
-    const trigger = triggerName.replaceAll("'", "''");
-    const journal = names.revisionChanges.replaceAll("'", "''");
-    const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
-  });
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
   return [installFunctionDdl, ...triggerDdl];
 }
 
@@ -1142,9 +1150,9 @@ function buildPostgresEngineProfileInternal(
   // DDL this backend issues then runs where the allocation lives.
   const allocationSchema = allocationSchemaOfTables(tables);
   const allocationPin =
-    allocationSchema === undefined ?
-      undefined
-    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
+    allocationSchema === undefined ? undefined : (
+      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
+    );
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1274,13 +1282,17 @@ function buildPostgresEngineProfileInternal(
   );
   const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
   const bareClient =
-    typeof rawClient === "object" &&
-    rawClient !== null &&
-    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
       rawClient
     : undefined;
   const queueOwner =
-    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
@@ -1317,7 +1329,9 @@ function buildPostgresEngineProfileInternal(
     baseSchemaVersions: getTableName(tables.baseSchemaVersions),
     graphTemplates: getTableName(tables.graphTemplates),
     indexMaterializations: getTableName(tables.indexMaterializations),
-    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
     kindRemovals: getTableName(tables.kindRemovals),
     reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies PostgresTableNames;
@@ -1610,8 +1624,9 @@ function buildPostgresEngineProfileInternal(
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
     async revisionChangesJournalReady(): Promise<boolean> {
       const expectedTriggers = portableSql.join(
-        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
-          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
         ),
         portableSql`, `,
       );
@@ -1916,6 +1931,68 @@ function buildPostgresEngineProfileInternal(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
     storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
+    async ensureRecordedAnchorRetentionStorage(clockProvisioned) {
+      const tableName = getTableName(tables.recordedClock);
+      const relation =
+        allocationSchema === undefined ?
+          postgresIdentifierRegclassName(tableName)
+        : `${postgresIdentifierRegclassName(allocationSchema)}.${postgresIdentifierRegclassName(tableName)}`;
+      // NOWAIT never queues an exclusive request ahead of captured writers.
+      // Re-probe on every attempt so concurrent adopters converge without more DDL.
+      const readStorage = async () => {
+        const [storage] = await executionAdapter.execute<{
+          table_name?: unknown;
+          has_retention?: unknown;
+        }>(portableSql`
+          SELECT to_regclass(${relation}) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass(${relation})
+                AND attname=${RECORDED_ANCHOR_RETENTION_COLUMN} AND NOT attisdropped) AS has_retention
+        `);
+        return storage;
+      };
+      const waitBudgetMs = 1000;
+      const deadline = performance.now() + waitBudgetMs;
+      for (;;) {
+        const storage = await readStorage();
+        if (storage?.has_retention === true) return;
+        if (!clockProvisioned && typeof storage?.table_name !== "string") {
+          await executeConcurrentCreateDdl(
+            generatePgCreateTableSQL(tables.recordedClock),
+          );
+          // CREATE includes the column. Re-check for a concurrent creator's schema.
+          const createdStorage = await readStorage();
+          if (createdStorage?.has_retention === true) return;
+        }
+        try {
+          const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
+          if (db instanceof PgTransaction) {
+            // A failed NOWAIT aborts a transaction: isolate each attempt in a
+            // savepoint so retrying does not reuse an aborted caller session.
+            await withConcurrentCreateRetry(() =>
+              db.transaction(async (transaction: AnyPgTransaction) => {
+                await bindSchemaWriteSessionToAllocation(transaction);
+                await transaction.execute(sql.raw(ddl));
+              }),
+            );
+          } else {
+            await executeConcurrentCreateDdl(ddl);
+          }
+          return;
+        } catch (error) {
+          if (!isPostgresLockTimeout(error)) throw error;
+          if (performance.now() >= deadline)
+            throw new SchemaFenceTimeoutError(
+              "@base-schema",
+              "schema-row",
+              waitBudgetMs,
+              error,
+              tableName,
+            );
+          await delay(Math.min(25, Math.max(0, deadline - performance.now())));
+        }
+      }
+    },
     recordedAnchorsDdl: [
       generatePgCreateTableSQL(tables.recordedAnchors),
       ...generatePgCreateIndexSQL(tables.recordedAnchors),

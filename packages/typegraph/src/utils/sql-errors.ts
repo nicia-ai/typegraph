@@ -601,20 +601,18 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/** Whether a concurrent SQLite adopter already added the column we planned. */
-export function isSqliteDuplicateEdgeMatchIdentityColumnError(
+/** Precisely classifies a concurrent nullable-column adoption race. */
+export function isSqliteDuplicateColumnError(
   error: unknown,
+  column: string,
 ): boolean {
   for (const link of errorChain(error)) {
-    if (!canReadProperty(link)) continue;
-    if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
-    const message = sqliteErrorMessage(link);
     if (
-      message === "duplicate column name: match_identity_name" ||
-      message === "duplicate column name: match_identity_key"
-    ) {
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === "SQLITE_ERROR" &&
+      sqliteErrorMessage(link) === `duplicate column name: ${column}`
+    )
       return true;
-    }
   }
   return false;
 }

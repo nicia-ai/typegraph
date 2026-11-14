@@ -51,7 +51,6 @@ import {
 import { BaseSQLiteDatabase, SQLiteTransaction } from "drizzle-orm/sqlite-core";
 
 import {
-  CompilerInvariantError,
   ConfigurationError,
   SchemaFenceTimeoutError,
 } from "../../errors";
@@ -80,7 +79,6 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -166,6 +164,7 @@ import {
   sqliteInstantiateGraphTemplateStatement,
 } from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
+import { adoptSqliteColumns } from "./sqlite-column-adoption";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -193,10 +192,11 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  edgeMatchIdentityColumnAdoption,
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
-  planSqliteEdgeMatchIdentityAdoption,
+  recordedAnchorRetentionColumnAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1273,7 +1273,7 @@ function getSerializedSqliteConnection(
   // same `ctx.storage` shares its one connection and its ambient transaction.
   const storageClient = getDurableObjectStorageClient(db);
   if (storageClient !== undefined) return storageClient;
-  return isLocalLibsqlClient(client) ? (client) : undefined;
+  return isLocalLibsqlClient(client) ? client : undefined;
 }
 
 /**
@@ -1545,24 +1545,40 @@ export function buildSqliteEngineProfile(
     revisionChangesJournalReady: () =>
       runWithSerializedQueue(serializedQueue, async () => {
         const specifications = sqliteRevisionChangeTriggerSpecs(tableNames);
-        const names = [tableNames.revisionChanges, ...specifications.map((specification) => specification.name)];
-        const rows = await executionAdapter.execute<Readonly<{
-          type: string;
-          name: string;
-          tbl_name: string;
-          sql: string | null;
-        }>>(portableSql`
+        const names = [
+          tableNames.revisionChanges,
+          ...specifications.map((specification) => specification.name),
+        ];
+        const rows = await executionAdapter.execute<
+          Readonly<{
+            type: string;
+            name: string;
+            tbl_name: string;
+            sql: string | null;
+          }>
+        >(portableSql`
           SELECT type, name, tbl_name, sql FROM sqlite_master
           WHERE name IN (${sqlValueList(names)})
         `);
-        if (!rows.some((row) => row.type === "table" && row.name === tableNames.revisionChanges)) return false;
+        if (
+          !rows.some(
+            (row) =>
+              row.type === "table" && row.name === tableNames.revisionChanges,
+          )
+        )
+          return false;
         return specifications.every((specification) =>
-          rows.some((row) =>
-            row.type === "trigger" &&
-            row.name === specification.name &&
-            row.tbl_name === specification.table &&
-            row.sql?.includes(`AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`) === true &&
-            row.sql.includes(`INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`),
+          rows.some(
+            (row) =>
+              row.type === "trigger" &&
+              row.name === specification.name &&
+              row.tbl_name === specification.table &&
+              row.sql?.includes(
+                `AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`,
+              ) === true &&
+              row.sql.includes(
+                `INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`,
+              ),
           ),
         );
       }),
@@ -1608,40 +1624,36 @@ export function buildSqliteEngineProfile(
     });
   }
 
-  async function ensureEdgeMatchIdentityStorage(): Promise<void> {
-    const edgeTableName = getTableName(tables.edges);
-    // SQLite has no ADD COLUMN IF NOT EXISTS. Re-read and re-plan after each
-    // precisely classified duplicate-column race; two retries cover the two
-    // additive columns even when concurrent cold starts interleave both.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const columnRows = await executionAdapter.execute<{
-        name?: unknown;
-      }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
-      const columns = new Set(
-        columnRows.flatMap((row) =>
-          typeof row.name === "string" ? [row.name] : [],
-        ),
+  async function ensureRecordedAnchorRetentionStorage(
+    clockProvisioned: boolean,
+  ): Promise<void> {
+    if (!clockProvisioned)
+      await provisioning.ensureTable(
+        generateSqliteCreateTableSQL(tables.recordedClock),
       );
-      try {
-        for (const statement of planSqliteEdgeMatchIdentityAdoption(
-          edgeTableName,
-          columns,
-        )) {
-          await db.run(sql.raw(statement));
-        }
-        return;
-      } catch (error) {
-        if (
-          attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
-        ) {
-          throw error;
-        }
-      }
-    }
-    throw new CompilerInvariantError(
-      "SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
+    const tableName = getTableName(tables.recordedClock);
+    await adoptSqliteColumns(recordedAnchorRetentionColumnAdoption(tableName), {
+      readColumns: () =>
+        executionAdapter.execute<{ name?: unknown }>(
+          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
+        ),
+      execute: async (statement) => {
+        await db.run(sql.raw(statement));
+      },
+    });
+  }
+
+  async function ensureEdgeMatchIdentityStorage(): Promise<void> {
+    const tableName = getTableName(tables.edges);
+    await adoptSqliteColumns(edgeMatchIdentityColumnAdoption(tableName), {
+      readColumns: () =>
+        executionAdapter.execute<{ name?: unknown }>(
+          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
+        ),
+      execute: async (statement) => {
+        await db.run(sql.raw(statement));
+      },
+    });
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {
@@ -1762,6 +1774,7 @@ export function buildSqliteEngineProfile(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
     storeOperationsDdl: [generateSqliteCreateTableSQL(tables.storeOperations)],
+    ensureRecordedAnchorRetentionStorage,
     recordedAnchorsDdl: [
       generateSqliteCreateTableSQL(tables.recordedAnchors),
       ...generateSqliteCreateIndexSQL(tables.recordedAnchors),
