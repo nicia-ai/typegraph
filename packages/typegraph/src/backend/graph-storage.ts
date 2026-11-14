@@ -125,7 +125,7 @@ export type GraphStorageRelationTarget = Pick<
   "relation" | "table"
 >;
 
-type ReadTarget = GraphBackend | TransactionBackend;
+export type ReadTarget = GraphBackend | TransactionBackend;
 type CountRow = Readonly<{ cnt: unknown; transaction_isolation?: unknown }>;
 type GraphIdRow = Readonly<{ graph_id: string }>;
 
@@ -471,20 +471,46 @@ export function inventoryRelationTargets(
  * snapshots by construction) or none can be produced (a backend that declares
  * no session isolation read), where the counts are reported per statement.
  */
-function sessionIsolationExpression(
+export function sessionIsolationExpression(
   target: ReadTarget,
-  dialect: DialectAdapter,
   execution: OptionalTransactionExecution,
 ): SqlFragment | undefined {
-  if (execution.mode !== "interactive-transaction") return undefined;
-  if (dialect.capabilities.transactionReadsShareOneSnapshot) return undefined;
+  if (!isInteractiveTransactionSession(target, execution)) return undefined;
+  if (sessionReadsShareOneSnapshot(target, execution, undefined))
+    return undefined;
   return target.fenceSql?.isolationFactExpression?.();
+}
+
+/** A callback alone cannot turn a command port bound to autocommit into a session. */
+export function isInteractiveTransactionSession(
+  target: ReadTarget,
+  execution: OptionalTransactionExecution,
+): boolean {
+  return (
+    execution.mode === "interactive-transaction" &&
+    target.commands.session === "transaction"
+  );
+}
+
+/** One snapshot decision for storage inspection and recorded read ownership. */
+export function sessionReadsShareOneSnapshot(
+  target: ReadTarget,
+  execution: OptionalTransactionExecution,
+  observedIsolation: GraphCommandIsolation | undefined,
+): boolean {
+  if (!isInteractiveTransactionSession(target, execution)) return false;
+  if (getDialect(target.dialect).capabilities.transactionReadsShareOneSnapshot)
+    return true;
+  return (
+    observedIsolation === "repeatable_read" ||
+    observedIsolation === "serializable"
+  );
 }
 
 /** What the counting session showed about the snapshot its reads shared. */
 type SnapshotEvidence = Readonly<{
   execution: OptionalTransactionExecution;
-  dialect: DialectAdapter;
+  target: ReadTarget;
   countStatements: number;
   observedIsolation: GraphCommandIsolation | undefined;
 }>;
@@ -500,15 +526,12 @@ function storageConsistency(
   evidence: SnapshotEvidence,
 ): GraphStorageConsistency {
   if (evidence.countStatements < 2) return "snapshot";
-  if (evidence.execution.mode !== "interactive-transaction") {
-    return "per-statement";
-  }
-  if (evidence.dialect.capabilities.transactionReadsShareOneSnapshot) {
-    return "snapshot";
-  }
   return (
-      evidence.observedIsolation === "repeatable_read" ||
-        evidence.observedIsolation === "serializable"
+      sessionReadsShareOneSnapshot(
+        evidence.target,
+        evidence.execution,
+        evidence.observedIsolation,
+      )
     ) ?
       "snapshot"
     : "per-statement";
@@ -538,12 +561,7 @@ export async function countGraphStorage(
         relations.map((relation) => relation.table),
         operation,
       );
-      const dialect = getDialect(target.dialect);
-      const isolationExpression = sessionIsolationExpression(
-        target,
-        dialect,
-        execution,
-      );
+      const isolationExpression = sessionIsolationExpression(target, execution);
       const counted: GraphStorageRelation[] = [];
       let countStatements = 0;
       let observedIsolation: GraphCommandIsolation | undefined;
@@ -568,7 +586,7 @@ export async function countGraphStorage(
         totalRows: counted.reduce((total, entry) => total + entry.rows, 0),
         consistency: storageConsistency({
           execution,
-          dialect,
+          target,
           countStatements,
           observedIsolation,
         }),

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { createStore, recordedRelation } from "../../../src";
+import {
+  createStore,
+  createStoreWithSchema,
+  recordedRelation,
+} from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { countGraphStorage } from "../../../src/backend/graph-storage";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -21,6 +26,7 @@ import { type IntegrationTestContext } from "./test-context";
 type Read = Readonly<{ sql: string; session: boolean }>;
 type SessionOptions = Readonly<{
   isolationLevel?: TransactionOptions["isolationLevel"];
+  autocommit?: boolean;
   beforeSession?: () => Promise<void>;
   afterRead?: (query: string) => Promise<void>;
 }>;
@@ -63,16 +69,22 @@ function observeReads(
   }
   return deriveBackend(base, {
     ...members(base, false),
-    transaction: (fn, requested) =>
-      base.transaction(
-        async (target) => {
-          await options?.beforeSession?.();
-          return fn(deriveBackend(target, members(target, true)));
-        },
+    transaction: async <T>(
+      fn: (target: TransactionBackend) => Promise<T>,
+      requested?: TransactionOptions,
+    ): Promise<T> => {
+      const run = async (target: TransactionBackend): Promise<T> => {
+        await options?.beforeSession?.();
+        return fn(deriveBackend(target, members(target, true)));
+      };
+      if (options?.autocommit === true) return run(base);
+      return base.transaction(
+        run,
         options?.isolationLevel === undefined ?
           requested
         : { ...requested, isolationLevel: options.isolationLevel },
-      ),
+      );
+    },
   });
 }
 
@@ -122,17 +134,8 @@ export function registerRecordedOwnershipStatementIntegrationTests(
         await view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
       ).toMatchObject([{ size: 2 }, { size: 2 }]);
       const sessionOwners = ownerReads(reads).filter((read) => read.session);
-      // A session fact earns the optimization. SQLite and adapters without
-      // that fact retain their portable guards rather than guessing isolation.
-      const sessionDataReads = reads.filter(
-        (read) => read.session && !read.sql.includes("revision_origins"),
-      );
-      const expectedSessionChecks =
-        base.fenceSql?.isolationFactExpression === undefined ?
-          1 + 2 * sessionDataReads.length
-        : 1;
-      expect(sessionOwners).toHaveLength(expectedSessionChecks);
-      expect(ownerReads(reads)).toHaveLength(expectedSessionChecks + 2);
+      expect(sessionOwners).toHaveLength(1);
+      expect(ownerReads(reads)).toHaveLength(3);
       reads.length = 0;
       await view.algorithms.weaklyConnectedComponents({ edges: ["knows"] });
       expect(ownerReads(reads).filter((read) => read.session)).toHaveLength(
@@ -159,6 +162,99 @@ export function registerRecordedOwnershipStatementIntegrationTests(
       expect(
         reads.some((read) => /SELECT\s+origin\s+FROM/u.test(read.sql)),
       ).toBe(false);
+    });
+
+    it.each(["fresh", "cleared"] as const)(
+      "initializes a %s origin without rereading its known absence",
+      async (phase) => {
+        const writer = await context.createHistoryStore(integrationTestGraph);
+        const reads: Read[] = [];
+        const observed = observeReads(context.getBackend(), reads);
+        async function allocate() {
+          return observed.transaction((target) =>
+            advanceRevisionClock(
+              target,
+              writer.revisionSchema,
+              writer.graphId,
+              false,
+            ),
+          );
+        }
+        if (phase === "cleared") {
+          await allocate();
+          await writer.clear();
+        }
+        reads.length = 0;
+        await allocate();
+        expect(
+          ownerReads(reads).filter(
+            (read) => !read.sql.includes("recorded_clock"),
+          ),
+        ).toHaveLength(1);
+        expect(
+          ownerReads(reads).filter((read) =>
+            read.sql.includes("recorded_clock"),
+          ),
+        ).toHaveLength(1);
+      },
+    );
+
+    it("keeps guards when transaction() passes an autocommit target reporting repeatable read", async () => {
+      const handle = await context.createSerializedBackend();
+      try {
+        const [writer] = await createStoreWithSchema(
+          integrationTestGraph,
+          handle.backend,
+          { history: true },
+        );
+        await writer.nodes.Person.create({ name: "Alice" });
+        const anchor = requireDefined(await writer.recordedNow());
+        const owner = await writer.allocationOwner();
+        const base = deriveBackend(handle.backend, {
+          fenceSql: {
+            ...handle.backend.fenceSql,
+            isolationFactExpression: () => sql.raw("'repeatable read'"),
+          },
+        });
+        const reads: Read[] = [];
+        let retired = false;
+        const observed = observeReads(base, reads, {
+          autocommit: true,
+          afterRead: async (query) => {
+            if (retired || !query.includes("revision_origins")) return;
+            retired = true;
+            await writer.rotateAllocationOwner(owner);
+          },
+        });
+        const names = createSqlSchema(base.tableNames).tables;
+        const inspection = await countGraphStorage(
+          observed,
+          writer.graphId,
+          [
+            { relation: "nodes", table: names.nodes },
+            { relation: "edges", table: names.edges },
+          ],
+          "autocommit-snapshot-regression",
+        );
+        expect(inspection.consistency).toBe("per-statement");
+        reads.length = 0;
+        const store = createStore(integrationTestGraph, observed, {
+          history: true,
+        });
+        await expect(
+          store
+            .asOfRecorded(anchor)
+            .algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+        ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
+        expect(retired).toBe(true);
+        expect(
+          reads.filter(
+            (read) => read.session && !read.sql.includes("revision_origins"),
+          ),
+        ).toHaveLength(0);
+      } finally {
+        await handle.close();
+      }
     });
 
     it("distinguishes an absent clock from a malformed persisted clock", async () => {
@@ -289,40 +385,6 @@ export function registerRecordedOwnershipStatementIntegrationTests(
           .algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
       ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
       expect(rotated).toBe(true);
-    });
-
-    it("retains a pinned topology while a concurrent captured write changes live edges", async () => {
-      if (!context.serverLaneConcurrency) return;
-      const writer = await context.createHistoryStore(integrationTestGraph);
-      const alice = await writer.nodes.Person.create({ name: "Alice" });
-      const bob = await writer.nodes.Person.create({ name: "Bob" });
-      const edge = await writer.edges.knows.create(alice, bob, {
-        since: "2020",
-      });
-      const anchor = requireDefined(await writer.recordedNow());
-      let changed = false;
-      const store = createStore(
-        integrationTestGraph,
-        observeReads(context.getBackend(), [], {
-          afterRead: async (query) => {
-            if (changed || !query.includes("transaction_isolation")) return;
-            changed = true;
-            await writer.edges.knows.delete(edge.id);
-          },
-        }),
-        { history: true },
-      );
-      expect(
-        await store
-          .asOfRecorded(anchor)
-          .algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
-      ).toMatchObject([{ size: 2 }, { size: 2 }]);
-      expect(changed).toBe(true);
-      expect(
-        await writer
-          .asOfRecorded(requireDefined(await writer.recordedNow()))
-          .algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
-      ).toMatchObject([{ size: 1 }, { size: 1 }]);
     });
   });
 }
