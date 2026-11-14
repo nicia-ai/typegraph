@@ -408,10 +408,18 @@ memberships. Incompatible options still require separate plans.
 The default mode aggregates JSON separately for each request, preserving the per-request JSON
 value size limit. Shared payloads aggregate each compatible group into one JSON value.
 
-On PostgreSQL, at most 25 independent subgraph plans may remain after compatible reads are combined.
-A batch over this budget throws `ConfigurationError` before issuing SQL. Use matching options or
-split incompatible reads into explicit `batchOnce()` calls. `shareSubgraphs: true` does not combine
-incompatible options, and relational reads do not consume subgraph plan slots.
+On PostgreSQL, a batch may contain at most 25 independent recursive plans in total. Each fluent
+`.traverse(...).recursive()` stage consumes one slot, including stages inside chained traversals,
+set operations, projections, and relations. Each compatible subgraph group consumes one slot after
+its roots are combined. Nonrecursive relational reads consume no slots. A single-hop recursive read that the compiler lowers
+to a fixed traversal also consumes no slots. The existing 25-plan
+subgraph limit is part of this combined allowance, not an additional allowance.
+
+A batch over either budget throws `ConfigurationError` before issuing SQL. Use matching subgraph
+options or split reads into explicit `batchOnce()` calls. `shareSubgraphs: true` does not combine
+incompatible subgraphs or fluent recursive queries. These planner budgets are PostgreSQL-specific;
+the portable 500-read cap and each backend's bind budget still apply. `batchOnce()` never silently
+chunks a batch or executes it sequentially.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.
