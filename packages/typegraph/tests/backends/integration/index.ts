@@ -64,6 +64,7 @@ export { registerQueryTerminalIntegrationTests } from "./query-terminals";
 export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";
 export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedAdjacencyIntegrationTests } from "./recorded-adjacency";
+export { registerRecordedOwnershipStatementIntegrationTests } from "./recorded-ownership-statements";
 export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-binding";
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";

@@ -83,6 +83,7 @@ import {
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
   type LineageDelta,
+  type OptionalTransactionExecution,
   runOptionallyInTransaction,
   type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
@@ -263,7 +264,8 @@ import {
   type InternalGraphAlgorithms,
 } from "./algorithms";
 import {
-  readGraphAllocationOwner,
+  type GraphAllocationOwnerRead,
+  readGraphAllocationOwnerSession,
   rotateGraphAllocationOwner,
 } from "./allocation-owner";
 import { applyResolvedNodeClaims } from "./claims/resolved-node-claims";
@@ -1556,9 +1558,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
-      revisionOrigin: async (target = this.#backend) => {
-        return this.#readRecordedReadOwner(target);
-      },
+      revisionOriginSession: (target, execution) =>
+        this.#readRecordedReadOwner(target, execution),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
@@ -3216,16 +3217,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   async #readRecordedReadOwner(
-    target: Pick<GraphBackend, "execute">,
-  ): Promise<GraphAllocationOwner | undefined> {
+    target: TransactionBackend,
+    execution?: OptionalTransactionExecution,
+  ): Promise<GraphAllocationOwnerRead> {
     const binding = this.#recordedReadBinding;
     if (binding?.kind === "external" && binding.owner !== undefined)
-      return binding.owner(target);
+      return { owner: await binding.owner(target), sharesSnapshot: false };
     return withRecordedRelationsPrecondition(
-      readGraphAllocationOwner(
+      readGraphAllocationOwnerSession(
         target,
         binding?.schema ?? this.#sqlSchema(),
         this.graphId,
+        execution ?? { mode: "sequential" },
       ),
       { dialect: this.#backend.dialect, surface: "allocation-owner" },
     );
@@ -3234,7 +3237,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** Captures the owner of recorded reads, including externally managed relations. */
   async recordedReadOwner(): Promise<GraphAllocationOwner> {
     if (this.#recordedReadBinding?.kind === "external") {
-      const owner = await this.#readRecordedReadOwner(this.#backend);
+      const { owner } = await this.#readRecordedReadOwner(this.#backend);
       if (owner === undefined)
         throw new ConfigurationError(
           "External recorded relations have no allocation owner.",

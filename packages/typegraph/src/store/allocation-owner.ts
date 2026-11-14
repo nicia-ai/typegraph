@@ -1,5 +1,13 @@
 import { runRetriedUnit } from "../backend/capabilities/retried-unit";
-import { type GraphBackend } from "../backend/types";
+import {
+  sessionIsolationExpression,
+  sessionReadsShareOneSnapshot,
+} from "../backend/graph-storage";
+import {
+  type GraphBackend,
+  type OptionalTransactionExecution,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   assertGraphAllocationOwner,
   type GraphAllocationOwner,
@@ -14,15 +22,50 @@ import {
   readRevisionOrigin,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
+import { readRevisionOriginState } from "./recorded-capture/clock";
 import { executeStatement } from "./recorded-capture/guards";
 
-export async function readGraphAllocationOwner(
+export type GraphAllocationOwnerRead = Readonly<{
+  owner: GraphAllocationOwner | undefined;
+  sharesSnapshot: boolean;
+}>;
+
+export async function readGraphAllocationOwnerSession(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  execution: OptionalTransactionExecution,
+): Promise<GraphAllocationOwnerRead> {
+  const state = await readRevisionOriginState(
+    target,
+    schema,
+    graphId,
+    sessionIsolationExpression(target, execution),
+  );
+  return {
+    owner: await allocationOwnerFromOrigin(schema, state.origin),
+    sharesSnapshot: sessionReadsShareOneSnapshot(
+      target,
+      execution,
+      state.isolation,
+    ),
+  };
+}
+
+async function allocationOwnerFromOrigin(
+  schema: SqlSchema,
+  origin: string | undefined,
+): Promise<GraphAllocationOwner | undefined> {
+  return origin === undefined ? undefined : recordedAnchorOwner(schema, origin);
+}
+
+async function readGraphAllocationOwner(
   target: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
 ): Promise<GraphAllocationOwner | undefined> {
   const origin = await readRevisionOrigin(target, schema, graphId);
-  return origin === undefined ? undefined : recordedAnchorOwner(schema, origin);
+  return allocationOwnerFromOrigin(schema, origin);
 }
 
 /** Explicit fork lifecycle operation. It preserves data, clock, and captured history. */

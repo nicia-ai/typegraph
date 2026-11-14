@@ -42,6 +42,42 @@ type RecordedClockParts = Readonly<{ recordedAt: string; revision: number }>;
 export type AllocatedRecordedCommit = RecordedClockParts &
   Readonly<{ instant: string }>;
 type RevisionOriginRow = Readonly<{ origin: unknown }>;
+export type RevisionOriginState = Readonly<{
+  origin: string | undefined;
+  isolation: GraphCommandIsolation | undefined;
+}>;
+type RecordedClockState = Readonly<{
+  clock: ClockRow | undefined;
+  originRow: RevisionOriginRow | undefined;
+}>;
+
+/** One clock/origin observation; presence is separate from persisted values. */
+async function readRecordedClockState(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<RecordedClockState> {
+  const [row] = await target.execute<
+    ClockRow &
+      RevisionOriginRow &
+      Readonly<{
+        clock_graph_id: unknown;
+        origin_graph_id: unknown;
+      }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at,
+        origins.graph_id AS origin_graph_id, origins.origin
+      FROM (SELECT 1) seed
+      LEFT JOIN ${schema.recordedClockTable} clock ON clock.graph_id = ${graphId}
+      LEFT JOIN ${schema.revisionOriginsTable} origins ON origins.graph_id = ${graphId}
+    `),
+  );
+  return {
+    clock: typeof row?.clock_graph_id === "string" ? row : undefined,
+    originRow: typeof row?.origin_graph_id === "string" ? row : undefined,
+  };
+}
 
 type RecordedClockBackend = Pick<
   GraphBackend,
@@ -356,27 +392,16 @@ export async function readRecordedClock(
   schema: SqlSchema,
   graphId: string,
 ): Promise<RecordedInstant | undefined> {
-  const rows = await target.execute<ClockRow & RevisionOriginRow>(
-    asCompiledRowsSql(sql`
-      SELECT clock.revision, clock.recorded_at, origins.origin
-      FROM ${schema.recordedClockTable} clock
-      JOIN ${schema.revisionOriginsTable} origins ON origins.graph_id = clock.graph_id
-      WHERE clock.graph_id = ${graphId}
-    `),
-  );
-  const row = rows[0];
-  if (row === undefined) return undefined;
-  const parts = recordedClockParts(row);
+  const state = await readRecordedClockState(target, schema, graphId);
+  if (state.clock === undefined || state.originRow === undefined)
+    return undefined;
+  const parts = recordedClockParts(state.clock);
   if (parts === undefined) return undefined;
-  if (typeof row.origin !== "string")
-    throw new ConfigurationError(
-      "Recorded clock has no durable graph origin.",
-      { graphId },
-    );
+  const origin = revisionOriginFromRow(state.originRow, graphId);
   return createRecordedInstant(
     parts.revision,
     parts.recordedAt,
-    await recordedAnchorOwner(schema, row.origin),
+    await recordedAnchorOwner(schema, origin),
   );
 }
 
@@ -406,14 +431,45 @@ export async function readRevisionOrigin(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string | undefined> {
-  const rows = await target.execute<RevisionOriginRow>(
+  const state = await readRevisionOriginState(target, schema, graphId);
+  return state.origin;
+}
+
+/** Return the origin and any requested isolation evidence from the same session SELECT. */
+export async function readRevisionOriginState(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+  isolationExpression?: SqlFragment,
+): Promise<RevisionOriginState> {
+  const rows = await target.execute<
+    RevisionOriginRow & Readonly<{ transaction_isolation: unknown }>
+  >(
     asCompiledRowsSql(sql`
-      SELECT origin
+      SELECT origin${isolationExpression === undefined ? sql`` : sql`, ${isolationExpression} AS transaction_isolation`}
       FROM ${schema.revisionOriginsTable}
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
+  return {
+    origin: revisionOriginFromRow(rows[0], graphId),
+    isolation: normalizeGraphCommandIsolation(rows[0]?.transaction_isolation),
+  };
+}
+
+/** One validation of persisted origin state for readers and allocators. */
+function revisionOriginFromRow(
+  first: RevisionOriginRow,
+  graphId: string,
+): string;
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined;
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined {
   if (first === undefined) return undefined;
   if (typeof first.origin !== "string" || first.origin.length === 0) {
     throw new ConfigurationError(
@@ -494,7 +550,15 @@ export async function ensureRevisionOriginRow(
 ): Promise<string> {
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;
+  return initializeRevisionOriginRow(target, schema, graphId);
+}
 
+/** Mint after an observed absence, then reread the winner of concurrent initialization. */
+async function initializeRevisionOriginRow(
+  target: Pick<GraphBackend, "dialect" | "execute" | "executeStatement">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
   await executeStatement(
     target,
     sql`
@@ -594,7 +658,7 @@ async function writeRecordedClock(
  *
  * WHY THE OTHER ARM NEEDS NO RE-READ, and why that is a property rather than an
  * assumption: when `previousRevision` is absent the value is read by
- * {@link readRecordedClockParts} AFTER {@link lockRecordedClock}, inside the
+ * {@link readRecordedClockState} AFTER {@link lockRecordedClock}, inside the
  * same transaction that then writes — a real fence on both dialects
  * (`pg_advisory_xact_lock`; SQLite's seed-UPSERT or the enclosing
  * `BEGIN IMMEDIATE`). Those constructs are transaction-scoped, so the fence
@@ -706,9 +770,12 @@ async function allocateRecordedCommitInternal(
   retainAnchor = false,
 ): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
+  const state = await readRecordedClockState(target, schema, graphId);
   const previous =
     previousRevision === undefined ?
-      await readRecordedClockParts(target, schema, graphId)
+      state.clock === undefined ?
+        undefined
+      : recordedClockParts(state.clock)
     : requireTypeGraphClockParts(
         parseRecordedInstant(previousRevision, "previous recorded revision"),
       );
@@ -723,7 +790,9 @@ async function allocateRecordedCommitInternal(
       },
     );
   }
-  const origin = await ensureRevisionOriginRow(target, schema, graphId);
+  const origin =
+    revisionOriginFromRow(state.originRow, graphId) ??
+    (await initializeRevisionOriginRow(target, schema, graphId));
   const instant = createRecordedInstant(
     revision,
     recordedAt,

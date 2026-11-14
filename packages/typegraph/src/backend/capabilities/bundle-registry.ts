@@ -947,6 +947,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     // connected backend's names to fence physical target bindings.
     accesses: 28,
   },
+  // The session expression is shared by inventory counts and recorded owner
+  // reads; both use the session snapshot predicate in backend/graph-storage.ts.
   fenceSql: {
     kind: "reasoned",
     reason:

@@ -92,6 +92,7 @@ import {
   registerReadEfficiencyIntegrationTests,
   registerReconciledSchemaIntegrationTests,
   registerRecordedAdjacencyIntegrationTests,
+  registerRecordedOwnershipStatementIntegrationTests,
   registerRecordedReadBindingIntegrationTests,
   registerRecordedTimeIntegrationTests,
   registerRecursiveDelimiterIdIntegrationTests,
@@ -342,6 +343,7 @@ export function createIntegrationTestSuite<
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRecordedAdjacencyIntegrationTests(context);
+    registerRecordedOwnershipStatementIntegrationTests(context);
     registerMutationPlanningIntegrationTests(context);
     registerStoreOperationIntegrationTests(context);
     registerLineageConformanceIntegrationTests(context);
