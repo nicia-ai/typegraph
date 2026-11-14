@@ -65,8 +65,21 @@ import {
   EdgeAcyclicityError,
   EdgeAcyclicityIndeterminateError,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  renderPostgres,
+  sql as graphSql,
+} from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../../../src/query/sql-intent";
+import {
+  isPostgresFailedTransactionError,
+  isStatementCutShortError,
+} from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import {
   poolApplicationName,
@@ -279,6 +292,113 @@ describe.runIf(process.env["POSTGRES_URL"])(
           contender: "ok",
         });
         expect(await setup.edges.dependsOn.findFrom(a)).toHaveLength(2);
+      },
+    );
+
+    it.each([
+      { mode: "single", interrupt: false },
+      { mode: "single", interrupt: true },
+      { mode: "batch", interrupt: false },
+      { mode: "batch", interrupt: true },
+    ] as const)(
+      "reports caller-owned transaction state for $mode cycle refusal (diagnostic interrupted: $interrupt)",
+      { timeout: CASE_TIMEOUT_MS },
+      async ({ mode, interrupt }) => {
+        const live = requirePostgres();
+        const backend = createPostgresBackend(live.holder);
+        const setup = createStore(graph, backend);
+        const head = await setup.nodes.Task.create(
+          { name: "head" },
+          { id: "head" },
+        );
+        const tail = await setup.nodes.Task.create(
+          { name: "tail" },
+          { id: "tail" },
+        );
+        await setup.edges.dependsOn.create(head, tail);
+        let diagnosticReads = 0;
+        const instrumented = deriveBackend(backend, {
+          transaction: (run, options) =>
+            backend.transaction(
+              (target) =>
+                run(
+                  deriveBackend(target, {
+                    async execute<Row>(
+                      statement: CompiledRowsSql,
+                    ): Promise<readonly Row[]> {
+                      const rendered = renderPostgres(statement).sql;
+                      if (
+                        rendered.includes("ancestry") &&
+                        rendered.includes("AS edge_id")
+                      ) {
+                        diagnosticReads += 1;
+                        if (interrupt) {
+                          // The verdict has already run. Cancel a real statement on
+                          // the diagnostic read's pinned PostgreSQL session only.
+                          await target.execute(
+                            asCompiledRowsSql(
+                              graphSql`SELECT set_config('statement_timeout', '50ms', true)`,
+                            ),
+                          );
+                          await target.execute(
+                            asCompiledRowsSql(graphSql`SELECT pg_sleep(1)`),
+                          );
+                        }
+                      }
+                      return target.execute<Row>(statement);
+                    },
+                  }),
+                ),
+              options,
+            ),
+        });
+        const caller = createStore(graph, instrumented);
+        const rollback = new Error(
+          "roll back caller transaction after observing refusal",
+        );
+        await expect(
+          caller.transaction(async (tx) => {
+            const refusal: unknown = await (
+              mode === "single" ?
+                tx.edges.dependsOn.create(tail, head)
+              : tx.edges.dependsOn.bulkCreate([
+                  { from: tail, to: head },
+                ])).catch((error: unknown) => error);
+            expect(refusal).toBeInstanceOf(EdgeAcyclicityError);
+            if (!(refusal instanceof EdgeAcyclicityError))
+              throw new Error("expected cycle refusal");
+            const followup = await tx.nodes.Task.find({}).then(
+              (rows) => ({ rowCount: rows.length }),
+              (error: unknown) => ({
+                failedTransaction: isPostgresFailedTransactionError(error),
+              }),
+            );
+            expect({
+              hasCause: refusal.cause !== undefined,
+              diagnosticCause:
+                refusal.cause instanceof EdgeAcyclicityIndeterminateError,
+              cutShort: isStatementCutShortError(refusal.cause),
+              followup,
+            }).toEqual(
+              interrupt ?
+                {
+                  hasCause: true,
+                  diagnosticCause: true,
+                  cutShort: true,
+                  followup: { failedTransaction: true },
+                }
+              : {
+                  hasCause: false,
+                  diagnosticCause: false,
+                  cutShort: false,
+                  followup: { rowCount: 2 },
+                },
+            );
+            throw rollback;
+          }),
+        ).rejects.toBe(rollback);
+        expect(diagnosticReads).toBe(1);
+        expect(await setup.edges.dependsOn.find({})).toHaveLength(1);
       },
     );
 

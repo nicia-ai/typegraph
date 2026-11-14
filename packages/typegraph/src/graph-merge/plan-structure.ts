@@ -367,6 +367,7 @@ function acyclicityMergeConflict(
   return new AcyclicityMergeConflictError(
     `The merge plan would close a cycle in acyclic relation "${firstViolation.relation}": ${describedEdges}.`,
     {
+      cause: firstViolation.witnessFailure,
       details: {
         relation: firstViolation.relation,
         edges,

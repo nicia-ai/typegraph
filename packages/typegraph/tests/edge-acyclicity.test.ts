@@ -411,7 +411,7 @@ function acyclicityContext(backend: GraphBackend) {
 }
 
 describe("cycle witness diagnostics", () => {
-  it("preserves a proven cycle refusal when the diagnostic statement is cut short", async () => {
+  it("reports a cut-short diagnostic as the proven cycle refusal cause", async () => {
     const backend = createTestBackend();
     vi.spyOn(backend, "execute")
       .mockResolvedValueOnce([{ origin_key: "closing" }])
@@ -432,7 +432,49 @@ describe("cycle witness diagnostics", () => {
           validTo: undefined,
         },
       ]),
-    ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+    ).rejects.toMatchObject({
+      name: "EdgeAcyclicityError",
+      cause: {
+        name: "EdgeAcyclicityIndeterminateError",
+        cause: { code: "SQLITE_INTERRUPT" },
+      },
+    });
+  });
+
+  it("retains a failed diagnostic for the merge planner's cause chain", async () => {
+    const backend = createTestBackend();
+    vi.spyOn(backend, "execute")
+      .mockResolvedValueOnce([
+        { origin_key: "closing", reached_key: "closing" },
+      ])
+      .mockRejectedValueOnce(
+        Object.assign(new Error("diagnostic cancelled"), { code: "57014" }),
+      );
+    const violations =
+      await acyclicityModule.readProposedEdgeAcyclicityViolations(
+        acyclicityContext(backend),
+        graph,
+        [
+          {
+            edgeId: "closing",
+            edgeKind: "dependsOn",
+            fromKind: "Task",
+            fromId: "a",
+            toKind: "Task",
+            toId: "b",
+            validTo: undefined,
+          },
+        ],
+      );
+    expect(violations).toMatchObject([
+      {
+        edgeIds: ["closing"],
+        witnessFailure: {
+          name: "EdgeAcyclicityIndeterminateError",
+          cause: { code: "57014" },
+        },
+      },
+    ]);
   });
 
   it("adds no diagnostic read to an accepted edge", async () => {

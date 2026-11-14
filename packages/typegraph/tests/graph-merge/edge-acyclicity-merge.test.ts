@@ -51,7 +51,7 @@ import {
   defineNode,
   partOf,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
@@ -60,6 +60,8 @@ import { merge, planMerge } from "../../src/graph-merge/merge";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { renderPostgres } from "../../src/query/sql-fragment";
+import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { withBindBudget } from "../backends/integration/bind-budget";
 import { backendMatrix } from "./test-utils";
@@ -187,6 +189,37 @@ describe.each(backendMatrix())(
         ],
         truncated: false,
       });
+
+      const backend = storeBackend(target);
+      const execute = backend.execute;
+      const diagnosticFailure = vi
+        .spyOn(backend, "execute")
+        .mockImplementation((statement) => {
+          const rendered = renderPostgres(statement).sql;
+          if (
+            rendered.includes("ancestry") &&
+            rendered.includes("AS edge_id")
+          ) {
+            throw Object.assign(new Error("witness read cancelled"), {
+              code: "57014",
+            });
+          }
+          return execute(statement);
+        });
+      try {
+        const failedDiagnostic = await planMerge(target, [branchA, branchB]);
+        expect(failedDiagnostic).toMatchObject({
+          error: {
+            name: "AcyclicityMergeConflictError",
+            cause: {
+              name: "EdgeAcyclicityIndeterminateError",
+              cause: { code: "57014" },
+            },
+          },
+        });
+      } finally {
+        diagnosticFailure.mockRestore();
+      }
 
       // Byte-unchanged: planning alone never wrote anything.
       const remaining = await target.edges.dependsOn.find({});

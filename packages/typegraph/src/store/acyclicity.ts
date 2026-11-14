@@ -990,20 +990,23 @@ function cycleRefusal(
   relation: AcyclicEdgeRelation,
   edge: ProposedRelationEdge,
   selfLoop = false,
-  witness?: EdgeCycleWitness,
+  diagnostic: CycleWitnessRead = {},
 ): EdgeAcyclicityError {
-  const reportedWitness = selfLoop ? selfLoopWitness(edge) : witness;
-  return new EdgeAcyclicityError({
-    relation: displayAcyclicRelationName(relation.name),
-    edgeKind: edge.edgeKind,
-    edgeId: edge.edgeId,
-    fromKind: edge.fromKind,
-    fromId: edge.fromId,
-    toKind: edge.toKind,
-    toId: edge.toId,
-    selfLoop,
-    ...(reportedWitness === undefined ? {} : { witness: reportedWitness }),
-  });
+  const reportedWitness = selfLoop ? selfLoopWitness(edge) : diagnostic.witness;
+  return new EdgeAcyclicityError(
+    {
+      relation: displayAcyclicRelationName(relation.name),
+      edgeKind: edge.edgeKind,
+      edgeId: edge.edgeId,
+      fromKind: edge.fromKind,
+      fromId: edge.fromId,
+      toKind: edge.toKind,
+      toId: edge.toId,
+      selfLoop,
+      ...(reportedWitness === undefined ? {} : { witness: reportedWitness }),
+    },
+    { cause: diagnostic.witnessFailure },
+  );
 }
 
 /**
@@ -1092,15 +1095,15 @@ export async function readProposedEdgeAcyclicityViolations(
     const edge = requireDefined(
       proposed.find((candidate) => candidate.edgeId === edgeIds[0]),
     );
-    const witness =
+    const diagnostic =
       proposedEdgeIsSelfLoop(edge) ?
-        selfLoopWitness(edge)
+        { witness: selfLoopWitness(edge) }
       : await readCycleWitness(ctx, relation, edge, edges, excludedEdgeIds);
     violations.push({
       family: "edgeAcyclicity",
       relation: displayAcyclicRelationName(relation.name),
       edgeIds,
-      ...(witness === undefined ? {} : { witness }),
+      ...diagnostic,
     });
   }
   return violations;
@@ -1108,9 +1111,13 @@ export async function readProposedEdgeAcyclicityViolations(
 
 /** A plan preview's first proposed edge on a cycle, with its return path when still visible. */
 export type ProposedEdgeAcyclicityViolation = EdgeAcyclicityViolation &
-  Readonly<{
-    witness?: EdgeCycleWitness;
-  }>;
+  CycleWitnessRead;
+
+/** Diagnostic failures remain visible: a failed SQL statement may abort its transaction. */
+type CycleWitnessRead = Readonly<{
+  witness?: EdgeCycleWitness;
+  witnessFailure?: EdgeAcyclicityIndeterminateError;
+}>;
 
 const MAX_CYCLE_WITNESS_EDGES = 64;
 
@@ -1163,24 +1170,29 @@ async function readCycleWitness(
   closing: ProposedRelationEdge,
   proposed: readonly ProposedRelationEdge[],
   excludedEdgeIds: readonly string[],
-): Promise<EdgeCycleWitness | undefined> {
+): Promise<CycleWitnessRead> {
   try {
-    return await collectCycleWitness(
+    const witness = await collectCycleWitness(
       ctx,
       relation,
       closing,
       proposed,
       excludedEdgeIds,
     );
+    return witness === undefined ? {} : { witness };
   } catch (error) {
-    // A diagnostic limit cannot turn a proven cycle into an indeterminate
-    // verdict or change the existing refusal's error class.
+    // PostgreSQL aborts the session's transaction on a statement failure.
+    // Preserve the proven cycle, but carry the failure to the refusal's cause
+    // so a caller knows this is not a clean, catch-and-continue refusal.
+    if (error instanceof EdgeAcyclicityIndeterminateError) {
+      return { witnessFailure: error };
+    }
+    // Sizing fails before SQL runs and leaves the transaction usable.
     if (
-      error instanceof EdgeAcyclicityIndeterminateError ||
-      (error instanceof ConfigurationError &&
-        error.details["capability"] === "maxBindParameters")
+      error instanceof ConfigurationError &&
+      error.details["capability"] === "maxBindParameters"
     )
-      return undefined;
+      return {};
     throw error;
   }
 }

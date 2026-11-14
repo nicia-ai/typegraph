@@ -784,8 +784,13 @@ search. Accepted
 writes run the same reachability probe as before. `store.verifyConstraintFences()`
 remains the exhaustive list of offending stored edges. The witness field is
 optional on errors constructed directly by callers. If the diagnostic query
-is cut short or cannot fit the backend's bind budget, the proven cycle still
-raises `EdgeAcyclicityError` with no witness.
+cannot fit the backend's bind budget, the proven cycle still raises
+`EdgeAcyclicityError` with no witness and no SQL failure. If the diagnostic
+statement times out or is cancelled, the refusal carries an
+`EdgeAcyclicityIndeterminateError` as `cause`, whose own `cause` retains the
+driver failure. On PostgreSQL that failed statement aborts the caller's
+transaction: roll back the transaction rather than catching the refusal and
+continuing to use it. A normal cycle refusal has no diagnostic cause.
 
 ### `EdgeAcyclicityIndeterminateError`
 
