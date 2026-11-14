@@ -79,7 +79,7 @@ export function registerEdgeAcyclicityIntegrationTests(
       const store = context.getStore();
       const a = await store.nodes.Task.create({ name: "a" });
       const b = await store.nodes.Task.create({ name: "b" });
-      await store.edges.dependsOn.create(a, b);
+      const forward = await store.edges.dependsOn.create(a, b);
 
       await expect(store.edges.dependsOn.create(b, a)).rejects.toThrow(
         expect.objectContaining({
@@ -89,6 +89,16 @@ export function registerEdgeAcyclicityIntegrationTests(
             fromId: b.id,
             toId: a.id,
             selfLoop: false,
+            witness: matchingObject({
+              nodes: [
+                { kind: "Task", id: a.id },
+                { kind: "Task", id: b.id },
+              ],
+              edges: [
+                { edgeKind: "dependsOn", edgeId: forward.id, source: "stored" },
+              ],
+              truncated: false,
+            }),
           }),
         }),
       );
@@ -101,7 +111,14 @@ export function registerEdgeAcyclicityIntegrationTests(
       await expect(store.edges.dependsOn.create(a, a)).rejects.toThrow(
         expect.objectContaining({
           name: "EdgeAcyclicityError",
-          details: matchingObject({ selfLoop: true }),
+          details: matchingObject({
+            selfLoop: true,
+            witness: matchingObject({
+              nodes: [{ kind: "Task", id: a.id }],
+              edges: [],
+              truncated: false,
+            }),
+          }),
         }),
       );
     });
@@ -124,8 +141,16 @@ export function registerEdgeAcyclicityIntegrationTests(
 
       const first = requireDefined(tasks[0]);
       const last = requireDefined(tasks.at(-1));
-      await expect(store.edges.dependsOn.create(last, first)).rejects.toThrow(
-        EdgeAcyclicityError,
+      const error: unknown = await store.edges.dependsOn
+        .create(last, first)
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      if (!(error instanceof EdgeAcyclicityError))
+        throw new Error("expected cycle refusal");
+      expect(error.details.witness?.truncated).toBe(true);
+      expect(error.details.witness?.edges).toHaveLength(64);
+      expect(error.details.witness?.nodes).toEqual(
+        tasks.slice(0, 65).map((task) => ({ kind: "Task", id: task.id })),
       );
     }, 30_000);
 
@@ -435,7 +460,7 @@ export function registerEdgeAcyclicityIntegrationTests(
       const a = await store.nodes.Task.create({ name: "a" });
       const b = await store.nodes.Task.create({ name: "b" });
       const c = await store.nodes.Task.create({ name: "c" });
-      await store.edges.dependsOn.create(b, c);
+      const stored = await store.edges.dependsOn.create(b, c);
 
       const refusals: unknown[] = [];
       await store.transaction(async (tx) => {
@@ -448,7 +473,26 @@ export function registerEdgeAcyclicityIntegrationTests(
       });
 
       expect(refusals).toEqual([
-        expect.objectContaining({ name: "EdgeAcyclicityError" }),
+        expect.objectContaining({
+          name: "EdgeAcyclicityError",
+          details: matchingObject({
+            witness: matchingObject({
+              nodes: [
+                { kind: "Task", id: b.id },
+                { kind: "Task", id: c.id },
+                { kind: "Task", id: a.id },
+              ],
+              edges: [
+                { edgeId: stored.id, edgeKind: "dependsOn", source: "stored" },
+                matchingObject({
+                  edgeKind: "dependsOn",
+                  source: "proposed",
+                }),
+              ],
+              truncated: false,
+            }),
+          }),
+        }),
       ]);
       expect(await store.edges.dependsOn.find({})).toHaveLength(1);
       expect(await store.verifyConstraintFences()).toEqual([]);

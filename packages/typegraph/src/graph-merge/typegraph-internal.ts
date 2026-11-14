@@ -102,8 +102,8 @@ export {
 } from "../schema/serializer";
 export {
   acyclicEdgeRelations,
-  type EdgeAcyclicityViolation,
   edgeKindIsInAcyclicRelation,
+  type ProposedEdgeAcyclicityViolation,
   type ProposedRelationEdge,
   readProposedEdgeAcyclicityViolations,
 } from "../store/acyclicity";

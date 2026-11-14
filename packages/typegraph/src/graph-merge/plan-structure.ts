@@ -43,7 +43,6 @@ import {
   compositionWindowOverlapError,
   type CompositionWindowTransition,
   createSqlSchema,
-  type EdgeAcyclicityViolation,
   edgeCardinalityClaimTarget,
   edgeInsertClaims,
   edgeKindCardinalityDeclarations,
@@ -56,6 +55,7 @@ import {
   type InsertEdgeParams,
   judgeNodeDeleteBehavior,
   type NodeDeletePolicy,
+  type ProposedEdgeAcyclicityViolation,
   type ProposedRelationEdge,
   readCompositionWindowConflict,
   readProposedEdgeAcyclicityViolations,
@@ -346,7 +346,7 @@ export async function acyclicityConflict<G extends GraphDef>(
  * `details.additionalRelations` without complicating the primary message.
  */
 function acyclicityMergeConflict(
-  violations: readonly EdgeAcyclicityViolation[],
+  violations: readonly ProposedEdgeAcyclicityViolation[],
   proposedById: ReadonlyMap<string, ProposedRelationEdge>,
 ): AcyclicityMergeConflictError {
   const [firstViolation, ...remaining] = violations;
@@ -367,9 +367,13 @@ function acyclicityMergeConflict(
   return new AcyclicityMergeConflictError(
     `The merge plan would close a cycle in acyclic relation "${firstViolation.relation}": ${describedEdges}.`,
     {
+      cause: firstViolation.witnessFailure,
       details: {
         relation: firstViolation.relation,
         edges,
+        ...(firstViolation.witness === undefined ?
+          {}
+        : { witness: firstViolation.witness }),
         ...(remaining.length === 0 ?
           {}
         : {

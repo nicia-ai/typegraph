@@ -18,6 +18,7 @@ export type {
   ContributionRepairResult,
 } from "../backend/types";
 export type { GraphAllocationOwner } from "../core/allocation-owner";
+export type { EdgeCycleWitness } from "../errors";
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export type { CompiledOneStatementRead } from "../query";
 export type { BatchReadBuilder } from "../store";

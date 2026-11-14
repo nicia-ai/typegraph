@@ -781,6 +781,23 @@ export class CardinalityError extends TypeGraphError {
   }
 }
 
+/** One return path in an acyclic relation, oriented in that relation's direction. */
+export type EdgeCycleWitness = Readonly<{
+  /** The refused/proposed edge closed by this path (not included in `edges`). */
+  edgeId: string;
+  /** Ordered node references, from the proposed edge's relation-oriented `to`. */
+  nodes: readonly Readonly<{ kind: string; id: string }>[];
+  /** `edges[i]` connects `nodes[i]` to `nodes[i + 1]` in relation orientation. */
+  edges: readonly Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    /** Proposed rows need not have been stored yet. */
+    source: "stored" | "proposed";
+  }>[];
+  /** Only the first 64 edges are reported when the return path is longer. */
+  truncated: boolean;
+}>;
+
 /**
  * Details for EdgeAcyclicityError.
  */
@@ -794,13 +811,14 @@ export type EdgeAcyclicityErrorDetails = Readonly<{
   toId: string;
   /** True when `from` and `to` are the same node: a cycle of length one. */
   selfLoop: boolean;
+  /** Return path when diagnostic limits permit collection; also optional on caller-created errors. */
+  witness?: EdgeCycleWitness;
 }>;
 
 /**
  * Thrown when a write would give a declared `acyclic: true` edge relation a
- * cycle. Carries no witness path — reconstructing one requires path
- * tracking, which the set-semantics reachability check gives up in exchange
- * for terminating with no depth bound (see `src/store/acyclicity.ts`).
+ * cycle. Store refusals carry one capped return path in `details.witness`,
+ * collected only after the exhaustive probe proves a cycle.
  */
 export class EdgeAcyclicityError extends TypeGraphError {
   declare readonly details: EdgeAcyclicityErrorDetails;
@@ -818,7 +836,7 @@ export class EdgeAcyclicityError extends TypeGraphError {
         details,
         category: "constraint",
         suggestion:
-          "Inspect store.verifyConstraintFences() for every offending edge in this relation, or run a .recursive() traversal from the endpoints to see the path a human should resolve.",
+          "Inspect details.witness for a path that closes the cycle; a truncated witness reports only its first 64 edges. store.verifyConstraintFences() lists every offending edge in the relation.",
         cause: options?.cause,
       },
     );
