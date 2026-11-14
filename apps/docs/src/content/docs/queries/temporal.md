@@ -316,10 +316,60 @@ returned anchor, and a subsequent graph reset makes that anchor refuse reads.
 
 Base-schema version 7 installs the log and time index. Coverage begins with
 captured transactions after installation; earlier allocations are not guessed
-from entity rows or timestamps. The log is retained until `clear()`; direct
-editing or partial pruning of TypeGraph history storage is unsupported. A backend
+from entity rows or timestamps. The log is retained until `clear()` unless explicitly pruned as described below.
+Direct editing of TypeGraph history storage is unsupported. A backend
 without `recordedAnchorLookup`, a store without TypeGraph capture, and an
 engine-native history refuse with `UnsupportedBackendCapabilityError`.
+
+### Retain and prune allocation metadata
+
+Long-running captured graphs accumulate one allocation-log row per committed write
+transaction. Call `store.pruneRecordedInstants(before)` with a canonical UTC
+ISO timestamp to bound this lookup metadata:
+
+```typescript
+await store.pruneRecordedInstants("2026-06-01T00:00:00.000Z");
+```
+
+The operation keeps the highest revision allocated at or before `before` and
+all later allocations. It also keeps revision one, when present, as evidence of
+the first allocation. This constant-size witness preserves the distinction
+between a request before the graph's first allocation (`undefined`) and a
+request within pruned history (`RECORDED_LOOKUP_HISTORY_PRUNED`). Once a gap
+exists between the witness and the retained suffix, wall-clock resolution
+refuses requests from the first allocation up to the suffix's timestamp. The
+witness is not a historical lookup result in that interval. Equal timestamps
+still resolve to the highest retained revision.
+
+Pruning before the first allocation does nothing; a future cutoff keeps the
+latest allocation plus the witness. Repeated calls are idempotent when no new eligible allocations have appeared;
+an older cutoff cannot restore coverage. Each call chooses its boundary from
+the allocations visible to that statement, so newer writes can advance it,
+including a higher revision at the same timestamp. If logging began after revision one,
+coverage before the retained suffix remains unknown and resolution refuses with
+`RECORDED_LOOKUP_HISTORY_NOT_LOGGED`; pruning never invents proof of an empty past.
+
+The owner-scoped deletion selects its boundary and removes older rows in one
+atomic statement. Concurrent writes retain their newer revisions; concurrent
+prunes can only advance the retained suffix. A lookup observes either side of
+a prune in one database snapshot. The existing time and revision indexes serve
+these operations on SQLite and PostgreSQL, including custom table namespaces.
+No schema migration is needed beyond base-schema version 7. Upgrade every
+application that resolves wall-clock cuts against the same database before the
+first prune: older versions do not recognize the first-allocation witness and
+can return it as a stale result inside pruned coverage.
+
+Pruning affects only wall-clock-to-anchor lookup metadata. It does not rotate
+the allocation owner, advance the graph clock, remove captured node or edge
+history, or invalidate saved `RecordedInstant` strings. Save exact anchors
+before pruning when checkpoints, cursors, branch bases, or downstream consumers
+must revisit old states. TypeGraph does not register or pin those consumers:
+coordinate allocation-log retention with backups, replication, external history
+retention, and any independent entity-history cleanup. A saved anchor needs its
+underlying entity history as well as its original owner and recording namespace.
+Pruning does not manage durable operation outcome evidence or schedule itself.
+It requires the same TypeGraph capture and `recordedAnchorLookup` capability as
+`resolveRecordedInstant`; live-only and engine-native stores refuse it.
 
 ### Anchor ownership and checkpoint upgrades
 

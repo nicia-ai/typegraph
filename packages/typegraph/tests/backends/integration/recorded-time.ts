@@ -1192,6 +1192,173 @@ export function registerRecordedTimeIntegrationTests(
       }
     });
 
+    it("prunes allocation metadata without changing ownership, checkpoints, or pre-allocation absence", async () => {
+      const store = await createHistoryStore(context);
+      const owner = await store.allocationOwner();
+      const times = [
+        "2026-06-01T12:00:00.000Z",
+        "2026-06-01T12:00:01.000Z",
+        "2026-06-01T12:00:02.000Z",
+        "2026-06-01T12:00:03.000Z",
+      ] as const;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(times[0]));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        const first = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[1]));
+        await store.nodes.Person.update(node.id, { name: "second" });
+        const saved = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[2]));
+        await store.nodes.Person.update(node.id, { name: "third" });
+        const boundary = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[3]));
+        await store.nodes.Person.update(node.id, { name: "fourth" });
+        const latest = requireDefined(await store.recordedNow());
+
+        await store.pruneRecordedInstants("1900-01-01T00:00:00.000Z");
+        expect(await store.resolveRecordedInstant(times[0])).toBe(first);
+        await store.pruneRecordedInstants("2026-06-01T12:00:02.500Z");
+        for (const time of [times[0], times[1], "2026-06-01T12:00:01.999Z"]) {
+          await expect(
+            store.resolveRecordedInstant(time),
+          ).rejects.toMatchObject({
+            details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+          });
+        }
+        expect(
+          await store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+        expect(await store.resolveRecordedInstant(times[2])).toBe(boundary);
+        expect(await store.resolveRecordedInstant(times[3])).toBe(latest);
+        expect(await store.allocationOwner()).toEqual(owner);
+        expect(await store.recordedNow()).toBe(latest);
+        expect(
+          await store.asOfRecorded(saved).nodes.Person.getById(node.id),
+        ).toMatchObject({ name: "second" });
+        const countAnchors = async () => {
+          const rows = await context
+            .getBackend()
+            .execute<CountRow>(
+              asCompiledRowsSql(
+                sql`SELECT count(*) AS count FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+              ),
+            );
+          return Number(requireDefined(rows[0]).count);
+        };
+        expect(await countAnchors()).toBe(3);
+        await store.pruneRecordedInstants(times[2]);
+        await store.pruneRecordedInstants(times[0]);
+        expect(await countAnchors()).toBe(3);
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z");
+        expect(await countAnchors()).toBe(2);
+        expect(
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(latest);
+        await store.nodes.Person.update(node.id, { name: "same timestamp" });
+        const tied = requireDefined(await store.recordedNow());
+        expect(await store.resolveRecordedInstant(times[3])).toBe(tied);
+        await store.pruneRecordedInstants(times[3]);
+        expect(await store.resolveRecordedInstant(times[3])).toBe(tied);
+        expect(await countAnchors()).toBe(2);
+        await store.clear();
+        expect(await store.resolveRecordedInstant(times[0])).toBeUndefined();
+        await store.pruneRecordedInstants(times[3]);
+        await store.nodes.Person.create({ name: "replacement", age: 1 });
+        expect(await store.allocationOwner()).not.toEqual(owner);
+        expect(await store.resolveRecordedInstant(times[3])).not.toBe(tied);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("prunes with one owner-scoped statement while a writer and another prune advance", async () => {
+      const store = await createHistoryStore(context);
+      const node = await store.nodes.Person.create({ name: "initial", age: 1 });
+      await store.nodes.Person.update(node.id, { name: "second" });
+      await store.nodes.Person.update(node.id, { name: "third" });
+      const boundary = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      const owner = await store.allocationOwner();
+      // Other graphs and stale owners must survive a prune in this graph.
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(sql`
+          INSERT INTO ${recordedAnchorsTable(store.revisionSchema)} (graph_id, origin, revision, recorded_at)
+          VALUES (${store.graphId}, ${"stale-origin"}, 2, ${"2000-01-01T00:00:00.000Z"}),
+            (${"other-graph"}, ${owner.origin}, 2, ${"2000-01-01T00:00:00.000Z"})
+        `),
+      );
+      const statements: CompiledStatementSql[] = [];
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          async executeStatement(query: CompiledStatementSql) {
+            statements.push(query);
+            return requireDefined(base.executeStatement)(query);
+          },
+        }),
+        { history: true },
+      );
+      statements.length = 0;
+      await observed.pruneRecordedInstants(recordedInstantWallTime(boundary));
+      expect(statements).toHaveLength(1);
+      await Promise.all([
+        store.nodes.Person.update(node.id, { name: "concurrent" }),
+        observed.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        store.pruneRecordedInstants(recordedInstantWallTime(boundary)),
+      ]);
+      const latest = requireDefined(await store.recordedNow());
+      expect(
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBe(latest);
+      expect(await store.allocationOwner()).toEqual(owner);
+      const otherRows = await base.execute<CountRow>(
+        asCompiledRowsSql(sql`
+          SELECT count(*) AS count FROM ${recordedAnchorsTable(store.revisionSchema)}
+          WHERE graph_id=${"other-graph"} OR (graph_id=${store.graphId} AND origin=${"stale-origin"})
+        `),
+      );
+      expect(Number(requireDefined(otherRows[0]).count)).toBe(2);
+    });
+
+    it("refuses unsupported or invalid allocation pruning and leaves unlogged coverage unknown", async () => {
+      const base = context.getBackend();
+      const [unsupported] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          capabilities: { ...base.capabilities, recordedAnchorLookup: false },
+        }),
+        { history: true },
+      );
+      await expect(
+        unsupported.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const live = createStore(integrationTestGraph, base);
+      await expect(
+        live.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const store = await createHistoryStore(context);
+      await expect(
+        store.pruneRecordedInstants("2026-01-01"),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+      await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z");
+      expect(
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBeUndefined();
+      await store.nodes.Person.create({ name: "unlogged", age: 1 });
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z");
+      await expect(
+        store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+    });
+
     it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {
       const base = context.getBackend();
       const [unsupported] = await createStoreWithSchema(
@@ -1349,6 +1516,11 @@ export function registerRecordedTimeIntegrationTests(
         ).rejects.toMatchObject({
           details: { code: "RECORDED_RELATIONS_MISSING" },
         });
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
         expect(await store.nodes.Person.count()).toBe(1);
         expect(await store.recordedNow()).toBe(before);
       } finally {
@@ -1426,9 +1598,14 @@ export function registerRecordedTimeIntegrationTests(
         ),
       );
       const reads: CompiledRowsSql[] = [];
+      const statements: CompiledStatementSql[] = [];
       const [observed] = await createStoreWithSchema(
         integrationTestGraph,
         deriveBackend(base, {
+          async executeStatement(query: CompiledStatementSql) {
+            statements.push(query);
+            return requireDefined(base.executeStatement)(query);
+          },
           execute<T>(query: CompiledRowsSql) {
             reads.push(query);
             return base.execute<T>(query);
@@ -1461,6 +1638,23 @@ export function registerRecordedTimeIntegrationTests(
         (serialized.includes('"Node Type":"Limit"') &&
           serialized.includes('"Actual Rows":1'));
       expect(oneRowLimit).toBe(true);
+      statements.length = 0;
+      await observed.pruneRecordedInstants("2025-01-01T00:00:01.000Z");
+      expect(statements).toHaveLength(1);
+      const prune = requireDefined(statements[0]);
+      const pruneExplain =
+        base.dialect === "sqlite" ?
+          "EXPLAIN QUERY PLAN "
+        : "EXPLAIN (FORMAT JSON) ";
+      const prunePlan = await base.execute(
+        asCompiledRowsSql(sql`${sql.raw(pruneExplain)}${prune}`),
+      );
+      const serializedPrune = JSON.stringify(prunePlan);
+      expect(serializedPrune).toContain("recorded_anchors_time_idx");
+      expect(serializedPrune).not.toContain("USE TEMP B-TREE");
+      expect(
+        await observed.resolveRecordedInstant("2025-01-01T00:00:01.000Z"),
+      ).toBe(resolved);
     });
 
     it("keeps a resolved cut stable when another writer advances after its lookup", async () => {

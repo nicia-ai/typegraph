@@ -5448,7 +5448,7 @@ type ResolvedSqlTableNames = Readonly<{
 }>;
 
 // @public
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> & Readonly<{
     rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
 }>;
 
@@ -6028,6 +6028,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: GraphNodeReference<G>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+    pruneRecordedInstants?: (before: string) => Promise<void>;
     clear: (options?: Readonly<{
         preserveContributionMaterializations?: boolean;
     }>) => Promise<void>;

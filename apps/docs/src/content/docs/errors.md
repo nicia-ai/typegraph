@@ -1153,6 +1153,7 @@ a retry against the same retired owner cannot repair it.
 | `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. |
 | `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
 | `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_LOOKUP_HISTORY_PRUNED` | The requested wall time falls within pruned allocation coverage. Use a saved anchor or a time within the retained suffix. |
 | `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
 | `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
 | `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |

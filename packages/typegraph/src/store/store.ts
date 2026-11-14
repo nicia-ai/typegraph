@@ -368,7 +368,10 @@ import {
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
-import { lookupRecordedAnchor } from "./recorded-anchor-log";
+import {
+  lookupRecordedAnchor,
+  pruneRecordedAnchors,
+} from "./recorded-anchor-log";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
   advanceRevisionClock,
@@ -881,6 +884,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
+  /** Explicit allocation-log retention; concrete Stores always provide it. */
+  pruneRecordedInstants?: (before: string) => Promise<void>;
   clear: (
     options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
   ) => Promise<void>;
@@ -1034,6 +1039,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
 /** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
   AddedStoreReads<G> &
+  Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> &
   Readonly<{
     rotateAllocationOwner: (
       expectedOwner: GraphAllocationOwner,
@@ -3068,21 +3074,41 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async resolveRecordedInstant(
     wallTime: string,
   ): Promise<RecordedInstant | undefined> {
-    if (
-      !this.#captureEnabled ||
-      this.#recordedTimeOwnership !== "typegraph-relations"
-    )
-      throw new UnsupportedBackendCapabilityError(
-        "resolveRecordedInstant",
-        "recordedAnchorLookup",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
-      );
+    this.#requireRecordedAnchorLookup("resolveRecordedInstant");
     return lookupRecordedAnchor(
       this.#backend,
       this.#sqlSchema(),
       this.graphId,
       wallTime,
     );
+  }
+
+  /**
+   * Bound allocation-time lookup metadata. Retains the latest allocation at or
+   * before `before`, all newer allocations, and the first-allocation witness.
+   * Pruned wall-clock lookups refuse; saved anchors and recorded entity history
+   * remain valid. Coordinate checkpoint and entity-history retention externally.
+   */
+  async pruneRecordedInstants(before: string): Promise<void> {
+    this.#requireRecordedAnchorLookup("pruneRecordedInstants");
+    await pruneRecordedAnchors(
+      this.#baseBackend,
+      this.#sqlSchema(),
+      this.graphId,
+      before,
+    );
+  }
+
+  #requireRecordedAnchorLookup(surface: string): void {
+    if (
+      !this.#captureEnabled ||
+      this.#recordedTimeOwnership !== "typegraph-relations"
+    )
+      throw new UnsupportedBackendCapabilityError(
+        surface,
+        "recordedAnchorLookup",
+        { graphId: this.graphId, dialect: this.#backend.dialect },
+      );
   }
 
   /**
