@@ -2450,6 +2450,7 @@ export type EdgeAcyclicityErrorDetails = Readonly<{
     toKind: string;
     toId: string;
     selfLoop: boolean;
+    witness?: EdgeCycleWitness;
 }>;
 
 // @public
@@ -2702,6 +2703,21 @@ type EdgeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
+}>;
+
+// @public
+export type EdgeCycleWitness = Readonly<{
+    edgeId: string;
+    nodes: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
+    edges: readonly Readonly<{
+        edgeKind: string;
+        edgeId: string;
+        source: "stored" | "proposed";
+    }>[];
+    truncated: boolean;
 }>;
 
 // @public

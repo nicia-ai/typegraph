@@ -410,6 +410,49 @@ function acyclicityContext(backend: GraphBackend) {
   };
 }
 
+describe("cycle witness diagnostics", () => {
+  it("preserves a proven cycle refusal when the diagnostic statement is cut short", async () => {
+    const backend = createTestBackend();
+    vi.spyOn(backend, "execute")
+      .mockResolvedValueOnce([{ origin_key: "closing" }])
+      .mockRejectedValueOnce(
+        Object.assign(new Error("diagnostic interrupted"), {
+          code: "SQLITE_INTERRUPT",
+        }),
+      );
+    await expect(
+      assertEdgeRelationsAcyclic(acyclicityContext(backend), [
+        {
+          edgeId: "closing",
+          edgeKind: "dependsOn",
+          fromKind: "Task",
+          fromId: "a",
+          toKind: "Task",
+          toId: "b",
+          validTo: undefined,
+        },
+      ]),
+    ).rejects.toBeInstanceOf(EdgeAcyclicityError);
+  });
+
+  it("adds no diagnostic read to an accepted edge", async () => {
+    const backend = createTestBackend();
+    const execute = vi.spyOn(backend, "execute");
+    await assertEdgeRelationsAcyclic(acyclicityContext(backend), [
+      {
+        edgeId: "accepted",
+        edgeKind: "dependsOn",
+        fromKind: "Task",
+        fromId: "a",
+        toKind: "Task",
+        toId: "b",
+        validTo: undefined,
+      },
+    ]);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a propagated error", () => {
   const PROPOSED_EDGE = {
     edgeId: "e1",
@@ -904,6 +947,19 @@ describe('the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERT
         family: "edgeAcyclicity",
         relation: "dependsOn",
         edgeIds: ["ab", "bc", "ca"],
+        witness: {
+          edgeId: "ab",
+          nodes: [
+            { kind: "Task", id: nodes.b },
+            { kind: "Task", id: nodes.c },
+            { kind: "Task", id: nodes.a },
+          ],
+          edges: [
+            { edgeKind: "dependsOn", edgeId: "bc", source: "proposed" },
+            { edgeKind: "dependsOn", edgeId: "ca", source: "proposed" },
+          ],
+          truncated: false,
+        },
       },
     ]);
   });
@@ -937,7 +993,17 @@ describe('the `"proposed"` form\'s direct join sees a cycle among ALREADY-INSERT
       );
 
     expect(violations).toEqual([
-      { family: "edgeAcyclicity", relation: "dependsOn", edgeIds: ["self"] },
+      {
+        family: "edgeAcyclicity",
+        relation: "dependsOn",
+        edgeIds: ["self"],
+        witness: {
+          edgeId: "self",
+          nodes: [{ kind: "Task", id: nodes.a }],
+          edges: [],
+          truncated: false,
+        },
+      },
     ]);
   });
 });

@@ -485,9 +485,13 @@ const result = await merge(store, branches);
 if (isErr(result) && result.error instanceof AcyclicityMergeConflictError) {
   console.log(result.error.code); // "GRAPH_MERGE_ACYCLICITY_CONFLICT"
   console.log(result.error.details.relation); // the declared-acyclic relation
-  console.log(result.error.details.edges); // every offending edge on the cycle
+  console.log(result.error.details.edges); // every offending proposed edge on a cycle
+  console.log(result.error.details.witness); // one return path, as on EdgeAcyclicityError
 }
 ```
+
+The witness may be absent if a concurrent deletion removes the path between
+the lock-free verdict and its diagnostic read.
 
 A cycle that only arises from a write racing the plan-time check (which holds
 no per-graph lock, since planning does no write) is not caught here — the
@@ -757,11 +761,31 @@ try {
 }
 ```
 
-Carries no witness path — reconstructing one requires path tracking, which
-the underlying set-semantics reachability check gives up in exchange for
-terminating without a depth bound. Run `store.verifyConstraintFences()` to
-list every edge already on a cycle in the relation, or a `.recursive()`
-traversal from the endpoints for a human to inspect.
+Store refusals carry `details.witness` (`EdgeCycleWitness`): `edgeId` names the
+refused edge, `nodes` is an ordered list of `{ kind, id }` references from its
+relation-oriented `to` back to its `from`, and `edges[i]` connects `nodes[i]`
+to `nodes[i + 1]`. Each edge names `edgeKind`, `edgeId`, and `source`:
+`"stored"` or `"proposed"` for another edge in the refused batch. Proposed
+edge ids may never be stored, because the batch is refused before writing.
+The refused edge itself is excluded from this return path. A self-loop has
+one node and no return edges.
+
+A path longer than 64 edges reports its first 64 edges and 65 nodes with
+`truncated: true`; otherwise the last node is the refused edge's
+relation-oriented `from` and `truncated` is false. Composition witnesses use
+part-to-whole orientation even when a realizing edge is stored whole-to-part.
+One path is reported, without guaranteeing which of several paths is chosen.
+
+Witness collection runs only after the exhaustive check proves a cycle. It
+uses linear work and memory per bind-budget seed slice in the reachable
+stored/proposed graph; a large batch can read shared regions again in another
+slice. The payload cap does not limit cycle detection or the diagnostic
+search. Accepted
+writes run the same reachability probe as before. `store.verifyConstraintFences()`
+remains the exhaustive list of offending stored edges. The witness field is
+optional on errors constructed directly by callers. If the diagnostic query
+is cut short or cannot fit the backend's bind budget, the proven cycle still
+raises `EdgeAcyclicityError` with no witness.
 
 ### `EdgeAcyclicityIndeterminateError`
 

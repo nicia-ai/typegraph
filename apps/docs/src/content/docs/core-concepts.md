@@ -515,6 +515,11 @@ the common case. Every write path that can put an edge into the relation
 enforces it: `create`, `bulkCreate`, `getOrCreateByEndpoints`, resurrecting a
 soft-deleted edge, validating import, and merge apply after canonicalization.
 
+A refusal's `details.witness` identifies one return path, including the node
+references and stored or proposed edge ids a caller can show for repair. It
+reports at most 64 edges with a `truncated` flag. This diagnostic runs only on
+refused writes; see [EdgeAcyclicityError](/errors#edgeacyclicityerror).
+
 **Population.** Every non-deleted edge counts, regardless of its validity
 window. Soft-deleting an edge frees the relation — `a -> b` then `b -> a` is
 accepted once the first edge is deleted. Ending an edge's validity window does

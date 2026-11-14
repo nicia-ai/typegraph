@@ -19,6 +19,7 @@ const __nodeId: unique symbol;
 export type AcyclicityMergeConflictDetails = Readonly<{
     relation: string;
     edges: readonly MergeConflictEdge[];
+    witness?: EdgeCycleWitness;
     [key: string]: unknown;
 }>;
 
@@ -2528,6 +2529,21 @@ type EdgeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
+}>;
+
+// @public
+export type EdgeCycleWitness = Readonly<{
+    edgeId: string;
+    nodes: readonly Readonly<{
+        kind: string;
+        id: string;
+    }>[];
+    edges: readonly Readonly<{
+        edgeKind: string;
+        edgeId: string;
+        source: "stored" | "proposed";
+    }>[];
+    truncated: boolean;
 }>;
 
 // @public

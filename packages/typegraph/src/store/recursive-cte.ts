@@ -804,7 +804,7 @@ function orientedEndpointColumns(
 }
 
 /** A proposed edge's endpoints in the relation's part->whole orientation. */
-function orientProposedEdge(
+export function orientProposedEdge(
   edge: ProposedRelationEdge,
   members: readonly AcyclicRelationMember[],
 ): Readonly<{
@@ -894,6 +894,8 @@ type AcyclicityProbeBodyOptions = Readonly<{
   dialect: DialectAdapter;
   forceWorktableOuterJoinOrder: boolean;
   excludedEdgeIds: readonly string[];
+  /** Reuse the same join and population for the rejection-only edge read. */
+  witnessEdges?: boolean;
 }>;
 
 /**
@@ -963,7 +965,10 @@ function buildAcyclicityAncestryStepDirect(
         joinPredicate: mixedOrientationJoinPredicate(forward, reversed),
         whereClauses: commonWhere,
       };
-  const selectClause = sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a`;
+  const selectClause =
+    options.witnessEdges ?
+      sql`SELECT a.origin_key, e.id AS edge_id, e.kind AS edge_kind, a.node_kind AS from_kind, a.node_id AS from_id, ${nextKind} AS to_kind, ${nextId} AS to_id FROM ancestry a`
+    : sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a`;
   if (forceWorktableOuterJoinOrder) {
     return sql`${selectClause} CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...whereClauses, joinPredicate], sql` AND `)}`;
   }
@@ -1025,6 +1030,8 @@ export function buildEdgeAcyclicityProbe(
     operation: string;
     /** Stored edges to leave out of the walk; see {@link buildAcyclicityAncestryStepDirect}. */
     excludedEdgeIds?: readonly string[];
+    /** Rejection-only read: return reachable edges, without tracking paths in SQL. */
+    witnessEdges?: boolean;
   }>,
 ): SqlFragment {
   assertRecursiveTraversal(options.recursiveTraversal, options.operation);
@@ -1036,7 +1043,13 @@ export function buildEdgeAcyclicityProbe(
     options.graphId,
     options.schema,
   );
-  const anchor = sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
+  // Merge all diagnostic origins into one frontier. In an overlay every
+  // stored leg starts at one proposed edge's `to`, so this visits each node
+  // once even when several proposed edges share its reachable subgraph.
+  const anchor =
+    options.witnessEdges ?
+      sql`SELECT DISTINCT CAST('' AS TEXT), s.to_kind, s.to_id FROM seed s`
+    : sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
   const ancestryStep = buildAcyclicityAncestryStepDirect({
     members,
     graphId: options.graphId,
@@ -1048,7 +1061,23 @@ export function buildEdgeAcyclicityProbe(
   });
   const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${anchor} UNION ${ancestryStep})`;
 
-  const body = sql`${seedCte}, ${ancestry}${acyclicityProbeClosing(seed, members)}`;
+  const closing =
+    options.witnessEdges ?
+      buildAcyclicityAncestryStepDirect({
+        members,
+        graphId: options.graphId,
+        schema: options.schema,
+        dialect: options.dialect,
+        forceWorktableOuterJoinOrder:
+          options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+        excludedEdgeIds: options.excludedEdgeIds ?? [],
+        witnessEdges: true,
+      })
+    : acyclicityProbeClosing(seed, members);
+  const body =
+    options.witnessEdges ?
+      sql`${seedCte}, ${ancestry} ${closing}`
+    : sql`${seedCte}, ${ancestry}${closing}`;
   return sql`WITH RECURSIVE ${body}`;
 }
 

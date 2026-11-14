@@ -328,6 +328,30 @@ export function registerCompositionFenceIntegrationTests(
     // passes (no cycle found) while the previous one still fails, proving the
     // flag — not just the union's existence — is load-bearing.
 
+    it("reports a reversed stored composition hop in part-to-whole direction", async () => {
+      const store = await context.createStore(buildGraph(nextGraphId()));
+      const folderA = await store.nodes.CfFolder.create({});
+      const folderB = await store.nodes.CfFolder.create({});
+      const stored = await store.edges.cfContainsC.create(folderB, folderA, {});
+      const error: unknown = await store.edges.cfContainsA
+        .create(folderB, folderA, {})
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(EdgeAcyclicityError);
+      if (!(error instanceof EdgeAcyclicityError))
+        throw new Error("expected cycle refusal");
+      expect(error.details.witness).toEqual({
+        edgeId: error.details.edgeId,
+        nodes: [
+          { kind: "CfFolder", id: folderA.id },
+          { kind: "CfFolder", id: folderB.id },
+        ],
+        edges: [
+          { edgeKind: "cfContainsC", edgeId: stored.id, source: "stored" },
+        ],
+        truncated: false,
+      });
+    });
+
     it("refuses a second whole with the same CompositionError, naming the incumbent edge, on every create shape", async () => {
       const store = await context.createStore(buildGraph(nextGraphId()));
       const chapter = await store.nodes.CfChapter.create({});

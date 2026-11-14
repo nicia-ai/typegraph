@@ -174,6 +174,20 @@ describe.each(backendMatrix())(
         ["ab", "bc", "ca"],
       );
 
+      expect(error.details.witness).toEqual({
+        edgeId: "ab",
+        nodes: [
+          { kind: "Task", id: "b" },
+          { kind: "Task", id: "c" },
+          { kind: "Task", id: "a" },
+        ],
+        edges: [
+          { edgeId: "bc", edgeKind: "dependsOn", source: "proposed" },
+          { edgeId: "ca", edgeKind: "dependsOn", source: "proposed" },
+        ],
+        truncated: false,
+      });
+
       // Byte-unchanged: planning alone never wrote anything.
       const remaining = await target.edges.dependsOn.find({});
       expect(remaining).toEqual([]);

@@ -435,6 +435,7 @@ export type {
   EagerMaterializationErrorDetails,
   EdgeAcyclicityErrorDetails,
   EdgeAcyclicityIndeterminateErrorDetails,
+  EdgeCycleWitness,
   EdgeNotFoundErrorDetails,
   EmbeddingDimensionChangedErrorDetails,
   EndpointErrorDetails,

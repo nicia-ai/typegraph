@@ -33,7 +33,11 @@
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
-import { ConfigurationError, EdgeAcyclicityError } from "../errors";
+import {
+  ConfigurationError,
+  EdgeAcyclicityError,
+  type EdgeCycleWitness,
+} from "../errors";
 import { EdgeAcyclicityIndeterminateError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
@@ -61,6 +65,7 @@ import {
   ACYCLICITY_TARGET_ROW_PARAM_COUNT,
   type AcyclicityProbeSeed,
   buildEdgeAcyclicityProbe,
+  orientProposedEdge,
 } from "./recursive-cte";
 
 /**
@@ -557,6 +562,7 @@ function acyclicityProbeStatement(
   relation: AcyclicEdgeRelation,
   seed: AcyclicityProbeSeed,
   excludedEdgeIds: readonly string[],
+  witnessEdges = false,
 ): SqlFragment {
   return buildEdgeAcyclicityProbe({
     graphId: ctx.graphId,
@@ -567,6 +573,7 @@ function acyclicityProbeStatement(
     recursiveTraversal: resolveRecursiveTraversal(ctx.target.capabilities),
     operation: ctx.operation,
     excludedEdgeIds,
+    witnessEdges,
   });
 }
 
@@ -587,6 +594,7 @@ function acyclicityProbeRowBudget(
   relation: AcyclicEdgeRelation,
   sample: ProposedRelationEdge,
   excludedEdgeIds: readonly string[],
+  witnessEdges = false,
 ): number | undefined {
   const maxBindParameters = ctx.target.capabilities.maxBindParameters;
   if (maxBindParameters === undefined) return undefined;
@@ -595,13 +603,15 @@ function acyclicityProbeRowBudget(
     relation,
     { kind: "proposed", edges: [sample] },
     excludedEdgeIds,
+    witnessEdges,
   );
   const available =
     maxBindParameters -
     (countSqlParameters(oneRowStatement) - ACYCLICITY_SEED_ROW_PARAM_COUNT);
   if (
     available <
-    ACYCLICITY_SEED_ROW_PARAM_COUNT + ACYCLICITY_TARGET_ROW_PARAM_COUNT
+    ACYCLICITY_SEED_ROW_PARAM_COUNT +
+      (witnessEdges ? 0 : ACYCLICITY_TARGET_ROW_PARAM_COUNT)
   ) {
     throw new ConfigurationError(
       `The acyclicity check for the "${displayAcyclicRelationName(relation.name)}" relation does not fit this backend's limit of ${maxBindParameters} bound parameters.`,
@@ -726,12 +736,14 @@ async function runAcyclicityProbe<Row extends Readonly<{ origin_key: string }>>(
   relation: AcyclicEdgeRelation,
   seed: AcyclicityProbeSeed,
   excludedEdgeIds: readonly string[] = [],
+  witnessEdges = false,
 ): Promise<readonly Row[]> {
   const fragment = acyclicityProbeStatement(
     ctx,
     relation,
     seed,
     excludedEdgeIds,
+    witnessEdges,
   );
   try {
     return await ctx.target.execute<Row>(asCompiledRowsSql(fragment));
@@ -816,10 +828,15 @@ export async function assertEdgeRelationsAcyclic(
       edges,
     );
     if (violatingOriginKeys.length === 0) continue;
+    const edge =
+      edges.find((candidate) =>
+        violatingOriginKeys.includes(candidate.edgeId),
+      ) ?? requireDefined(edges[0]);
     throw cycleRefusal(
       relation,
-      edges.find((edge) => violatingOriginKeys.includes(edge.edgeId)) ??
-        requireDefined(edges[0]),
+      edge,
+      false,
+      await readCycleWitness(ctx, relation, edge, edges, []),
     );
   }
 }
@@ -867,7 +884,18 @@ export async function assertUnwrittenEdgeRelationsAcyclic(
     );
     const [violatingEdge] = proposedEdgesOnOverlayCycle(edges, reaches, 1);
     if (violatingEdge === undefined) continue;
-    throw cycleRefusal(relation, violatingEdge);
+    throw cycleRefusal(
+      relation,
+      violatingEdge,
+      false,
+      await readCycleWitness(
+        ctx,
+        relation,
+        violatingEdge,
+        edges,
+        excludedEdgeIds,
+      ),
+    );
   }
 }
 
@@ -962,7 +990,9 @@ function cycleRefusal(
   relation: AcyclicEdgeRelation,
   edge: ProposedRelationEdge,
   selfLoop = false,
+  witness?: EdgeCycleWitness,
 ): EdgeAcyclicityError {
+  const reportedWitness = selfLoop ? selfLoopWitness(edge) : witness;
   return new EdgeAcyclicityError({
     relation: displayAcyclicRelationName(relation.name),
     edgeKind: edge.edgeKind,
@@ -972,6 +1002,7 @@ function cycleRefusal(
     toKind: edge.toKind,
     toId: edge.toId,
     selfLoop,
+    ...(reportedWitness === undefined ? {} : { witness: reportedWitness }),
   });
 }
 
@@ -1039,13 +1070,13 @@ export async function readProposedEdgeAcyclicityViolations(
   graph: GraphDef,
   proposed: readonly ProposedRelationEdge[],
   excludedEdgeIds: readonly string[] = [],
-): Promise<readonly EdgeAcyclicityViolation[]> {
+): Promise<readonly ProposedEdgeAcyclicityViolation[]> {
   const { groups } = groupProposedByAcyclicRelation(
     graph,
     ctx.registry,
     proposed,
   );
-  const violations: EdgeAcyclicityViolation[] = [];
+  const violations: ProposedEdgeAcyclicityViolation[] = [];
   for (const { relation, edges, selfLoopEdgeIds } of groups) {
     const probedIds =
       edges.length === 0 ?
@@ -1058,11 +1089,200 @@ export async function readProposedEdgeAcyclicityViolations(
       compareStrings,
     );
     if (edgeIds.length === 0) continue;
+    const edge = requireDefined(
+      proposed.find((candidate) => candidate.edgeId === edgeIds[0]),
+    );
+    const witness =
+      proposedEdgeIsSelfLoop(edge) ?
+        selfLoopWitness(edge)
+      : await readCycleWitness(ctx, relation, edge, edges, excludedEdgeIds);
     violations.push({
       family: "edgeAcyclicity",
       relation: displayAcyclicRelationName(relation.name),
       edgeIds,
+      ...(witness === undefined ? {} : { witness }),
     });
   }
   return violations;
+}
+
+/** A plan preview's first proposed edge on a cycle, with its return path when still visible. */
+export type ProposedEdgeAcyclicityViolation = EdgeAcyclicityViolation &
+  Readonly<{
+    witness?: EdgeCycleWitness;
+  }>;
+
+const MAX_CYCLE_WITNESS_EDGES = 64;
+
+type WitnessEdgeRow = Readonly<{
+  origin_key: string;
+  edge_id: string;
+  edge_kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+type WitnessStep = Readonly<{
+  from: Readonly<{ kind: string; id: string }>;
+  to: Readonly<{ kind: string; id: string }>;
+  edge: EdgeCycleWitness["edges"][number];
+}>;
+
+function witnessNodeKey(node: Readonly<{ kind: string; id: string }>): string {
+  return JSON.stringify([node.kind, node.id]);
+}
+
+function selfLoopWitness(edge: ProposedRelationEdge): EdgeCycleWitness {
+  return {
+    edgeId: edge.edgeId,
+    nodes: [{ kind: edge.toKind, id: edge.toId }],
+    edges: [],
+    truncated: false,
+  };
+}
+
+/**
+ * Rejection-only diagnostic. The verdict's set-semantics SQL stays unchanged:
+ * no arrays per frontier row, no enumeration of distinct paths. Read the
+ * reachable stored edges per bind-budget seed slice, then BFS the stored/proposed overlay with one
+ * predecessor per node. Work and memory per slice are linear in that reachable graph,
+ * including a diamond DAG with exponentially many paths. Only the reported
+ * prefix is capped; detection and witness search have no depth ceiling.
+ *
+ * All proposed rows replace their stored versions (resurrections/repointing),
+ * and retired rows stay excluded. The shared SQL join owns membership and
+ * orientation, so diagnostics cannot accidentally walk ended composition rows
+ * or invert a mixed-orientation relation. Plan previews can race a deletion;
+ * in that case there is no longer a path to report, and the witness is absent.
+ */
+async function readCycleWitness(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  closing: ProposedRelationEdge,
+  proposed: readonly ProposedRelationEdge[],
+  excludedEdgeIds: readonly string[],
+): Promise<EdgeCycleWitness | undefined> {
+  try {
+    return await collectCycleWitness(
+      ctx,
+      relation,
+      closing,
+      proposed,
+      excludedEdgeIds,
+    );
+  } catch (error) {
+    // A diagnostic limit cannot turn a proven cycle into an indeterminate
+    // verdict or change the existing refusal's error class.
+    if (
+      error instanceof EdgeAcyclicityIndeterminateError ||
+      (error instanceof ConfigurationError &&
+        error.details["capability"] === "maxBindParameters")
+    )
+      return undefined;
+    throw error;
+  }
+}
+
+async function collectCycleWitness(
+  ctx: AcyclicityAuditContext,
+  relation: AcyclicEdgeRelation,
+  closing: ProposedRelationEdge,
+  proposed: readonly ProposedRelationEdge[],
+  excludedEdgeIds: readonly string[],
+): Promise<EdgeCycleWitness | undefined> {
+  const excluded = [
+    ...new Set([...excludedEdgeIds, ...proposed.map((edge) => edge.edgeId)]),
+  ];
+  const budget = acyclicityProbeRowBudget(
+    ctx,
+    relation,
+    requireDefined(proposed[0]),
+    excluded,
+    true,
+  );
+  const slices =
+    budget === undefined ?
+      [proposed]
+    : chunk(proposed, Math.floor(budget / ACYCLICITY_SEED_ROW_PARAM_COUNT));
+  const steps: WitnessStep[] = [];
+  for (const edges of slices) {
+    const rows = await runAcyclicityProbe<WitnessEdgeRow>(
+      ctx,
+      relation,
+      { kind: "proposed", edges },
+      excluded,
+      true,
+    );
+    for (const row of rows) {
+      steps.push({
+        from: { kind: row.from_kind, id: row.from_id },
+        to: { kind: row.to_kind, id: row.to_id },
+        edge: {
+          edgeId: row.edge_id,
+          edgeKind: row.edge_kind,
+          source: "stored",
+        },
+      });
+    }
+  }
+  for (const edge of proposed) {
+    const oriented = orientProposedEdge(edge, relation.members);
+    steps.push({
+      from: { kind: oriented.fromKind, id: oriented.fromId },
+      to: { kind: oriented.toKind, id: oriented.toId },
+      edge: {
+        edgeId: edge.edgeId,
+        edgeKind: edge.edgeKind,
+        source: "proposed",
+      },
+    });
+  }
+  const oriented = orientProposedEdge(closing, relation.members);
+  const start = { kind: oriented.toKind, id: oriented.toId };
+  const finish = witnessNodeKey({
+    kind: oriented.fromKind,
+    id: oriented.fromId,
+  });
+  const successors = new Map<string, WitnessStep[]>();
+  for (const step of steps) {
+    if (step.edge.edgeId === closing.edgeId) continue;
+    const key = witnessNodeKey(step.from);
+    const known = successors.get(key);
+    if (known === undefined) successors.set(key, [step]);
+    else known.push(step);
+  }
+  const predecessors = new Map<string, WitnessStep>();
+  const frontier = [start];
+  const visited = new Set([witnessNodeKey(start)]);
+  for (
+    let index = 0;
+    index < frontier.length && !visited.has(finish);
+    index += 1
+  ) {
+    const node = requireDefined(frontier[index]);
+    for (const step of successors.get(witnessNodeKey(node)) ?? []) {
+      const key = witnessNodeKey(step.to);
+      if (visited.has(key)) continue;
+      visited.add(key);
+      predecessors.set(key, step);
+      frontier.push(step.to);
+    }
+  }
+  if (!visited.has(finish)) return undefined;
+  const reversed: WitnessStep[] = [];
+  for (let key = finish; key !== witnessNodeKey(start);) {
+    const step = requireDefined(predecessors.get(key));
+    reversed.push(step);
+    key = witnessNodeKey(step.from);
+  }
+  const path = reversed.toReversed();
+  const prefix = path.slice(0, MAX_CYCLE_WITNESS_EDGES);
+  return {
+    edgeId: closing.edgeId,
+    nodes: [start, ...prefix.map((step) => step.to)],
+    edges: prefix.map((step) => step.edge),
+    truncated: path.length > prefix.length,
+  };
 }

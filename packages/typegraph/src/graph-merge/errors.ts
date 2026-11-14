@@ -1,3 +1,4 @@
+import type { EdgeCycleWitness } from "../errors";
 import { requireDefined } from "../utils/presence";
 import type { MergePlanCompositionOrphan } from "./plan-schema";
 import type { FullPlanningScope } from "./sparse-candidate-branch";
@@ -392,6 +393,8 @@ export type AcyclicityMergeConflictDetails = Readonly<{
   relation: string;
   /** Every edge of `relation` the plan-time probe found on the cycle. */
   edges: readonly MergeConflictEdge[];
+  /** Return path for one edge in `edges`, in relation orientation. */
+  witness?: EdgeCycleWitness;
   [key: string]: unknown;
 }>;
 
