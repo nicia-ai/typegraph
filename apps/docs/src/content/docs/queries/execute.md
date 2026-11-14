@@ -419,14 +419,14 @@ no extra slots. Reads without emitted recursion, including single-hop recursion 
 fixed traversal, consume no slots.
 
 A batch over this budget throws `ConfigurationError` before issuing SQL. The error details report
-`recursivePlans`, `subgraphPlans`, `fluentPlans` (including historical identity reconstruction),
-and `maxRecursivePlans`. Use matching subgraph options or split reads into explicit `batchOnce()`
-calls. If one composed read alone exceeds the budget, simplify it or run it directly with
-`.execute()`; splitting the batch cannot reduce that read's count. Standalone `.execute()` does
-not impose this batch budget. `shareSubgraphs: true` does not combine incompatible subgraphs or
-fluent recursive queries. This planner budget is PostgreSQL-specific; the portable 500-read cap
-and each backend's bind budget still apply. `batchOnce()` never silently chunks a batch or
-executes it sequentially.
+`recursivePlans`, `subgraphPlans`, `queryPlans`, and `maxRecursivePlans`. `queryPlans` counts
+recursive plans emitted by relational reads, including historical identity reconstruction. Use
+matching subgraph options or split reads into explicit `batchOnce()` calls. If one composed read
+alone exceeds the budget, simplify it or run it directly with `.execute()`; splitting the batch
+cannot reduce that read's count. Standalone `.execute()` does not impose this batch budget.
+`shareSubgraphs: true` does not combine incompatible subgraphs or fluent recursive queries. This
+planner budget is PostgreSQL-specific; the portable 500-read cap and each backend's bind budget
+still apply. `batchOnce()` never silently chunks a batch or executes it sequentially.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

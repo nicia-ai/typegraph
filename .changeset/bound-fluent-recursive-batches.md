@@ -7,4 +7,3 @@ Bound PostgreSQL `batchOnce()` planner costs with one allowance of 25 independen
 ### Upgrade notes
 
 - Split PostgreSQL `batchOnce()` reads into explicit calls when their emitted recursive plans exceed 25. Historical identity expansion consumes a slot even without `.recursive()`. `shareSubgraphs` does not combine fluent queries. If a single composed read exceeds the allowance, simplify it or use standalone `.execute()`, which does not impose this batch budget.
-- Custom dialect adapters should replace `DialectCapabilities.maxSubgraphBatchPlans` with `maxRecursiveBatchPlans`. This single capability bounds subgraph groups, fluent stages, and historical identity reconstruction together. Refusal details now use `recursivePlans`, `maxRecursivePlans`, `subgraphPlans`, and `fluentPlans` (including historical identity reconstruction).

@@ -75,7 +75,7 @@ Fluent plan fusion is deferred because arbitrary filters, chained stages, orderi
 operations require a separate compatibility design; callers can explicitly split batches or use compatible
 subgraph helpers when those fit their reads.
 
-`DialectCapabilities.maxRecursiveBatchPlans` owns the combined allowance; it replaces `maxSubgraphBatchPlans`.
-Refusal details retain the fluent and subgraph breakdown. When a single composed read alone exceeds the
-allowance, splitting the batch cannot help: simplify that read or run it through standalone `execute()`, which
-does not impose this batch budget.
+`DialectCapabilities.maxRecursiveBatchPlans` declares the combined allowance. Refusal details report the total
+`recursivePlans` and its breakdown into `queryPlans` (recursive plans emitted by relational reads) and
+`subgraphPlans`. When a single composed read alone exceeds the allowance, splitting the batch cannot help:
+simplify that read or run it through standalone `execute()`, which does not impose this batch budget.

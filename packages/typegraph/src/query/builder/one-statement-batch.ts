@@ -142,18 +142,18 @@ export async function executeOneStatementBatch<
     options.shareSubgraphs === true,
   );
   let subgraphPlans = 0;
-  let fluentPlans = 0;
+  let queryPlans = 0;
   let largestReadPlans = 0;
   for (const group of groups) {
     if (group.kind === "subgraph") {
       subgraphPlans++;
     } else {
       const readPlans = recursivePlanCount(group.item.query);
-      fluentPlans += readPlans;
+      queryPlans += readPlans;
       largestReadPlans = Math.max(largestReadPlans, readPlans);
     }
   }
-  const recursivePlans = subgraphPlans + fluentPlans;
+  const recursivePlans = subgraphPlans + queryPlans;
   const maxRecursivePlans = dialect.capabilities.maxRecursiveBatchPlans;
   if (maxRecursivePlans !== undefined && recursivePlans > maxRecursivePlans) {
     throw new ConfigurationError(
@@ -162,7 +162,7 @@ export async function executeOneStatementBatch<
         operation: "batchOnce",
         recursivePlans,
         subgraphPlans,
-        fluentPlans,
+        queryPlans,
         maxRecursivePlans,
         backend: backend.dialect,
       },
