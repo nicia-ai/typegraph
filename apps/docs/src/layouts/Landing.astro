@@ -3,16 +3,14 @@ import "../styles/tailwind.css";
 
 import Analytics from "../components/Analytics.astro";
 import StructuredData from "../components/StructuredData.astro";
+import { PRODUCT_DESCRIPTION } from "../lib/structured-data";
 
 interface Props {
   title: string;
   description?: string;
 }
 
-const {
-  title,
-  description = "Embedded knowledge graph for TypeScript. Define your ontology with Zod, query with a fluent builder, blend BM25 fulltext with vector similarity, and extend the schema at runtime when your agents need more. Runs on SQLite or PostgreSQL.",
-} = Astro.props;
+const { title, description = PRODUCT_DESCRIPTION } = Astro.props;
 
 const canonicalUrl = new URL(Astro.url.pathname, Astro.site).href;
 const ogImageUrl = new URL("/og-image.png", Astro.site).href;

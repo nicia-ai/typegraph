@@ -1,6 +1,7 @@
 ---
 import Default from "@astrojs/starlight/components/Head.astro";
 
+import { hasMarkdownTwin, markdownUrl } from "../../lib/llms";
 import Analytics from "../Analytics.astro";
 import StructuredData from "../StructuredData.astro";
 
@@ -30,6 +31,7 @@ interface SocialFrontmatter {
 
 const { starlightRoute } = Astro.locals as unknown as {
   starlightRoute: {
+    id: string;
     entry: {
       data: { cover?: CoverFrontmatter; social?: SocialFrontmatter };
     };
@@ -70,6 +72,10 @@ const resolvedOgImage =
 const ogImageUrl = resolvedOgImage.url;
 const ogImageWidth = String(resolvedOgImage.width);
 const ogImageHeight = String(resolvedOgImage.height);
+const markdownTwinUrl =
+  hasMarkdownTwin(starlightRoute.id) ?
+    markdownUrl(starlightRoute.id)
+  : undefined;
 const ogImageAlt = shareImage?.alt ?? defaultOgImageAlt;
 ---
 
@@ -83,5 +89,8 @@ const ogImageAlt = shareImage?.alt ?? defaultOgImageAlt;
 <meta name="twitter:image:alt" content={ogImageAlt} />
 <meta name="twitter:site" content="@pdlug" />
 <meta name="twitter:creator" content="@pdlug" />
+{markdownTwinUrl !== undefined && (
+  <link rel="alternate" type="text/markdown" href={markdownTwinUrl} />
+)}
 <StructuredData />
 <Analytics />
