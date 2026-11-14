@@ -64,8 +64,9 @@ async function installLibsqlBaseSchema(
   tables: SqliteTables,
   backend: AdapterBackend<AnySqliteDatabase>,
 ): Promise<void> {
+  const assertCurrent = requireDefined(backend.assertBaseSchemaCurrent);
   try {
-    await requireDefined(backend.assertBaseSchemaCurrent)();
+    await assertCurrent();
   } catch (error) {
     if (
       !(error instanceof BaseSchemaMigrationError) ||
@@ -95,7 +96,7 @@ async function installLibsqlBaseSchema(
   const installationSql = generateSqliteMigrationSQL(tables);
   try {
     await client.executeMultiple(installationSql);
-    await requireDefined(backend.assertBaseSchemaCurrent)();
+    await assertCurrent();
   } catch (error) {
     const requiresLifecycleAdoption =
       isSqliteMissingEdgeMatchIdentityColumnError(error) ||
