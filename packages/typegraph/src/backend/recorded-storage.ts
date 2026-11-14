@@ -1,4 +1,7 @@
-import { errorChain } from "../utils/sql-errors";
+import {
+  errorChain,
+  POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE,
+} from "../utils/sql-errors";
 
 /** Physical retention metadata column shared by schema adoption and allocation-log SQL. */
 export const RECORDED_ANCHOR_RETENTION_COLUMN = "anchor_retention";
@@ -17,7 +20,7 @@ export function recordedAnchorAdoptionTimeoutBudget(
   for (const link of errorChain(error)) {
     if (typeof link !== "object" || link === null) continue;
     if (
-      Reflect.get(link, "code") !== "55P03" ||
+      Reflect.get(link, "code") !== POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE ||
       Reflect.get(link, "hint") !== RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT
     )
       continue;

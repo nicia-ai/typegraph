@@ -19,6 +19,8 @@ import { raceTimeout } from "../../concurrency-utils";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const databaseUrl = await provisionPostgresTestDatabase(import.meta.url);
+// Harness observations need scheduler slack; adoption's database budget stays 1s.
+const OBSERVER_TIMEOUT_MS = 5000;
 
 describe.skipIf(!process.env["POSTGRES_URL"])(
   "recorded retention adoption under captured writes",
@@ -78,18 +80,17 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       mode = "AccessExclusiveLock",
       minimum = 1,
     ) {
-      await raceTimeout(
-        (async () => {
-          for (;;) {
-            const result = await pool.query<{ count: number }>(
-              "SELECT count(*)::int AS count FROM pg_locks WHERE relation='typegraph_recorded_clock'::regclass AND mode=$1 AND NOT granted",
-              [mode],
-            );
-            if (requireDefined(result.rows[0]).count >= minimum) return;
-            await delay(5);
-          }
-        })(),
-        750,
+      const deadline = performance.now() + OBSERVER_TIMEOUT_MS;
+      while (performance.now() < deadline) {
+        const result = await pool.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM pg_locks WHERE relation='typegraph_recorded_clock'::regclass AND mode=$1 AND NOT granted",
+          [mode],
+        );
+        if (requireDefined(result.rows[0]).count >= minimum) return;
+        await delay(5);
+      }
+      throw new Error(
+        `No ${mode} queue with ${minimum} waiter(s) was observed.`,
       );
     }
     async function dropRetention() {
@@ -146,7 +147,10 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
     it("skips adoption DDL when the retention column is already installed", async () => {
       const release = await holdWriter();
       try {
-        await raceTimeout(requireDefined(backend.adoptBaseSchema)(), 500);
+        await raceTimeout(
+          requireDefined(backend.adoptBaseSchema)(),
+          OBSERVER_TIMEOUT_MS,
+        );
       } finally {
         await release();
       }
@@ -172,7 +176,9 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
         await waitForQueuedLock("RowExclusiveLock");
         await releaseFirst();
         await releaseSecond();
-        expect(await raceTimeout(adopting, 1500)).toBeUndefined();
+        expect(
+          await raceTimeout(adopting, OBSERVER_TIMEOUT_MS),
+        ).toBeUndefined();
         await writing;
       } finally {
         await releaseFirst();
@@ -229,7 +235,7 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       );
       let outcome: unknown;
       try {
-        outcome = await raceTimeout(adopting, 3000);
+        outcome = await raceTimeout(adopting, OBSERVER_TIMEOUT_MS);
       } finally {
         await release();
       }

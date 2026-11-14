@@ -1140,8 +1140,8 @@ Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
 clock coordinates and start with no retention watermark. Privileged adoption adds
 the column before publishing version 9; externally managed deployments must apply
 that additive migration before pruning. Synchronous local SQLite opening preserves
-an existing versioned clock and marker until asynchronous privileged adoption. Marker-less SQLite
-bootstrap upgrades an existing clock before it stamps the current marker, including
+an existing versioned clock and marker until asynchronous privileged adoption. Marker-less local SQLite and managed libSQL
+bootstrap upgrade an existing clock before stamping the current marker, including
 when legacy edge-identity columns also need adoption. Before pruning an existing
 versioned local SQLite file, run `await backend.adoptBaseSchema()` or
 `createStoreWithSchema()` with DDL privileges. The managed libSQL factory is

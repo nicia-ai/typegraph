@@ -26,13 +26,18 @@
  * ```
  */
 import type { Client } from "@libsql/client";
+import { getTableName } from "drizzle-orm";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
 import { BaseSchemaMigrationError } from "../../errors";
 import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";
 import { requireDefined } from "../../utils/presence";
 import { isSqliteMissingEdgeMatchIdentityColumnError } from "../../utils/sql-errors";
-import { generateSqliteMigrationSQL } from "../drizzle/ddl";
+import {
+  generateSqliteMigrationSQL,
+  quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
+} from "../drizzle/ddl";
 import {
   type AnySqliteDatabase,
   ORDERED_AGGREGATE_PROBE_SQL,
@@ -44,6 +49,7 @@ import {
   type SqliteTables,
   tables as defaultTables,
 } from "../drizzle/sqlite";
+import { adoptSqliteColumns } from "../drizzle/sqlite-column-adoption";
 import type { AdapterBackend, SchemaProvisioning } from "../types";
 
 export type {
@@ -58,6 +64,34 @@ async function installLibsqlBaseSchema(
   tables: SqliteTables,
   backend: AdapterBackend<AnySqliteDatabase>,
 ): Promise<void> {
+  try {
+    await requireDefined(backend.assertBaseSchemaCurrent)();
+  } catch (error) {
+    if (
+      !(error instanceof BaseSchemaMigrationError) ||
+      error.details.reason === "newer"
+    )
+      throw error;
+    if (error.details.reason === "missing") {
+      // A marker-less installation script publishes the current version. Finish
+      // any existing clock's additive upgrade before that script can stamp it.
+      const clockTable = getTableName(tables.recordedClock);
+      await adoptSqliteColumns(
+        recordedAnchorRetentionColumnAdoption(clockTable),
+        {
+          async readColumns() {
+            const result = await client.execute(
+              `PRAGMA table_info(${quoteDdlIdentifier(clockTable)})`,
+            );
+            return result.rows.map((row) => ({ name: row["name"] }));
+          },
+          async execute(statement) {
+            await client.execute(statement);
+          },
+        },
+      );
+    }
+  }
   const installationSql = generateSqliteMigrationSQL(tables);
   try {
     await client.executeMultiple(installationSql);

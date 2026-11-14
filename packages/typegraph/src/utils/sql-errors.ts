@@ -971,10 +971,16 @@ export function parseDimensionMismatch(
   return undefined;
 }
 
+/** PostgreSQL's lock_not_available code shared by lock-failure classifiers. */
+export const POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03";
+
 /** Shared lock-not-available classification, including wrapped driver errors. */
 export function isPostgresLockTimeout(error: unknown): boolean {
   for (const link of errorChain(error))
-    if (canReadProperty(link) && Reflect.get(link, "code") === "55P03")
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE
+    )
       return true;
   return false;
 }

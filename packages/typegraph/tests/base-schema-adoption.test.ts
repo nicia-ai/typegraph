@@ -1404,6 +1404,61 @@ describe("version 6: recorded adjacency indexes", () => {
 });
 
 describe("version 9: recorded allocation retention watermark", () => {
+  it.each([false, true])(
+    "upgrades marker-less managed libSQL history before stamping v9 (legacy edges: %s)",
+    async (legacyEdges) => {
+      const client = createClient({ url: ":memory:" });
+      const opened: GraphBackend[] = [];
+      try {
+        const original = await createLibsqlBackend(client);
+        opened.push(original.backend);
+        const [store] = await createStoreWithSchema(graph, original.backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        await store.nodes.Person.update(person.id, { name: "latest" });
+        const anchor = requireDefined(await store.recordedNow());
+        await client.execute("DROP TABLE typegraph_base_schema_versions");
+        await client.execute(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        if (legacyEdges) {
+          await client.execute("DROP TABLE typegraph_edges");
+          await client.executeMultiple(LEGACY_EDGE_TABLE_SQL);
+        }
+        const reopened = await createLibsqlBackend(client);
+        opened.push(reopened.backend);
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        const marker = await client.execute(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+        );
+        expect(marker.rows.map((row) => Number(row["version"]))).toEqual([
+          CURRENT_BASE_SCHEMA_VERSION,
+        ]);
+        expect(await attached.recordedNow()).toBe(anchor);
+        expect(await attached.nodes.Person.getById(person.id)).toMatchObject({
+          name: "latest",
+        });
+        expect(
+          await attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).toEqual({
+          deletedCount: 1,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        for (const backend of opened) await backend.close();
+        client.close();
+      }
+    },
+  );
+
   it.each(["sqlite", "pglite"] as const)(
     "adopts a populated version 8 clock on %s without inventing pruning",
     async (lane) => {
