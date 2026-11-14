@@ -356,7 +356,7 @@ const subgraphs = await store.batchOnce((read) =>
 ```
 
 When compatible subgraphs have substantially overlapping neighborhoods and project meaningful payloads,
-opt into shared traversal and hydration:
+opt into deduplicated entity payloads:
 
 ```typescript
 const subgraphs = await store.batchOnce(
