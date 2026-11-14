@@ -26,6 +26,7 @@ import {
 import type { RecursiveCyclePolicy } from "../query/ast";
 import {
   type OneStatementBatchItem,
+  type OneStatementCombinedItem,
   registerOneStatementSharing,
 } from "../query/builder/one-statement-sharing";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
@@ -857,6 +858,7 @@ export function createSubgraphRead<
       };
       sharedSubgraphPlans.set(item, plan);
       registerOneStatementSharing(item, {
+        kind: "subgraph",
         owner: params.graph,
         key: subgraphSharingKey(plan),
         combine: combineSubgraphBatchItems,
@@ -905,7 +907,7 @@ function sharedEntityKey(row: Readonly<Record<string, unknown>>): string {
 function combineSubgraphBatchItems(
   items: readonly OneStatementBatchItem[],
   sharePayloads: boolean,
-): OneStatementBatchItem<readonly unknown[]> {
+): OneStatementCombinedItem {
   const first = requireDefined(items[0]);
   const plans = items.map((item) =>
     requireDefined(sharedSubgraphPlans.get(item)),
@@ -987,6 +989,7 @@ function combineSubgraphBatchItems(
       `),
       provenance: first.provenance,
       outputNames: [...columns, SUBGRAPH_REQUEST_COLUMN],
+      payloadPartitionColumn: SUBGRAPH_REQUEST_COLUMN,
       orderBy: [],
       mapRows: (rows) => {
         const requestRows: Record<string, unknown>[][] = items.map(() => []);
@@ -995,7 +998,7 @@ function combineSubgraphBatchItems(
             requestRows[Number(row[SUBGRAPH_REQUEST_COLUMN])],
           ).push(row);
         return items.map((item, index) =>
-          item.mapRows(structuredClone(requireDefined(requestRows[index]))),
+          item.mapRows(requireDefined(requestRows[index])),
         );
       },
     };

@@ -115,6 +115,9 @@ export type DialectCapabilities = Readonly<{
    */
   subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
 
+  /** Maximum independent subgraph plans in a single batch, after combining compatible reads. */
+  maxSubgraphBatchPlans?: number;
+
   /**
    * Whether every index over a text column is kept in byte order, the order
    * {@link DialectAdapter.binaryText} imposes, so a byte-order bound is an
@@ -220,6 +223,15 @@ export interface DialectAdapter {
     rowAlias: string,
     columns: readonly string[],
     orderColumn: string,
+  ) => SqlFragment;
+
+  /** Returns one payload row per partition, preserving the ordinal within each JSON array. */
+  readonly partitionedRowsJsonArrays?: (
+    this: void,
+    rowAlias: string,
+    columns: readonly string[],
+    orderColumn: string,
+    partitionColumn: string,
   ) => SqlFragment;
 
   /**

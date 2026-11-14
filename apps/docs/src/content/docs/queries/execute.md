@@ -405,6 +405,13 @@ Compatible subgraph reads use one origin-keyed recursive traversal in either pay
 keeping planner overhead bounded as the root count grows. By default each request carries its own
 entity payloads. The explicit `shareSubgraphs` option sends overlapping entities once with request
 memberships. Incompatible options still require separate plans.
+The default mode aggregates JSON separately for each request, preserving the per-request JSON
+value size limit. Shared payloads aggregate each compatible group into one JSON value.
+
+On PostgreSQL, at most 25 independent subgraph plans may remain after compatible reads are combined.
+A batch over this budget throws `ConfigurationError` before issuing SQL. Use matching options or
+split incompatible reads into explicit `batchOnce()` calls. `shareSubgraphs: true` does not combine
+incompatible options, and relational reads do not consume subgraph plan slots.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

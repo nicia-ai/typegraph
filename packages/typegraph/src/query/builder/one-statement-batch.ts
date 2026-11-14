@@ -1,6 +1,7 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
+import { requireDefined } from "../../utils/presence";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -141,6 +142,25 @@ export async function executeOneStatementBatch<
     items,
     options.shareSubgraphs === true,
   );
+  const subgraphPlans = groups.filter(
+    (group) => group.kind === "subgraph",
+  ).length;
+  const maxSubgraphPlans = dialect.capabilities.maxSubgraphBatchPlans;
+  if (maxSubgraphPlans !== undefined && subgraphPlans > maxSubgraphPlans) {
+    throw new ConfigurationError(
+      "store.batchOnce() exceeds the backend's independent subgraph-plan budget.",
+      {
+        operation: "batchOnce",
+        subgraphPlans,
+        maxSubgraphPlans,
+        backend: backend.dialect,
+      },
+      {
+        suggestion:
+          "Use matching subgraph options so compatible reads combine, or split the reads into explicit batchOnce() calls. Payload sharing cannot combine incompatible options.",
+      },
+    );
+  }
   for (const [index, { item }] of groups.entries()) {
     const sourceName = `typegraph_batch_source_${index}`;
     const rowsName = `typegraph_batch_rows_${index}`;
@@ -149,6 +169,19 @@ export async function executeOneStatementBatch<
       sql`${sql.identifier(sourceName)} AS (${item.query})`,
       sql`${sql.identifier(rowsName)} AS (SELECT ${sql.identifier(sourceName)}.*, ROW_NUMBER() OVER (${ordinalOrder}) AS ${sql.identifier(ORDER_COLUMN)} FROM ${sql.identifier(sourceName)})`,
     );
+    if (item.payloadPartitionColumn !== undefined) {
+      // getDialect resolves bundled adapters, which provide partitioned aggregation.
+      const payloads = requireDefined(dialect.partitionedRowsJsonArrays)(
+        rowsName,
+        [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
+        ORDER_COLUMN,
+        item.payloadPartitionColumn,
+      );
+      branches.push(
+        sql`SELECT ${index} AS batch_index, payload FROM (${payloads}) AS typegraph_batch_partitions`,
+      );
+      continue;
+    }
     const payload = dialect.orderedRowsJsonArray(
       rowsName,
       [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
@@ -175,9 +208,12 @@ export async function executeOneStatementBatch<
     );
   }
   const envelopes = await backend.execute<BatchEnvelopeRow>(statement);
-  const payloads = new Map<number, readonly Record<string, unknown>[]>();
+  const payloads = new Map<number, Record<string, unknown>[]>();
   for (const envelope of envelopes) {
-    payloads.set(Number(envelope.batch_index), parsePayload(envelope.payload));
+    const index = Number(envelope.batch_index);
+    const rows = payloads.get(index) ?? [];
+    for (const row of parsePayload(envelope.payload)) rows.push(row);
+    payloads.set(index, rows);
   }
 
   const results: unknown[] = Array.from({ length: items.length });

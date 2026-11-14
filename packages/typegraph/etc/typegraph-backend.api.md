@@ -1924,6 +1924,7 @@ export interface DialectAdapter {
         filter: SqlFragment | undefined;
     }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
+    readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
@@ -1945,6 +1946,7 @@ export type DialectCapabilities = Readonly<{
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+    maxSubgraphBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
     transactionReadsShareOneSnapshot: boolean;
 }>;

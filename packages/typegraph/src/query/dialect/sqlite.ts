@@ -21,6 +21,28 @@ import {
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
 import { type DialectAdapter } from "./types";
 
+function buildRowsJsonObject(
+  rowAlias: string,
+  columns: readonly string[],
+): SqlFragment {
+  const row = sql.identifier(rowAlias);
+  const objectParts = Array.from(
+    { length: Math.ceil(columns.length / JSON_OBJECT_PAIRS_PER_CALL) },
+    (_, index) => {
+      const slice = columns.slice(
+        index * JSON_OBJECT_PAIRS_PER_CALL,
+        (index + 1) * JSON_OBJECT_PAIRS_PER_CALL,
+      );
+      const pairs = slice.flatMap((column) => [
+        sql`${column}`,
+        sql`${row}.${sql.identifier(column)}`,
+      ]);
+      return sql`json_object(${sql.join(pairs, sql`, `)})`;
+    },
+  );
+  return mergeJsonObjects(objectParts);
+}
+
 /**
  * Escapes a string for use in a SQLite string literal.
  * SQLite uses single quotes and escapes embedded single quotes by doubling them.
@@ -166,22 +188,16 @@ export const sqliteDialect: DialectAdapter = {
 
   orderedRowsJsonArray(rowAlias, columns, orderColumn) {
     const row = sql.identifier(rowAlias);
-    const objectParts = Array.from(
-      { length: Math.ceil(columns.length / JSON_OBJECT_PAIRS_PER_CALL) },
-      (_, index) => {
-        const slice = columns.slice(
-          index * JSON_OBJECT_PAIRS_PER_CALL,
-          (index + 1) * JSON_OBJECT_PAIRS_PER_CALL,
-        );
-        const pairs = slice.flatMap((column) => [
-          sql`${column}`,
-          sql`${row}.${sql.identifier(column)}`,
-        ]);
-        return sql`json_object(${sql.join(pairs, sql`, `)})`;
-      },
-    );
-    const object = mergeJsonObjects(objectParts);
+    const object = buildRowsJsonObject(rowAlias, columns);
     return sql`COALESCE((SELECT json_group_array(json(batch_json)) FROM (SELECT ${object} AS batch_json FROM ${row} ORDER BY ${row}.${sql.identifier(orderColumn)})), json('[]'))`;
+  },
+
+  partitionedRowsJsonArrays(rowAlias, columns, orderColumn, partitionColumn) {
+    const row = sql.identifier(rowAlias);
+    const object = buildRowsJsonObject(rowAlias, columns);
+    // Preserve JSON objects even on SQLite 3.44, whose aggregate ORDER BY
+    // loses JSON subtypes. Match orderedRecordJsonArray's text assembly.
+    return sql`SELECT json('[' || group_concat(${object} ORDER BY ${row}.${sql.identifier(orderColumn)}) || ']') AS payload FROM ${row} GROUP BY ${row}.${sql.identifier(partitionColumn)}`;
   },
 
   orderedScalarJsonArray({ filter, orderBy, value, valueType }) {

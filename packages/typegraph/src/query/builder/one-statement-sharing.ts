@@ -7,18 +7,25 @@ export type OneStatementBatchItem<Result = unknown> = ReturnType<
   >
 >;
 
+export type OneStatementCombinedItem = OneStatementBatchItem<
+  readonly unknown[]
+> &
+  Readonly<{ payloadPartitionColumn?: string }>;
+
 export type OneStatementSharing = Readonly<{
+  kind: "subgraph";
   owner: object;
   key: string;
   combine: (
     items: readonly OneStatementBatchItem[],
     sharePayloads: boolean,
-  ) => OneStatementBatchItem<readonly unknown[]>;
+  ) => OneStatementCombinedItem;
 }>;
 
 export type OneStatementBatchGroup = Readonly<{
   indices: readonly number[];
-  item: OneStatementBatchItem<readonly unknown[]>;
+  kind: "subgraph" | undefined;
+  item: OneStatementCombinedItem;
 }>;
 
 // Evidence belongs to the exact compiled item, not a mutable read wrapper.
@@ -61,6 +68,7 @@ export function groupOneStatementBatchItems(
     const first = requireDefined(inputs[0]);
     return {
       indices: group.indices,
+      kind: group.sharing?.kind,
       item:
         group.sharing !== undefined && inputs.length > 1 ?
           group.sharing.combine(inputs, sharePayloads)

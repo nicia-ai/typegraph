@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { indexSubgraph } from "../../../src";
+import { asNodeId, createStore, indexSubgraph } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { ConfigurationError } from "../../../src/errors";
+import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
@@ -66,6 +68,50 @@ async function seedMultiRootSubgraphData(store: MultiRootTestStore): Promise<
 export function registerMultiRootSubgraphBatchIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  it("keeps the unshared JSON payload budget per request while sharing traversal", async () => {
+    const backend = context.getBackend();
+    const sizes: number[] = [];
+    const observedBackend = deriveBackend(backend, {
+      async execute<Row>(query: CompiledRowsSql): Promise<readonly Row[]> {
+        const rows = await backend.execute<Row>(query);
+        const statement = requireDefined(backend.compileSql)(query).sql;
+        if (statement.includes("typegraph_batch_envelope")) {
+          for (const row of rows) {
+            if (typeof row !== "object" || row === null || !("payload" in row))
+              throw new Error("Expected a batch payload envelope");
+            const encoded =
+              typeof row.payload === "string" ?
+                row.payload
+              : JSON.stringify(row.payload);
+            const size = Buffer.byteLength(encoded);
+            // Scale the engine's per-JSON-value ceiling down for this fixture.
+            // Eight individually small requests must fit even when their sum does not.
+            if (size > 8192)
+              throw new Error("Per-envelope fixture budget exceeded");
+            sizes.push(size);
+          }
+        }
+        return rows;
+      },
+    });
+    const store = createStore(integrationTestGraph, observedBackend);
+    const root = await store.nodes.Document.create({ title: "x".repeat(4096) });
+    const results = await store.batchOnce((read) =>
+      Array.from({ length: 8 }, () =>
+        read.subgraph(root, {
+          edges: [],
+          maxDepth: 0,
+          includeKinds: ["Document"],
+        }),
+      ),
+    );
+    expect(sizes).toHaveLength(8);
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(8192);
+    expect(results.map((result) => result.root?.title)).toEqual(
+      Array.from({ length: 8 }, () => root.title),
+    );
+  });
+
   describe.each([false, true])(
     "Multi-root subgraph batching (shareSubgraphs=%s)",
     (shareSubgraphs) => {
@@ -156,6 +202,75 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
         FULL_BATCH_CAP_TIMEOUT_MS,
       );
 
+      it("bounds independent PostgreSQL subgraph plans before executing SQL", async () => {
+        const statements: string[] = [];
+        const store = await context.createStore(integrationTestGraph, {
+          hooks: {
+            onQueryStart: (query) => {
+              statements.push(query.sql);
+            },
+          },
+        });
+        const outcome = await store
+          .batchOnce(
+            (read) =>
+              Array.from({ length: 26 }, (_, index) =>
+                read.subgraph(seeded.alice, {
+                  edges: ["knows"],
+                  maxDepth: index,
+                }),
+              ),
+            { shareSubgraphs },
+          )
+          .then(
+            (results) => ({
+              resultCount: results.length,
+              statements: statements.length,
+            }),
+            (error: unknown) => ({
+              typed: error instanceof ConfigurationError,
+              details:
+                error instanceof ConfigurationError ? error.details : undefined,
+              statements: statements.length,
+            }),
+          );
+        expect(outcome).toEqual(
+          context.getBackend().dialect === "postgres" ?
+            {
+              typed: true,
+              details: {
+                operation: "batchOnce",
+                subgraphPlans: 26,
+                maxSubgraphPlans: 25,
+                backend: "postgres",
+              },
+              statements: 0,
+            }
+          : { resultCount: 26, statements: 1 },
+        );
+      });
+
+      it("allows 25 distinct subgraph plans and does not count relational reads toward that budget", async () => {
+        const store = context.getStore();
+        const names = store
+          .query()
+          .from("Person", "person")
+          .select((fields) => fields.person.name);
+        const results = await store.batchOnce(
+          (read) => [
+            ...Array.from({ length: 25 }, (_, index) =>
+              read.subgraph(seeded.alice, {
+                edges: ["knows"],
+                maxDepth: index,
+              }),
+            ),
+            names,
+          ],
+          { shareSubgraphs },
+        );
+        expect(results).toHaveLength(26);
+      });
+
       it("uses one recursive plan for compatible roots with independent payload modes", async () => {
         const statements: string[] = [];
         const store = await context.createStore(integrationTestGraph, {
@@ -177,15 +292,20 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           seeded.bob,
           seeded.charlie,
           seeded.acme,
-          { kind: "Person", id: "missing-compact-root" },
+          {
+            kind: "Person",
+            id: asNodeId<typeof integrationTestGraph.nodes.Person.type>(
+              "missing-compact-root",
+            ),
+          },
           seeded.alice,
         ] as const;
         const independent = await Promise.all(
-          roots.map((root) => store.subgraph(root as never, options)),
+          roots.map((root) => store.subgraph(root, options)),
         );
         statements.length = 0;
         const batched = await store.batchOnce(
-          (read) => roots.map((root) => read.subgraph(root as never, options)),
+          (read) => roots.map((root) => read.subgraph(root, options)),
           { shareSubgraphs },
         );
         expect(batched).toEqual(independent);
@@ -206,7 +326,12 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           seeded.alice,
           seeded.bob,
           seeded.alice,
-          { kind: "Person", id: "missing-multi-root" },
+          {
+            kind: "Person",
+            id: asNodeId<typeof integrationTestGraph.nodes.Person.type>(
+              "missing-multi-root",
+            ),
+          },
           seeded.charlie,
         ] as const;
         const options = {
@@ -215,11 +340,10 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
         } as const;
 
         const independent = await Promise.all(
-          roots.map((rootRef) => store.subgraph(rootRef as never, options)),
+          roots.map((rootRef) => store.subgraph(rootRef, options)),
         );
         const batched = await store.batchOnce(
-          (read) =>
-            roots.map((rootRef) => read.subgraph(rootRef as never, options)),
+          (read) => roots.map((rootRef) => read.subgraph(rootRef, options)),
           { shareSubgraphs },
         );
 
@@ -284,20 +408,25 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           direction: "both",
         } as const;
         const rootOnly = { edges: [], maxDepth: 0 } as const;
-        const missingRoot = { kind: "Person", id: "missing-with-options" };
+        const missingRoot = {
+          kind: "Person",
+          id: asNodeId<typeof integrationTestGraph.nodes.Person.type>(
+            "missing-with-options",
+          ),
+        } as const;
 
         const independent = await Promise.all([
           store.subgraph(seeded.alice, projectedWindow),
           store.subgraph(seeded.bob, peopleWithoutRoot),
           store.subgraph(seeded.acme, incomingEmployment),
-          store.subgraph(missingRoot as never, rootOnly),
+          store.subgraph(missingRoot, rootOnly),
         ]);
         const batched = await store.batchOnce(
           (read) => [
             read.subgraph(seeded.alice, projectedWindow),
             read.subgraph(seeded.bob, peopleWithoutRoot),
             read.subgraph(seeded.acme, incomingEmployment),
-            read.subgraph(missingRoot as never, rootOnly),
+            read.subgraph(missingRoot, rootOnly),
           ],
           { shareSubgraphs },
         );
