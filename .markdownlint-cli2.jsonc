@@ -26,5 +26,8 @@
     // upstream CHANGELOG.md; line-length and other rules are inherited from
     // the source which is already ignored above.
     "apps/docs/src/content/docs/changelog.md",
+    // Build output: the per-page `.md` twins are generated from sources that
+    // are already linted.
+    "apps/docs/dist/**",
   ],
 }
