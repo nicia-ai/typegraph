@@ -43,6 +43,7 @@ import {
   type EngineRecordedTimeMembers,
 } from "../src/backend/capabilities/recorded-time";
 import { isEngineNativeRecordedReadBinding } from "../src/backend/capabilities/recorded-time-ownership";
+import { statementExecutionVerdict } from "../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   deriveTransactionSessionBackend,
@@ -74,7 +75,9 @@ import {
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
+import { runRecordedTransactionSavepoint } from "../src/store/recorded-capture";
 import { resolveLineage } from "../src/store/recorded-capture";
+import { transactionBackend } from "../src/store/runtime-port";
 import { storeCaptureEnabled } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { attachEngineNativeRecordedTime } from "./engine-native-recorded-time-fixture";
@@ -420,6 +423,53 @@ describe("engine-native recorded time: construction", () => {
 });
 
 describe("engine-native recorded time: transaction receipts", () => {
+  it.each([false, true])(
+    "restores the mutation witness after a savepoint rollback (prior write: %s)",
+    async (priorWrite) => {
+      const observedSessions: TransactionBackend[] = [];
+      const { backend } = createEngineNativeBackend(observedSessions);
+      const [store] = await createStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      const statements = statementExecutionVerdict(backend);
+      if (!statements.supported)
+        throw new Error("Fixture requires statement execution");
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        if (priorWrite)
+          await tx.nodes.Widget.create(
+            { label: "survivor" },
+            { id: "survivor" },
+          );
+        await runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          statements,
+          "test_native_rollback",
+          async () => {
+            await tx.nodes.Widget.create(
+              { label: "rolled back" },
+              { id: "rolled-back" },
+            );
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new Error("refused"),
+            };
+          },
+        );
+      });
+      expect(outcome.receipt.recorded).toBe(
+        priorWrite ?
+          createEngineRecordedInstant(
+            ENGINE_REVISION.revision,
+            ENGINE_REVISION.recordedAt,
+          )
+        : undefined,
+      );
+      expect(observedSessions).toHaveLength(priorWrite ? 1 : 0);
+      expect(await store.nodes.Widget.find()).toHaveLength(priorWrite ? 1 : 0);
+    },
+  );
+
   it("stamps an e1: receipt from revisionNow on the committing transaction handle, and writes no recorded rows", async () => {
     const observedSessions: TransactionBackend[] = [];
     const { backend, sqlite } = createEngineNativeBackend(observedSessions);

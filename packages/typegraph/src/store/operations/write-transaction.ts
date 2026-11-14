@@ -110,6 +110,7 @@ import {
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
+import { registerSavepointState } from "../savepoint-state";
 import {
   type OperationHookContext,
   type OperationOutcomeFacts,
@@ -231,10 +232,19 @@ async function withTransactionSchemaFenceLease<T>(
     return fn();
   }
 
-  leasedSchemaFences.set(target, new Map());
+  const leases = new Map<string, Promise<void>>();
+  leasedSchemaFences.set(target, leases);
+  const unregister = registerSavepointState(target, () => {
+    const before = new Map(leases);
+    return () => {
+      leases.clear();
+      for (const [key, lease] of before) leases.set(key, lease);
+    };
+  });
   try {
     return await fn();
   } finally {
+    unregister();
     leasedSchemaFences.delete(target);
   }
 }
@@ -469,6 +479,15 @@ export async function withWriteTransactionSession<T>(
     wrote: false,
   };
   writeTransactionSessions.set(target, session);
+  const unregister = registerSavepointState(target, () => {
+    const { wrote, lock, aborted } = session;
+    return () => {
+      session.wrote = wrote;
+      session.lock = lock;
+      if (aborted === undefined) delete session.aborted;
+      else session.aborted = aborted;
+    };
+  });
   try {
     const result = await (fenceEvidence === "reusable" ?
       withTransactionSchemaFenceLease(ctx, target, fn)
@@ -489,6 +508,7 @@ export async function withWriteTransactionSession<T>(
     }
     return result;
   } finally {
+    unregister();
     writeTransactionSessions.delete(target);
   }
 }

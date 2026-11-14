@@ -460,6 +460,10 @@ import {
   STORE_RUNTIME,
   type StoreRuntime,
 } from "./runtime-port";
+import {
+  publishSavepointEffect,
+  registerSavepointState,
+} from "./savepoint-state";
 import { StoreSearch } from "./search-facade";
 import {
   describeStore,
@@ -4511,8 +4515,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       frame,
     ) => {
       const pending: PendingOperationOutcome[] = [];
-      const runHooks = this.#createBufferedHookRunner(pending);
-      const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
       // Every attempt owns a recorder so the handle's write lifetime ends
       // when the callback settles, receipt requested or not; only a requested
       // receipt is reported, counted by the mutation witness, and measurable.
@@ -4569,6 +4571,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               mutationWitness.sink,
             );
           }
+          const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
+          const runBulkHooks = this.#createBufferedBulkHookRunner(
+            pending,
+            writeTarget,
+          );
           const invokeTransaction = (): Promise<T> =>
             runInTransactionContext(
               this.#buildTransactionContext(
@@ -4580,7 +4587,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 frame.attempt,
                 backendOptions.accessMode === "read_only",
                 receiptRequested,
-                pending,
               ),
               async (activeContext) => {
                 try {
@@ -5108,8 +5114,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
       bindScopedTransactionRuntime(scopedContext, context);
       const scoped = this.#attachMeasure(scopedContext, buildSurface, chain);
-      const result = await fn(scoped);
-      return { result, receipt: scopeRecorder.snapshot() };
+      const unregister = registerSavepointState(
+        surface.runtime.backend,
+        scopeRecorder.checkpoint,
+      );
+      try {
+        const result = await fn(scoped);
+        return { result, receipt: scopeRecorder.snapshot() };
+      } finally {
+        unregister();
+      }
     };
     return overlayPropertyDescriptors(context, { measure });
   }
@@ -5336,19 +5350,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #buildTransactionContext(
     txBackend: TransactionBackend,
     sql?: TNativeTransaction,
-    runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    runHooks: OperationHookRunner = this.#immediateHookRunner(txBackend),
     receiptRecorder?: TransactionReceiptRecorder,
-    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
+    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(
+      txBackend,
+    ),
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
     // The transaction was opened with `accessMode: "read_only"`.
     readOnly = false,
     measurable = receiptRecorder !== undefined,
-    // The `onOperationEnd` outcomes `runHooks` buffers until COMMIT, when it
-    // buffers at all (a `store.transaction` callback); `markEffects` needs it.
-    hookBuffer?: PendingOperationOutcome[],
   ): AdapterTransactionContext<G, TNativeTransaction> {
+    if (receiptRecorder !== undefined) {
+      registerSavepointState(txBackend, receiptRecorder.checkpoint);
+    }
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
@@ -5401,21 +5417,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               work.id,
               txBackend,
             ),
-          markEffects: () => {
-            const restores = receiptRecorders.map((recorder) =>
-              recorder.checkpoint(),
-            );
-            const bufferedCount = hookBuffer?.length ?? 0;
-            return {
-              discard: (cause) => {
-                for (const restore of restores) restore();
-                const failure = asError(cause);
-                for (const outcome of hookBuffer?.splice(bufferedCount) ?? []) {
-                  this.#reportError(outcome.ctx, failure);
-                }
-              },
-            };
-          },
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,
@@ -7591,20 +7592,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Internal: Operation Contexts ===
 
-  #immediateHookRunner(): OperationHookRunner {
+  #immediateHookRunner(target?: TransactionBackend): OperationHookRunner {
     return <T>(
       ctx: OperationHookContext,
       fn: () => Promise<T>,
       didWrite?: (result: T) => boolean,
       operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
-    ) => this.#withOperationHooks(ctx, fn, didWrite, operationFacts);
+    ) => this.#withOperationHooks(ctx, fn, didWrite, operationFacts, target);
   }
 
-  #immediateBulkHookRunner(): BulkOperationHookRunner {
+  #immediateBulkHookRunner(
+    target?: TransactionBackend,
+  ): BulkOperationHookRunner {
     return <T extends Readonly<{ affectedCount: number }>>(
       ctx: BulkOperationHookContext,
       fn: () => Promise<T>,
-    ) => this.#withBulkOperationHooks(ctx, fn);
+    ) => this.#withBulkOperationHooks(ctx, fn, target);
   }
 
   /** The one binding of the node window-end identity hook to this graph. */
@@ -7897,19 +7900,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     fn: () => Promise<T>,
     didWrite?: (result: T) => boolean,
     operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+    target?: TransactionBackend,
   ): Promise<T> {
     this.#hooks.onOperationStart?.(ctx);
     const startTime = Date.now();
     try {
       const result = await fn();
-      this.#hooks.onOperationEnd?.(
-        operationEndContext(ctx, result, operationFacts),
-        {
-          durationMs: Date.now() - startTime,
-          outcome:
-            didWrite === undefined ? "unknown"
-            : didWrite(result) ? "written"
-            : "unchanged",
+      const durationMs = Date.now() - startTime;
+      const endContext = operationEndContext(ctx, result, operationFacts);
+      const outcome =
+        didWrite === undefined ? "unknown"
+        : didWrite(result) ? "written"
+        : "unchanged";
+      publishSavepointEffect(
+        target,
+        () => this.#hooks.onOperationEnd?.(endContext, { durationMs, outcome }),
+        (cause) => {
+          this.#reportError(endContext, asError(cause));
         },
       );
       return result;
@@ -7922,15 +7929,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #withBulkOperationHooks<T extends Readonly<{ affectedCount: number }>>(
     ctx: BulkOperationHookContext,
     fn: () => Promise<T>,
+    target?: TransactionBackend,
   ): Promise<T> {
     this.#hooks.onBulkOperationStart?.(ctx);
     const startTime = Date.now();
     try {
       const result = await fn();
-      this.#hooks.onBulkOperationEnd?.(ctx, {
-        affectedCount: result.affectedCount,
-        durationMs: Date.now() - startTime,
-      });
+      const durationMs = Date.now() - startTime;
+      publishSavepointEffect(
+        target,
+        () =>
+          this.#hooks.onBulkOperationEnd?.(ctx, {
+            affectedCount: result.affectedCount,
+            durationMs,
+          }),
+        (cause) => {
+          this.#reportError(ctx, asError(cause));
+        },
+      );
       return result;
     } catch (error) {
       this.#reportError(ctx, asError(error));
@@ -7965,6 +7981,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   #createBufferedHookRunner(
     pending: PendingOperationOutcome[],
+    target: TransactionBackend,
   ): OperationHookRunner {
     return async <T>(
       ctx: OperationHookContext,
@@ -7976,15 +7993,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const startTime = Date.now();
       try {
         const result = await fn();
-        pending.push({
+        const endContext = operationEndContext(ctx, result, operationFacts);
+        const outcome = {
           type: "operation",
-          ctx: operationEndContext(ctx, result, operationFacts),
+          ctx: endContext,
           durationMs: Date.now() - startTime,
           outcome:
             didWrite === undefined ? "unknown"
             : didWrite(result) ? "written"
             : "unchanged",
-        });
+        } satisfies PendingOperationOutcome;
+        publishSavepointEffect(
+          target,
+          () => {
+            pending.push(outcome);
+          },
+          (cause) => {
+            this.#reportError(endContext, asError(cause));
+          },
+        );
         return result;
       } catch (error) {
         this.#reportError(ctx, asError(error));
@@ -7996,6 +8023,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** Buffered counterpart for set-based operations inside `transaction()`. */
   #createBufferedBulkHookRunner(
     pending: PendingOperationOutcome[],
+    target: TransactionBackend,
   ): BulkOperationHookRunner {
     return async <T extends Readonly<{ affectedCount: number }>>(
       ctx: BulkOperationHookContext,
@@ -8005,12 +8033,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const startTime = Date.now();
       try {
         const result = await fn();
-        pending.push({
+        const outcome = {
           type: "bulkOperation",
           ctx,
           affectedCount: result.affectedCount,
           durationMs: Date.now() - startTime,
-        });
+        } satisfies PendingOperationOutcome;
+        publishSavepointEffect(
+          target,
+          () => {
+            pending.push(outcome);
+          },
+          (cause) => {
+            this.#reportError(ctx, asError(cause));
+          },
+        );
         return result;
       } catch (error) {
         this.#reportError(ctx, asError(error));

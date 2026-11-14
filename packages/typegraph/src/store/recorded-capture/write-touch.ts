@@ -54,6 +54,7 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
+import { registerSavepointState } from "../savepoint-state";
 import type {
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
@@ -616,8 +617,15 @@ export function createMutationWitness(): Readonly<{
       mutated = true;
     },
   };
+  const checkpoint = () => {
+    const before = mutated;
+    return () => {
+      mutated = before;
+    };
+  };
   return {
     wrap(target: TransactionBackend): TransactionBackend {
+      registerSavepointState(target, checkpoint);
       return deriveBackend(target, {
         ...buildRecordedWriteMembers(target, sink),
         commands: buildRecordedCommandsPort(target, sink),

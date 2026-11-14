@@ -89,6 +89,7 @@ import {
   type WriteMemberHooks,
   type WriteTouchSink,
 } from "./recorded-capture/write-touch";
+import { withSavepointState } from "./savepoint-state";
 
 export {
   advanceRevisionClock,
@@ -627,8 +628,8 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
  * this identity write touched, and what is the underlying raw target?");
  * `capture` carries the additional session state only a TypeGraph-owned
  * transaction has — the engine-native mutation witness registers a binding
- * with `capture` absent, since it keeps no checkpoint to restore across a
- * savepoint and takes no advisory lock to release one.
+ * with `capture` absent, since its mutation flag is checkpointed separately
+ * through the shared savepoint-state registry and it takes no advisory lock.
  */
 type RecordedTransactionBinding = Readonly<{
   target: TransactionBackend;
@@ -679,10 +680,11 @@ export function inheritRecordedTransactionBindings(
 
 /**
  * Runs one TypeGraph-owned savepoint without letting recorded state drift from
- * live state. A rollback restores both pending capture and the transaction's
- * graph-lock memo to their pre-savepoint snapshots. Callers never receive the
- * raw transaction target, so they cannot roll back SQL while forgetting the
- * TypeGraph sidecars that mirror it.
+ * live state. A rollback restores pending capture, graph-lock memos and all
+ * registered transaction state, and reports savepoint-local successes through
+ * their error hooks with the rollback cause.
+ * Callers never receive the raw transaction target, so they cannot roll back
+ * SQL while forgetting the TypeGraph sidecars that mirror it.
  *
  * This is deliberately the only supported savepoint seam for recorded writes.
  * Savepoints issued directly through an adopted backend remain outside the
@@ -704,10 +706,9 @@ export async function runRecordedTransactionSavepoint<T>(
     rawTarget,
     statementExecution,
   );
-  // Only a TypeGraph-owned capture binding carries session state to
-  // checkpoint/restore across this savepoint — an engine-native mutation
-  // witness's binding has no `capture`, so it degrades to the same no-op
-  // `restoreCapture` an entirely unbound target already gets below.
+  // Capture owns its touched entities and graph-lock memo. Other transaction
+  // state (revision flags, mutation witnesses, hooks) participates
+  // through withSavepointState below, including targets without capture.
   const captureCheckpoint = binding?.capture?.session.checkpoint();
   const graphLockCheckpoint =
     binding?.capture === undefined ?
@@ -727,15 +728,20 @@ export async function runRecordedTransactionSavepoint<T>(
     }
   };
 
-  return runSessionSavepoint(
-    {
-      executeControl: (statement) =>
-        executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
-      enterDriverScope: resolveDriverSavepointScope(rawTarget),
-    },
-    savepoint,
-    fn,
-    restoreCapture,
+  return withSavepointState(target, (restoreState) =>
+    runSessionSavepoint(
+      {
+        executeControl: (statement) =>
+          executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
+        enterDriverScope: resolveDriverSavepointScope(rawTarget),
+      },
+      savepoint,
+      fn,
+      (cause) => {
+        restoreCapture();
+        restoreState(cause);
+      },
+    ),
   );
 }
 
