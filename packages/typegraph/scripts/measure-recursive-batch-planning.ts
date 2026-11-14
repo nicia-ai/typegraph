@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Client, Pool } from "pg";
+import { Client, Pool, type PoolClient } from "pg";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../src";
@@ -18,7 +18,11 @@ import { generatePostgresMigrationSQL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import type { EmbeddableOneStatementRead } from "../src/query/builder/types";
 import { getDialect } from "../src/query/dialect";
-import { sql, type SqlFragment } from "../src/query/sql-fragment";
+import {
+  renderSqlInline,
+  sql,
+  type SqlFragment,
+} from "../src/query/sql-fragment";
 import type { CompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
 
@@ -33,9 +37,7 @@ const graph = defineGraph({
 });
 const pool = new Pool({ connectionString });
 const schema = `recursive_batch_measurement_${process.pid}`;
-await pool.query(`CREATE SCHEMA "${schema}"`);
-const client = await pool.connect();
-try {
+async function measure(client: PoolClient): Promise<void> {
   // All fixture tables live in a throwaway schema, never in the caller's graph.
   await client.query(`SET search_path TO "${schema}", public`);
   await client.query(generatePostgresMigrationSQL());
@@ -126,7 +128,7 @@ try {
           const explain =
             mode === "named" ?
               await session.query<{ "QUERY PLAN": unknown }>(
-                `EXPLAIN (ANALYZE, BUFFERS, MEMORY, FORMAT JSON) EXECUTE recursive_batch(${statement.params.map((value) => session.escapeLiteral(String(value))).join(", ")})`,
+                `EXPLAIN (ANALYZE, BUFFERS, MEMORY, FORMAT JSON) EXECUTE recursive_batch(${statement.params.map((value) => renderSqlInline(sql`${value}`, "postgres")).join(", ")})`,
               )
             : await session.query<{ "QUERY PLAN": unknown }>(
                 `EXPLAIN (ANALYZE, BUFFERS, MEMORY, FORMAT JSON) ${statement.sql}`,
@@ -174,8 +176,20 @@ try {
       }
     }
   }
+}
+
+try {
+  const client = await pool.connect();
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    try {
+      await measure(client);
+    } finally {
+      await client.query(`DROP SCHEMA "${schema}" CASCADE`);
+    }
+  } finally {
+    client.release();
+  }
 } finally {
-  client.release();
-  await pool.query(`DROP SCHEMA "${schema}" CASCADE`);
   await pool.end();
 }

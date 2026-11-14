@@ -59,15 +59,23 @@ pooled connection. A named statement therefore does not remove the need for admi
 
 ## Policy
 
-Use the existing conservative allowance of 25 plans for the combined total of independent fluent recursive stages
-and subgraph groups. This fixture costs about 25 MiB of planner memory at that boundary; the earlier subgraph
-fixture in #833 cost about 32 MB. These are different measurements, not an assumption of equivalent cost. The
-allowance bounds plan multiplicity, not total query memory or execution cost.
+Use the existing conservative allowance of 25 plans for the combined total of independent fluent recursive
+stages, historical identity ledger reconstructions, and subgraph groups. This fixture costs about 25 MiB of
+planner memory at that boundary; the earlier subgraph fixture in #833 cost about 32 MB. These are different
+measurements, not an assumption of equivalent cost. The allowance bounds plan multiplicity, not total query
+memory or execution cost. Historical identity reconstruction is included because it also emits an independent
+recursive plan; its cost is not measured by this fixture.
 
-Compiler metadata marks each emitted fluent recursive stage and propagates through SQL composition, including set
-operations, relations, projections, and nested expressions. Subgraphs count after compatible roots combine. A mixed
-batch gets one combined allowance, not 25 fluent stages plus another 25 subgraphs. PostgreSQL refuses excess plans
-before execution with ConfigurationError; SQLite retains its existing request/bind limits. This preserves
-batchOnce's exact-one-statement contract. Fluent plan fusion is deferred because arbitrary filters, chained stages,
-ordering, projections, and set operations require a separate compatibility design; callers can explicitly split
-batches or use compatible subgraph helpers when those fit their reads.
+Compiler metadata marks each emitted fluent recursive stage and historical identity reconstruction, and
+propagates through SQL composition, including set operations, relations, projections, and nested expressions.
+Subgraphs count after compatible roots combine. A mixed batch gets one combined allowance, not 25 fluent
+stages plus another 25 subgraphs. PostgreSQL refuses excess plans before execution with ConfigurationError;
+SQLite retains its existing request/bind limits. This preserves batchOnce's exact-one-statement contract.
+Fluent plan fusion is deferred because arbitrary filters, chained stages, ordering, projections, and set
+operations require a separate compatibility design; callers can explicitly split batches or use compatible
+subgraph helpers when those fit their reads.
+
+`DialectCapabilities.maxRecursiveBatchPlans` owns the combined allowance; it replaces `maxSubgraphBatchPlans`.
+Refusal details retain the fluent and subgraph breakdown. When a single composed read alone exceeds the
+allowance, splitting the batch cannot help: simplify that read or run it through standalone `execute()`, which
+does not impose this batch budget.

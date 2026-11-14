@@ -1946,7 +1946,6 @@ export type DialectCapabilities = Readonly<{
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
-    maxSubgraphBatchPlans?: number;
     maxRecursiveBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
     transactionReadsShareOneSnapshot: boolean;

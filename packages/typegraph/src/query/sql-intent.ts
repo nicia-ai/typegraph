@@ -120,12 +120,12 @@ export function annIndexScanTypes(
   return sqlIntentRegistry.annIndexScanQueries.get(query);
 }
 
-/** Compiler evidence: independent fluent recursive stages in this fragment. */
+/** Compiler evidence: independent recursive plans in this fragment. */
 export function recursivePlanCount(query: SqlFragment): number {
   return recursivePlanCounts.get(query) ?? 0;
 }
 
-/** Records one newly emitted recursive stage, preserving nested stages. */
+/** Records one newly emitted recursive plan, preserving nested stages. */
 export function markRecursivePlan(query: SqlFragment): void {
   recursivePlanCounts.set(query, recursivePlanCount(query) + 1);
 }

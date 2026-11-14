@@ -2407,12 +2407,15 @@ const details = await store.batchOnce(
 ```
 
 Default batches aggregate JSON per request, so compatible reads do not share one JSON value's size
-limit. PostgreSQL allows at most 25 independent recursive plans in total: each fluent recursive
-stage counts separately, and each compatible subgraph group counts once after its roots combine.
-Single-hop recursion lowered to a fixed traversal consumes no slots. Exceeding this budget throws
-`ConfigurationError` before SQL runs. Align subgraph options or split reads into explicit `batchOnce()` calls.
-This limit includes the existing 25-plan subgraph budget and applies with either value of
-`shareSubgraphs`; that option does not combine fluent queries.
+limit. PostgreSQL allows at most 25 independent recursive plans in total: each emitted fluent
+recursive stage counts separately, and each compatible subgraph group counts once after its roots
+combine. Historical identity expansion (`includeIdentityMembers` with `asOf` or `recordedAsOf`)
+adds one slot per emitted ledger reconstruction, even without a fluent recursive stage. Current
+identity expansion adds no slots. Single-hop recursion lowered to a fixed traversal adds no slots.
+Exceeding this budget throws `ConfigurationError` before SQL runs. Align subgraph options or split
+reads into explicit `batchOnce()` calls. If a single composed read exceeds the budget, simplify it
+or run it directly with `.execute()`, which does not impose this batch budget. The limit applies
+with either value of `shareSubgraphs`; that option does not combine fluent queries.
 
 Every request still receives independent result objects. Sharing adds membership and reconstruction
 work, and measurements show it can increase encoded response size when roots do not overlap or the

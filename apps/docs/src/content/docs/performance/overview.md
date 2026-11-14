@@ -696,10 +696,13 @@ coordinates, projections, or edge windows can keep reads in separate groups even
 when their results overlap. For example, a social `knows` neighborhood and an
 employment `worksAt` neighborhood still fit in one `batchOnce()` call, but enabling
 sharing does not fuse those incompatible plans.
-PostgreSQL refuses more than 25 independent recursive plans in one batch: fluent recursive stages
-plus subgraph groups after compatible roots combine. This combined allowance includes the existing
-25-plan subgraph budget and applies in both payload modes. `shareSubgraphs` does not combine fluent
-recursive queries; split reads into explicit `batchOnce()` calls when they exceed the allowance.
+PostgreSQL refuses more than 25 independent recursive plans in one batch: emitted fluent recursive
+stages, historical identity ledger reconstructions, and subgraph groups after compatible roots
+combine. Historical identity expansion consumes a slot even in an otherwise nonrecursive read.
+This single allowance applies in both payload modes. `shareSubgraphs` does not combine fluent
+queries; split reads into explicit `batchOnce()` calls when they exceed the allowance. If one
+composed read alone exceeds it, simplify the read or use standalone `.execute()`, which does not
+impose this batch budget.
 
 ## Connection Management
 

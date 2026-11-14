@@ -408,18 +408,25 @@ memberships. Incompatible options still require separate plans.
 The default mode aggregates JSON separately for each request, preserving the per-request JSON
 value size limit. Shared payloads aggregate each compatible group into one JSON value.
 
-On PostgreSQL, a batch may contain at most 25 independent recursive plans in total. Each fluent
-`.traverse(...).recursive()` stage consumes one slot, including stages inside chained traversals,
-set operations, projections, and relations. Each compatible subgraph group consumes one slot after
-its roots are combined. Nonrecursive relational reads consume no slots. A single-hop recursive read that the compiler lowers
-to a fixed traversal also consumes no slots. The existing 25-plan
-subgraph limit is part of this combined allowance, not an additional allowance.
+On PostgreSQL, a batch may contain at most 25 independent recursive plans in total. Each emitted
+fluent `.traverse(...).recursive()` stage consumes one slot, including stages inside chained
+traversals, set operations, projections, and relations. Each compatible subgraph group consumes
+one slot after its roots are combined. Historical identity expansion (`includeIdentityMembers`
+with `asOf` or `recordedAsOf`) also consumes one slot per emitted ledger reconstruction, even in
+an otherwise nonrecursive traversal. A recursive stage with historical identity expansion
+therefore consumes two slots. Current identity expansion uses the maintained closure and consumes
+no extra slots. Reads without emitted recursion, including single-hop recursion lowered to a
+fixed traversal, consume no slots.
 
-A batch over either budget throws `ConfigurationError` before issuing SQL. Use matching subgraph
-options or split reads into explicit `batchOnce()` calls. `shareSubgraphs: true` does not combine
-incompatible subgraphs or fluent recursive queries. These planner budgets are PostgreSQL-specific;
-the portable 500-read cap and each backend's bind budget still apply. `batchOnce()` never silently
-chunks a batch or executes it sequentially.
+A batch over this budget throws `ConfigurationError` before issuing SQL. The error details report
+`recursivePlans`, `subgraphPlans`, `fluentPlans` (including historical identity reconstruction),
+and `maxRecursivePlans`. Use matching subgraph options or split reads into explicit `batchOnce()`
+calls. If one composed read alone exceeds the budget, simplify it or run it directly with
+`.execute()`; splitting the batch cannot reduce that read's count. Standalone `.execute()` does
+not impose this batch budget. `shareSubgraphs: true` does not combine incompatible subgraphs or
+fluent recursive queries. This planner budget is PostgreSQL-specific; the portable 500-read cap
+and each backend's bind budget still apply. `batchOnce()` never silently chunks a batch or
+executes it sequentially.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

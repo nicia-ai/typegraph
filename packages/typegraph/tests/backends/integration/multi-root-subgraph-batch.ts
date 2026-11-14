@@ -77,6 +77,7 @@ async function seedMultiRootSubgraphData(store: MultiRootTestStore): Promise<
 // fit its separate 999-parameter allowance at the planner boundary.
 const recursiveBatchGraph = defineGraph({
   id: "recursive_batch_budget",
+  identity: { sameIdAcrossKinds: "ignore" },
   nodes: { Person: { type: integrationTestGraph.nodes.Person.type } },
   edges: {
     knows: {
@@ -98,6 +99,16 @@ function recursiveRead(store: Pick<RecursiveBudgetStore, "query">) {
     .whereNode("person", (person) => person.name.eq("Alice"))
     .traverse("knows", "edge")
     .recursive({ maxHops: 2 })
+    .to("Person", "friend");
+}
+
+function fixedIdentitySteps(store: Pick<RecursiveBudgetStore, "query">) {
+  return store
+    .query()
+    .from("Person", "person")
+    .traverse("knows", "first", { includeIdentityMembers: true })
+    .to("Person", "middle")
+    .traverse("knows", "second", { includeIdentityMembers: true })
     .to("Person", "friend");
 }
 
@@ -158,6 +169,8 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
               details: {
                 operation: "batchOnce",
                 recursivePlans: 26,
+                subgraphPlans: 0,
+                fluentPlans: 26,
                 maxRecursivePlans: 25,
                 backend: "postgres",
               },
@@ -237,6 +250,134 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
           }
         : { resultCount: 26 },
       );
+    });
+
+    it.each([false, true])(
+      "counts historical identity reconstruction with recursive=%s",
+      async (recursive) => {
+        const backend = context.getBackend();
+        const peer = await budgetStore.nodes.Person.create({ name: "Peer" });
+        await budgetStore.identity.assertSame(budgetRoot, peer);
+        const execute = vi.fn();
+        const store = createStore(
+          recursiveBatchGraph,
+          deriveBackend(backend, {
+            async execute<Row>(
+              query: CompiledRowsSql,
+            ): Promise<readonly Row[]> {
+              execute();
+              return backend.execute<Row>(query);
+            },
+          }),
+        );
+        const traversal = store
+          .asOf("2100-01-01T00:00:00.000Z")
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) => person.name.eq("Alice"))
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        const query =
+          recursive ?
+            traversal
+              .recursive({ maxHops: 2 })
+              .to("Person", "friend")
+              .project((fields) => ({ name: fields.friend.name }))
+          : traversal
+              .to("Person", "friend")
+              .project((fields) => ({ name: fields.friend.name }));
+        const plansPerRead = recursive ? 2 : 1;
+        expect(
+          recursivePlanCount(query.compileOneStatementBatchItem().query),
+        ).toBe(plansPerRead);
+        const allowedReads =
+          backend.dialect === "postgres" ? Math.floor(25 / plansPerRead) : 2;
+        expect(
+          await store.batchOnce(() =>
+            Array.from({ length: allowedReads }, () => query),
+          ),
+        ).toHaveLength(allowedReads);
+        expect(execute).toHaveBeenCalledTimes(1);
+        execute.mockClear();
+        const refusedReads =
+          backend.dialect === "postgres" ? 26 / plansPerRead : 2;
+        const outcome = await recursiveBatchOutcome(
+          store.batchOnce(() =>
+            Array.from({ length: refusedReads }, () => query),
+          ),
+        );
+        expect(outcome).toEqual(
+          backend.dialect === "postgres" ?
+            {
+              typed: true,
+              details: {
+                operation: "batchOnce",
+                recursivePlans: 26,
+                fluentPlans: 26,
+                subgraphPlans: 0,
+                maxRecursivePlans: 25,
+                backend: "postgres",
+              },
+            }
+          : { resultCount: refusedReads },
+        );
+        expect(execute).toHaveBeenCalledTimes(
+          backend.dialect === "postgres" ? 0 : 1,
+        );
+      },
+    );
+
+    it("shares historical identity reconstruction across fixed steps and uses the current closure without recursion", () => {
+      const current = fixedIdentitySteps(budgetStore).project((fields) => ({
+        name: fields.friend.name,
+      }));
+      const historical = fixedIdentitySteps(
+        budgetStore.asOf("2100-01-01T00:00:00.000Z"),
+      ).project((fields) => ({ name: fields.friend.name }));
+      expect(
+        recursivePlanCount(current.compileOneStatementBatchItem().query),
+      ).toBe(0);
+      expect(
+        recursivePlanCount(historical.compileOneStatementBatchItem().query),
+      ).toBe(1);
+    });
+
+    it("explains how to run one composed read that exceeds the batch budget", async () => {
+      let query = budgetStore.query().from("Person", "outerPerson");
+      for (let index = 0; index < 26; index++) {
+        query = query.where((fields) =>
+          fields.$exists((nested) =>
+            nested
+              .from("Person", "seed")
+              .traverse("knows", "edge")
+              .recursive({ maxHops: 2 })
+              .to("Person", "friend")
+              .project((inner) => ({ id: inner.friend.id })),
+          ),
+        );
+      }
+      const composed = query.project((fields) => ({
+        name: fields.outerPerson.name,
+      }));
+      expect(
+        recursivePlanCount(composed.compileOneStatementBatchItem().query),
+      ).toBe(26);
+      expect(await composed.execute()).toHaveLength(3);
+      const outcome = await budgetStore
+        .batchOnce(() => [composed])
+        .then(
+          (results) => ({ resultCount: results.length }),
+          (error: unknown) => ({
+            typed: error instanceof ConfigurationError,
+            suggestsStandalone:
+              error instanceof ConfigurationError &&
+              error.suggestion?.includes("execute()") === true,
+          }),
+        );
+      const expected =
+        context.getBackend().dialect === "postgres" ?
+          { typed: true, suggestsStandalone: true }
+        : { resultCount: 1 };
+      expect(outcome).toMatchObject(expected);
     });
 
     it("counts stages inside chained traversals, set operations, and relation wrappers", async () => {
@@ -467,8 +608,10 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
               typed: true,
               details: {
                 operation: "batchOnce",
+                recursivePlans: 26,
                 subgraphPlans: 26,
-                maxSubgraphPlans: 25,
+                fluentPlans: 0,
+                maxRecursivePlans: 25,
                 backend: "postgres",
               },
               statements: 0,

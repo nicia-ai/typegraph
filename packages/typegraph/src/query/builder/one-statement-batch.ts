@@ -141,31 +141,19 @@ export async function executeOneStatementBatch<
     items,
     options.shareSubgraphs === true,
   );
-  const subgraphPlans = groups.filter(
-    (group) => group.kind === "subgraph",
-  ).length;
-  const maxSubgraphPlans = dialect.capabilities.maxSubgraphBatchPlans;
-  if (maxSubgraphPlans !== undefined && subgraphPlans > maxSubgraphPlans) {
-    throw new ConfigurationError(
-      "store.batchOnce() exceeds the backend's independent subgraph-plan budget.",
-      {
-        operation: "batchOnce",
-        subgraphPlans,
-        maxSubgraphPlans,
-        backend: backend.dialect,
-      },
-      {
-        suggestion:
-          "Use matching subgraph options so compatible reads combine, or split the reads into explicit batchOnce() calls. Payload sharing cannot combine incompatible options.",
-      },
-    );
+  let subgraphPlans = 0;
+  let fluentPlans = 0;
+  let largestReadPlans = 0;
+  for (const group of groups) {
+    if (group.kind === "subgraph") {
+      subgraphPlans++;
+    } else {
+      const readPlans = recursivePlanCount(group.item.query);
+      fluentPlans += readPlans;
+      largestReadPlans = Math.max(largestReadPlans, readPlans);
+    }
   }
-  const recursivePlans = groups.reduce(
-    (count, group) =>
-      count +
-      (group.kind === "subgraph" ? 1 : recursivePlanCount(group.item.query)),
-    0,
-  );
+  const recursivePlans = subgraphPlans + fluentPlans;
   const maxRecursivePlans = dialect.capabilities.maxRecursiveBatchPlans;
   if (maxRecursivePlans !== undefined && recursivePlans > maxRecursivePlans) {
     throw new ConfigurationError(
@@ -173,12 +161,16 @@ export async function executeOneStatementBatch<
       {
         operation: "batchOnce",
         recursivePlans,
+        subgraphPlans,
+        fluentPlans,
         maxRecursivePlans,
         backend: backend.dialect,
       },
       {
         suggestion:
-          "Split the reads into explicit batchOnce() calls, or use compatible subgraph helpers to combine traversals. Each fluent recursive stage counts separately, including inside composed reads; shareSubgraphs does not combine fluent queries.",
+          largestReadPlans > maxRecursivePlans ?
+            "A single read exceeds the budget. Simplify that read or run it directly with execute(); splitting the batch cannot reduce that read's plan count."
+          : "Split the reads into explicit batchOnce() calls, or use matching subgraph options to combine traversals. Fluent recursive stages and historical identity reconstructions each consume slots, including inside composed reads; shareSubgraphs does not combine fluent queries.",
       },
     );
   }
