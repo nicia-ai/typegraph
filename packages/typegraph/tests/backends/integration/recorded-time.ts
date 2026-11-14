@@ -27,7 +27,10 @@ import {
   type StoreSearch,
   UnsupportedBackendCapabilityError,
 } from "../../../src";
-import { deriveBackend } from "../../../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import {
   type GraphBackend,
   rowPropsToJsonText,
@@ -1411,7 +1414,7 @@ export function registerRecordedTimeIntegrationTests(
                         const text = requireDefined(base.compileSql)(query).sql;
                         if (
                           text.trimStart().startsWith("UPDATE") &&
-                          text.includes("anchor_retention=")
+                          text.includes('"anchor_retention"=')
                         ) {
                           reached.open();
                           await release.opened;
@@ -1532,11 +1535,16 @@ export function registerRecordedTimeIntegrationTests(
       expect(rows).toHaveLength(3);
     });
 
-    it("keeps the lookup validation and missing-storage error contract", async () => {
+    it("checks capture capability before validating either allocation-log entrypoint", async () => {
       const live = createStore(integrationTestGraph, context.getBackend());
-      await expect(
-        live.resolveRecordedInstant("not-a-date"),
-      ).rejects.toMatchObject({ name: "ValidationError" });
+      for (const time of ["not-a-date", "2026-01-01"]) {
+        await expect(live.resolveRecordedInstant(time)).rejects.toMatchObject({
+          name: "UnsupportedBackendCapabilityError",
+        });
+        await expect(live.pruneRecordedInstants(time)).rejects.toMatchObject({
+          name: "UnsupportedBackendCapabilityError",
+        });
+      }
     });
 
     it("prunes successfully after a healthy clock advance between its read and update", async () => {
@@ -1557,7 +1565,7 @@ export function registerRecordedTimeIntegrationTests(
                       const rows = await target.execute<T>(query);
                       if (
                         requireDefined(base.compileSql)(query).sql.includes(
-                          "clock.anchor_retention",
+                          'clock."anchor_retention"',
                         )
                       ) {
                         await advanceRevisionClock(
@@ -1596,9 +1604,9 @@ export function registerRecordedTimeIntegrationTests(
       const observed = createStore(
         integrationTestGraph,
         deriveBackend(base, {
-          get tableNames() {
+          get tableNames(): GraphBackend["tableNames"] {
             if (broken) throw failure;
-            return undefined;
+            return;
           },
         }),
       );
@@ -1610,7 +1618,7 @@ export function registerRecordedTimeIntegrationTests(
       ).toBe(failure);
     });
 
-    it("accepts valid legacy retention proof but refuses an invented earlier birth", async () => {
+    it("persists only the initial retention format and refuses obsolete birth fields", async () => {
       const store = await createHistoryStore(context);
       const times = [
         "2026-06-01T12:00:00.000Z",
@@ -1626,9 +1634,9 @@ export function registerRecordedTimeIntegrationTests(
         vi.useRealTimers();
       }
       await store.pruneRecordedInstants(times[1]);
-      const legacy = {
+      const state = {
         version: 1,
-        firstAllocationAt: times[0],
+        loggedFromFirstAllocation: true,
         loggedFrom: times[0],
         prunedBefore: times[1],
         retainedRevision: 2,
@@ -1640,7 +1648,7 @@ export function registerRecordedTimeIntegrationTests(
             UPDATE ${store.revisionSchema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${store.graphId}
           `),
         );
-      await writeState(legacy);
+      await writeState(state);
       expect(
         await store.resolveRecordedInstant("2026-06-01T11:59:59.000Z"),
       ).toBeUndefined();
@@ -1652,9 +1660,9 @@ export function registerRecordedTimeIntegrationTests(
       );
       expect(
         JSON.parse(requireDefined(rows[0]).anchor_retention),
-      ).toMatchObject({ version: 2, loggedFromFirstAllocation: true });
+      ).toMatchObject({ version: 1, loggedFromFirstAllocation: true });
       await writeState({
-        ...legacy,
+        ...state,
         firstAllocationAt: "2026-05-01T00:00:00.000Z",
       });
       await expect(
@@ -1764,6 +1772,20 @@ export function registerRecordedTimeIntegrationTests(
         hasMore: true,
       });
       const base = context.getBackend();
+      const [watermark] = await base.execute<
+        Readonly<{ anchor_retention: string }>
+      >(
+        asCompiledRowsSql(
+          sql`SELECT anchor_retention FROM ${store.revisionSchema.recordedClockTable} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      expect(JSON.parse(requireDefined(watermark).anchor_retention)).toEqual({
+        version: 1,
+        loggedFromFirstAllocation: true,
+        loggedFrom: times[0],
+        prunedBefore: times[4],
+        retainedRevision: 5,
+      });
       const remaining = await base.execute<Readonly<{ revision: unknown }>>(
         asCompiledRowsSql(sql`
           SELECT revision FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId} ORDER BY revision
@@ -1978,6 +2000,22 @@ export function registerRecordedTimeIntegrationTests(
       ).rejects.toMatchObject({
         details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
       });
+    });
+
+    it("requires a backend lifecycle assertion before reading retention storage", async () => {
+      const base = context.getBackend();
+      await createHistoryStore(context);
+      const missingLifecycle = createStore(
+        integrationTestGraph,
+        projectBackendWithout(base, ["assertBaseSchemaCurrent"]),
+        { history: true },
+      );
+      await expect(
+        missingLifecycle.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      await expect(
+        missingLifecycle.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
     });
 
     it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {

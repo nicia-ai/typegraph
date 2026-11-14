@@ -391,7 +391,6 @@ export class BaseSchemaMigrationError extends TypeGraphError {
 
 // @public (undocumented)
 export type BaseSchemaMigrationErrorDetails = Readonly<{
-    missingColumn?: string;
     installedVersion: number | undefined;
     requiredVersion: number;
     reason: "missing" | "stale" | "newer";
@@ -7911,13 +7910,14 @@ export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
 
 // @public
 export class SchemaFenceTimeoutError extends TypeGraphError {
-    constructor(graphId: string, phase: SchemaFencePhase, waitBudgetMs: number, cause?: unknown);
+    constructor(graphId: string, phase: SchemaFencePhase, waitBudgetMs: number, cause?: unknown, baseSchemaTable?: string);
     readonly details: SchemaFenceTimeoutErrorDetails;
 }
 
 // @public
 export type SchemaFenceTimeoutErrorDetails = Readonly<{
     graphId: string;
+    baseSchemaTable?: string;
     phase: SchemaFencePhase;
     waitBudgetMs: number;
 }>;

@@ -1137,12 +1137,17 @@ Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
 clock coordinates and start with no retention watermark. Privileged adoption adds
 the column before publishing version 9; externally managed deployments must apply
 that additive migration before DML-only attach. Custom schema providers must include
-the column and supply the version 9 adoption step. Upgrade every reader before
+the column, supply the version 9 adoption step, and implement the backend-owned
+`assertBaseSchemaCurrent` lifecycle assertion. Allocation-log entrypoints check the
+installation marker before reading retention storage and report its actual installed
+version in `BaseSchemaMigrationError`. Upgrade every reader before
 enabling a retention job so all lookups honor retired coverage. PostgreSQL
 checks the column catalog before requesting DDL. If the column is missing and
-captured transactions hold conflicting locks, adoption fails immediately rather
-than queueing an exclusive lock ahead of new writers. Retry privileged adoption
-after those transactions finish; the deployment marker stays at its old version.
+captured transactions hold conflicting locks, adoption retries `NOWAIT` requests
+for up to one second without queueing an exclusive lock ahead of new writers.
+Persistent contention raises `SchemaFenceTimeoutError` with
+`details.baseSchemaTable`; the deployment marker stays at its old version.
+Retry privileged adoption after those transactions finish.
 
 `pruneRecordedInstants(before, { limit })` persists the coverage boundary and deletes
 one bounded revision range per transaction. Its result reports `deletedCount`,

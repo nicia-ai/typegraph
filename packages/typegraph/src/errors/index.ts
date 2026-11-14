@@ -1203,8 +1203,6 @@ export class MigrationError extends TypeGraphError {
 }
 
 export type BaseSchemaMigrationErrorDetails = Readonly<{
-  /** Runtime column refusal; installedVersion is unknown without an extra probe. */
-  missingColumn?: string;
   installedVersion: number | undefined;
   requiredVersion: number;
   reason: "missing" | "stale" | "newer";
@@ -1230,11 +1228,9 @@ export class BaseSchemaMigrationError extends TypeGraphError {
         "no installation marker"
       : `base schema version ${String(details.installedVersion)}`;
     super(
-      details.missingColumn === undefined ?
-        details.reason === "newer" ?
-          `The database has ${installed}, which is newer than this TypeGraph release supports (version ${String(details.requiredVersion)}).`
-        : `The database has ${installed}; this TypeGraph release requires base schema version ${String(details.requiredVersion)}.`
-      : `The database is missing base-schema column ${details.missingColumn}; adopt base schema version ${String(details.requiredVersion)}.`,
+      details.reason === "newer" ?
+        `The database has ${installed}, which is newer than this TypeGraph release supports (version ${String(details.requiredVersion)}).`
+      : `The database has ${installed}; this TypeGraph release requires base schema version ${String(details.requiredVersion)}.`,
       "BASE_SCHEMA_MIGRATION_REQUIRED",
       {
         category: "system",
@@ -1465,12 +1461,14 @@ export type SchemaFencePhase = "schema-advisory" | "schema-row" | "writer-slot";
 
 /** Identifies the graph, lock phase, and requested wait budget for a timeout. */
 export type SchemaFenceTimeoutErrorDetails = Readonly<{
+  /** Deployment-wide adoption uses the reserved scope @base-schema. */
   graphId: string;
+  baseSchemaTable?: string;
   phase: SchemaFencePhase;
   waitBudgetMs: number;
 }>;
 
-/** The caller-owned transaction could not acquire its schema fence in time. */
+/** A graph schema fence or deployment-wide base-schema adoption exceeded its lock budget. */
 export class SchemaFenceTimeoutError extends TypeGraphError {
   /** The graph and lock acquisition that exceeded the caller's budget. */
   declare readonly details: SchemaFenceTimeoutErrorDetails;
@@ -1480,15 +1478,25 @@ export class SchemaFenceTimeoutError extends TypeGraphError {
     phase: SchemaFencePhase,
     waitBudgetMs: number,
     cause?: unknown,
+    baseSchemaTable?: string,
   ) {
     super(
-      `Timed out acquiring the schema fence for graph ${graphId}.`,
+      baseSchemaTable === undefined ?
+        `Timed out acquiring the schema fence for graph ${graphId}.`
+      : `Timed out adopting base-schema table ${baseSchemaTable}.`,
       "SCHEMA_FENCE_TIMEOUT",
       {
         category: "system",
-        details: { graphId, phase, waitBudgetMs },
+        details: {
+          graphId,
+          phase,
+          waitBudgetMs,
+          ...(baseSchemaTable === undefined ? {} : { baseSchemaTable }),
+        },
         suggestion:
-          "Roll back the complete caller transaction before retrying it.",
+          baseSchemaTable === undefined ?
+            "Roll back the complete caller transaction before retrying it."
+          : "Retry base-schema adoption after transactions using this table have completed.",
         cause,
       },
     );

@@ -601,28 +601,6 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/** Match an absent physical column without treating unrelated SQL failures as adoption. */
-export function isMissingColumnError(error: unknown, column: string): boolean {
-  for (const link of errorChain(error)) {
-    if (!canReadProperty(link)) continue;
-    const code: unknown = Reflect.get(link, "code");
-    const message = sqliteErrorMessage(link);
-    if (typeof message !== "string") continue;
-    const absent =
-      code === "42703" ? /^column (.+) does not exist$/.exec(message)?.[1]
-      : code === "SQLITE_ERROR" && message.startsWith("no such column: ") ?
-        message.slice("no such column: ".length)
-      : undefined;
-    const name = absent?.replaceAll('"', "").split(".").at(-1);
-    if (
-      (code === "42703" && firstStringField(link, ["column"]) === column) ||
-      name === column
-    )
-      return true;
-  }
-  return false;
-}
-
 /** Precisely classifies a concurrent nullable-column adoption race. */
 export function isSqliteDuplicateColumnError(
   error: unknown,
@@ -637,15 +615,6 @@ export function isSqliteDuplicateColumnError(
       return true;
   }
   return false;
-}
-
-/** Whether a concurrent SQLite adopter already added the column we planned. */
-export function isSqliteDuplicateEdgeMatchIdentityColumnError(
-  error: unknown,
-): boolean {
-  return ["match_identity_name", "match_identity_key"].some((column) =>
-    isSqliteDuplicateColumnError(error, column),
-  );
 }
 
 /**

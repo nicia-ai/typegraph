@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { GraphBackend, ReconciledSchema } from "../src";
 import {
   BaseSchemaMigrationError,
+  createStore,
   createStoreWithSchema,
   createVerifiedStore,
   defineEdge,
@@ -22,6 +23,7 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
 import {
   edgeMatchIdentityPairCheckName,
@@ -1429,9 +1431,37 @@ describe("version 9: recorded allocation retention watermark", () => {
           () => store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
           () => store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
         ]) {
-          await expect(operation()).rejects.toBeInstanceOf(
-            BaseSchemaMigrationError,
+          await expect(operation()).rejects.toMatchObject({
+            name: "BaseSchemaMigrationError",
+            details: {
+              installedVersion: 8,
+              requiredVersion: 9,
+              reason: "stale",
+            },
+          });
+        }
+        // Error shape and server language cannot change lifecycle refusal.
+        for (const driverError of [
+          Object.assign(new Error("SQLITE_ERROR"), { code: "SQLITE_ERROR" }),
+          Object.assign(new Error("colonne inexistante"), { code: "42703" }),
+          new Error("custom backend reshaped the driver error"),
+        ]) {
+          const execute = vi.fn(() => Promise.reject(driverError));
+          const attached = createStore(
+            graph,
+            deriveBackend(backend, { execute }),
+            { history: true },
           );
+          for (const operation of [
+            () => attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+            () => attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+          ]) {
+            await expect(operation()).rejects.toMatchObject({
+              name: "BaseSchemaMigrationError",
+              details: { installedVersion: 8, reason: "stale" },
+            });
+          }
+          expect(execute).not.toHaveBeenCalled();
         }
         await requireDefined(backend.adoptBaseSchema)();
         await requireDefined(backend.adoptBaseSchema)();

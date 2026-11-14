@@ -29,6 +29,7 @@ import {
   type GraphRelationKey,
   isGraphRelationKey,
 } from "../graph-relations";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../recorded-storage";
 import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
@@ -836,7 +837,7 @@ function recordedAnchorRetentionColumnDDL(
   tableName: string,
   ifNotExists = false,
 ): string {
-  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${ifNotExists ? "IF NOT EXISTS " : ""}${quoteDdlIdentifier("anchor_retention")} TEXT;`;
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${ifNotExists ? "IF NOT EXISTS " : ""}${quoteDdlIdentifier(RECORDED_ANCHOR_RETENTION_COLUMN)} TEXT;`;
 }
 
 /** Shared by synchronous managed SQLite bootstrap and asynchronous adoption. */
@@ -844,7 +845,10 @@ function planRecordedAnchorRetentionAdoption(
   tableName: string,
   existingColumns: ReadonlySet<string>,
 ): readonly string[] {
-  return existingColumns.size === 0 || existingColumns.has("anchor_retention") ?
+  return (
+      existingColumns.size === 0 ||
+        existingColumns.has(RECORDED_ANCHOR_RETENTION_COLUMN)
+    ) ?
       []
     : [recordedAnchorRetentionColumnDDL(tableName)];
 }
@@ -874,7 +878,7 @@ export function recordedAnchorRetentionColumnAdoption(
   tableName: string,
 ): SqliteColumnAdoptionPlan {
   return {
-    addedColumns: ["anchor_retention"],
+    addedColumns: [RECORDED_ANCHOR_RETENTION_COLUMN],
     statements: (columns) =>
       planRecordedAnchorRetentionAdoption(tableName, columns),
   };

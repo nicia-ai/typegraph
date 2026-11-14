@@ -39,6 +39,7 @@ import {
   systemIndexName,
 } from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../recorded-storage";
 
 /**
  * Table name configuration.
@@ -248,7 +249,7 @@ export function createSqliteTables(
       graphId: text("graph_id").notNull(),
       revision: integer("revision").notNull(),
       recordedAt: text("recorded_at").notNull(),
-      anchorRetention: text("anchor_retention"),
+      anchorRetention: text(RECORDED_ANCHOR_RETENTION_COLUMN),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );

@@ -1540,13 +1540,14 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "params": [
       ""typegraph_recorded_clock"",
       ""typegraph_recorded_clock"",
+      "anchor_retention",
     ],
     "sql": "
-        SELECT to_regclass($1) AS table_name,
-          EXISTS (SELECT 1 FROM pg_attribute
-            WHERE attrelid=to_regclass($2)
-              AND attname='anchor_retention' AND NOT attisdropped) AS has_retention
-      ",
+          SELECT to_regclass($1) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass($2)
+                AND attname=$3 AND NOT attisdropped) AS has_retention
+        ",
   },
   {
     "params": [
@@ -3056,13 +3057,14 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "params": [
       ""typegraph_recorded_clock"",
       ""typegraph_recorded_clock"",
+      "anchor_retention",
     ],
     "sql": "
-        SELECT to_regclass($1) AS table_name,
-          EXISTS (SELECT 1 FROM pg_attribute
-            WHERE attrelid=to_regclass($2)
-              AND attname='anchor_retention' AND NOT attisdropped) AS has_retention
-      ",
+          SELECT to_regclass($1) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass($2)
+                AND attname=$3 AND NOT attisdropped) AS has_retention
+        ",
   },
   {
     "params": [

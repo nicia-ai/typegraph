@@ -4,27 +4,20 @@ import {
   OPTIMISTIC_RETRY_ATTEMPTS,
   runRetriedUnit,
 } from "../backend/capabilities/retried-unit";
-import { CURRENT_BASE_SCHEMA_VERSION } from "../backend/drizzle/base-schema";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../backend/recorded-storage";
 import { type GraphBackend } from "../backend/types";
 import {
   createRecordedInstant,
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
-import {
-  BaseSchemaMigrationError,
-  ConfigurationError,
-  ValidationError,
-} from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { requireDefined } from "../utils/presence";
-import {
-  isMissingColumnError,
-  withRecordedRelationsPrecondition,
-} from "../utils/sql-errors";
+import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import {
   recordedAnchorCandidate,
   recordedAnchorOrigin,
@@ -58,7 +51,7 @@ export type RecordedAnchorLogContext = Readonly<{
 
 const DEFAULT_PRUNE_LIMIT = 1000;
 const MAX_PRUNE_LIMIT = 10_000;
-const RETENTION_STATE_VERSION = 2;
+const RETENTION_STATE_VERSION = 1;
 const RetentionStateSchema = z
   .object({
     version: z.literal(RETENTION_STATE_VERSION),
@@ -72,33 +65,6 @@ const RetentionStateSchema = z
       .max(RECORDED_MAX_REVISION - 1),
   })
   .strict();
-const LegacyRetentionStateSchema = RetentionStateSchema.omit({
-  version: true,
-  loggedFromFirstAllocation: true,
-})
-  .extend({
-    version: z.literal(1),
-    firstAllocationAt: z.string().optional(),
-  })
-  .refine(
-    (state) =>
-      state.firstAllocationAt === undefined ||
-      state.firstAllocationAt === state.loggedFrom,
-  )
-  .transform(
-    ({
-      firstAllocationAt,
-      ...state
-    }): z.infer<typeof RetentionStateSchema> => ({
-      ...state,
-      version: RETENTION_STATE_VERSION,
-      loggedFromFirstAllocation: firstAllocationAt !== undefined,
-    }),
-  );
-const ReadRetentionStateSchema = z.union([
-  RetentionStateSchema,
-  LegacyRetentionStateSchema,
-]);
 type RecordedAnchorRetentionState = Readonly<
   z.infer<typeof RetentionStateSchema>
 >;
@@ -129,7 +95,7 @@ async function readRecordedAnchorSnapshot(
         )
         SELECT origins.origin, candidate.revision, candidate.recorded_at,
           first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at,
-          clock.anchor_retention
+          clock.${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)} AS anchor_retention
         FROM ${schema.recordedClockTable} clock
         LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
         LEFT JOIN candidate ON candidate.origin=origins.origin
@@ -138,18 +104,7 @@ async function readRecordedAnchorSnapshot(
       `),
     ),
     { dialect: target.dialect, surface },
-  ).catch((error: unknown) => {
-    if (!isMissingColumnError(error, "anchor_retention")) throw error;
-    throw new BaseSchemaMigrationError(
-      {
-        installedVersion: undefined,
-        requiredVersion: CURRENT_BASE_SCHEMA_VERSION,
-        reason: "stale",
-        missingColumn: "anchor_retention",
-      },
-      { cause: error },
-    );
-  });
+  );
   return rows[0];
 }
 
@@ -162,7 +117,7 @@ function retentionState(
   try {
     if (typeof row.anchor_retention !== "string")
       throw new TypeError("Expected serialized retention state");
-    const state = ReadRetentionStateSchema.parse(
+    const state = RetentionStateSchema.parse(
       JSON.parse(row.anchor_retention) as unknown,
     );
     validateCanonicalIsoDate(state.loggedFrom, "loggedFrom");
@@ -212,8 +167,12 @@ export async function lookupRecordedAnchor(
   context: RecordedAnchorLogContext,
   wallTime: string,
 ): Promise<RecordedInstant | undefined> {
+  const assertStorage = requireRecordedAnchorLog(
+    context,
+    "resolveRecordedInstant",
+  );
   validateCanonicalIsoDate(wallTime, "wallTime");
-  requireRecordedAnchorLog(context, "resolveRecordedInstant");
+  await assertStorage();
   const { backend, schema, graphId } = context;
   const row = await readRecordedAnchorSnapshot(
     backend,
@@ -280,9 +239,13 @@ export async function pruneRecordedAnchors(
   before: string,
   options: PruneRecordedInstantsOptions = {},
 ): Promise<PruneRecordedInstantsResult> {
-  requireRecordedAnchorLog(context, "pruneRecordedInstants");
+  const assertStorage = requireRecordedAnchorLog(
+    context,
+    "pruneRecordedInstants",
+  );
   validateCanonicalIsoDate(before, "before");
   const limit = pruneLimit(options);
+  await assertStorage();
   const { backend, schema, graphId } = context;
   return runRetriedUnit(
     {
@@ -359,7 +322,7 @@ export async function pruneRecordedAnchors(
         // Publish the logical coverage floor in the SAME commit as this bounded deletion.
         const written = await target.execute(
           asCompiledRowsSql(sql`
-            UPDATE ${schema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${graphId}
+            UPDATE ${schema.recordedClockTable} SET ${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)}=${JSON.stringify(state)} WHERE graph_id=${graphId}
               AND revision>=${revision}
               AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
             RETURNING graph_id

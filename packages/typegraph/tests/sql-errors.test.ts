@@ -27,11 +27,9 @@ import {
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
-  isMissingColumnError,
   isMissingTableError,
   isNotNullColumnViolation,
   isPostgresConcurrentDdlRaceError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
@@ -893,23 +891,6 @@ describe("edge match-identity provisioning error classifiers", () => {
       false,
     );
   });
-
-  it("recognizes only the two duplicate-column adoption races", () => {
-    expect(
-      isSqliteDuplicateEdgeMatchIdentityColumnError(
-        Object.assign(new Error("duplicate column name: match_identity_key"), {
-          code: "SQLITE_ERROR",
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      isSqliteDuplicateEdgeMatchIdentityColumnError(
-        Object.assign(new Error("duplicate column name: props"), {
-          code: "SQLITE_ERROR",
-        }),
-      ),
-    ).toBe(false);
-  });
 });
 
 describe("database retry disposition", () => {
@@ -980,19 +961,4 @@ describe("database retry disposition", () => {
       );
     },
   );
-});
-
-describe("missing retention column classification", () => {
-  it.each([
-    ["SQLITE_ERROR", "no such column: clock.anchor_retention", true],
-    ["SQLITE_ERROR", "no such column: another.anchor_retention", true],
-    ["42703", "column clock.anchor_retention does not exist", true],
-    ["42703", 'column "anchor_retention" does not exist', true],
-    ["42703", "column clock.revision does not exist", false],
-    ["42501", "column clock.anchor_retention does not exist", false],
-  ] as const)("classifies %s / %s precisely", (code, message, missing) => {
-    const driver = Object.assign(new Error(message), { code });
-    const wrapped = new Error("query failed", { cause: driver });
-    expect(isMissingColumnError(wrapped, "anchor_retention")).toBe(missing);
-  });
 });
