@@ -7915,7 +7915,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       publishSavepointEffect(
         target,
         () => this.#hooks.onOperationEnd?.(endContext, { durationMs, outcome }),
-        (cause) => { this.#reportError(endContext, asError(cause)); },
+        (cause) => {
+          this.#reportError(endContext, asError(cause));
+        },
       );
       return result;
     } catch (error) {
@@ -7941,7 +7943,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             affectedCount: result.affectedCount,
             durationMs,
           }),
-        (cause) => { this.#reportError(ctx, asError(cause)); },
+        (cause) => {
+          this.#reportError(ctx, asError(cause));
+        },
       );
       return result;
     } catch (error) {
@@ -8004,7 +8008,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           () => {
             pending.push(outcome);
           },
-          (cause) => { this.#reportError(endContext, asError(cause)); },
+          (cause) => {
+            this.#reportError(endContext, asError(cause));
+          },
         );
         return result;
       } catch (error) {
@@ -8038,7 +8044,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           () => {
             pending.push(outcome);
           },
-          (cause) => { this.#reportError(ctx, asError(cause)); },
+          (cause) => {
+            this.#reportError(ctx, asError(cause));
+          },
         );
         return result;
       } catch (error) {
