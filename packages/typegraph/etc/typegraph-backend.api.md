@@ -1947,6 +1947,7 @@ export type DialectCapabilities = Readonly<{
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
     maxSubgraphBatchPlans?: number;
+    maxRecursiveBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
     transactionReadsShareOneSnapshot: boolean;
 }>;

@@ -4,7 +4,7 @@ import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
-import { asCompiledRowsSql } from "../sql-intent";
+import { asCompiledRowsSql, recursivePlanCount } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
 import type {
   EmbeddableOneStatementRead,
@@ -157,6 +157,28 @@ export async function executeOneStatementBatch<
       {
         suggestion:
           "Use matching subgraph options so compatible reads combine, or split the reads into explicit batchOnce() calls. Payload sharing cannot combine incompatible options.",
+      },
+    );
+  }
+  const recursivePlans = groups.reduce(
+    (count, group) =>
+      count +
+      (group.kind === "subgraph" ? 1 : recursivePlanCount(group.item.query)),
+    0,
+  );
+  const maxRecursivePlans = dialect.capabilities.maxRecursiveBatchPlans;
+  if (maxRecursivePlans !== undefined && recursivePlans > maxRecursivePlans) {
+    throw new ConfigurationError(
+      "store.batchOnce() exceeds the backend's independent recursive-plan budget.",
+      {
+        operation: "batchOnce",
+        recursivePlans,
+        maxRecursivePlans,
+        backend: backend.dialect,
+      },
+      {
+        suggestion:
+          "Split the reads into explicit batchOnce() calls, or use compatible subgraph helpers to combine traversals. Each fluent recursive stage counts separately, including inside composed reads; shareSubgraphs does not combine fluent queries.",
       },
     );
   }

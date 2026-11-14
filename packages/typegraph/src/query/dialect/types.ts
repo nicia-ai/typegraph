@@ -117,6 +117,8 @@ export type DialectCapabilities = Readonly<{
 
   /** Maximum independent subgraph plans in a single batch, after combining compatible reads. */
   maxSubgraphBatchPlans?: number;
+  /** Independent recursive stages plus combined subgraph plans in batchOnce. */
+  maxRecursiveBatchPlans?: number;
 
   /**
    * Whether every index over a text column is kept in byte order, the order

@@ -50,6 +50,7 @@ export function asCompiledTemporaryStatementSql(
  * ~1ms, the generic-plan cliff it avoids is 10-300ms.
  */
 type SqlIntentRegistry = Readonly<{
+  recursivePlanCounts?: WeakMap<SqlFragment, number>;
   annIndexScanQueries: WeakMap<SqlFragment, readonly string[]>;
   forceCustomPlanQueries: WeakSet<SqlFragment>;
 }>;
@@ -65,6 +66,7 @@ const sqlIntentRegistry =
   globalWithSqlIntentRegistry[SQL_INTENT_REGISTRY] ??
   (() => {
     const registry: SqlIntentRegistry = {
+      recursivePlanCounts: new WeakMap(),
       annIndexScanQueries: new WeakMap(),
       forceCustomPlanQueries: new WeakSet(),
     };
@@ -76,6 +78,15 @@ const sqlIntentRegistry =
     });
     return registry;
   })();
+
+// Another package instance may have initialized the registry before this
+// metadata existed. Extend that registry without replacing its intent state.
+const recursivePlanCounts =
+  sqlIntentRegistry.recursivePlanCounts ?? new WeakMap<SqlFragment, number>();
+if (sqlIntentRegistry.recursivePlanCounts === undefined)
+  Object.defineProperty(sqlIntentRegistry, "recursivePlanCounts", {
+    value: recursivePlanCounts,
+  });
 
 export function markForceCustomPlan(query: SqlFragment): void {
   sqlIntentRegistry.forceCustomPlanQueries.add(query);
@@ -109,11 +120,26 @@ export function annIndexScanTypes(
   return sqlIntentRegistry.annIndexScanQueries.get(query);
 }
 
-/** @internal Copies execution semantics when immutable fragments are composed. */
+/** Compiler evidence: independent fluent recursive stages in this fragment. */
+export function recursivePlanCount(query: SqlFragment): number {
+  return recursivePlanCounts.get(query) ?? 0;
+}
+
+/** Records one newly emitted recursive stage, preserving nested stages. */
+export function markRecursivePlan(query: SqlFragment): void {
+  recursivePlanCounts.set(query, recursivePlanCount(query) + 1);
+}
+
+/** @internal Copies execution semantics and compiler metadata through composition. */
 export function copySqlIntents(
   target: SqlFragment,
   sources: readonly SqlFragment[],
 ): void {
+  const recursivePlans = sources.reduce(
+    (count, source) => count + recursivePlanCount(source),
+    0,
+  );
+  if (recursivePlans > 0) recursivePlanCounts.set(target, recursivePlans);
   if (sources.some((source) => shouldForceCustomPlan(source))) {
     markForceCustomPlan(target);
   }
