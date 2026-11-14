@@ -26,6 +26,7 @@ import {
 import type { RecursiveCyclePolicy } from "../query/ast";
 import {
   type OneStatementBatchItem,
+  type OneStatementCombinedItem,
   registerOneStatementSharing,
 } from "../query/builder/one-statement-sharing";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
@@ -857,6 +858,7 @@ export function createSubgraphRead<
       };
       sharedSubgraphPlans.set(item, plan);
       registerOneStatementSharing(item, {
+        kind: "subgraph",
         owner: params.graph,
         key: subgraphSharingKey(plan),
         combine: combineSubgraphBatchItems,
@@ -867,6 +869,7 @@ export function createSubgraphRead<
 }
 
 const sharedSubgraphPlans = new WeakMap<OneStatementBatchItem, SubgraphPlan>();
+const SUBGRAPH_REQUEST_COLUMN = "typegraph_subgraph_request";
 const SHARED_MEMBERSHIPS_COLUMN = "typegraph_shared_memberships";
 
 function projectionSharingKey(plan: ProjectionPlan): unknown {
@@ -903,7 +906,8 @@ function sharedEntityKey(row: Readonly<Record<string, unknown>>): string {
 
 function combineSubgraphBatchItems(
   items: readonly OneStatementBatchItem[],
-): OneStatementBatchItem<readonly unknown[]> {
+  sharePayloads: boolean,
+): OneStatementCombinedItem {
   const first = requireDefined(items[0]);
   const plans = items.map((item) =>
     requireDefined(sharedSubgraphPlans.get(item)),
@@ -953,7 +957,9 @@ function combineSubgraphBatchItems(
   const membershipColumns = columns.map((column) =>
     column === "typegraph_entity" ? sql`'membership'` : sql`NULL`,
   );
-  const query = asCompiledRowsSql(sql`
+  // Both payload modes use one origin-keyed recursive traversal. Only the
+  // shared mode sends entities once with a separate membership envelope.
+  const commonCtes = sql`
     ${reachable}${included},
         typegraph_shared_requests(request_id, root_kind, root_id) AS (VALUES ${sql.join(requests, sql`, `)}),
         typegraph_shared_hydrated AS (${hydration}),
@@ -970,7 +976,35 @@ function combineSubgraphBatchItems(
           JOIN included_ids target_membership ON h.to_kind = target_membership.kind AND h.to_id = target_membership.id AND source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id
           JOIN typegraph_shared_requests requests ON ${requestMatches("source_membership.origin_kind", "source_membership.origin_id")}
           WHERE h.typegraph_entity = 'edge'
-        ),
+        )
+  `;
+  if (!sharePayloads) {
+    return {
+      query: asCompiledRowsSql(sql`
+        ${commonCtes}
+        SELECT ${sql.join(hydratedColumns, sql`, `)}, membership.request_id AS ${sql.identifier(SUBGRAPH_REQUEST_COLUMN)}
+        FROM typegraph_shared_hydrated h
+        JOIN typegraph_shared_membership membership
+          ON h.typegraph_entity = membership.typegraph_entity AND h.kind = membership.kind AND h.id = membership.id
+      `),
+      provenance: first.provenance,
+      outputNames: [...columns, SUBGRAPH_REQUEST_COLUMN],
+      payloadPartitionColumn: SUBGRAPH_REQUEST_COLUMN,
+      orderBy: [],
+      mapRows: (rows) => {
+        const requestRows: Record<string, unknown>[][] = items.map(() => []);
+        for (const row of rows)
+          requireDefined(
+            requestRows[Number(row[SUBGRAPH_REQUEST_COLUMN])],
+          ).push(row);
+        return items.map((item, index) =>
+          item.mapRows(requireDefined(requestRows[index])),
+        );
+      },
+    };
+  }
+  const query = asCompiledRowsSql(sql`
+    ${commonCtes},
         typegraph_shared_ordered_membership AS (
           SELECT membership.*, request_id AS typegraph_shared_ordinal
           FROM typegraph_shared_membership membership

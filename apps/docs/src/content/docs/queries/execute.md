@@ -356,7 +356,7 @@ const subgraphs = await store.batchOnce((read) =>
 ```
 
 When compatible subgraphs have substantially overlapping neighborhoods and project meaningful payloads,
-opt into shared traversal and hydration:
+opt into deduplicated entity payloads:
 
 ```typescript
 const subgraphs = await store.batchOnce(
@@ -400,10 +400,18 @@ const [social, employment] = await store.batchOnce((read) => [
 ]);
 ```
 
-The one-statement guarantee reduces round trips, which is often valuable for remote databases. By
-default it does not combine recursive plans or share hydration between overlapping subgraphs, and
-it does not promise less database work than direct `store.subgraph()` calls. The explicit
-`shareSubgraphs` option changes that planning choice for compatible subgraph members only.
+The one-statement guarantee reduces round trips, which is often valuable for remote databases.
+Compatible subgraph reads use one origin-keyed recursive traversal in either payload mode,
+keeping planner overhead bounded as the root count grows. By default each request carries its own
+entity payloads. The explicit `shareSubgraphs` option sends overlapping entities once with request
+memberships. Incompatible options still require separate plans.
+The default mode aggregates JSON separately for each request, preserving the per-request JSON
+value size limit. Shared payloads aggregate each compatible group into one JSON value.
+
+On PostgreSQL, at most 25 independent subgraph plans may remain after compatible reads are combined.
+A batch over this budget throws `ConfigurationError` before issuing SQL. Use matching options or
+split incompatible reads into explicit `batchOnce()` calls. `shareSubgraphs: true` does not combine
+incompatible options, and relational reads do not consume subgraph plan slots.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

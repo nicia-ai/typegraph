@@ -2394,10 +2394,10 @@ const [social, work] = await store.batchOnce((read) => [
 ]);
 ```
 
-One statement means one round trip, not one shared traversal by default. Overlapping subgraphs are
-planned and hydrated independently. For compatible, overlapping, payload-heavy subgraphs, pass
-`{ shareSubgraphs: true }` as the second `batchOnce()` argument to traverse the roots together and
-hydrate each shared entity once:
+Compatible subgraph reads use one origin-keyed recursive traversal by default, while returning
+entity payloads per request. For compatible, overlapping, payload-heavy subgraphs, pass
+`{ shareSubgraphs: true }` as the second `batchOnce()` argument to send each shared entity once
+with request memberships:
 
 ```typescript
 const details = await store.batchOnce(
@@ -2405,6 +2405,11 @@ const details = await store.batchOnce(
   { shareSubgraphs: true },
 );
 ```
+
+Default batches aggregate JSON per request, so compatible reads do not share one JSON value's size
+limit. PostgreSQL allows at most 25 independent subgraph plans after compatible reads are combined;
+exceeding this budget throws `ConfigurationError` before SQL runs. Align the options or split the
+reads into explicit `batchOnce()` calls. This limit applies with either value of `shareSubgraphs`.
 
 Every request still receives independent result objects. Sharing adds membership and reconstruction
 work, and measurements show it can increase encoded response size when roots do not overlap or the

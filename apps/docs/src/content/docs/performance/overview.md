@@ -469,10 +469,11 @@ const [activeUsers, recentOrders] = await store.batchOnce(() => [
 ]);
 ```
 
-Runtime arrays of compatible `read.subgraph()` calls can opt into shared traversal and hydration
+Runtime arrays of compatible `read.subgraph()` calls use one origin-keyed recursive traversal
+by default and can opt into deduplicated entity payloads
 with `store.batchOnce(build, { shareSubgraphs: true })`. This helps overlapping, payload-heavy
 neighborhoods; it adds overhead for membership and per-request reconstruction, so the independent
-one-statement plan remains the default. Measure the real root overlap and projection rather than
+per-request payload remains the default. Measure the real root overlap and projection rather than
 enabling sharing universally.
 
 Compare the [concrete sharing examples](#choosing-shared-subgraphs) before enabling the option.
@@ -615,8 +616,8 @@ Bea ──knows──▶ Cara
 ```
 
 Both depth-two subgraphs contain Cara and Dev. If their biographies are several
-kilobytes each, independent plans repeat that property data. Enable sharing so the
-compatible reads hydrate those shared entities once:
+kilobytes each, per-request payloads repeat that property data. Enable sharing so the
+compatible reads send those shared entities once:
 
 ```typescript
 const overlapping = await store.batchOnce(
@@ -635,7 +636,7 @@ const overlapping = await store.batchOnce(
 // Each result owns independent projected values, including nested objects.
 ```
 
-**Keep the default: disjoint neighborhoods.** Suppose Erin knows Finn, Finn knows
+**Disjoint neighborhoods.** Suppose Erin knows Finn, Finn knows
 Gia, Hana knows Ivan, and Ivan knows Jules, with no connections between the groups:
 
 ```text
@@ -659,7 +660,7 @@ const disjoint = await store.batchOnce((read) =>
 );
 ```
 
-**Keep the default initially: overlapping roots, identity-only results.** A graph
+**Overlapping roots, identity-only results.** A graph
 preview might need only connectivity, even when the stored biographies are large.
 Use empty property selections to retain identities and edge endpoints without
 transferring biographies:
@@ -680,34 +681,24 @@ Overlap alone does not make sharing a payload optimization here: little repeated
 property data remains to remove. Sharing may still improve latency, so measure
 both response size and elapsed time before choosing it.
 
-| Eight-root benchmark shape | Shared vs default batch encoded bytes | Starting choice |
-| --- | --- | --- |
-| 75% overlap, full 2,048-byte payload | About 27–29% fewer | Try sharing |
-| Disjoint roots, full 256-byte payload | About 21–25% more | Default batching |
-| 75% overlap, identities only | About 10–18% more | Default batching; measure latency |
+The payload tradeoff depends on how much entity data repeats across requests versus the size
+of the membership information. Benchmark response size and elapsed time for your actual roots,
+projections, and database route before choosing the option.
 
-These response-size differences appeared in small local SQLite and PostgreSQL runs
-and a same-region remote Neon PostgreSQL run; they are not universal thresholds.
-Bytes measure JSON encoding at the backend boundary, not protocol traffic. In the
-remote run, shared batches were faster at the median in all three shapes, including
-the disjoint and identity-only shapes whose encoded responses grew. Default
-`batchOnce()` was faster at the median than concurrent direct subgraph calls in all
-three shapes. The remote client egress was observed in Bend, Oregon, and the pooled
-database endpoint was in Oregon; a simple pooled `SELECT 1` round trip measured
-24 ms at the median. Tail latency varied, so compare elapsed time and response
-size on the deployment route that matters to your application.
-See the [SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md)
-and [PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md)
-for local timings and methodology, and the [remote Neon report](https://github.com/nicia-ai/typegraph/blob/cffd0082906bffd5f5e993dfeede1e01e6e6f300/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
-for 40 raw samples per shape and mode, placement, and reproduction commands. The
-older PostgreSQL report also includes a separately labeled delay simulation; the
-Neon measurements used actual network calls without injected delay.
+The [historical SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md),
+[PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md),
+and [remote Neon report](https://github.com/nicia-ai/typegraph/blob/cffd0082906bffd5f5e993dfeede1e01e6e6f300/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
+describe the older planner. Their timings and percentage differences are not recommendations
+for the current origin-keyed traversal.
 
 Sharing also requires compatible options. Different edge sets, depths, temporal
 coordinates, projections, or edge windows can keep reads in separate groups even
 when their results overlap. For example, a social `knows` neighborhood and an
 employment `worksAt` neighborhood still fit in one `batchOnce()` call, but enabling
 sharing does not fuse those incompatible plans.
+PostgreSQL refuses more than 25 independent subgraph plans in one batch, after compatible reads
+are combined. This limit applies in both payload modes; split incompatible reads into explicit
+`batchOnce()` calls when they exceed it.
 
 ## Connection Management
 

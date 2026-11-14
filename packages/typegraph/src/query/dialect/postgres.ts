@@ -20,7 +20,7 @@ import {
   inlineSqlStringLiteral,
   packSqlListValue,
 } from "./profile";
-import { type DialectAdapter } from "./types";
+import { type BuiltinDialectAdapter } from "./types";
 
 const SCALAR_SQL_TYPES: Readonly<
   Record<PortableCountDistinctValueType, string>
@@ -154,7 +154,7 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 /**
  * PostgreSQL dialect adapter implementation.
  */
-export const postgresDialect: DialectAdapter = {
+export const postgresDialect: BuiltinDialectAdapter = {
   safeNumericConversion(expression) {
     const trimmed = sql`btrim(${expression}, ${" \t\r\n"})`;
     const exact = sql`CAST(${trimmed} AS NUMERIC)`;
@@ -172,6 +172,9 @@ export const postgresDialect: DialectAdapter = {
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,
     supportsFulltext: true,
+    // Issue #833 measured ~32 MB of planner memory for 25 independent roots,
+    // versus ~700 MB at 500. Compatible roots consume only one plan slot.
+    maxSubgraphBatchPlans: 25,
     subgraphMembershipStrategy: "materialized-ids",
     textIndexOrderIsBinary: false,
     transactionReadsShareOneSnapshot: false,
@@ -196,6 +199,12 @@ export const postgresDialect: DialectAdapter = {
     const row = sql.identifier(rowAlias);
     const order = sql`${row}.${sql.identifier(orderColumn)}`;
     return sql`(SELECT COALESCE(jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}), '[]'::jsonb) FROM ${row})`;
+  },
+
+  partitionedRowsJsonArrays(rowAlias, _columns, orderColumn, partitionColumn) {
+    const row = sql.identifier(rowAlias);
+    const order = sql`${row}.${sql.identifier(orderColumn)}`;
+    return sql`SELECT jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}) AS payload FROM ${row} GROUP BY ${row}.${sql.identifier(partitionColumn)}`;
   },
 
   orderedScalarJsonArray({ filter, orderBy, value, valueType }) {
