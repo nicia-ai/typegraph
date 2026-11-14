@@ -1,18 +1,30 @@
 import { z } from "zod";
 
+import {
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../backend/capabilities/retried-unit";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../backend/drizzle/base-schema";
 import { type GraphBackend } from "../backend/types";
 import {
   createRecordedInstant,
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  BaseSchemaMigrationError,
+  ConfigurationError,
+  ValidationError,
+} from "../errors";
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { requireDefined } from "../utils/presence";
-import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import {
+  isMissingColumnError,
+  withRecordedRelationsPrecondition,
+} from "../utils/sql-errors";
 import {
   recordedAnchorCandidate,
   recordedAnchorOrigin,
@@ -46,11 +58,11 @@ export type RecordedAnchorLogContext = Readonly<{
 
 const DEFAULT_PRUNE_LIMIT = 1000;
 const MAX_PRUNE_LIMIT = 10_000;
-const RETENTION_STATE_VERSION = 1;
+const RETENTION_STATE_VERSION = 2;
 const RetentionStateSchema = z
   .object({
     version: z.literal(RETENTION_STATE_VERSION),
-    firstAllocationAt: z.string().optional(),
+    loggedFromFirstAllocation: z.boolean(),
     loggedFrom: z.string(),
     prunedBefore: z.string(),
     retainedRevision: z
@@ -59,9 +71,37 @@ const RetentionStateSchema = z
       .min(RECORDED_FIRST_REVISION)
       .max(RECORDED_MAX_REVISION - 1),
   })
-  .strict()
-  .readonly();
-type RecordedAnchorRetentionState = z.infer<typeof RetentionStateSchema>;
+  .strict();
+const LegacyRetentionStateSchema = RetentionStateSchema.omit({
+  version: true,
+  loggedFromFirstAllocation: true,
+})
+  .extend({
+    version: z.literal(1),
+    firstAllocationAt: z.string().optional(),
+  })
+  .refine(
+    (state) =>
+      state.firstAllocationAt === undefined ||
+      state.firstAllocationAt === state.loggedFrom,
+  )
+  .transform(
+    ({
+      firstAllocationAt,
+      ...state
+    }): z.infer<typeof RetentionStateSchema> => ({
+      ...state,
+      version: RETENTION_STATE_VERSION,
+      loggedFromFirstAllocation: firstAllocationAt !== undefined,
+    }),
+  );
+const ReadRetentionStateSchema = z.union([
+  RetentionStateSchema,
+  LegacyRetentionStateSchema,
+]);
+type RecordedAnchorRetentionState = Readonly<
+  z.infer<typeof RetentionStateSchema>
+>;
 
 type RecordedAnchorSnapshot = Readonly<{
   origin: unknown;
@@ -70,7 +110,6 @@ type RecordedAnchorSnapshot = Readonly<{
   first_revision: unknown;
   first_recorded_at: unknown;
   anchor_retention: unknown;
-  clock_revision: unknown;
 }>;
 
 async function readRecordedAnchorSnapshot(
@@ -78,6 +117,7 @@ async function readRecordedAnchorSnapshot(
   schema: SqlSchema,
   graphId: string,
   wallTime: string,
+  surface: string,
 ): Promise<RecordedAnchorSnapshot | undefined> {
   const rows = await withRecordedRelationsPrecondition(
     target.execute<RecordedAnchorSnapshot>(
@@ -89,7 +129,7 @@ async function readRecordedAnchorSnapshot(
         )
         SELECT origins.origin, candidate.revision, candidate.recorded_at,
           first_retained.revision AS first_revision, first_retained.recorded_at AS first_recorded_at,
-          clock.anchor_retention, clock.revision AS clock_revision
+          clock.anchor_retention
         FROM ${schema.recordedClockTable} clock
         LEFT JOIN ${schema.revisionOriginsTable} origins ON clock.graph_id=origins.graph_id
         LEFT JOIN candidate ON candidate.origin=origins.origin
@@ -97,8 +137,19 @@ async function readRecordedAnchorSnapshot(
         WHERE clock.graph_id=${graphId}
       `),
     ),
-    { dialect: target.dialect, surface: "recorded-anchor-log" },
-  );
+    { dialect: target.dialect, surface },
+  ).catch((error: unknown) => {
+    if (!isMissingColumnError(error, "anchor_retention")) throw error;
+    throw new BaseSchemaMigrationError(
+      {
+        installedVersion: undefined,
+        requiredVersion: CURRENT_BASE_SCHEMA_VERSION,
+        reason: "stale",
+        missingColumn: "anchor_retention",
+      },
+      { cause: error },
+    );
+  });
   return rows[0];
 }
 
@@ -111,18 +162,12 @@ function retentionState(
   try {
     if (typeof row.anchor_retention !== "string")
       throw new TypeError("Expected serialized retention state");
-    const state = RetentionStateSchema.parse(
+    const state = ReadRetentionStateSchema.parse(
       JSON.parse(row.anchor_retention) as unknown,
     );
     validateCanonicalIsoDate(state.loggedFrom, "loggedFrom");
     validateCanonicalIsoDate(state.prunedBefore, "prunedBefore");
-    if (state.firstAllocationAt !== undefined)
-      validateCanonicalIsoDate(state.firstAllocationAt, "firstAllocationAt");
-    if (
-      state.loggedFrom > state.prunedBefore ||
-      (state.firstAllocationAt !== undefined &&
-        state.firstAllocationAt > state.loggedFrom)
-    )
+    if (state.loggedFrom > state.prunedBefore)
       throw new TypeError("Retention coverage is inverted");
     return state;
   } catch (error) {
@@ -139,7 +184,9 @@ function firstAllocationAt(
   state: RecordedAnchorRetentionState | undefined,
 ): string | undefined {
   return (
-    state?.firstAllocationAt ??
+    (state?.loggedFromFirstAllocation === true ?
+      state.loggedFrom
+    : undefined) ??
     ((
       Number(row.first_revision) === RECORDED_FIRST_REVISION &&
       typeof row.first_recorded_at === "string"
@@ -165,14 +212,15 @@ export async function lookupRecordedAnchor(
   context: RecordedAnchorLogContext,
   wallTime: string,
 ): Promise<RecordedInstant | undefined> {
-  requireRecordedAnchorLog(context, "resolveRecordedInstant");
   validateCanonicalIsoDate(wallTime, "wallTime");
+  requireRecordedAnchorLog(context, "resolveRecordedInstant");
   const { backend, schema, graphId } = context;
   const row = await readRecordedAnchorSnapshot(
     backend,
     schema,
     graphId,
     wallTime,
+    "resolve-recorded-anchor",
   );
   if (row === undefined) return undefined;
   const state = retentionState(row, graphId);
@@ -236,100 +284,121 @@ export async function pruneRecordedAnchors(
   validateCanonicalIsoDate(before, "before");
   const limit = pruneLimit(options);
   const { backend, schema, graphId } = context;
-  return backend.transaction(async (target) => {
-    // The same transaction-scoped graph fence used by writers, clear, and owner rotation.
-    await lockRecordedGraphWrite(target, graphId);
-    const row = await readRecordedAnchorSnapshot(
-      target,
-      schema,
-      graphId,
-      before,
-    );
-    if (row === undefined)
-      return { deletedCount: 0, retainedBoundary: undefined, hasMore: false };
-    const previous = retentionState(row, graphId);
-    const candidate =
-      row.revision === undefined || row.revision === null ?
-        undefined
-      : Number(row.revision);
-    if (candidate === undefined && previous === undefined)
-      return { deletedCount: 0, retainedBoundary: undefined, hasMore: false };
-    const advance =
-      candidate !== undefined &&
-      (previous === undefined || candidate > previous.retainedRevision);
-    const revision =
-      advance ? candidate : requireDefined(previous).retainedRevision;
-    const recordedAt =
-      advance ? row.recorded_at : requireDefined(previous).prunedBefore;
-    if (typeof row.origin !== "string" || typeof recordedAt !== "string")
-      throw new ConfigurationError(
-        "Recorded pruning has no valid allocation owner or boundary.",
-        { graphId },
-      );
-    const retainedBoundary = createRecordedInstant(
-      revision,
-      recordedAt,
-      await recordedAnchorOwner(schema, row.origin),
-    );
-    const first = firstAllocationAt(row, previous);
-    if (previous === undefined && typeof row.first_recorded_at !== "string")
-      throw new ConfigurationError(
-        "Recorded pruning has no logged coverage start.",
-        { graphId },
-      );
-    const state: RecordedAnchorRetentionState = {
-      version: RETENTION_STATE_VERSION,
-      ...(first === undefined ? {} : { firstAllocationAt: first }),
-      loggedFrom: previous?.loggedFrom ?? String(row.first_recorded_at),
-      prunedBefore: recordedAt,
-      retainedRevision: revision,
-    };
-    const victims = await target.execute<Readonly<{ revision: unknown }>>(
-      asCompiledRowsSql(sql`
-        SELECT anchors.revision FROM ${recordedAnchorsTable(schema)} anchors
-        WHERE ${recordedAnchorScope(schema, graphId, row.origin)} AND anchors.revision < ${revision}
-        ORDER BY anchors.revision ASC LIMIT ${limit + 1}
-      `),
-    );
-    const deletedCount = Math.min(victims.length, limit);
-    // Publish the logical coverage floor in the SAME commit as this bounded deletion.
-    const written = await target.execute(
-      asCompiledRowsSql(sql`
-        UPDATE ${schema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${graphId}
-          AND revision=${Number(row.clock_revision)} AND revision>=${revision}
-          AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
-        RETURNING graph_id
-      `),
-    );
-    if (written.length !== 1)
-      throw new ConfigurationError(
-        "Recorded pruning could not persist its coverage watermark.",
-        { code: "RECORDED_RETENTION_WRITE_REFUSED", graphId },
-      );
-    if (deletedCount > 0) {
-      const firstRevision = Number(requireDefined(victims[0]).revision);
-      const lastRevision = Number(
-        requireDefined(victims[deletedCount - 1]).revision,
-      );
-      const deleted = await target.execute(
-        asCompiledRowsSql(sql`
-          DELETE FROM ${recordedAnchorsTable(schema)} AS anchors
-          WHERE ${recordedAnchorScope(schema, graphId, row.origin)}
-            AND anchors.revision BETWEEN ${firstRevision} AND ${lastRevision}
-          RETURNING revision
-        `),
-      );
-      if (deleted.length !== deletedCount)
-        throw new ConfigurationError(
-          "Recorded pruning did not delete exactly its bounded allocation range.",
-          {
-            code: "RECORDED_RETENTION_DELETE_REFUSED",
-            graphId,
-            expected: deletedCount,
-            actual: deleted.length,
-          },
+  return runRetriedUnit(
+    {
+      target: backend,
+      operation: "pruneRecordedInstants",
+      attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+    },
+    () =>
+      backend.transaction(async (target) => {
+        // The same transaction-scoped graph fence used by writers, clear, and owner rotation.
+        await lockRecordedGraphWrite(target, graphId);
+        const row = await readRecordedAnchorSnapshot(
+          target,
+          schema,
+          graphId,
+          before,
+          "prune-recorded-anchors",
         );
-    }
-    return { deletedCount, retainedBoundary, hasMore: victims.length > limit };
-  });
+        if (row === undefined)
+          return {
+            deletedCount: 0,
+            retainedBoundary: undefined,
+            hasMore: false,
+          };
+        const previous = retentionState(row, graphId);
+        const candidate =
+          row.revision === undefined || row.revision === null ?
+            undefined
+          : Number(row.revision);
+        if (candidate === undefined && previous === undefined)
+          return {
+            deletedCount: 0,
+            retainedBoundary: undefined,
+            hasMore: false,
+          };
+        const advance =
+          candidate !== undefined &&
+          (previous === undefined || candidate > previous.retainedRevision);
+        const revision =
+          advance ? candidate : requireDefined(previous).retainedRevision;
+        const recordedAt =
+          advance ? row.recorded_at : requireDefined(previous).prunedBefore;
+        if (typeof row.origin !== "string" || typeof recordedAt !== "string")
+          throw new ConfigurationError(
+            "Recorded pruning has no valid allocation owner or boundary.",
+            { graphId },
+          );
+        const retainedBoundary = createRecordedInstant(
+          revision,
+          recordedAt,
+          await recordedAnchorOwner(schema, row.origin),
+        );
+        const first = firstAllocationAt(row, previous);
+        if (previous === undefined && typeof row.first_recorded_at !== "string")
+          throw new ConfigurationError(
+            "Recorded pruning has no logged coverage start.",
+            { graphId },
+          );
+        const state: RecordedAnchorRetentionState = {
+          version: RETENTION_STATE_VERSION,
+          loggedFromFirstAllocation: first !== undefined,
+          loggedFrom: previous?.loggedFrom ?? String(row.first_recorded_at),
+          prunedBefore: recordedAt,
+          retainedRevision: revision,
+        };
+        const victims = await target.execute<Readonly<{ revision: unknown }>>(
+          asCompiledRowsSql(sql`
+            SELECT anchors.revision FROM ${recordedAnchorsTable(schema)} anchors
+            WHERE ${recordedAnchorScope(schema, graphId, row.origin)} AND anchors.revision < ${revision}
+            ORDER BY anchors.revision ASC LIMIT ${limit + 1}
+          `),
+        );
+        const deletedCount = Math.min(victims.length, limit);
+        // Publish the logical coverage floor in the SAME commit as this bounded deletion.
+        const written = await target.execute(
+          asCompiledRowsSql(sql`
+            UPDATE ${schema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${graphId}
+              AND revision>=${revision}
+              AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
+            RETURNING graph_id
+          `),
+        );
+        if (written.length !== 1)
+          throw new ConfigurationError(
+            "Recorded pruning could not persist its coverage watermark.",
+            { code: "RECORDED_RETENTION_WRITE_REFUSED", graphId },
+          );
+        if (deletedCount > 0) {
+          const firstRevision = Number(requireDefined(victims[0]).revision);
+          const lastRevision = Number(
+            requireDefined(victims[deletedCount - 1]).revision,
+          );
+          const deleted = await target.execute(
+            asCompiledRowsSql(sql`
+              DELETE FROM ${recordedAnchorsTable(schema)} AS anchors
+              WHERE ${recordedAnchorScope(schema, graphId, row.origin)}
+                AND anchors.revision BETWEEN ${firstRevision} AND ${lastRevision}
+              RETURNING revision
+            `),
+          );
+          if (deleted.length !== deletedCount)
+            throw new ConfigurationError(
+              "Recorded pruning did not delete exactly its bounded allocation range.",
+              {
+                code: "RECORDED_RETENTION_DELETE_REFUSED",
+                graphId,
+                expected: deletedCount,
+                actual: deleted.length,
+              },
+            );
+        }
+        return {
+          deletedCount,
+          retainedBoundary,
+          hasMore: victims.length > limit,
+        };
+      }),
+  );
 }

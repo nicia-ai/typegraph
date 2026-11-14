@@ -217,7 +217,7 @@ import {
   generatePostgresEdgeMatchIdentityUpgradeDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
-  recordedAnchorRetentionColumnDDL,
+  postgresRecordedAnchorRetentionAdoptionDDL,
 } from "./ddl";
 import {
   type BaseSchemaRuntime,
@@ -1930,15 +1930,27 @@ function buildPostgresEngineProfileInternal(
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
     storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
     async ensureRecordedAnchorRetentionStorage(clockProvisioned) {
-      if (!clockProvisioned)
+      const tableName = getTableName(tables.recordedClock);
+      const relation =
+        allocationSchema === undefined ?
+          postgresIdentifierRegclassName(tableName)
+        : `${postgresIdentifierRegclassName(allocationSchema)}.${postgresIdentifierRegclassName(tableName)}`;
+      const [storage] = await executionAdapter.execute<{
+        table_name?: unknown;
+        has_retention?: unknown;
+      }>(portableSql`
+        SELECT to_regclass(${relation}) AS table_name,
+          EXISTS (SELECT 1 FROM pg_attribute
+            WHERE attrelid=to_regclass(${relation})
+              AND attname='anchor_retention' AND NOT attisdropped) AS has_retention
+      `);
+      if (storage?.has_retention === true) return;
+      if (!clockProvisioned && typeof storage?.table_name !== "string")
         await executeConcurrentCreateDdl(
           generatePgCreateTableSQL(tables.recordedClock),
         );
       await executeConcurrentCreateDdl(
-        recordedAnchorRetentionColumnDDL(
-          getTableName(tables.recordedClock),
-          true,
-        ),
+        postgresRecordedAnchorRetentionAdoptionDDL(tableName),
       );
     },
     recordedAnchorsDdl: [

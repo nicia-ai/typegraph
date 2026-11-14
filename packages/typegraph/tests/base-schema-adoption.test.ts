@@ -1425,6 +1425,14 @@ describe("version 9: recorded allocation retention watermark", () => {
         await executeDdl(
           "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
         );
+        for (const operation of [
+          () => store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          () => store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ]) {
+          await expect(operation()).rejects.toBeInstanceOf(
+            BaseSchemaMigrationError,
+          );
+        }
         await requireDefined(backend.adoptBaseSchema)();
         await requireDefined(backend.adoptBaseSchema)();
         expect(

@@ -391,6 +391,7 @@ export class BaseSchemaMigrationError extends TypeGraphError {
 
 // @public (undocumented)
 export type BaseSchemaMigrationErrorDetails = Readonly<{
+    missingColumn?: string;
     installedVersion: number | undefined;
     requiredVersion: number;
     reason: "missing" | "stale" | "newer";

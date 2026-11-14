@@ -3084,7 +3084,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /** Retire allocation coverage and delete at most one bounded batch per call. */
-  pruneRecordedInstants(
+  async pruneRecordedInstants(
     before: string,
     options?: PruneRecordedInstantsOptions,
   ): Promise<PruneRecordedInstantsResult> {

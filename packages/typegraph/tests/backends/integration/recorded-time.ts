@@ -70,6 +70,7 @@ import { recordedAnchorCandidate } from "../../../src/store/recorded-anchor-log-
 import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
 import {
   advanceRevisionClock,
+  lockRecordedGraphWrite,
   readRecordedClock as readGraphRecordedClock,
   readRevisionOrigin,
 } from "../../../src/store/recorded-capture";
@@ -1531,6 +1532,205 @@ export function registerRecordedTimeIntegrationTests(
       expect(rows).toHaveLength(3);
     });
 
+    it("keeps the lookup validation and missing-storage error contract", async () => {
+      const live = createStore(integrationTestGraph, context.getBackend());
+      await expect(
+        live.resolveRecordedInstant("not-a-date"),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+    });
+
+    it("prunes successfully after a healthy clock advance between its read and update", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "first", age: 1 });
+      await store.nodes.Person.create({ name: "second", age: 2 });
+      const boundary = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    async execute<T>(query: CompiledRowsSql) {
+                      const rows = await target.execute<T>(query);
+                      if (
+                        requireDefined(base.compileSql)(query).sql.includes(
+                          "clock.anchor_retention",
+                        )
+                      ) {
+                        await advanceRevisionClock(
+                          target,
+                          store.revisionSchema,
+                          store.graphId,
+                          false,
+                        );
+                      }
+                      return rows;
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      expect(
+        await observed.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(
+        recordedInstantRevision(requireDefined(await store.recordedNow())),
+      ).toBe(3);
+    });
+
+    it("rejects pruning context failures through its Promise", async () => {
+      const base = context.getBackend();
+      const failure = new Error("context construction failed");
+      let broken = false;
+      const observed = createStore(
+        integrationTestGraph,
+        deriveBackend(base, {
+          get tableNames() {
+            if (broken) throw failure;
+            return undefined;
+          },
+        }),
+      );
+      broken = true;
+      expect(
+        await observed
+          .pruneRecordedInstants("2099-01-01T00:00:00.000Z")
+          .catch((error: unknown) => error),
+      ).toBe(failure);
+    });
+
+    it("accepts valid legacy retention proof but refuses an invented earlier birth", async () => {
+      const store = await createHistoryStore(context);
+      const times = [
+        "2026-06-01T12:00:00.000Z",
+        "2026-06-01T12:00:01.000Z",
+      ] as const;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        for (const time of times) {
+          vi.setSystemTime(new Date(time));
+          await store.nodes.Person.create({ name: time, age: 1 });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+      await store.pruneRecordedInstants(times[1]);
+      const legacy = {
+        version: 1,
+        firstAllocationAt: times[0],
+        loggedFrom: times[0],
+        prunedBefore: times[1],
+        retainedRevision: 2,
+      };
+      const base = context.getBackend();
+      const writeState = (state: unknown) =>
+        requireDefined(base.executeStatement)(
+          asCompiledStatementSql(sql`
+            UPDATE ${store.revisionSchema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${store.graphId}
+          `),
+        );
+      await writeState(legacy);
+      expect(
+        await store.resolveRecordedInstant("2026-06-01T11:59:59.000Z"),
+      ).toBeUndefined();
+      await store.pruneRecordedInstants(times[1]);
+      const rows = await base.execute<Readonly<{ anchor_retention: string }>>(
+        asCompiledRowsSql(sql`
+          SELECT anchor_retention FROM ${store.revisionSchema.recordedClockTable} WHERE graph_id=${store.graphId}
+        `),
+      );
+      expect(
+        JSON.parse(requireDefined(rows[0]).anchor_retention),
+      ).toMatchObject({ version: 2, loggedFromFirstAllocation: true });
+      await writeState({
+        ...legacy,
+        firstAllocationAt: "2026-05-01T00:00:00.000Z",
+      });
+      await expect(
+        store.resolveRecordedInstant("2026-04-15T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_RETENTION_STATE_INVALID" },
+      });
+    });
+
+    it
+      .runIf(context.serverLaneConcurrency)
+      .each(["repeatable_read", "serializable"] as const)(
+      "retries a pruning snapshot taken before a writer releases its fence (%s)",
+      async (isolationLevel) => {
+        const store = await createHistoryStore(context);
+        await store.nodes.Person.create({ name: "first", age: 1 });
+        await store.nodes.Person.create({ name: "second", age: 2 });
+        const base = context.getBackend();
+        const reached = createGate();
+        const release = createGate();
+        const writing = base.transaction(async (target) => {
+          await lockRecordedGraphWrite(target, store.graphId);
+          await advanceRevisionClock(
+            target,
+            store.revisionSchema,
+            store.graphId,
+            false,
+          );
+          reached.open();
+          await release.opened;
+        });
+        await reached.opened;
+        let attempts = 0;
+        const [observed] = await createStoreWithSchema(
+          integrationTestGraph,
+          deriveBackend(base, {
+            transaction(callback, options) {
+              attempts += 1;
+              return base.transaction(callback, { ...options, isolationLevel });
+            },
+          }),
+          { history: true },
+        );
+        attempts = 0;
+        const pruning = observed.pruneRecordedInstants(
+          "2099-01-01T00:00:00.000Z",
+        );
+        try {
+          await vi.waitFor(
+            async () => {
+              const rows = await base.execute<CountRow>(
+                asCompiledRowsSql(sql`
+                  SELECT count(*) AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory'
+                `),
+              );
+              expect(
+                Number(requireDefined(rows[0]).count),
+              ).toBeGreaterThanOrEqual(1);
+            },
+            { timeout: 5000 },
+          );
+        } finally {
+          release.open();
+        }
+        await writing;
+        expect(await pruning).toMatchObject({
+          deletedCount: 1,
+          hasMore: false,
+        });
+        expect(attempts).toBe(2);
+        expect(
+          recordedInstantRevision(requireDefined(await store.recordedNow())),
+        ).toBe(3);
+      },
+    );
+
     it("publishes a durable watermark and drains only one bounded batch per call", async () => {
       const store = await createHistoryStore(context);
       const times = Array.from(
@@ -1932,6 +2132,15 @@ export function registerRecordedTimeIntegrationTests(
         ),
       );
       try {
+        await expect(
+          store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          details: {
+            code: "RECORDED_RELATIONS_MISSING",
+            surface: "resolve-recorded-anchor",
+          },
+        });
+
         await expect(
           store.nodes.Person.create({ name: "refused", age: 2 }),
         ).rejects.toMatchObject({

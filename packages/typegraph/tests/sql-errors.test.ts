@@ -27,6 +27,7 @@ import {
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
+  isMissingColumnError,
   isMissingTableError,
   isNotNullColumnViolation,
   isPostgresConcurrentDdlRaceError,
@@ -979,4 +980,19 @@ describe("database retry disposition", () => {
       );
     },
   );
+});
+
+describe("missing retention column classification", () => {
+  it.each([
+    ["SQLITE_ERROR", "no such column: clock.anchor_retention", true],
+    ["SQLITE_ERROR", "no such column: another.anchor_retention", true],
+    ["42703", "column clock.anchor_retention does not exist", true],
+    ["42703", 'column "anchor_retention" does not exist', true],
+    ["42703", "column clock.revision does not exist", false],
+    ["42501", "column clock.anchor_retention does not exist", false],
+  ] as const)("classifies %s / %s precisely", (code, message, missing) => {
+    const driver = Object.assign(new Error(message), { code });
+    const wrapped = new Error("query failed", { cause: driver });
+    expect(isMissingColumnError(wrapped, "anchor_retention")).toBe(missing);
+  });
 });

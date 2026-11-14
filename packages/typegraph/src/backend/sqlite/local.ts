@@ -35,8 +35,6 @@ import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
   isMissingTableError,
-  isSqliteDuplicateColumnError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
@@ -46,12 +44,16 @@ import {
   CURRENT_BASE_SCHEMA_VERSION,
 } from "../drizzle/base-schema";
 import {
+  edgeMatchIdentityColumnAdoption,
   generateSqliteMigrationSQL,
-  planRecordedAnchorRetentionAdoption,
-  planSqliteEdgeMatchIdentityAdoption,
   quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
+import {
+  adoptSqliteColumnsSync,
+  type SqliteColumnRow,
+} from "../drizzle/sqlite-column-adoption";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
@@ -112,57 +114,31 @@ function installLocalSqliteBaseSchema(
     if (!isMissingTableError(error)) throw error;
   }
   const clockTable = getTableName(tables.recordedClock);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const rows = sqlite
-      .prepare(`PRAGMA table_info(${quoteDdlIdentifier(clockTable)})`)
-      .all() as readonly Readonly<{ name: string }>[];
-    try {
-      for (const statement of planRecordedAnchorRetentionAdoption(
-        clockTable,
-        new Set(rows.map((row) => row.name)),
-      ))
-        sqlite.exec(statement);
-      break;
-    } catch (error) {
-      if (
-        attempt > 0 ||
-        !isSqliteDuplicateColumnError(error, "anchor_retention")
-      )
-        throw error;
-    }
-  }
+  adoptSqliteColumnsSync(recordedAnchorRetentionColumnAdoption(clockTable), {
+    readColumns: () =>
+      sqlite
+        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(clockTable)})`)
+        .all() as readonly SqliteColumnRow[],
+    execute: (statement) => {
+      sqlite.exec(statement);
+    },
+  });
   const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
   try {
     sqlite.exec(installationSql);
   } catch (error) {
     if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
     const edgeTableName = getTableName(tables.edges);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const rows = sqlite
-        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
-        .all() as readonly Readonly<{ name?: unknown }>[];
-      const columns = new Set(
-        rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-      );
-      const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
-        edgeTableName,
-        columns,
-      );
-      try {
-        sqlite.exec([...adoptionSql, installationSql].join("\n"));
-        return;
-      } catch (repairError) {
-        if (
-          attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
-        ) {
-          throw repairError;
-        }
-      }
-    }
-    throw new CompilerInvariantError(
-      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
+    adoptSqliteColumnsSync(edgeMatchIdentityColumnAdoption(edgeTableName), {
+      readColumns: () =>
+        sqlite
+          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
+          .all() as readonly SqliteColumnRow[],
+      execute: (statement) => {
+        sqlite.exec(statement);
+      },
+    });
+    sqlite.exec(installationSql);
   }
 }
 

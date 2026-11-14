@@ -358,13 +358,17 @@ pruning. If logging began after revision one, earlier unlogged times still raise
 `RECORDED_LOOKUP_HISTORY_PRUNED`.
 
 Each batch uses the same graph write fence as captured writers and owner rotation.
-Concurrent writers keep their newer revisions, and competing prunes advance coverage
+Serialization conflicts retry the complete bounded transaction. Concurrent
+writers keep their newer revisions, and competing prunes advance coverage
 monotonically. Lookup reads the watermark and candidate in one database snapshot.
 The existing time and revision indexes serve candidate selection and bounded deletion
 on SQLite and PostgreSQL, including custom table namespaces.
 
-Upgrade to base-schema version 9 before using this API. It adds the nullable
-`anchor_retention` column to the recorded clock; adoption preserves existing rows
+Upgrade to base-schema version 9 before using either `resolveRecordedInstant` or
+`pruneRecordedInstants`. It adds the nullable
+`anchor_retention` column to the recorded clock. If it is absent, both APIs raise `BaseSchemaMigrationError`
+with `details.missingColumn`; no marker probe is added to successful lookups.
+Adoption preserves existing rows
 and does not infer earlier pruning. Upgrade all applications sharing the database
 before enabling a retention job, so every reader honors the persisted watermark.
 

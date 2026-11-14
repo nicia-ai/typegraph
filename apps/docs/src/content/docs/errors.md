@@ -1207,6 +1207,11 @@ try {
 
 ### `BaseSchemaMigrationError`
 
+Recorded-instant lookup and pruning also raise this error when the version 9
+`anchor_retention` column is absent. In that refusal, `details.missingColumn`
+names the column and `details.installedVersion` is unknown: the failed read does
+not add a deployment-marker probe or guess the installed version.
+
 Thrown by zero-DDL verified and graph-template entry points when the
 deployment-wide physical TypeGraph schema has not been adopted to the version
 required by the running library. This is separate from `MigrationError`, which

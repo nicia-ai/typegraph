@@ -132,4 +132,4 @@ vitest_args+=(
 
 # PGlite-only files and local merge-matrix entries already run in the default
 # lanes. Keep mixed files loaded so their server-specific cases still execute.
-TYPEGRAPH_TEST_BACKEND=postgres POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"
+TYPEGRAPH_TEST_BACKEND=postgres POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}" "$@"

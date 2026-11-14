@@ -51,7 +51,6 @@ import {
 import { BaseSQLiteDatabase, SQLiteTransaction } from "drizzle-orm/sqlite-core";
 
 import {
-  CompilerInvariantError,
   ConfigurationError,
   SchemaFenceTimeoutError,
 } from "../../errors";
@@ -80,8 +79,6 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteDuplicateColumnError,
-  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -167,6 +164,7 @@ import {
   sqliteInstantiateGraphTemplateStatement,
 } from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
+import { adoptSqliteColumns } from "./sqlite-column-adoption";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -194,11 +192,11 @@ import {
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  edgeMatchIdentityColumnAdoption,
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
-  planRecordedAnchorRetentionAdoption,
-  planSqliteEdgeMatchIdentityAdoption,
+  recordedAnchorRetentionColumnAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1634,65 +1632,28 @@ export function buildSqliteEngineProfile(
         generateSqliteCreateTableSQL(tables.recordedClock),
       );
     const tableName = getTableName(tables.recordedClock);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const rows = await executionAdapter.execute<{ name: string }>(
-        sql`PRAGMA table_info(${sql.identifier(tableName)})`,
-      );
-      const columns = new Set(rows.map((row) => row.name));
-      try {
-        for (const statement of planRecordedAnchorRetentionAdoption(
-          tableName,
-          columns,
-        ))
-          await db.run(sql.raw(statement));
-        return;
-      } catch (error) {
-        if (
-          attempt > 0 ||
-          !isSqliteDuplicateColumnError(error, "anchor_retention")
-        )
-          throw error;
-      }
-    }
-    throw new CompilerInvariantError(
-      "Recorded retention adoption exhausted its retry loop.",
-    );
+    await adoptSqliteColumns(recordedAnchorRetentionColumnAdoption(tableName), {
+      readColumns: () =>
+        executionAdapter.execute<{ name?: unknown }>(
+          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
+        ),
+      execute: async (statement) => {
+        await db.run(sql.raw(statement));
+      },
+    });
   }
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
-    const edgeTableName = getTableName(tables.edges);
-    // SQLite has no ADD COLUMN IF NOT EXISTS. Re-read and re-plan after each
-    // precisely classified duplicate-column race; two retries cover the two
-    // additive columns even when concurrent cold starts interleave both.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const columnRows = await executionAdapter.execute<{
-        name?: unknown;
-      }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
-      const columns = new Set(
-        columnRows.flatMap((row) =>
-          typeof row.name === "string" ? [row.name] : [],
+    const tableName = getTableName(tables.edges);
+    await adoptSqliteColumns(edgeMatchIdentityColumnAdoption(tableName), {
+      readColumns: () =>
+        executionAdapter.execute<{ name?: unknown }>(
+          sql`PRAGMA table_info(${sql.identifier(tableName)})`,
         ),
-      );
-      try {
-        for (const statement of planSqliteEdgeMatchIdentityAdoption(
-          edgeTableName,
-          columns,
-        )) {
-          await db.run(sql.raw(statement));
-        }
-        return;
-      } catch (error) {
-        if (
-          attempt === 2 ||
-          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
-        ) {
-          throw error;
-        }
-      }
-    }
-    throw new CompilerInvariantError(
-      "SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
-    );
+      execute: async (statement) => {
+        await db.run(sql.raw(statement));
+      },
+    });
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {

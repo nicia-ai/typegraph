@@ -1203,6 +1203,8 @@ export class MigrationError extends TypeGraphError {
 }
 
 export type BaseSchemaMigrationErrorDetails = Readonly<{
+  /** Runtime column refusal; installedVersion is unknown without an extra probe. */
+  missingColumn?: string;
   installedVersion: number | undefined;
   requiredVersion: number;
   reason: "missing" | "stale" | "newer";
@@ -1228,9 +1230,11 @@ export class BaseSchemaMigrationError extends TypeGraphError {
         "no installation marker"
       : `base schema version ${String(details.installedVersion)}`;
     super(
-      details.reason === "newer" ?
-        `The database has ${installed}, which is newer than this TypeGraph release supports (version ${String(details.requiredVersion)}).`
-      : `The database has ${installed}; this TypeGraph release requires base schema version ${String(details.requiredVersion)}.`,
+      details.missingColumn === undefined ?
+        details.reason === "newer" ?
+          `The database has ${installed}, which is newer than this TypeGraph release supports (version ${String(details.requiredVersion)}).`
+        : `The database has ${installed}; this TypeGraph release requires base schema version ${String(details.requiredVersion)}.`
+      : `The database is missing base-schema column ${details.missingColumn}; adopt base schema version ${String(details.requiredVersion)}.`,
       "BASE_SCHEMA_MIGRATION_REQUIRED",
       {
         category: "system",

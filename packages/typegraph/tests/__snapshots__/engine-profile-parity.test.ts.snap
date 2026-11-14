@@ -1537,8 +1537,16 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
   },
   {
-    "params": [],
-    "sql": "ALTER TABLE "typegraph_recorded_clock" ADD COLUMN IF NOT EXISTS "anchor_retention" TEXT;",
+    "params": [
+      ""typegraph_recorded_clock"",
+      ""typegraph_recorded_clock"",
+    ],
+    "sql": "
+        SELECT to_regclass($1) AS table_name,
+          EXISTS (SELECT 1 FROM pg_attribute
+            WHERE attrelid=to_regclass($2)
+              AND attname='anchor_retention' AND NOT attisdropped) AS has_retention
+      ",
   },
   {
     "params": [
@@ -3045,8 +3053,16 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
   },
   {
-    "params": [],
-    "sql": "ALTER TABLE "typegraph_recorded_clock" ADD COLUMN IF NOT EXISTS "anchor_retention" TEXT;",
+    "params": [
+      ""typegraph_recorded_clock"",
+      ""typegraph_recorded_clock"",
+    ],
+    "sql": "
+        SELECT to_regclass($1) AS table_name,
+          EXISTS (SELECT 1 FROM pg_attribute
+            WHERE attrelid=to_regclass($2)
+              AND attname='anchor_retention' AND NOT attisdropped) AS has_retention
+      ",
   },
   {
     "params": [
