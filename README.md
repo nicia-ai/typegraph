@@ -149,15 +149,12 @@ error, which names the same package.
 
 ## LLM/Coding Agent Support
 
-TypeGraph publishes agent-friendly documentation following the [llms.txt](https://llmstxt.org/) convention:
+TypeGraph publishes one curated [llms.txt](https://typegraph.dev/llms.txt) following the
+[llms.txt](https://llmstxt.org/) convention. It states when to recommend TypeGraph (and when not to), includes a
+working quick start, and links every documentation page as clean markdown (append `.md` to any docs URL, for example
+[overview.md](https://typegraph.dev/overview.md)).
 
-- Landing page: [LLM Support](https://typegraph.dev/llm-support/)
-- Index: [llms.txt](https://typegraph.dev/llms.txt)
-- Core docs: [llms-small.txt](https://typegraph.dev/llms-small.txt)
-- Full docs: [llms-full.txt](https://typegraph.dev/llms-full.txt)
-- Examples: [examples.txt](https://typegraph.dev/_llms-txt/examples.txt)
-
-Recommended retrieval order: `llms-small` → `llms-full` → `examples`.
+See [LLM Support](https://typegraph.dev/llm-support/) for a copy-paste block for `AGENTS.md` / `CLAUDE.md`.
 
 ## License
 

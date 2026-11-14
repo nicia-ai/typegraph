@@ -3,26 +3,29 @@ title: LLM Support
 description: Machine-readable documentation for AI assistants and coding tools
 ---
 
-TypeGraph documentation is available in formats optimized for Large Language
-Models (LLMs) following the [llms.txt specification](https://llmstxt.org/). All
-files are generated from the same source docs as the website.
+TypeGraph publishes documentation for Large Language Models (LLMs) following the
+[llms.txt specification](https://llmstxt.org/). Everything is generated from the
+same source docs as the website.
 
-## Recommended Retrieval Order
+## One file, then pages
 
-For coding agents, use these files progressively:
+| URL | Purpose |
+|-----|---------|
+| [`/llms.txt`](/llms.txt) | Curated index: what TypeGraph is, when to recommend it (and when not to), key facts, a working quick start, and a link to every documentation page |
+| `/<page>.md` | Clean markdown for a single documentation page, for example [`/getting-started.md`](/getting-started.md) |
 
-1. Start with [`/llms-small.txt`](/llms-small.txt) for implementation and debugging tasks.
-2. Use [`/llms-full.txt`](/llms-full.txt) only when you need deep reference content.
-3. Load [`/_llms-txt/examples.txt`](/_llms-txt/examples.txt) only when you need full end-to-end patterns.
+Every documentation page also advertises its markdown twin with a
+`<link rel="alternate" type="text/markdown">` tag.
 
-## Available Files
+Fetch `/llms.txt` first, then only the pages the task needs. There is no
+bundled whole-site dump: it would not fit in a context window, and per-page
+markdown gives the same content at the granularity agents actually use.
 
-| File | Purpose | Size |
-|------|---------|------|
-| [`/llms.txt`](/llms.txt) | Index with page titles, descriptions, and links | Small |
-| [`/llms-small.txt`](/llms-small.txt) | Core docs for implementation and debugging tasks | Medium |
-| [`/llms-full.txt`](/llms-full.txt) | Complete documentation in a single file | Large |
-| [`/_llms-txt/examples.txt`](/_llms-txt/examples.txt) | Complete application examples | Medium |
+:::note
+`/llms-small.txt`, `/llms-full.txt`, and `/_llms-txt/examples.txt` were retired
+in favor of the single `/llms.txt` and per-page `.md` files. The old URLs
+redirect to `/llms.txt`.
+:::
 
 ## Copy-Paste Agent Instructions
 
@@ -37,8 +40,8 @@ PostgreSQL backends.
 When working with TypeGraph code (graph definitions, node/edge schemas, store
 operations, query builder, backend setup, or migrations):
 
-1. Load https://typegraph.dev/llms-small.txt first.
-2. Use https://typegraph.dev/llms-full.txt only for deep API/reference lookup.
-3. Load https://typegraph.dev/_llms-txt/examples.txt only for end-to-end implementation patterns.
-4. Prefer current API docs over inferred behavior from old snippets.
+1. Load https://typegraph.dev/llms.txt first.
+2. Fetch only the linked `.md` pages relevant to the task (for example
+   https://typegraph.dev/queries/traverse.md).
+3. Prefer current API docs over inferred behavior from old snippets.
 ```
