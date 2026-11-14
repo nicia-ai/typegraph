@@ -14,7 +14,7 @@ import type {
 
 /** Execution choices for a one-statement read batch. */
 export type BatchOnceOptions = Readonly<{
-  /** Share hydration among compatible subgraphs. Recommended for overlapping, payload-heavy roots. Defaults to false. */
+  /** Deduplicate entity payloads among compatible subgraphs. Recommended for overlapping, payload-heavy roots. Defaults to false. */
   shareSubgraphs?: boolean;
 }>;
 

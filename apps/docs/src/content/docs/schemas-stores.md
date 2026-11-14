@@ -2394,10 +2394,10 @@ const [social, work] = await store.batchOnce((read) => [
 ]);
 ```
 
-One statement means one round trip, not one shared traversal by default. Overlapping subgraphs are
-planned and hydrated independently. For compatible, overlapping, payload-heavy subgraphs, pass
-`{ shareSubgraphs: true }` as the second `batchOnce()` argument to traverse the roots together and
-hydrate each shared entity once:
+Compatible subgraph reads use one origin-keyed recursive traversal by default, while returning
+entity payloads per request. For compatible, overlapping, payload-heavy subgraphs, pass
+`{ shareSubgraphs: true }` as the second `batchOnce()` argument to send each shared entity once
+with request memberships:
 
 ```typescript
 const details = await store.batchOnce(

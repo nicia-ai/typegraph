@@ -3,12 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { indexSubgraph } from "../../../src";
 import { ConfigurationError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
+import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
-/**
- * Hydrating 500 subgraphs in one statement takes about 3.5s alone on
- * PostgreSQL, too close to the 15s default on a loaded CI host.
- */
+/** Allow slow CI hosts to execute the full portable request cap. */
 const FULL_BATCH_CAP_TIMEOUT_MS = 60_000;
 
 type MultiRootTestStore = ReturnType<IntegrationTestContext["getStore"]>;
@@ -80,12 +78,21 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
       it(
         "composes the full 500-read cap into one statement or refuses it by bind budget",
         async () => {
-          const store = context.getStore();
+          const statements: string[] = [];
+          const store = await context.createStore(integrationTestGraph, {
+            hooks: {
+              onQueryStart: (query) => {
+                statements.push(query.sql);
+              },
+            },
+          });
           const people = [seeded.alice, seeded.bob, seeded.charlie] as const;
           const roots = Array.from(
             { length: 500 },
             (_, index) => people[index % people.length] ?? seeded.alice,
           );
+
+          statements.length = 0;
 
           // Composing 500 reads must never overflow the call stack. A backend
           // whose bind budget cannot hold the statement refuses it with the
@@ -106,6 +113,8 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
               (error: unknown) => ({ error }) as const,
             );
 
+          const statement = statements[0] ?? "";
+
           const observed =
             "error" in outcome ?
               {
@@ -119,15 +128,77 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
             : {
                 outcome: "ran",
                 rootIds: outcome.results.map((result) => result.root?.id),
+                statementCount: statements.length,
+                recursivePlans: (statement.match(/WITH RECURSIVE/gi) ?? [])
+                  .length,
+                sourcePlans: (
+                  statement.match(/typegraph_batch_source_\d+"? AS/g) ?? []
+                ).length,
+                compactSql: statement.length < 100_000,
+                sharedPayload: statement.includes(
+                  "typegraph_shared_memberships",
+                ),
               };
           expect(observed).toEqual(
             observed.outcome === "refused" ?
               { outcome: "refused", typedBudgetRefusal: true }
-            : { outcome: "ran", rootIds: roots.map((rootNode) => rootNode.id) },
+            : {
+                outcome: "ran",
+                rootIds: roots.map((rootNode) => rootNode.id),
+                statementCount: 1,
+                recursivePlans: 1,
+                sourcePlans: 1,
+                compactSql: true,
+                sharedPayload: shareSubgraphs,
+              },
           );
         },
         FULL_BATCH_CAP_TIMEOUT_MS,
       );
+
+      it("uses one recursive plan for compatible roots with independent payload modes", async () => {
+        const statements: string[] = [];
+        const store = await context.createStore(integrationTestGraph, {
+          hooks: {
+            onQueryStart: (query) => {
+              statements.push(query.sql);
+            },
+          },
+        });
+        const options = {
+          edges: ["knows", "worksAt"],
+          maxDepth: 2,
+          edgeWindows: {
+            knows: { limit: 1, orderBy: { field: "id", direction: "asc" } },
+          },
+        } as const;
+        const roots = [
+          seeded.alice,
+          seeded.bob,
+          seeded.charlie,
+          seeded.acme,
+          { kind: "Person", id: "missing-compact-root" },
+          seeded.alice,
+        ] as const;
+        const independent = await Promise.all(
+          roots.map((root) => store.subgraph(root as never, options)),
+        );
+        statements.length = 0;
+        const batched = await store.batchOnce(
+          (read) => roots.map((root) => read.subgraph(root as never, options)),
+          { shareSubgraphs },
+        );
+        expect(batched).toEqual(independent);
+        expect(statements).toHaveLength(1);
+        const statement = requireDefined(statements[0]);
+        expect(statement.match(/WITH RECURSIVE/gi)).toHaveLength(1);
+        expect(statement.includes("typegraph_shared_memberships")).toBe(
+          shareSubgraphs,
+        );
+        expect(statement.includes("typegraph_subgraph_request")).toBe(
+          !shareSubgraphs,
+        );
+      });
 
       it("preserves independent result slots for duplicate, missing, overlapping, and cyclic roots", async () => {
         const store = context.getStore();

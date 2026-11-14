@@ -400,10 +400,11 @@ const [social, employment] = await store.batchOnce((read) => [
 ]);
 ```
 
-The one-statement guarantee reduces round trips, which is often valuable for remote databases. By
-default it does not combine recursive plans or share hydration between overlapping subgraphs, and
-it does not promise less database work than direct `store.subgraph()` calls. The explicit
-`shareSubgraphs` option changes that planning choice for compatible subgraph members only.
+The one-statement guarantee reduces round trips, which is often valuable for remote databases.
+Compatible subgraph reads use one origin-keyed recursive traversal in either payload mode,
+keeping planner overhead bounded as the root count grows. By default each request carries its own
+entity payloads. The explicit `shareSubgraphs` option sends overlapping entities once with request
+memberships. Incompatible options still require separate plans.
 
 Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
 sequential execution is the intended connection profile.

@@ -469,10 +469,11 @@ const [activeUsers, recentOrders] = await store.batchOnce(() => [
 ]);
 ```
 
-Runtime arrays of compatible `read.subgraph()` calls can opt into shared traversal and hydration
+Runtime arrays of compatible `read.subgraph()` calls use one origin-keyed recursive traversal
+by default and can opt into deduplicated entity payloads
 with `store.batchOnce(build, { shareSubgraphs: true })`. This helps overlapping, payload-heavy
 neighborhoods; it adds overhead for membership and per-request reconstruction, so the independent
-one-statement plan remains the default. Measure the real root overlap and projection rather than
+per-request payload remains the default. Measure the real root overlap and projection rather than
 enabling sharing universally.
 
 Compare the [concrete sharing examples](#choosing-shared-subgraphs) before enabling the option.
@@ -686,7 +687,8 @@ both response size and elapsed time before choosing it.
 | Disjoint roots, full 256-byte payload | About 21–25% more | Default batching |
 | 75% overlap, identities only | About 10–18% more | Default batching; measure latency |
 
-These response-size differences appeared in small local SQLite and PostgreSQL runs
+These measurements predate the default origin-keyed traversal; remeasure latency for the current
+planner. These response-size differences appeared in small local SQLite and PostgreSQL runs
 and a same-region remote Neon PostgreSQL run; they are not universal thresholds.
 Bytes measure JSON encoding at the backend boundary, not protocol traffic. In the
 remote run, shared batches were faster at the median in all three shapes, including

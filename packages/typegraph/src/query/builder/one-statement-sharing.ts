@@ -12,6 +12,7 @@ export type OneStatementSharing = Readonly<{
   key: string;
   combine: (
     items: readonly OneStatementBatchItem[],
+    sharePayloads: boolean,
   ) => OneStatementBatchItem<readonly unknown[]>;
 }>;
 
@@ -32,7 +33,7 @@ export function registerOneStatementSharing(
 
 export function groupOneStatementBatchItems(
   items: readonly OneStatementBatchItem[],
-  enabled: boolean,
+  sharePayloads: boolean,
 ): readonly OneStatementBatchGroup[] {
   const groups: {
     indices: number[];
@@ -40,7 +41,7 @@ export function groupOneStatementBatchItems(
   }[] = [];
   const owners = new Map<object, Map<string, number>>();
   for (const [index, item] of items.entries()) {
-    const plan = enabled ? sharing.get(item) : undefined;
+    const plan = sharing.get(item);
     if (plan === undefined) {
       groups.push({ indices: [index], sharing: undefined });
       continue;
@@ -62,7 +63,7 @@ export function groupOneStatementBatchItems(
       indices: group.indices,
       item:
         group.sharing !== undefined && inputs.length > 1 ?
-          group.sharing.combine(inputs)
+          group.sharing.combine(inputs, sharePayloads)
         : { ...first, mapRows: (rows) => [first.mapRows(rows)] },
     };
   });
