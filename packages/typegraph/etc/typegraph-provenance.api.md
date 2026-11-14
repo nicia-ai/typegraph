@@ -4771,6 +4771,18 @@ type ProvenanceSourceConfig<G extends GraphDef = GraphDef> = Readonly<{
     retractedField?: string;
 }>;
 
+// @public (undocumented)
+type PruneRecordedInstantsOptions = Readonly<{
+    limit?: number;
+}>;
+
+// @public (undocumented)
+type PruneRecordedInstantsResult = Readonly<{
+    deletedCount: number;
+    retainedBoundary: RecordedInstant | undefined;
+    hasMore: boolean;
+}>;
+
 // @public
 type PurgeEdgeClaimsParams = Readonly<{
     graphId: string;
@@ -6018,7 +6030,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: GraphNodeReference<G>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
-    pruneRecordedInstants?: (before: string) => Promise<void>;
+    pruneRecordedInstants?: (before: string, options?: PruneRecordedInstantsOptions) => Promise<PruneRecordedInstantsResult>;
     clear: (options?: Readonly<{
         preserveContributionMaterializations?: boolean;
     }>) => Promise<void>;

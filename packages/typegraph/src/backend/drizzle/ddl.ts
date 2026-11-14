@@ -829,3 +829,21 @@ export function generateVectorlessPostgresMigrationSQL(
 ): string {
   return generatePostgresInstallationSQL(tables, fulltextStrategy, false);
 }
+
+/** Version-9 nullable retention watermark on the existing owned clock row. */
+export function recordedAnchorRetentionColumnDDL(
+  tableName: string,
+  ifNotExists = false,
+): string {
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${ifNotExists ? "IF NOT EXISTS " : ""}${quoteDdlIdentifier("anchor_retention")} TEXT;`;
+}
+
+/** Shared by synchronous managed SQLite bootstrap and asynchronous adoption. */
+export function planRecordedAnchorRetentionAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  return existingColumns.size === 0 || existingColumns.has("anchor_retention") ?
+      []
+    : [recordedAnchorRetentionColumnDDL(tableName)];
+}

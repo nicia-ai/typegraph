@@ -323,41 +323,50 @@ engine-native history refuse with `UnsupportedBackendCapabilityError`.
 
 ### Retain and prune allocation metadata
 
-Long-running captured graphs accumulate one allocation-log row per committed write
-transaction. Call `store.pruneRecordedInstants(before)` with a canonical UTC
-ISO timestamp to bound this lookup metadata:
+Long-running captured graphs accumulate allocation-log rows. Use a canonical UTC
+ISO timestamp and a bounded batch size to retire old wall-clock lookup coverage:
 
 ```typescript
-await store.pruneRecordedInstants("2026-06-01T00:00:00.000Z");
+const before = "2026-06-01T00:00:00.000Z";
+let progress;
+do {
+  progress = await store.pruneRecordedInstants(before, { limit: 1000 });
+  console.log(progress.deletedCount, progress.retainedBoundary);
+} while (progress.hasMore);
 ```
 
-The operation keeps the highest revision allocated at or before `before` and
-all later allocations. It also keeps revision one, when present, as evidence of
-the first allocation. This constant-size witness preserves the distinction
-between a request before the graph's first allocation (`undefined`) and a
-request within pruned history (`RECORDED_LOOKUP_HISTORY_PRUNED`). Once a gap
-exists between the witness and the retained suffix, wall-clock resolution
-refuses requests from the first allocation up to the suffix's timestamp. The
-witness is not a historical lookup result in that interval. Equal timestamps
-still resolve to the highest retained revision.
+Each call deletes at most `limit` rows in one transaction (default 1,000;
+maximum 10,000). It keeps the highest revision allocated at or before `before`
+and every later allocation. Equal timestamps select the highest revision,
+using exactly the same candidate selection as `resolveRecordedInstant`.
+The result reports the actual deleted count, the owned `RecordedInstant` at
+the retained boundary, and whether physical cleanup has more work.
 
-Pruning before the first allocation does nothing; a future cutoff keeps the
-latest allocation plus the witness. Repeated calls are idempotent when no new eligible allocations have appeared;
-an older cutoff cannot restore coverage. Each call chooses its boundary from
-the allocations visible to that statement, so newer writes can advance it,
-including a higher revision at the same timestamp. If logging began after revision one,
-coverage before the retained suffix remains unknown and resolution refuses with
-`RECORDED_LOOKUP_HISTORY_NOT_LOGGED`; pruning never invents proof of an empty past.
+The first successful batch atomically persists a coverage watermark and retires
+all wall-clock lookup coverage below that boundary, even if some old rows remain
+for later batches. `hasMore` describes pending physical cleanup, not continued
+lookup availability. A retention job can resume with the same cutoff after an
+interruption; older cutoffs cannot move the watermark backward and can finish
+previously retired cleanup. Pruning before the first allocation does nothing
+when no coverage was previously retired. A future cutoff keeps the latest allocation.
 
-The owner-scoped deletion selects its boundary and removes older rows in one
-atomic statement. Concurrent writes retain their newer revisions; concurrent
-prunes can only advance the retained suffix. A lookup observes either side of
-a prune in one database snapshot. The existing time and revision indexes serve
-these operations on SQLite and PostgreSQL, including custom table namespaces.
-No schema migration is needed beyond base-schema version 7. Upgrade every
-application that resolves wall-clock cuts against the same database before the
-first prune: older versions do not recognize the first-allocation witness and
-can return it as a stale result inside pruned coverage.
+The watermark preserves the first allocation time when known, so a request before
+that time returns `undefined`; requests within explicitly retired coverage raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`. Naturally gapped logs are valid and do not imply
+pruning. If logging began after revision one, earlier unlogged times still raise
+`RECORDED_LOOKUP_HISTORY_NOT_LOGGED`, while explicitly retired logged times raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`.
+
+Each batch uses the same graph write fence as captured writers and owner rotation.
+Concurrent writers keep their newer revisions, and competing prunes advance coverage
+monotonically. Lookup reads the watermark and candidate in one database snapshot.
+The existing time and revision indexes serve candidate selection and bounded deletion
+on SQLite and PostgreSQL, including custom table namespaces.
+
+Upgrade to base-schema version 9 before using this API. It adds the nullable
+`anchor_retention` column to the recorded clock; adoption preserves existing rows
+and does not infer earlier pruning. Upgrade all applications sharing the database
+before enabling a retention job, so every reader honors the persisted watermark.
 
 Pruning affects only wall-clock-to-anchor lookup metadata. It does not rotate
 the allocation owner, advance the graph clock, remove captured node or edge

@@ -248,6 +248,7 @@ export function createSqliteTables(
       graphId: text("graph_id").notNull(),
       revision: integer("revision").notNull(),
       recordedAt: text("recorded_at").notNull(),
+      anchorRetention: text("anchor_retention"),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
@@ -262,7 +263,12 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
-      index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
     ],
   );
 
@@ -276,7 +282,9 @@ export function createSqliteTables(
       operationDigest: text("operation_digest").notNull(),
       evidence: text("evidence").notNull(),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = sqliteTable(
@@ -299,7 +307,12 @@ export function createSqliteTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY

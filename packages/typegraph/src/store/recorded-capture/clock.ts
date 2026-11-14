@@ -60,6 +60,7 @@ type RevisionOriginBackend = Pick<
  * this internal row and is never exposed as a valid recorded instant.
  */
 const RECORDED_MIN_REVISION = 0;
+export const RECORDED_FIRST_REVISION = RECORDED_MIN_REVISION + 1;
 const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 
@@ -328,7 +329,7 @@ function nextRecordedCommitParts(
 ): RecordedClockParts {
   const wallTime = nowIso();
   if (previous === undefined) {
-    return { revision: 1, recordedAt: wallTime };
+    return { revision: RECORDED_FIRST_REVISION, recordedAt: wallTime };
   }
 
   return {

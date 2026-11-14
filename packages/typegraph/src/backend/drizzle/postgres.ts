@@ -217,6 +217,7 @@ import {
   generatePostgresEdgeMatchIdentityUpgradeDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
+  recordedAnchorRetentionColumnDDL,
 } from "./ddl";
 import {
   type BaseSchemaRuntime,
@@ -513,14 +514,19 @@ END; $tg$`;
     EXECUTE $definition$ ${functionDdl} $definition$;
   END IF;
 END; $install$`;
-  const triggerDdl = postgresRevisionChangeTargets(names).map(({ entity, table }) => {
-    const triggerName = revisionChangeTriggerName(entity, table);
-    const relation = postgresIdentifierRegclassName(table).replaceAll("'", "''");
-    const trigger = triggerName.replaceAll("'", "''");
-    const journal = names.revisionChanges.replaceAll("'", "''");
-    const clock = names.recordedClock.replaceAll("'", "''");
-    return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
-  });
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
   return [installFunctionDdl, ...triggerDdl];
 }
 
@@ -1142,9 +1148,9 @@ function buildPostgresEngineProfileInternal(
   // DDL this backend issues then runs where the allocation lives.
   const allocationSchema = allocationSchemaOfTables(tables);
   const allocationPin =
-    allocationSchema === undefined ?
-      undefined
-    : toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres");
+    allocationSchema === undefined ? undefined : (
+      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
+    );
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1274,13 +1280,17 @@ function buildPostgresEngineProfileInternal(
   );
   const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
   const bareClient =
-    typeof rawClient === "object" &&
-    rawClient !== null &&
-    isBarePgClient(rawClient as Readonly<Record<string, unknown>>) ?
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
       rawClient
     : undefined;
   const queueOwner =
-    transactionScoped ? (getPinnedPostgresTransactionClient(db) ?? db) : bareClient;
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
@@ -1317,7 +1327,9 @@ function buildPostgresEngineProfileInternal(
     baseSchemaVersions: getTableName(tables.baseSchemaVersions),
     graphTemplates: getTableName(tables.graphTemplates),
     indexMaterializations: getTableName(tables.indexMaterializations),
-    contributionMaterializations: getTableName(tables.contributionMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
     kindRemovals: getTableName(tables.kindRemovals),
     reconciliationMarkers: getTableName(tables.reconciliationMarkers),
   } satisfies PostgresTableNames;
@@ -1610,8 +1622,9 @@ function buildPostgresEngineProfileInternal(
     revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
     async revisionChangesJournalReady(): Promise<boolean> {
       const expectedTriggers = portableSql.join(
-        postgresRevisionChangeTargets(tableNames).map(({ entity, table }) =>
-          portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
         ),
         portableSql`, `,
       );
@@ -1916,6 +1929,18 @@ function buildPostgresEngineProfileInternal(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
     storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
+    async ensureRecordedAnchorRetentionStorage(clockProvisioned) {
+      if (!clockProvisioned)
+        await executeConcurrentCreateDdl(
+          generatePgCreateTableSQL(tables.recordedClock),
+        );
+      await executeConcurrentCreateDdl(
+        recordedAnchorRetentionColumnDDL(
+          getTableName(tables.recordedClock),
+          true,
+        ),
+      );
+    },
     recordedAnchorsDdl: [
       generatePgCreateTableSQL(tables.recordedAnchors),
       ...generatePgCreateIndexSQL(tables.recordedAnchors),

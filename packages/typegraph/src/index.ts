@@ -1046,6 +1046,10 @@ export {
   type DatabaseExpression,
   expr,
 } from "./query/expressions";
+export type {
+  PruneRecordedInstantsOptions,
+  PruneRecordedInstantsResult,
+} from "./store/recorded-anchor-log";
 export {
   // ID utilities
   generateId,

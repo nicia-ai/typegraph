@@ -97,8 +97,7 @@ export type CreatePostgresTablesOptions = Readonly<{
   indexes?: readonly IndexDeclaration[] | undefined;
   /** Resolve graph index identifiers for an isolated physical namespace. */
   physicalIndexName?:
-    | ((index: RelationalIndexDeclaration) => string)
-    | undefined;
+    ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
 const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
@@ -259,6 +258,7 @@ export function createPostgresTables(
       graphId: text("graph_id").notNull(),
       revision: bigint("revision", { mode: "number" }).notNull(),
       recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      anchorRetention: text("anchor_retention"),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
@@ -273,7 +273,12 @@ export function createPostgresTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
-      index(systemIndexName(n.recordedAnchors, "time_idx")).on(t.graphId, t.origin, t.recordedAt, t.revision),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
     ],
   );
 
@@ -287,7 +292,9 @@ export function createPostgresTables(
       operationDigest: text("operation_digest").notNull(),
       evidence: text("evidence").notNull(),
     },
-    (t) => [primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] })],
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = pgTable(
@@ -310,7 +317,12 @@ export function createPostgresTables(
       kind: text("kind").notNull(),
       id: text("id").notNull(),
     },
-    (t) => [index(`${n.revisionChanges}_graph_revision_idx`).on(t.graphId, t.revision)],
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
   );
 
   // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY

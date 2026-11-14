@@ -80,6 +80,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
+  isSqliteDuplicateColumnError,
   isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
@@ -196,6 +197,7 @@ import {
   generateSqliteCreateIndexSQL,
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
+  planRecordedAnchorRetentionAdoption,
   planSqliteEdgeMatchIdentityAdoption,
   sqliteContributions,
 } from "./ddl";
@@ -1273,7 +1275,7 @@ function getSerializedSqliteConnection(
   // same `ctx.storage` shares its one connection and its ambient transaction.
   const storageClient = getDurableObjectStorageClient(db);
   if (storageClient !== undefined) return storageClient;
-  return isLocalLibsqlClient(client) ? (client) : undefined;
+  return isLocalLibsqlClient(client) ? client : undefined;
 }
 
 /**
@@ -1545,24 +1547,40 @@ export function buildSqliteEngineProfile(
     revisionChangesJournalReady: () =>
       runWithSerializedQueue(serializedQueue, async () => {
         const specifications = sqliteRevisionChangeTriggerSpecs(tableNames);
-        const names = [tableNames.revisionChanges, ...specifications.map((specification) => specification.name)];
-        const rows = await executionAdapter.execute<Readonly<{
-          type: string;
-          name: string;
-          tbl_name: string;
-          sql: string | null;
-        }>>(portableSql`
+        const names = [
+          tableNames.revisionChanges,
+          ...specifications.map((specification) => specification.name),
+        ];
+        const rows = await executionAdapter.execute<
+          Readonly<{
+            type: string;
+            name: string;
+            tbl_name: string;
+            sql: string | null;
+          }>
+        >(portableSql`
           SELECT type, name, tbl_name, sql FROM sqlite_master
           WHERE name IN (${sqlValueList(names)})
         `);
-        if (!rows.some((row) => row.type === "table" && row.name === tableNames.revisionChanges)) return false;
+        if (
+          !rows.some(
+            (row) =>
+              row.type === "table" && row.name === tableNames.revisionChanges,
+          )
+        )
+          return false;
         return specifications.every((specification) =>
-          rows.some((row) =>
-            row.type === "trigger" &&
-            row.name === specification.name &&
-            row.tbl_name === specification.table &&
-            row.sql?.includes(`AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`) === true &&
-            row.sql.includes(`INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`),
+          rows.some(
+            (row) =>
+              row.type === "trigger" &&
+              row.name === specification.name &&
+              row.tbl_name === specification.table &&
+              row.sql?.includes(
+                `AFTER ${specification.action} ON ${quoteRevisionJournalIdentifier(specification.table)}`,
+              ) === true &&
+              row.sql.includes(
+                `INSERT INTO ${quoteRevisionJournalIdentifier(tableNames.revisionChanges)}`,
+              ),
           ),
         );
       }),
@@ -1606,6 +1624,39 @@ export function buildSqliteEngineProfile(
       // `executionAdapter` — see `CreateSqliteOperationBackendOptions.catalog`.
       catalog: provisioning.catalog,
     });
+  }
+
+  async function ensureRecordedAnchorRetentionStorage(
+    clockProvisioned: boolean,
+  ): Promise<void> {
+    if (!clockProvisioned)
+      await provisioning.ensureTable(
+        generateSqliteCreateTableSQL(tables.recordedClock),
+      );
+    const tableName = getTableName(tables.recordedClock);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const rows = await executionAdapter.execute<{ name: string }>(
+        sql`PRAGMA table_info(${sql.identifier(tableName)})`,
+      );
+      const columns = new Set(rows.map((row) => row.name));
+      try {
+        for (const statement of planRecordedAnchorRetentionAdoption(
+          tableName,
+          columns,
+        ))
+          await db.run(sql.raw(statement));
+        return;
+      } catch (error) {
+        if (
+          attempt > 0 ||
+          !isSqliteDuplicateColumnError(error, "anchor_retention")
+        )
+          throw error;
+      }
+    }
+    throw new CompilerInvariantError(
+      "Recorded retention adoption exhausted its retry loop.",
+    );
   }
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
@@ -1762,6 +1813,7 @@ export function buildSqliteEngineProfile(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
     storeOperationsDdl: [generateSqliteCreateTableSQL(tables.storeOperations)],
+    ensureRecordedAnchorRetentionStorage,
     recordedAnchorsDdl: [
       generateSqliteCreateTableSQL(tables.recordedAnchors),
       ...generateSqliteCreateIndexSQL(tables.recordedAnchors),

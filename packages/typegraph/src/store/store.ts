@@ -371,6 +371,9 @@ import {
 import {
   lookupRecordedAnchor,
   pruneRecordedAnchors,
+  type PruneRecordedInstantsOptions,
+  type PruneRecordedInstantsResult,
+  type RecordedAnchorLogContext,
 } from "./recorded-anchor-log";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
@@ -885,7 +888,10 @@ type StoreCore<G extends GraphDef> = Readonly<{
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
   /** Explicit allocation-log retention; concrete Stores always provide it. */
-  pruneRecordedInstants?: (before: string) => Promise<void>;
+  pruneRecordedInstants?: (
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ) => Promise<PruneRecordedInstantsResult>;
   clear: (
     options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
   ) => Promise<void>;
@@ -3074,41 +3080,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async resolveRecordedInstant(
     wallTime: string,
   ): Promise<RecordedInstant | undefined> {
-    this.#requireRecordedAnchorLookup("resolveRecordedInstant");
-    return lookupRecordedAnchor(
-      this.#backend,
-      this.#sqlSchema(),
-      this.graphId,
-      wallTime,
-    );
+    return lookupRecordedAnchor(this.#recordedAnchorLogContext(), wallTime);
   }
 
-  /**
-   * Bound allocation-time lookup metadata. Retains the latest allocation at or
-   * before `before`, all newer allocations, and the first-allocation witness.
-   * Pruned wall-clock lookups refuse; saved anchors and recorded entity history
-   * remain valid. Coordinate checkpoint and entity-history retention externally.
-   */
-  async pruneRecordedInstants(before: string): Promise<void> {
-    this.#requireRecordedAnchorLookup("pruneRecordedInstants");
-    await pruneRecordedAnchors(
-      this.#baseBackend,
-      this.#sqlSchema(),
-      this.graphId,
+  /** Retire allocation coverage and delete at most one bounded batch per call. */
+  pruneRecordedInstants(
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ): Promise<PruneRecordedInstantsResult> {
+    return pruneRecordedAnchors(
+      this.#recordedAnchorLogContext(),
       before,
+      options,
     );
   }
 
-  #requireRecordedAnchorLookup(surface: string): void {
-    if (
-      !this.#captureEnabled ||
-      this.#recordedTimeOwnership !== "typegraph-relations"
-    )
-      throw new UnsupportedBackendCapabilityError(
-        surface,
-        "recordedAnchorLookup",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
-      );
+  #recordedAnchorLogContext(): RecordedAnchorLogContext {
+    return {
+      backend: this.#baseBackend,
+      schema: this.#sqlSchema(),
+      graphId: this.graphId,
+      captureEnabled: this.#captureEnabled,
+    };
   }
 
   /**
