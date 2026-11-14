@@ -19,7 +19,7 @@ import {
   MAXIMUM_FINITE_DOUBLE_TEXT,
 } from "./numeric-conversion";
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
-import { type DialectAdapter } from "./types";
+import { type BuiltinDialectAdapter } from "./types";
 
 function buildRowsJsonObject(
   rowAlias: string,
@@ -129,7 +129,7 @@ function isArrayIndex(segment: string): boolean {
 /**
  * SQLite dialect adapter implementation.
  */
-export const sqliteDialect: DialectAdapter = {
+export const sqliteDialect: BuiltinDialectAdapter = {
   safeNumericConversion(expression) {
     const trimmed = sql`trim(${expression})`;
     const wrapped = sql`'[' || ${trimmed} || ']'`;

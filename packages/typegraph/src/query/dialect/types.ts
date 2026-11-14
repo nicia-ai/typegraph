@@ -761,3 +761,7 @@ export interface DialectAdapter {
    */
   readonly fulltext: FulltextStrategy | undefined;
 }
+
+/** Bundled dialects must support every operation consumed by the batch compiler. */
+export type BuiltinDialectAdapter = DialectAdapter &
+  Required<Pick<DialectAdapter, "partitionedRowsJsonArrays">>;

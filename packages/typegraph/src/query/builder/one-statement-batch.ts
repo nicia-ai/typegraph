@@ -1,7 +1,6 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
-import { requireDefined } from "../../utils/presence";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -170,8 +169,7 @@ export async function executeOneStatementBatch<
       sql`${sql.identifier(rowsName)} AS (SELECT ${sql.identifier(sourceName)}.*, ROW_NUMBER() OVER (${ordinalOrder}) AS ${sql.identifier(ORDER_COLUMN)} FROM ${sql.identifier(sourceName)})`,
     );
     if (item.payloadPartitionColumn !== undefined) {
-      // getDialect resolves bundled adapters, which provide partitioned aggregation.
-      const payloads = requireDefined(dialect.partitionedRowsJsonArrays)(
+      const payloads = dialect.partitionedRowsJsonArrays(
         rowsName,
         [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
         ORDER_COLUMN,

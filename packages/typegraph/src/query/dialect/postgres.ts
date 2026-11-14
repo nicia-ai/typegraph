@@ -20,7 +20,7 @@ import {
   inlineSqlStringLiteral,
   packSqlListValue,
 } from "./profile";
-import { type DialectAdapter } from "./types";
+import { type BuiltinDialectAdapter } from "./types";
 
 const SCALAR_SQL_TYPES: Readonly<
   Record<PortableCountDistinctValueType, string>
@@ -154,7 +154,7 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 /**
  * PostgreSQL dialect adapter implementation.
  */
-export const postgresDialect: DialectAdapter = {
+export const postgresDialect: BuiltinDialectAdapter = {
   safeNumericConversion(expression) {
     const trimmed = sql`btrim(${expression}, ${" \t\r\n"})`;
     const exact = sql`CAST(${trimmed} AS NUMERIC)`;
