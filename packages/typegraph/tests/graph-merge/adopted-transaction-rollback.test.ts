@@ -55,6 +55,7 @@ describe("adopted merge mid-apply rollback", () => {
   async function mergeTarget(
     history: boolean,
     refuseEncounterWrites: () => boolean,
+    ended: string[] = [],
   ) {
     const { backend } = createLocalSqliteBackend();
     cleanups.push(() => backend.close());
@@ -63,6 +64,12 @@ describe("adopted merge mid-apply rollback", () => {
       revisionTracking: true,
       history,
       hooks: {
+        onOperationEnd: (operation) => {
+          ended.push(operation.kind);
+        },
+        onBulkOperationEnd: (operation) => {
+          ended.push(operation.kind);
+        },
         onOperationStart: (operation) => {
           if (operation.entity !== "node" || operation.kind !== "Encounter")
             return;
@@ -173,6 +180,58 @@ describe("adopted merge mid-apply rollback", () => {
       ).resolves.toBeDefined();
       expect(await target.revisionNow()).not.toEqual(revisionBefore);
       expect(await target.verifyConstraintFences()).toEqual([]);
+    },
+  );
+
+  it.each(
+    [false, true].flatMap((history) =>
+      [false, true].flatMap((adopted) =>
+        [false, true].map((continueWriting) => ({
+          history,
+          adopted,
+          continueWriting,
+        })),
+      ),
+    ),
+  )(
+    "discards failed apply hooks and revision flags (history: $history, adopted: $adopted, continue: $continueWriting)",
+    async ({ history, adopted, continueWriting }) => {
+      let refuse = false;
+      const ended: string[] = [];
+      const { backend, target, artifact } = await mergeTarget(
+        history,
+        () => refuse,
+        ended,
+      );
+      const before = await target.revisionNow();
+      ended.length = 0;
+      refuse = true;
+      const run = async (
+        tx: Parameters<Parameters<typeof target.transactionWithReceipt>[0]>[0],
+      ) => {
+        await expect(
+          applyMergePlanInTransaction(target, tx, artifact),
+        ).rejects.toBeInstanceOf(MergeError);
+        expect(ended).toEqual([]);
+        if (continueWriting)
+          await tx.nodes.Patient.create(
+            { name: "Application" },
+            { id: "application" },
+          );
+      };
+      const { receipt } =
+        adopted ?
+          await backend.transactionWithNative(async (_target, native) =>
+            target.withRecordedTransaction(native, run),
+          )
+        : await target.transactionWithReceipt(run);
+      expect(ended).toEqual(continueWriting ? ["Patient"] : []);
+      expect(receipt.writes.total).toBe(continueWriting ? 1 : 0);
+      expect(await target.nodes.Encounter.find()).toEqual([]);
+      if (!continueWriting) {
+        expect(receipt.recorded).toBeUndefined();
+        expect(await target.revisionNow()).toEqual(before);
+      }
     },
   );
   // MUTATION CHECK (verified): calling `applyValidatedMergePlanInTransaction`

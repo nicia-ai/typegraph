@@ -676,7 +676,9 @@ export type StoreHooks = Readonly<{
    * reported through `onError` instead. (Inside an adopted transaction —
    * `withTransaction` / `withRecordedTransaction` — the commit belongs to
    * the caller and cannot be observed, so this fires when the operation
-   * completes within the still-open transaction.)
+   * completes within the still-open transaction.) Operations inside a
+   * TypeGraph-owned savepoint wait until that savepoint is released; rolling
+   * it back discards their success notifications.
    *
    * A composition whole's delete cascades to its parts (see
    * [Composition Cascade](https://typegraph.dev/limitations#composition-cascade))
@@ -699,6 +701,7 @@ export type StoreHooks = Readonly<{
   /**
    * Called after a set-based mutation durably commits. Inside
    * `store.transaction`, emission is deferred until the enclosing commit.
+   * Adopted transactions follow the same savepoint rule as `onOperationEnd`.
    */
   onBulkOperationEnd?: (
     ctx: BulkOperationHookContext,

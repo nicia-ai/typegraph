@@ -17,12 +17,14 @@ import { z } from "zod";
 
 import {
   asEdgeId,
+  createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   UniquenessError,
 } from "../../../src";
+import { statementExecutionVerdict } from "../../../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -30,6 +32,8 @@ import {
 } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
+import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
+import { transactionBackend } from "../../../src/store/runtime-port";
 import { type IntegrationTestContext } from "./test-context";
 
 const SavepointStamp = defineNode("SavepointStamp", {
@@ -141,6 +145,125 @@ export function registerSavepointRecoveryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("a refusal recovered through a savepoint", () => {
+    it.each(
+      [false, true].flatMap((history) =>
+        [false, true].map((priorWrite) => ({ history, priorWrite })),
+      ),
+    )(
+      "restores session state while retaining earlier writes (history: $history, prior write: $priorWrite)",
+      async ({ history, priorWrite }) => {
+        const options = { revisionTracking: true };
+        const store =
+          history ?
+            await context.createHistoryStore(stampGraph, options)
+          : await context.createStore(stampGraph, options);
+        const statements = statementExecutionVerdict(context.getBackend());
+        if (!statements.supported)
+          throw new Error("Fixture requires statement execution");
+        const revision = await store.revisionNow();
+        const { receipt } = await store.transactionWithReceipt(async (tx) => {
+          if (priorWrite)
+            await tx.nodes.SavepointNote.create({ body: "survivor" });
+          await runRecordedTransactionSavepoint(
+            transactionBackend(tx),
+            statements,
+            "test_outer_rollback",
+            async () => {
+              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              await runRecordedTransactionSavepoint(
+                transactionBackend(tx),
+                statements,
+                "test_inner_release",
+                async () => {
+                  await tx.nodes.SavepointNote.bulkCreate([
+                    { props: { body: "also rolled back" } },
+                  ]);
+                  return { action: "release", value: undefined };
+                },
+              );
+              return {
+                action: "rollback",
+                value: undefined,
+                cause: new Error("refused"),
+              };
+            },
+          );
+        });
+        expect(await store.nodes.SavepointNote.find()).toHaveLength(
+          priorWrite ? 1 : 0,
+        );
+        expect(receipt.recorded === undefined).toBe(!history || !priorWrite);
+        expect((await store.revisionNow()) === revision).toBe(!priorWrite);
+      },
+    );
+
+    it("publishes adopted success hooks only after the enclosing savepoint releases", async () => {
+      const backend = context.getBackend();
+      const ended: string[] = [];
+      const [store] = await createAdapterStoreWithSchema(stampGraph, backend, {
+        hooks: {
+          onOperationEnd: (operation) => {
+            ended.push(operation.id);
+          },
+          onBulkOperationEnd: () => {
+            ended.push("bulk");
+          },
+        },
+      });
+      const statements = statementExecutionVerdict(backend);
+      if (!statements.supported)
+        throw new Error("Fixture requires statement execution");
+      await backend.transactionWithNative(async (_target, native) => {
+        await store.withRecordedTransaction(native, async (tx) => {
+          await tx.nodes.SavepointNote.create(
+            { body: "before" },
+            { id: "before" },
+          );
+          expect(ended).toEqual(["before"]);
+          await runRecordedTransactionSavepoint(
+            transactionBackend(tx),
+            statements,
+            "test_hooks_outer",
+            async () => {
+              await tx.nodes.SavepointNote.create(
+                { body: "released" },
+                { id: "released" },
+              );
+              await runRecordedTransactionSavepoint(
+                transactionBackend(tx),
+                statements,
+                "test_hooks_inner",
+                async () => {
+                  await tx.nodes.SavepointNote.updateWhere({
+                    all: true,
+                    patch: { body: "rolled back" },
+                  });
+                  return {
+                    action: "rollback",
+                    value: undefined,
+                    cause: new Error("refused"),
+                  };
+                },
+              );
+              await tx.nodes.SavepointNote.updateWhere({
+                all: true,
+                patch: { body: "released bulk" },
+              });
+              expect(ended).toEqual(["before"]);
+              return { action: "release", value: undefined };
+            },
+          );
+          expect(ended).toEqual(["before", "released", "bulk"]);
+          await tx.nodes.SavepointNote.create(
+            { body: "after" },
+            { id: "after" },
+          );
+          expect(ended).toEqual(["before", "released", "bulk", "after"]);
+        });
+      });
+      expect(await store.nodes.SavepointNote.find()).toHaveLength(3);
+    });
+
     it("lets a caller transaction commit after bulkReplaceById loses a unique key", async () => {
       const store = await context.createStore(stampGraph);
       const first = await store.nodes.SavepointStamp.create({ label: "one" });
