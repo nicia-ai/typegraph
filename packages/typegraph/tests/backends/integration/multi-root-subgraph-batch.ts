@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { asNodeId, createStore, indexSubgraph } from "../../../src";
+import {
+  asNodeId,
+  createStore,
+  defineGraph,
+  indexSubgraph,
+  type Store,
+} from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { ConfigurationError } from "../../../src/errors";
+import type { OneStatementBatchableQuery } from "../../../src/query/builder/types";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
+import { recursivePlanCount } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
@@ -65,9 +73,369 @@ async function seedMultiRootSubgraphData(store: MultiRootTestStore): Promise<
   return { alice, bob, charlie, dave, erin, acme };
 }
 
+// Use a small graph and narrow SQL projections so libsql's JSON-key binds
+// fit its separate 999-parameter allowance at the planner boundary.
+const recursiveBatchGraph = defineGraph({
+  id: "recursive_batch_budget",
+  identity: { sameIdAcrossKinds: "ignore" },
+  nodes: { Person: { type: integrationTestGraph.nodes.Person.type } },
+  edges: {
+    knows: {
+      type: integrationTestGraph.edges.knows.type,
+      from: [integrationTestGraph.nodes.Person.type],
+      to: [integrationTestGraph.nodes.Person.type],
+    },
+  },
+});
+type RecursiveBudgetStore = Store<typeof recursiveBatchGraph>;
+type RecursiveBudgetPerson = Awaited<
+  ReturnType<RecursiveBudgetStore["nodes"]["Person"]["create"]>
+>;
+
+function recursiveRead(store: Pick<RecursiveBudgetStore, "query">) {
+  return store
+    .query()
+    .from("Person", "person")
+    .whereNode("person", (person) => person.name.eq("Alice"))
+    .traverse("knows", "edge")
+    .recursive({ maxHops: 2 })
+    .to("Person", "friend");
+}
+
+function fixedIdentitySteps(store: Pick<RecursiveBudgetStore, "query">) {
+  return store
+    .query()
+    .from("Person", "person")
+    .traverse("knows", "first", { includeIdentityMembers: true })
+    .to("Person", "middle")
+    .traverse("knows", "second", { includeIdentityMembers: true })
+    .to("Person", "friend");
+}
+
+async function recursiveBatchOutcome(batch: Promise<readonly unknown[]>) {
+  return batch.then(
+    (results) => ({ resultCount: results.length }),
+    (error: unknown) => ({
+      typed: error instanceof ConfigurationError,
+      details: error instanceof ConfigurationError ? error.details : undefined,
+    }),
+  );
+}
+
 export function registerMultiRootSubgraphBatchIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("Fluent recursive batch planner budget", () => {
+    let budgetStore: RecursiveBudgetStore;
+    let budgetRoot: RecursiveBudgetPerson;
+
+    beforeEach(async () => {
+      budgetStore = await context.createStore(recursiveBatchGraph);
+      budgetRoot = await budgetStore.nodes.Person.create({ name: "Alice" });
+      const bob = await budgetStore.nodes.Person.create({ name: "Bob" });
+      const charlie = await budgetStore.nodes.Person.create({
+        name: "Charlie",
+      });
+      await budgetStore.edges.knows.create(budgetRoot, bob, {});
+      await budgetStore.edges.knows.create(bob, charlie, {});
+    });
+    it.each([false, true])(
+      "refuses 26 fluent plans before execution (shareSubgraphs=%s)",
+      async (shareSubgraphs) => {
+        const backend = context.getBackend();
+        const execute = vi.fn();
+        const store = createStore(
+          recursiveBatchGraph,
+          deriveBackend(backend, {
+            async execute<Row>(
+              query: CompiledRowsSql,
+            ): Promise<readonly Row[]> {
+              execute();
+              return backend.execute<Row>(query);
+            },
+          }),
+        );
+        const read = recursiveRead(store).project((fields) => ({
+          name: fields.friend.name,
+        }));
+        const batch = store.batchOnce(
+          () => Array.from({ length: 26 }, () => read),
+          { shareSubgraphs },
+        );
+        expect(await recursiveBatchOutcome(batch)).toEqual(
+          backend.dialect === "postgres" ?
+            {
+              typed: true,
+              details: {
+                operation: "batchOnce",
+                recursivePlans: 26,
+                subgraphPlans: 0,
+                queryPlans: 26,
+                maxRecursivePlans: 25,
+                backend: "postgres",
+              },
+            }
+          : { resultCount: 26 },
+        );
+        expect(execute).toHaveBeenCalledTimes(
+          backend.dialect === "postgres" ? 0 : 1,
+        );
+      },
+    );
+
+    it("allows 25 fluent plans plus nonrecursive reads with ordered result slots", async () => {
+      const store = budgetStore;
+      const read = recursiveRead(store).project((fields) => ({
+        name: fields.friend.name,
+      }));
+      const expected = await read.execute();
+      const plain = store
+        .query()
+        .from("Person", "person")
+        .project((fields) => ({ name: fields.person.name }));
+      const expectedPlain = await plain.execute();
+      const results = await store.batchOnce(() => [
+        plain,
+        ...Array.from({ length: 25 }, () => read),
+      ]);
+      expect(
+        results.map((rows) => rows.map((row) => row.name).toSorted()),
+      ).toEqual([
+        expectedPlain.map((row) => row.name).toSorted(),
+        ...Array.from({ length: 25 }, () =>
+          expected.map((row) => row.name).toSorted(),
+        ),
+      ]);
+    });
+
+    it("does not charge recursive syntax lowered to a fixed single hop", async () => {
+      const store = budgetStore;
+      const query = store
+        .query()
+        .from("Person", "person")
+        .traverse("knows", "edge")
+        .recursive({ minHops: 1, maxHops: 1 })
+        .to("Person", "friend")
+        .project((fields) => ({ name: fields.friend.name }));
+      const item = query.compileOneStatementBatchItem();
+      expect(recursivePlanCount(item.query)).toBe(0);
+      expect(
+        await store.batchOnce(() => Array.from({ length: 26 }, () => query)),
+      ).toHaveLength(26);
+    });
+
+    it("shares one allowance between fluent stages and combined subgraphs", async () => {
+      const store = budgetStore;
+      const alice = budgetRoot;
+      const read = recursiveRead(store).project((fields) => ({
+        name: fields.friend.name,
+      }));
+      const reads = Array.from({ length: 24 }, () => read);
+      const results = await store.batchOnce((helpers) => [
+        ...reads,
+        helpers.subgraph(alice, { edges: ["knows"], maxDepth: 1 }),
+        helpers.subgraph(alice, { edges: ["knows"], maxDepth: 1 }),
+      ]);
+      expect(results).toHaveLength(26);
+      const oversized = store.batchOnce((helpers) => [
+        ...reads,
+        helpers.subgraph(alice, { edges: ["knows"], maxDepth: 1 }),
+        helpers.subgraph(alice, { edges: ["knows"], maxDepth: 2 }),
+      ]);
+      expect(await recursiveBatchOutcome(oversized)).toMatchObject(
+        context.getBackend().dialect === "postgres" ?
+          {
+            typed: true,
+            details: { recursivePlans: 26, maxRecursivePlans: 25 },
+          }
+        : { resultCount: 26 },
+      );
+    });
+
+    it.each([false, true])(
+      "counts historical identity reconstruction with recursive=%s",
+      async (recursive) => {
+        const backend = context.getBackend();
+        const peer = await budgetStore.nodes.Person.create({ name: "Peer" });
+        await budgetStore.identity.assertSame(budgetRoot, peer);
+        const execute = vi.fn();
+        const store = createStore(
+          recursiveBatchGraph,
+          deriveBackend(backend, {
+            async execute<Row>(
+              query: CompiledRowsSql,
+            ): Promise<readonly Row[]> {
+              execute();
+              return backend.execute<Row>(query);
+            },
+          }),
+        );
+        const traversal = store
+          .asOf("2100-01-01T00:00:00.000Z")
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (person) => person.name.eq("Alice"))
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        const query =
+          recursive ?
+            traversal
+              .recursive({ maxHops: 2 })
+              .to("Person", "friend")
+              .project((fields) => ({ name: fields.friend.name }))
+          : traversal
+              .to("Person", "friend")
+              .project((fields) => ({ name: fields.friend.name }));
+        const plansPerRead = recursive ? 2 : 1;
+        expect(
+          recursivePlanCount(query.compileOneStatementBatchItem().query),
+        ).toBe(plansPerRead);
+        const allowedReads =
+          backend.dialect === "postgres" ? Math.floor(25 / plansPerRead) : 2;
+        expect(
+          await store.batchOnce(() =>
+            Array.from({ length: allowedReads }, () => query),
+          ),
+        ).toHaveLength(allowedReads);
+        expect(execute).toHaveBeenCalledTimes(1);
+        execute.mockClear();
+        const refusedReads =
+          backend.dialect === "postgres" ? 26 / plansPerRead : 2;
+        const outcome = await recursiveBatchOutcome(
+          store.batchOnce(() =>
+            Array.from({ length: refusedReads }, () => query),
+          ),
+        );
+        expect(outcome).toEqual(
+          backend.dialect === "postgres" ?
+            {
+              typed: true,
+              details: {
+                operation: "batchOnce",
+                recursivePlans: 26,
+                queryPlans: 26,
+                subgraphPlans: 0,
+                maxRecursivePlans: 25,
+                backend: "postgres",
+              },
+            }
+          : { resultCount: refusedReads },
+        );
+        expect(execute).toHaveBeenCalledTimes(
+          backend.dialect === "postgres" ? 0 : 1,
+        );
+      },
+    );
+
+    it("shares historical identity reconstruction across fixed steps and uses the current closure without recursion", () => {
+      const current = fixedIdentitySteps(budgetStore).project((fields) => ({
+        name: fields.friend.name,
+      }));
+      const historical = fixedIdentitySteps(
+        budgetStore.asOf("2100-01-01T00:00:00.000Z"),
+      ).project((fields) => ({ name: fields.friend.name }));
+      expect(
+        recursivePlanCount(current.compileOneStatementBatchItem().query),
+      ).toBe(0);
+      expect(
+        recursivePlanCount(historical.compileOneStatementBatchItem().query),
+      ).toBe(1);
+    });
+
+    it("explains how to run one composed read that exceeds the batch budget", async () => {
+      let query = budgetStore.query().from("Person", "outerPerson");
+      for (let index = 0; index < 26; index++) {
+        query = query.where((fields) =>
+          fields.$exists((nested) =>
+            nested
+              .from("Person", "seed")
+              .traverse("knows", "edge")
+              .recursive({ maxHops: 2 })
+              .to("Person", "friend")
+              .project((inner) => ({ id: inner.friend.id })),
+          ),
+        );
+      }
+      const composed = query.project((fields) => ({
+        name: fields.outerPerson.name,
+      }));
+      expect(
+        recursivePlanCount(composed.compileOneStatementBatchItem().query),
+      ).toBe(26);
+      expect(await composed.execute()).toHaveLength(3);
+      const outcome = await budgetStore
+        .batchOnce(() => [composed])
+        .then(
+          (results) => ({ resultCount: results.length }),
+          (error: unknown) => ({
+            typed: error instanceof ConfigurationError,
+            suggestsStandalone:
+              error instanceof ConfigurationError &&
+              error.suggestion?.includes("execute()") === true,
+          }),
+        );
+      const expected =
+        context.getBackend().dialect === "postgres" ?
+          { typed: true, suggestsStandalone: true }
+        : { resultCount: 1 };
+      expect(outcome).toMatchObject(expected);
+    });
+
+    it("counts stages inside chained traversals, set operations, and relation wrappers", async () => {
+      const store = budgetStore;
+      const single = recursiveRead(store).select(
+        (fields) => fields.friend.name,
+      );
+      const chained = recursiveRead(store)
+        .traverse("knows", "nextEdge")
+        .recursive({ maxHops: 2 })
+        .to("Person", "next")
+        .project((fields) => ({ name: fields.next.name }));
+      const union = single.unionAll(single);
+      const nested = store
+        .query()
+        .from("Person", "outerPerson")
+        .where((fields) =>
+          fields.$exists((query) =>
+            query
+              .from("Person", "seed")
+              .traverse("knows", "nestedEdge")
+              .recursive({ maxHops: 2 })
+              .to("Person", "nestedFriend")
+              .project((inner) => ({ id: inner.nestedFriend.id })),
+          ),
+        )
+        .select((fields) => fields.outerPerson.name);
+      const nestedItem = requireDefined(
+        nested.compileOneStatementBatchItem?.(),
+      );
+      expect(recursivePlanCount(nestedItem.query)).toBe(1);
+      const relation = recursiveRead(store)
+        .project((fields) => ({ name: fields.friend.name }))
+        .asRelation()
+        .unionAll(
+          recursiveRead(store)
+            .project((fields) => ({ name: fields.friend.name }))
+            .asRelation(),
+        );
+      for (const read of [chained, union, relation, nested.unionAll(nested)]) {
+        const batchRead: OneStatementBatchableQuery<unknown> = read;
+        const item = requireDefined(batchRead.compileOneStatementBatchItem?.());
+        expect(recursivePlanCount(item.query)).toBe(2);
+        const batch = store.batchOnce(() =>
+          Array.from({ length: 13 }, () => read),
+        );
+        expect(await recursiveBatchOutcome(batch)).toMatchObject(
+          context.getBackend().dialect === "postgres" ?
+            {
+              typed: true,
+              details: { recursivePlans: 26, maxRecursivePlans: 25 },
+            }
+          : { resultCount: 13 },
+        );
+      }
+    });
+  });
+
   it("keeps the unshared JSON payload budget per request while sharing traversal", async () => {
     const backend = context.getBackend();
     const sizes: number[] = [];
@@ -240,8 +608,10 @@ export function registerMultiRootSubgraphBatchIntegrationTests(
               typed: true,
               details: {
                 operation: "batchOnce",
+                recursivePlans: 26,
                 subgraphPlans: 26,
-                maxSubgraphPlans: 25,
+                queryPlans: 0,
+                maxRecursivePlans: 25,
                 backend: "postgres",
               },
               statements: 0,

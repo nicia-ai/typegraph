@@ -115,8 +115,8 @@ export type DialectCapabilities = Readonly<{
    */
   subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
 
-  /** Maximum independent subgraph plans in a single batch, after combining compatible reads. */
-  maxSubgraphBatchPlans?: number;
+  /** Maximum recursive stages, historical identity reconstructions, and combined subgraph plans in batchOnce. */
+  maxRecursiveBatchPlans?: number;
 
   /**
    * Whether every index over a text column is kept in byte order, the order

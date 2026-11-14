@@ -174,7 +174,9 @@ export const postgresDialect: BuiltinDialectAdapter = {
     supportsFulltext: true,
     // Issue #833 measured ~32 MB of planner memory for 25 independent roots,
     // versus ~700 MB at 500. Compatible roots consume only one plan slot.
-    maxSubgraphBatchPlans: 25,
+    // Fluent recursion measured ~25/100/531 MiB at 25/100/500 stages (#839).
+    // One allowance covers all recursive plans, including identity reconstruction.
+    maxRecursiveBatchPlans: 25,
     subgraphMembershipStrategy: "materialized-ids",
     textIndexOrderIsBinary: false,
     transactionReadsShareOneSnapshot: false,

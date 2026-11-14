@@ -8,6 +8,7 @@ import {
 } from "../../identity/historical-sql";
 import { type QueryAst } from "../ast";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { markRecursivePlan } from "../sql-intent";
 import { type TemporalFilterPass } from "./passes";
 import {
   type PredicateCompilerContext,
@@ -122,11 +123,13 @@ export function compileIdentityClassCte(
   // rebuilt per candidate (source row, edge) pair — the quadratic term
   // typegraph#310 removes. The expansion below reads it from an uncorrelated
   // join for the same reason.
-  return sql`
+  const definition = sql`
     ${sql.identifier(IDENTITY_CLASS_CTE_ALIAS)}(${IDENTITY_PEER_CLASS_COLUMNS}) AS MATERIALIZED (
       ${peerClasses}
     )
   `;
+  markRecursivePlan(definition);
+  return definition;
 }
 
 /**
