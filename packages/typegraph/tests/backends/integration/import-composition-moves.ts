@@ -36,13 +36,16 @@ const partOfWhole = defineEdge("icmPartOf", {
 });
 
 type Population = "oneActive" | "one";
-type Existence = "optional" | "required";
+const EXISTENCES = ["optional", "required"] as const;
+type Existence = (typeof EXISTENCES)[number];
 const ORDERS = ["endFirst", "attachFirst"] as const;
 type Order = (typeof ORDERS)[number];
 const BATCH_SIZES = [1, 1000] as const;
 
 const ATTACHED_AT = "2020-01-01T00:00:00.000Z";
 const MOVED_AT = "2021-01-01T00:00:00.000Z";
+/** Inside the incumbent's window, so an attachment opening here overlaps it. */
+const INSIDE_INCUMBENT = "2020-06-01T00:00:00.000Z";
 
 /** The label every committed state names the target's original edge by. */
 const INCUMBENT = "incumbent";
@@ -247,28 +250,65 @@ const MOVED: readonly CommittedEdge[] = [
   { id: INCUMBENT, whole: "old", validFrom: ATTACHED_AT, validTo: MOVED_AT },
 ];
 
+const UNMOVED: readonly CommittedEdge[] = [
+  { id: INCUMBENT, whole: "old", validFrom: ATTACHED_AT, validTo: undefined },
+];
+
 export function registerImportCompositionMoveIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("import: a composition move re-imported with onConflict update", () => {
-    describe.each(ORDERS)("oneActive optional, %s", (order) => {
-      it("ends the old attachment and opens the new one at every batch size", async () => {
-        const outcome = await importAtEveryBatchSize(
-          context,
-          "oneActive",
-          "optional",
-          (seeded) =>
-            ordered(
-              order,
-              endIncumbent(seeded, MOVED_AT),
-              attachElsewhere(seeded, MOVED_AT),
-            ),
-        );
-        expect(outcome).toEqual({
-          edges: MOVED,
-          counts: { created: 1, updated: 1, skipped: 0 },
-          errors: [],
-          fenceViolations: 0,
+    describe.each(EXISTENCES)("oneActive %s", (existence) => {
+      describe.each(ORDERS)("%s", (order) => {
+        it("ends the old attachment and opens the new one at every batch size", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            existence,
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, MOVED_AT),
+              ),
+          );
+          expect(outcome).toEqual({
+            edges: MOVED,
+            counts: { created: 1, updated: 1, skipped: 0 },
+            errors: [],
+            fenceViolations: 0,
+          });
+        });
+
+        it("keeps the old attachment when the new one is refused", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            existence,
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, INSIDE_INCUMBENT),
+              ),
+          );
+          const endError = {
+            id: INCUMBENT,
+            code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+          };
+          const attachError = {
+            id: MOVED_EDGE_ID,
+            code: "COMPOSITION_WINDOW_OVERLAP",
+          };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
         });
       });
     });
