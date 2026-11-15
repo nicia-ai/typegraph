@@ -4655,6 +4655,26 @@ type IdentityWriteSummary = Readonly<{
 type IfExistsMode = "return" | "update";
 
 // @public
+class ImportCompositionMoveFrame {
+}
+
+// @public
+type ImportedCompositionMove = Readonly<{
+    part: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    whole: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    via: string;
+    props: Readonly<Record<string, unknown>>;
+    edgeId: string;
+    validFrom: string | undefined;
+}>;
+
+// @public
 type IndexChange = Readonly<{
     type: ChangeType;
     name: string;
@@ -9090,6 +9110,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    applyImportedCompositionMoves: (frame: ImportCompositionMoveFrame, moves: readonly ImportedCompositionMove[]) => Promise<void>;
     importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";

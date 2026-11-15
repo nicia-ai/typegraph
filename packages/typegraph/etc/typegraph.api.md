@@ -1232,6 +1232,28 @@ export type CompositionErrorDetails = Readonly<{
     option: string;
     stated: string | null;
     stored?: string;
+}> | Readonly<{
+    situation: "importMove";
+    partKind: string;
+    partId: string;
+    wholeKind: string;
+    wholeId: string;
+    edgeKind: string;
+    edgeId: string;
+    incumbentEdgeKind: string;
+    incumbentEdgeId: string;
+    incumbentWholeKind: string;
+    incumbentWholeId: string;
+}> | Readonly<{
+    situation: "importMoveWindow";
+    partKind: string;
+    partId: string;
+    wholeKind: string;
+    wholeId: string;
+    edgeKind: string;
+    edgeId: string;
+    bound: "validFrom" | "validTo";
+    stated: string | null;
 }>;
 
 // @public
@@ -5650,6 +5672,26 @@ export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE = "IMMUTABLE_VALIDITY_LOWER_BOU
 export function implies<A extends AnyEdgeType, B extends AnyEdgeType>(edgeA: A, edgeB: B): TypedOntologyRelation<typeof META_EDGE_IMPLIES, A, B>;
 
 // @public
+class ImportCompositionMoveFrame {
+}
+
+// @public
+type ImportedCompositionMove = Readonly<{
+    part: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    whole: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    via: string;
+    props: Readonly<Record<string, unknown>>;
+    edgeId: string;
+    validFrom: string | undefined;
+}>;
+
+// @public
 const INCOMPATIBLE_CHANGE_TYPES: readonly ["REMOVE_PROPERTY", "ADD_REQUIRED_PROPERTY", "TIGHTEN_OPTIONALITY", "TIGHTEN_CONSTRAINT", "ADD_PATTERN", "CHANGE_PATTERN", "ADD_FORMAT", "CHANGE_FORMAT", "TIGHTEN_INT", "TIGHTEN_ENUM", "TYPE_CHANGE", "ADD_UNIQUE_ON_POPULATED", "TIGHTEN_EDGE_ENDPOINTS"];
 
 // @public (undocumented)
@@ -9872,6 +9914,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    applyImportedCompositionMoves: (frame: ImportCompositionMoveFrame, moves: readonly ImportedCompositionMove[]) => Promise<void>;
     importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";

@@ -4160,6 +4160,26 @@ type IdentityWriteSummary = Readonly<{
 // @public
 type IfExistsMode = "return" | "update";
 
+// @public
+class ImportCompositionMoveFrame {
+}
+
+// @public
+type ImportedCompositionMove = Readonly<{
+    part: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    whole: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    via: string;
+    props: Readonly<Record<string, unknown>>;
+    edgeId: string;
+    validFrom: string | undefined;
+}>;
+
 // @public (undocumented)
 export type ImportError = z.infer<typeof ImportErrorSchema>;
 
@@ -4202,6 +4222,10 @@ export const ImportOptionsSchema: z.ZodObject<{
     onStreamChunkError: z.ZodDefault<z.ZodEnum<{
         abort: "abort";
         continue: "continue";
+    }>>;
+    onCompositionIncumbent: z.ZodDefault<z.ZodEnum<{
+        replace: "replace";
+        refuse: "refuse";
     }>>;
 }, z.core.$strip>;
 
@@ -7520,6 +7544,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    applyImportedCompositionMoves: (frame: ImportCompositionMoveFrame, moves: readonly ImportedCompositionMove[]) => Promise<void>;
     importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";

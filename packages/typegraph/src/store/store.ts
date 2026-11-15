@@ -360,6 +360,7 @@ import {
 import { readNodeByReference } from "./node-reference-read";
 import {
   applyIdentityWindowEnd,
+  applyImportedCompositionMoves,
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
@@ -1831,6 +1832,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         applyIdentityWindowEnd(this.#identityWindowEndContext(), target, input),
       detachDeletedImportedIdentityNode: (target, reference) =>
         this.detachDeletedImportedIdentityNode(target, reference),
+      applyImportedCompositionMoves: (frame, moves) =>
+        applyImportedCompositionMoves(
+          this.#createNodeOperationContext(),
+          frame,
+          moves,
+        ),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
       readIdentityTransitionPageAtTarget: (target, options) =>
