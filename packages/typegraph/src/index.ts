@@ -436,6 +436,7 @@ export type {
 export {
   // Error classes
   BackendDisposedError,
+  BaseSchemaAdoptionTimeoutError,
   BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
@@ -1046,6 +1047,10 @@ export {
   type DatabaseExpression,
   expr,
 } from "./query/expressions";
+export type {
+  PruneRecordedInstantsOptions,
+  PruneRecordedInstantsResult,
+} from "./store/recorded-anchor-log";
 export {
   // ID utilities
   generateId,

@@ -307,6 +307,7 @@ export function avg<const Alias extends string, const Property extends string>(a
 // @public
 export type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
@@ -379,6 +380,16 @@ type BaseFieldAccessor<T = unknown> = Readonly<{
     in: (values: MembershipOperand<T>) => Predicate;
     notIn: (values: MembershipOperand<T>) => Predicate;
 }>;
+
+// @public
+export class BaseSchemaAdoptionTimeoutError extends TypeGraphError {
+    constructor(tableName: string, waitBudgetMs: number, cause?: unknown);
+    // (undocumented)
+    readonly details: Readonly<{
+        tableName: string;
+        waitBudgetMs: number;
+    }>;
+}
 
 // @public
 export class BaseSchemaMigrationError extends TypeGraphError {
@@ -6902,6 +6913,18 @@ export type PropsAccessor<N extends NodeType> = Readonly<{
     [K in CommonPropertyKeys<NodePropsFor<N>>]-?: FieldAccessor<NodePropsFor<N>[K]>;
 }>;
 
+// @public (undocumented)
+export type PruneRecordedInstantsOptions = Readonly<{
+    limit?: number;
+}>;
+
+// @public (undocumented)
+export type PruneRecordedInstantsResult = Readonly<{
+    deletedCount: number;
+    retainedBoundary: RecordedInstant | undefined;
+    hasMore: boolean;
+}>;
+
 // @public
 type PurgeEdgeClaimsParams = Readonly<{
     graphId: string;
@@ -7707,7 +7730,7 @@ export type ResolvedSqlTableNames = Readonly<{
 }>;
 
 // @public
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> & Readonly<{
     rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
 }>;
 
@@ -8513,6 +8536,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProject<G, NK, EK> | undefined = undefined>(root: GraphNodeReference<G>, options: SubgraphOptions<G, EK, NK, P>) => Promise<SubgraphResult<G, NK, EK, P>>;
+    pruneRecordedInstants?: (before: string, options?: PruneRecordedInstantsOptions) => Promise<PruneRecordedInstantsResult>;
     clear: (options?: Readonly<{
         preserveContributionMaterializations?: boolean;
     }>) => Promise<void>;

@@ -46,6 +46,7 @@ export type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, un
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
@@ -1498,6 +1499,23 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 isAutoincrement: false;
                 hasRuntimeDefault: false;
                 enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            anchorRetention: drizzle_orm_pg_core.PgColumn<{
+                name: "anchor_retention";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
                 baseColumn: never;
                 identity: undefined;
                 generated: undefined;

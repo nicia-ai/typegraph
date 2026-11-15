@@ -45,7 +45,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Candidate one-active and durable edge identity planning add four accesses.
 // The graph storage inventory resolves the graph-relation names once and reads
 // the session isolation expression once: 123 -> 125.
-const REASONED_FLOOR = 125;
+// Recorded pruning requires one backend-owned base-schema assertion.
+const REASONED_FLOOR = 126;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -71,15 +72,15 @@ const REASONED_FLOOR = 125;
 const DEFERRED_LIVE_TOTAL = 238;
 const DEFERRED_DECLARED_TOTAL = 243;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 377;
+const TOTAL_ROW_COUNT = 378;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:167#executeStatement",
   "backend/migrate-recorded-time.ts:174#executeStatement",
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
-  "store/recorded-capture/guards.ts:76#executeStatement",
-  "store/recorded-capture/guards.ts:93#executeStatement",
-  "store/recorded-capture/guards.ts:238#executeStatement",
+  "store/recorded-capture/guards.ts:78#executeStatement",
+  "store/recorded-capture/guards.ts:95#executeStatement",
+  "store/recorded-capture/guards.ts:240#executeStatement",
 ] as const;
 
 function rowKey(
@@ -218,7 +219,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 377)", () => {
+  it("the class partition covers every scanned row (total 378)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

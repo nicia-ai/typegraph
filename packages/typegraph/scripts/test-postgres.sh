@@ -105,6 +105,10 @@ fi
 # tests/backends/integration/ is deliberately absent: it holds suite
 # definitions registered via createIntegrationTestSuite, not *.test.ts files,
 # so listing it matches nothing and reads as coverage that is not there.
+# Positional filters (paths or bare name fragments) replace the default roots.
+# Delegate option-value parsing to the same parser used by Vitest itself.
+has_explicit_filters="$(node --import tsx "$SCRIPT_DIR/vitest-has-filters.ts" "$@")"
+if [[ "$has_explicit_filters" == "0" ]]; then
 vitest_args+=(
   tests/backends/postgres/
   tests/graph-merge/
@@ -130,6 +134,8 @@ vitest_args+=(
   tests/perf/identity-historical-traversal-scaling.test.ts
 )
 
+fi
+
 # PGlite-only files and local merge-matrix entries already run in the default
 # lanes. Keep mixed files loaded so their server-specific cases still execute.
-TYPEGRAPH_TEST_BACKEND=postgres POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"
+TYPEGRAPH_TEST_BACKEND=postgres POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}" "$@"

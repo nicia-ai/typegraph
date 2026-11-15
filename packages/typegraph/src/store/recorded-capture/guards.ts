@@ -3,6 +3,7 @@ import {
   batchRefusalSuffix,
   resolveBatchWriteVerdict,
 } from "../../backend/capabilities/batch-write-verdict";
+import { resolveRecordedTimeOwnership } from "../../backend/capabilities/recorded-time-ownership";
 import {
   recordedRevisionOriginsVerdict,
   statementExecutionVerdict,
@@ -20,6 +21,7 @@ import {
 import {
   ConfigurationError,
   type RecordedCaptureGuardCode,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
@@ -364,4 +366,30 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
+}
+
+/** One capture, ownership, and backend gate for allocation-log entrypoints. */
+export function requireRecordedAnchorLog(
+  context: Readonly<{
+    backend: GraphBackend;
+    graphId: string;
+    captureEnabled: boolean;
+  }>,
+  surface: string,
+): void {
+  if (
+    !context.captureEnabled ||
+    resolveRecordedTimeOwnership(context.backend) !== "typegraph-relations" ||
+    context.backend.capabilities.recordedAnchorLookup !== true
+  )
+    throw new UnsupportedBackendCapabilityError(
+      surface,
+      "recordedAnchorLookup",
+      {
+        graphId: context.graphId,
+        dialect: context.backend.dialect,
+        captureEnabled: context.captureEnabled,
+      },
+    );
+  assertCapturableBackend(context.backend);
 }

@@ -11,9 +11,10 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import type { GraphBackend, ReconciledSchema } from "../src";
+import type { CompiledRowsSql, GraphBackend, ReconciledSchema } from "../src";
 import {
   BaseSchemaMigrationError,
+  createStore,
   createStoreWithSchema,
   createVerifiedStore,
   defineEdge,
@@ -22,6 +23,7 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
 import {
   edgeMatchIdentityPairCheckName,
@@ -1399,4 +1401,284 @@ describe("version 6: recorded adjacency indexes", () => {
       }
     },
   );
+});
+
+describe("version 9: recorded allocation retention watermark", () => {
+  it.each([false, true])(
+    "upgrades marker-less managed libSQL history before stamping v9 (legacy edges: %s)",
+    async (legacyEdges) => {
+      const client = createClient({ url: ":memory:" });
+      const opened: GraphBackend[] = [];
+      try {
+        const original = await createLibsqlBackend(client);
+        opened.push(original.backend);
+        const [store] = await createStoreWithSchema(graph, original.backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        await store.nodes.Person.update(person.id, { name: "latest" });
+        const anchor = requireDefined(await store.recordedNow());
+        await client.execute("DROP TABLE typegraph_base_schema_versions");
+        await client.execute(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        if (legacyEdges) {
+          await client.execute("DROP TABLE typegraph_edges");
+          await client.executeMultiple(LEGACY_EDGE_TABLE_SQL);
+        }
+        const reopened = await createLibsqlBackend(client);
+        opened.push(reopened.backend);
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        const marker = await client.execute(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+        );
+        expect(marker.rows.map((row) => Number(row["version"]))).toEqual([
+          CURRENT_BASE_SCHEMA_VERSION,
+        ]);
+        expect(await attached.recordedNow()).toBe(anchor);
+        expect(await attached.nodes.Person.getById(person.id)).toMatchObject({
+          name: "latest",
+        });
+        expect(
+          await attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).toEqual({
+          deletedCount: 1,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        for (const backend of opened) await backend.close();
+        client.close();
+      }
+    },
+  );
+
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts a populated version 8 clock on %s without inventing pruning",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        const [store] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        const anchor = requireDefined(await store.recordedNow());
+        const owner = await store.allocationOwner();
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        await executeDdl(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+        );
+        const statements: CompiledRowsSql[] = [];
+        const assertStorage = vi.fn(
+          requireDefined(backend.assertBaseSchemaCurrent),
+        );
+        const existing = createStore(
+          graph,
+          deriveBackend(backend, {
+            assertBaseSchemaCurrent: assertStorage,
+            execute<T>(query: CompiledRowsSql) {
+              statements.push(query);
+              return backend.execute<T>(query);
+            },
+          }),
+          { history: true },
+        );
+        expect(
+          await existing.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(statements).toHaveLength(1);
+        expect(assertStorage).not.toHaveBeenCalled();
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          name: "BaseSchemaMigrationError",
+          details: { installedVersion: 8, requiredVersion: 9, reason: "stale" },
+        });
+        // Error shape and server language cannot change lifecycle refusal.
+        for (const driverError of [
+          Object.assign(new Error("SQLITE_ERROR"), { code: "SQLITE_ERROR" }),
+          Object.assign(new Error("colonne inexistante"), { code: "42703" }),
+          new Error("custom backend reshaped the driver error"),
+        ]) {
+          const execute = vi.fn(() => Promise.reject(driverError));
+          const attached = createStore(
+            graph,
+            deriveBackend(backend, { execute }),
+            { history: true },
+          );
+          await expect(
+            attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+          ).rejects.toMatchObject({
+            name: "BaseSchemaMigrationError",
+            details: { installedVersion: 8, reason: "stale" },
+          });
+          expect(execute).not.toHaveBeenCalled();
+        }
+        await requireDefined(backend.adoptBaseSchema)();
+        await requireDefined(backend.adoptBaseSchema)();
+        expect(
+          await executeRaw(
+            "SELECT CASE WHEN anchor_retention IS NULL THEN 1 ELSE 0 END AS unpruned FROM typegraph_recorded_clock",
+            [],
+          ),
+        ).toEqual([{ unpruned: 1 }]);
+        expect(
+          await executeRaw(
+            "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+            [],
+          ),
+        ).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
+        const [reopened] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        expect(await reopened.nodes.Person.getById(person.id)).toEqual(person);
+        expect(await reopened.recordedNow()).toBe(anchor);
+        expect(await reopened.allocationOwner()).toEqual(owner);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+
+  it("upgrades marker-less SQLite history before stamping the current version", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-unstamped-retention-"),
+    );
+    const filename = path.join(directory, "legacy.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "preserved legacy history" });
+      const anchor = await store.recordedNow();
+      const client = sqliteClient(original.db);
+      client.exec("DROP TABLE typegraph_base_schema_versions");
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec("DROP TABLE typegraph_edges");
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      await original.backend.close();
+      const reopened = createLocalSqliteBackend({ path: filename });
+      try {
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        expect(
+          markerVersion(
+            sqliteClient(reopened.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await expect(
+          attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).resolves.toEqual({
+          deletedCount: 0,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        await reopened.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps synchronous local SQLite lookups working before privileged v9 adoption", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-retention-upgrade-"),
+    );
+    const filename = path.join(directory, "graph.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "existing" });
+      const anchor = requireDefined(await store.recordedNow());
+      const client = sqliteClient(original.db);
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+      );
+      await original.backend.close();
+      const upgraded = createLocalSqliteBackend({ path: filename });
+      try {
+        const reopened = createStore(graph, upgraded.backend, {
+          history: true,
+        });
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+        expect(
+          sqliteClient(upgraded.db)
+            .prepare("PRAGMA table_info(typegraph_recorded_clock)")
+            .all(),
+        ).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "anchor_retention" }),
+          ]),
+        );
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(8);
+        await expect(
+          reopened.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({ details: { installedVersion: 8 } });
+        await reopened.nodes.Person.create({ name: "written after upgrade" });
+        const advanced = await reopened.recordedNow();
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
+        await requireDefined(upgraded.backend.adoptBaseSchema)();
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
+      } finally {
+        await upgraded.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

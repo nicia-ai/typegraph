@@ -38,6 +38,7 @@ export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
@@ -1602,6 +1603,25 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
                 data: string;
                 driverParam: string;
                 notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            anchorRetention: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "anchor_retention";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;

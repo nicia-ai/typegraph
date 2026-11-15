@@ -40,7 +40,8 @@ export function asCompiledTemporaryStatementSql(
 }
 
 /**
- * Statements whose good plan depends on the bound parameter values —
+ * Statements that require a freshly parsed plan, including schema-sensitive
+ * result projections and plans that depend on bound parameter values —
  * e.g. an id-array membership filter where the array cardinality varies
  * per call. PostgreSQL's prepared-statement machinery switches to a
  * generic (parameter-blind) plan after five executions, which for these

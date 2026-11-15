@@ -370,7 +370,13 @@ import {
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
-import { lookupRecordedAnchor } from "./recorded-anchor-log";
+import {
+  lookupRecordedAnchor,
+  pruneRecordedAnchors,
+  type PruneRecordedInstantsOptions,
+  type PruneRecordedInstantsResult,
+  type RecordedAnchorLogContext,
+} from "./recorded-anchor-log";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
   advanceRevisionClock,
@@ -883,6 +889,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     root: GraphNodeReference<G>,
     options: SubgraphOptions<G, EK, NK, P>,
   ) => Promise<SubgraphResult<G, NK, EK, P>>;
+  /** Explicit allocation-log retention; concrete Stores always provide it. */
+  pruneRecordedInstants?: (
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ) => Promise<PruneRecordedInstantsResult>;
   clear: (
     options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
   ) => Promise<void>;
@@ -1036,6 +1047,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
 /** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
   AddedStoreReads<G> &
+  Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> &
   Readonly<{
     rotateAllocationOwner: (
       expectedOwner: GraphAllocationOwner,
@@ -3069,21 +3081,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async resolveRecordedInstant(
     wallTime: string,
   ): Promise<RecordedInstant | undefined> {
-    if (
-      !this.#captureEnabled ||
-      this.#recordedTimeOwnership !== "typegraph-relations"
-    )
-      throw new UnsupportedBackendCapabilityError(
-        "resolveRecordedInstant",
-        "recordedAnchorLookup",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
-      );
-    return lookupRecordedAnchor(
-      this.#backend,
-      this.#sqlSchema(),
-      this.graphId,
-      wallTime,
+    return lookupRecordedAnchor(this.#recordedAnchorLogContext(), wallTime);
+  }
+
+  /** Retire allocation coverage and delete at most one bounded batch per call. */
+  async pruneRecordedInstants(
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ): Promise<PruneRecordedInstantsResult> {
+    return pruneRecordedAnchors(
+      this.#recordedAnchorLogContext(),
+      before,
+      options,
     );
+  }
+
+  #recordedAnchorLogContext(): RecordedAnchorLogContext {
+    return {
+      backend: this.#baseBackend,
+      schema: this.#sqlSchema(),
+      graphId: this.graphId,
+      captureEnabled: this.#captureEnabled,
+    };
   }
 
   /**

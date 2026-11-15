@@ -164,7 +164,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await branch.store.nodes.Person.update(person.id, { name: "Copy" });
         const unchangedSource = await source.nodes.Person.getById(person.id);
         expect(unchangedSource?.name).toBe("Source");
+        const copiedAnchor = await branch.store.recordedNow();
         await branch.close();
+        // Simulate an allocation created by the previous release. Reopen is DML-only.
+        await pool.query(
+          `ALTER TABLE "${names.recordedClock}" DROP COLUMN anchor_retention`,
+        );
+        await pool.query(
+          `UPDATE "${names.baseSchemaVersions}" SET version=8 WHERE installation=1`,
+        );
 
         const reopenedResult = await reopenDurableBranch(
           graph,
@@ -173,10 +181,29 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(isOk(reopenedResult)).toBe(true);
         const reopened = unwrap(reopenedResult);
+        expect(
+          await reopened.store.resolveRecordedInstant(
+            "2099-01-01T00:00:00.000Z",
+          ),
+        ).toBe(copiedAnchor);
+        await expect(
+          reopened.store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          name: "BaseSchemaMigrationError",
+          details: { installedVersion: 8 },
+        });
         const reopenedPerson = await reopened.store.nodes.Person.getById(
           person.id,
         );
         expect(reopenedPerson?.name).toBe("Copy");
+        await reopened.store.nodes.Person.update(person.id, {
+          name: "Legacy allocation write",
+        });
+        expect(
+          await reopened.store.resolveRecordedInstant(
+            "2099-01-01T00:00:00.000Z",
+          ),
+        ).toBe(await reopened.store.recordedNow());
         await expect(
           reopened.store.evolve(
             defineGraphExtension({

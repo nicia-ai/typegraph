@@ -320,8 +320,13 @@ export type {
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
-  /** Retains TypeGraph allocation anchors atomically, with an indexed time lookup. */
+  /**
+   * Retains TypeGraph allocation anchors atomically, with an indexed time lookup.
+   * Pruning also requires assertBaseSchemaCurrent; lookup reads pre-v9 storage.
+   */
   recordedAnchorLookup?: boolean;
+  /** Supports bounded allocation-log retention; requires recordedAnchorLookup and assertBaseSchemaCurrent. */
+  recordedAnchorPruning?: boolean;
   /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */
   durableStoreOperations?: boolean;
   /** How this backend executes work and establishes atomicity. */
