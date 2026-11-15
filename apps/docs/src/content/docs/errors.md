@@ -1551,6 +1551,7 @@ ontology checks around it raise these `ConfigurationError` codes:
 | `COMPOSITION_UNIT_INDETERMINATE` | The database cut the composition closure of a `subgraph({ composition: true })` read short (a statement timeout, for example), so the owned unit is unknown. The read never returns a prefix of it: retry with a higher timeout. `details.rootKind` and `details.rootId` name the root. |
 | `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
 | `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
+| `COMPOSITION_WINDOW_VERDICT_NESTED` | A second composition-window verdict was opened on a transaction that already has one open. The graph-merge apply decides its whole edge write set once and opens that verdict around its writes, so this signals a nested call from inside such a write. |
 | `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
 
 #### Fresh-snapshot guard codes

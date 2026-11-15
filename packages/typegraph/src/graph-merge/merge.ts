@@ -207,11 +207,14 @@ import {
   acyclicityConflict,
   assertPlanStructurallySound,
   compositionWindowConflict,
+  compositionWindowWriteSet,
   edgeClaimConflict,
   MERGE_NODE_DELETE_POLICY,
   mergeNodeDeleteSequence,
+  plannedEdgeWriteOnlyReleases,
   type PlanStructuralCheck,
   type PlanStructure,
+  readPlannedEdgeRows,
   restrictedDeleteConflict,
   statesValidityEnd,
 } from "./plan-structure";
@@ -258,6 +261,7 @@ import type {
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
+  CompositionWindowVerdict,
   Edge,
   EdgeId,
   GraphBackend,
@@ -283,6 +287,7 @@ import type { IdentityDecisionProvenance } from "./typegraph-internal";
 import {
   activeSchemaHash,
   advanceRevisionClock,
+  assertCompositionWindowsDisjoint,
   BATCH_POINT_READ,
   batchPointReadVerdict,
   bindExtraIfReachable,
@@ -307,6 +312,7 @@ import {
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
+  withDecidedCompositionWindows,
   withDeferredCompositionExistence,
   withRecordedIdentityDecision,
 } from "./typegraph-internal";
@@ -2488,10 +2494,11 @@ async function applyMergeRowWrites<T>(
   edgeDeletions: readonly MergePlanEntityRef[],
   writeNodes: () => Promise<T>,
   edgeUpserts: readonly MechanicalEdgeWrite[],
+  releasingEdgeIds: ReadonlySet<string>,
 ): Promise<Readonly<{ nodes: T; edges: number }>> {
   await applyEdgeDeletes(edgesApi, edgeDeletions);
   const nodes = await writeNodes();
-  const edges = await applyEdgeUpserts(edgesApi, edgeUpserts);
+  const edges = await applyEdgeUpserts(edgesApi, edgeUpserts, releasingEdgeIds);
   return { nodes, edges };
 }
 
@@ -2505,27 +2512,30 @@ async function applyEdgeDeletes(
 }
 
 /**
- * RELEASES BEFORE CLAIMS: every upsert that ends a validity window lands
- * before the rest. A move is planned as "retire the old edge, write the new
- * one", and a claim the retired edge still holds (a part's one whole, a
- * `oneActive` slot) refuses the new edge if it is written first — which a
- * single `bulkUpsertById` would do, since it runs its creates ahead of its
- * updates.
+ * RELEASES BEFORE CLAIMS: every upsert that only releases what its stored row
+ * held (`releasingEdgeIds`, {@link plannedEdgeWriteOnlyReleases}) lands before
+ * the rest. A move is planned as "retire the old edge, write the new one", and
+ * a claim the retired edge still holds (a part's one whole, a `oneActive`
+ * slot) refuses the new edge if it is written first — which a single
+ * `bulkUpsertById` would do, since it runs its creates ahead of its updates.
+ * A write stating an end is not therefore a release: an edge inserted already
+ * ended claims its window, so it lands with the claims.
  */
 async function applyEdgeUpserts(
   edgesApi: TxEdges,
   upserts: readonly MechanicalEdgeWrite[],
+  releasingEdgeIds: ReadonlySet<string>,
 ): Promise<number> {
-  const endsWindow = (upsert: MechanicalEdgeWrite): boolean =>
-    upsert.item.validTo !== undefined;
+  const onlyReleases = (upsert: MechanicalEdgeWrite): boolean =>
+    releasingEdgeIds.has(upsert.item.id);
   return (
     (await upsertEdgeRows(
       edgesApi,
-      upserts.filter((upsert) => endsWindow(upsert)),
+      upserts.filter((upsert) => onlyReleases(upsert)),
     )) +
     (await upsertEdgeRows(
       edgesApi,
-      upserts.filter((upsert) => !endsWindow(upsert)),
+      upserts.filter((upsert) => !onlyReleases(upsert)),
     ))
   );
 }
@@ -2544,6 +2554,82 @@ async function upsertEdgeRows(
     await edgeCollection(edgesApi, kind).bulkUpsertById(items);
   }
   return upserts.length;
+}
+
+/** What the apply decided about the plan's edge upserts before writing any row. */
+type EdgeUpsertDecision = Readonly<{
+  /** The upserts that only release what their stored row held; they land first. */
+  releasingEdgeIds: ReadonlySet<string>;
+  /** The composition window verdict over the plan's whole composition write set. */
+  compositionWindows: CompositionWindowVerdict | undefined;
+}>;
+
+/**
+ * Decides the plan's edge upserts once, inside the apply transaction and
+ * before any row is written, from the plan's constrained writes beside the
+ * rows the target holds for them now ({@link readPlannedEdgeRows} — the
+ * planner's own reader):
+ *
+ * - which upserts only release ({@link plannedEdgeWriteOnlyReleases}), so
+ *   {@link applyEdgeUpserts} lands them before the rest;
+ * - the composition window verdict over the plan's whole composition write
+ *   set ({@link compositionWindowWriteSet} — the set the planner judged),
+ *   fenced. The apply then writes one edge kind per `bulkUpsertById`, each
+ *   its own frame; judged alone, a frame would read rows a later kind's frame
+ *   has not changed yet. Every frame consumes this verdict instead
+ *   ({@link withEdgeUpsertDecision}), so the plan and the apply reach one
+ *   decision over one write set.
+ *
+ * @throws CompositionError (`COMPOSITION_WINDOW_OVERLAP`) when the write set
+ *   would leave one part with two composition windows sharing an instant.
+ */
+async function decideEdgeUpserts<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  writes: MergePlanWrites,
+): Promise<EdgeUpsertDecision> {
+  const planned = await readPlannedEdgeRows(target, txBackend, writes);
+  const releasingEdgeIds = new Set(
+    planned.edgeRows
+      .filter((row) => plannedEdgeWriteOnlyReleases(row))
+      .map((row) => row.edgeId),
+  );
+  const compositionWrites = compositionWindowWriteSet(
+    target,
+    planned,
+    nowIso(),
+  );
+  if (
+    compositionWrites.inserts.length === 0 &&
+    compositionWrites.revisions.length === 0
+  ) {
+    return { releasingEdgeIds, compositionWindows: undefined };
+  }
+  const compositionWindows = await assertCompositionWindowsDisjoint(
+    {
+      graphId: target.graphId,
+      registry: target.registry,
+      lock: await lockRecordedGraphWrite(txBackend, target.graphId),
+    },
+    txBackend,
+    compositionWrites,
+  );
+  return { releasingEdgeIds, compositionWindows };
+}
+
+/** Runs `write` with the decision's composition window verdict open, if it reached one. */
+function withEdgeUpsertDecision<Output>(
+  txBackend: TransactionBackend,
+  decision: EdgeUpsertDecision,
+  write: () => Promise<Output>,
+): Promise<Output> {
+  return decision.compositionWindows === undefined ?
+      write()
+    : withDecidedCompositionWindows(
+        txBackend,
+        decision.compositionWindows,
+        write,
+      );
 }
 
 type MergeGraphRows = Readonly<{
@@ -2588,26 +2674,34 @@ async function applyGraphRows<G extends GraphDef>(
     rows.writes,
   );
 
+  const edgeUpsertDecision = await decideEdgeUpserts(
+    target,
+    txBackend,
+    rows.writes,
+  );
+
   const applied = await withDeferredCompositionExistence(
     txBackend,
     unattachedCandidates,
-    async () => {
-      const applied = await applyMergeRowWrites(
-        edgesApi,
-        rows.writes.edgeDeletes,
-        () =>
-          applyNodeWritePhase(
-            target,
-            txBackend,
-            nodesApi,
-            rows.nodePhase,
-            deleteNodeWithPolicy,
-            decision,
-          ),
-        rows.edgeUpserts,
-      );
-      return { ...applied.nodes, edges: applied.edges };
-    },
+    () =>
+      withEdgeUpsertDecision(txBackend, edgeUpsertDecision, async () => {
+        const applied = await applyMergeRowWrites(
+          edgesApi,
+          rows.writes.edgeDeletes,
+          () =>
+            applyNodeWritePhase(
+              target,
+              txBackend,
+              nodesApi,
+              rows.nodePhase,
+              deleteNodeWithPolicy,
+              decision,
+            ),
+          rows.edgeUpserts,
+          edgeUpsertDecision.releasingEdgeIds,
+        );
+        return { ...applied.nodes, edges: applied.edges };
+      }),
   );
 
   await assertNoUnattachedRequiredParts(
