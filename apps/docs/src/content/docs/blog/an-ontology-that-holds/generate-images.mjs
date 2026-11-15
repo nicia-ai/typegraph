@@ -20,8 +20,8 @@ import process from "node:process";
 
 import {
   CANVAS_HEIGHT,
-  MARGIN_X,
   layoutTitle,
+  MARGIN_X,
   parseOutDirArgument,
   renderIllustrationBackground,
   renderLogoMark,
@@ -55,12 +55,16 @@ const PATH_NODE_R = 14;
  * @typedef {{ id: string; column: number } & Point} FieldNode
  */
 
-/** Deterministic linear congruential generator, so the field never changes. */
+/**
+ * Deterministic linear congruential generator, so the field never changes.
+ * @param {number} seed
+ * @returns {() => number}
+ */
 function seededRandom(seed) {
   let state = seed;
   return () => {
-    state = (state * 1664525 + 1013904223) % 4294967296;
-    return state / 4294967296;
+    state = (state * 1_664_525 + 1_013_904_223) % 4_294_967_296;
+    return state / 4_294_967_296;
   };
 }
 
@@ -74,6 +78,10 @@ const LIT_CHAIN = [
   { column: 6, y: 320 },
 ];
 
+/**
+ * @param {number} column
+ * @returns {number}
+ */
 function columnX(column) {
   return (
     FIELD_LEFT + ((FIELD_RIGHT - FIELD_LEFT) * column) / (COLUMN_COUNT - 1)
@@ -120,7 +128,7 @@ function buildField() {
     const count = 1 + Math.floor(random() * 2);
     for (let index = 0; index < count && earlier.length > 0; index += 1) {
       const [target] = earlier.splice(Math.floor(random() * earlier.length), 1);
-      if (target !== undefined) edges.push([node, target]);
+      edges.push([node, target]);
     }
   }
   return { nodes, edges };
@@ -163,12 +171,12 @@ function renderChain() {
 /**
  * The proposed closing edge: from the chain's last node back toward its
  * first, arcing above the field. It stops short of the first node at a
- * refusal mark, with its arrowhead pointing at a node it never reaches.
+ * refusal mark.
  */
 function renderRefusedEdge() {
   const start = CHAIN.at(-1);
   const end = CHAIN[0];
-  if (start === undefined || end === undefined) return "";
+  if (start === undefined) return "";
   const apexY = 205;
   const controlX = (start.x + end.x) / 2;
   // Quadratic curve from the last node up over the field toward the first.
