@@ -81,6 +81,7 @@ export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typ
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
+export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerQueryHookIntegrationTests } from "./query-hooks";

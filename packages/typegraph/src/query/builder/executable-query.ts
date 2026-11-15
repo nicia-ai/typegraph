@@ -54,6 +54,7 @@ import {
   mapSelectiveResults,
   MissingSelectiveFieldError,
   nullToUndefined,
+  selectableSystemFieldPath,
   transformPathColumns,
 } from "../execution";
 import { parseJsonPointer } from "../json-pointer";
@@ -1427,8 +1428,23 @@ export class ExecutableQuery<
           throw new MissingSelectiveFieldError(alias, fieldName);
         }
 
-        const aliasObject = this.#getOrCreateAliasObject(cursorContext, alias);
-        aliasObject[fieldName] = nullToUndefined(row[outputName]);
+        // Placed where a selectable node or edge holds the column, the one
+        // shape `extractCursorValue` reads for both selections.
+        const location = selectableSystemFieldPath(fieldName) ?? [fieldName];
+        let container = this.#getOrCreateAliasObject(cursorContext, alias);
+        for (const segment of location.slice(0, -1)) {
+          const nested = container[segment];
+          if (typeof nested === "object" && nested !== null) {
+            container = nested as Record<string, unknown>;
+          } else {
+            const created = Object.create(null) as Record<string, unknown>;
+            container[segment] = created;
+            container = created;
+          }
+        }
+        container[requireDefined(location.at(-1))] = nullToUndefined(
+          row[outputName],
+        );
         continue;
       }
 
