@@ -248,6 +248,15 @@ export type ImportTarget<G extends GraphDef> =
  * Nodes are imported first to satisfy edge reference validation.
  * The import runs within a transaction for atomicity when supported.
  *
+ * Edges are applied in one order at every `batchSize`: rows naming an existing
+ * edge first, then the composition moves the document states (an update
+ * ending a part's attachment paired with a create attaching it again, and
+ * rows `onCompositionIncumbent: "replace"` moves), applied together as one set
+ * with each move both-or-neither, then new edges. `batchSize` changes round trips, never the
+ * committed state. A new composition edge whose part holds an attachment the
+ * document does not mention is refused unless `onCompositionIncumbent:
+ * "replace"` asks for it to be applied as a move.
+ *
  * Refused with a typed {@link ConfigurationError} when the target writes through
  * a serialized database connection another long-lived interchange operation
  * holds — the same refusal, codes and `details.heldBy` / `details.requested` as
@@ -838,6 +847,16 @@ async function importGraphData<G extends GraphDef>(
  *
  * Nodes must precede edges. Once a node chunk commits, edge validation reads the
  * target store rather than retaining every imported node id in memory.
+ *
+ * Every rule {@link importGraph} applies to "the document" applies here to one
+ * chunk: its evaluation order, the pairing of a composition move's two rows
+ * into one unit, and which incumbents `onCompositionIncumbent` speaks for. A
+ * move whose rows land in different chunks is therefore not paired, and an
+ * earlier chunk stays committed when a later one is refused. Chunk boundaries
+ * are the caller's, so keep a move's rows in one chunk when it must be atomic.
+ * Under `onCompositionIncumbent: "replace"` a new attachment whose chunk comes
+ * first still converges: it ends the incumbent at its own `validFrom`, and the
+ * later row restates that end.
  *
  * Refused with a typed {@link ConfigurationError}
  * (`IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`) before any chunk is read
