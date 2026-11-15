@@ -122,12 +122,7 @@ export function registerImportDuplicateEdgeOrderIntegrationTests(
 
         console.info("duplicate edge id, update", kind, result.edges);
         expect(result.errors).toEqual([]);
-        expect(result.edges).toEqual({
-          created: 1,
-          updated: 1,
-          skipped: 0,
-          replaced: 0,
-        });
+        expect(result.edges).toEqual({ created: 1, updated: 1, skipped: 0 });
         const [stored] = await store.edges[kind].find();
         expect(stored?.label).toBe("second");
         expect(stored?.toId).toBe("w1");
@@ -142,12 +137,7 @@ export function registerImportDuplicateEdgeOrderIntegrationTests(
         );
 
         console.info("duplicate edge id, error", kind, result.errors);
-        expect(result.edges).toEqual({
-          created: 1,
-          updated: 0,
-          skipped: 0,
-          replaced: 0,
-        });
+        expect(result.edges).toEqual({ created: 1, updated: 0, skipped: 0 });
         expect(result.errors).toHaveLength(1);
         const stored = await store.edges[kind].find();
         expect(stored.map((edge) => [edge.label, edge.toId])).toEqual([
@@ -164,12 +154,7 @@ export function registerImportDuplicateEdgeOrderIntegrationTests(
         );
 
         expect(result.errors).toEqual([]);
-        expect(result.edges).toEqual({
-          created: 1,
-          updated: 0,
-          skipped: 1,
-          replaced: 0,
-        });
+        expect(result.edges).toEqual({ created: 1, updated: 0, skipped: 1 });
         const stored = await store.edges[kind].find();
         expect(stored.map((edge) => [edge.label, edge.toId])).toEqual([
           ["first", "w1"],
@@ -201,12 +186,7 @@ export function registerImportDuplicateEdgeOrderIntegrationTests(
       );
 
       console.info("duplicate composition edge id", result.errors);
-      expect(result.edges).toEqual({
-        created: 1,
-        updated: 0,
-        skipped: 0,
-        replaced: 0,
-      });
+      expect(result.edges).toEqual({ created: 1, updated: 0, skipped: 0 });
       expect(result.errors).toHaveLength(1);
       const stored = await store.edges.idoHolds.find();
       expect(stored.map((edge) => [edge.label, edge.toId])).toEqual([

@@ -16,7 +16,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, partOf } from "../../../src";
-import { rowPropsToObject } from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -48,8 +47,6 @@ const BATCH_SIZES = [1, 1000] as const;
 
 const ATTACHED_AT = "2020-01-01T00:00:00.000Z";
 const MOVED_AT = "2021-01-01T00:00:00.000Z";
-/** Before the incumbent opened, so a move at this instant would invert it. */
-const BEFORE_INCUMBENT = "2019-01-01T00:00:00.000Z";
 /** Inside the incumbent's window, so an attachment opening here overlaps it. */
 const INSIDE_INCUMBENT = "2020-06-01T00:00:00.000Z";
 
@@ -74,91 +71,6 @@ function moveGraph(population: Population, existence: Existence, run: string) {
 }
 
 type MoveStore = InspectableStore<ReturnType<typeof moveGraph>>;
-
-/** A realizing edge whose schema transforms its value: parsing it twice shows. */
-const taggedPartOf = defineEdge("icmTaggedPartOf", {
-  schema: z.object({
-    note: z
-      .string()
-      .transform((note) => `${note}!`)
-      .optional(),
-  }),
-});
-
-function taggedGraph(run: string) {
-  return defineGraph({
-    id: `import_composition_moves_props_${run}`,
-    nodes: { IcmPart: { type: Part }, IcmWhole: { type: Whole } },
-    edges: {
-      icmTaggedPartOf: {
-        type: taggedPartOf,
-        from: [Part],
-        to: [Whole],
-        cardinality: "one",
-      },
-    },
-    ontology: [partOf(Part, Whole, { via: taggedPartOf })],
-  });
-}
-
-/**
- * Imports one document holding two rows with the same `properties`: one that
- * MOVES a part under `onCompositionIncumbent: "replace"`, and one that
- * attaches a part holding no whole — an ordinary create. Returns the stored
- * properties of each, so a test can hold the move to the ordinary create.
- */
-async function importMoveBesideCreate(
-  context: IntegrationTestContext,
-  run: string,
-  properties: Record<string, unknown>,
-  overrides: Partial<ImportOptions>,
-): Promise<
-  Readonly<{
-    errors: readonly string[];
-    moved: Record<string, unknown> | undefined;
-    created: Record<string, unknown> | undefined;
-  }>
-> {
-  const store = await context.createStore(taggedGraph(run));
-  const oldWhole = await store.nodes.IcmWhole.create({});
-  const newWhole = await store.nodes.IcmWhole.create({});
-  const moving = await store.nodes.IcmPart.create(
-    {},
-    { partOf: { whole: oldWhole, validFrom: ATTACHED_AT } },
-  );
-  const unattached = await store.nodes.IcmPart.create({});
-  const attachRow = (id: string, partId: string): EdgeRows[number] => ({
-    kind: "icmTaggedPartOf",
-    id,
-    from: { kind: "IcmPart", id: partId },
-    to: { kind: "IcmWhole", id: newWhole.id },
-    properties,
-    validFrom: MOVED_AT,
-  });
-  const result = await importGraph(
-    store,
-    document([
-      attachRow("icm-moved", moving.id),
-      attachRow("icm-created", unattached.id),
-    ]),
-    {
-      ...options(1000),
-      onCompositionIncumbent: "replace",
-      ...overrides,
-    },
-  );
-  const storedProps = async (
-    id: string,
-  ): Promise<Record<string, unknown> | undefined> => {
-    const row = await store.backend.getEdge(store.graphId, id);
-    return row === undefined ? undefined : rowPropsToObject(row.props);
-  };
-  return {
-    errors: result.errors.map((entry) => `${entry.id}: ${entry.error}`),
-    moved: await storedProps("icm-moved"),
-    created: await storedProps("icm-created"),
-  };
-}
 
 type Seeded = Readonly<{
   store: MoveStore;
@@ -459,20 +371,6 @@ function compositionRow(
   return { kind, id, from, to, properties: {}, ...window };
 }
 
-function partAttachRow(
-  id: string,
-  partId: string,
-  wholeId: string,
-): EdgeRows[number] {
-  return compositionRow(
-    "icmPartOf",
-    id,
-    { kind: "IcmPart", id: partId },
-    { kind: "IcmWhole", id: wholeId },
-    { validFrom: MOVED_AT },
-  );
-}
-
 function itemRef(id: string): Readonly<{ kind: string; id: string }> {
   return { kind: "IcmItem", id };
 }
@@ -520,7 +418,7 @@ export function registerImportCompositionMoveIntegrationTests(
           );
           expect(outcome).toEqual({
             edges: MOVED,
-            counts: { created: 1, updated: 1, skipped: 0, replaced: 0 },
+            counts: { created: 1, updated: 1, skipped: 0 },
             errors: [],
             fenceViolations: 0,
           });
@@ -548,32 +446,11 @@ export function registerImportCompositionMoveIntegrationTests(
           };
           expect(outcome).toEqual({
             edges: UNMOVED,
-            counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
+            counts: { created: 0, updated: 0, skipped: 0 },
             errors:
               order === "endFirst" ?
                 [endError, attachError]
               : [attachError, endError],
-            fenceViolations: 0,
-          });
-        });
-
-        it("applies the same move under onCompositionIncumbent replace", async () => {
-          const outcome = await importAtEveryBatchSize(
-            context,
-            "oneActive",
-            existence,
-            (seeded) =>
-              ordered(
-                order,
-                endIncumbent(seeded, MOVED_AT),
-                attachElsewhere(seeded, MOVED_AT),
-              ),
-            { onCompositionIncumbent: "replace" },
-          );
-          expect(outcome).toEqual({
-            edges: MOVED,
-            counts: { created: 1, updated: 1, skipped: 0, replaced: 0 },
-            errors: [],
             fenceViolations: 0,
           });
         });
@@ -585,44 +462,187 @@ export function registerImportCompositionMoveIntegrationTests(
       (existence) => {
         // An ended `one` row still holds its part, so ending it makes no room:
         // the document contradicts itself, and the outcome is the same at every
-        // batch size, in either order, under either setting.
+        // batch size and in either order.
         describe.each(ORDERS)("%s", (order) => {
-          it.each(["refuse", "replace"] as const)(
-            "refuses the second attachment under %s",
-            async (onCompositionIncumbent) => {
-              const outcome = await importAtEveryBatchSize(
-                context,
-                "one",
-                existence,
-                (seeded) =>
-                  ordered(
-                    order,
-                    endIncumbent(seeded, MOVED_AT),
-                    attachElsewhere(seeded, MOVED_AT),
-                  ),
-                { onCompositionIncumbent },
-              );
-              const ended = existence === "optional";
+          it("refuses the second attachment", async () => {
+            const outcome = await importAtEveryBatchSize(
+              context,
+              "one",
+              existence,
+              (seeded) =>
+                ordered(
+                  order,
+                  endIncumbent(seeded, MOVED_AT),
+                  attachElsewhere(seeded, MOVED_AT),
+                ),
+            );
+            const ended = existence === "optional";
+            expect(outcome).toEqual({
+              edges: [
+                {
+                  id: INCUMBENT,
+                  whole: "old",
+                  validFrom: ATTACHED_AT,
+                  validTo: ended ? MOVED_AT : undefined,
+                },
+              ],
+              counts: {
+                created: 0,
+                updated: ended ? 1 : 0,
+                skipped: 0,
+              },
+              errors: [
+                ...(ended ?
+                  []
+                : [{ id: INCUMBENT, code: "COMPOSITION_DETACH_REFUSED" }]),
+                { id: MOVED_EDGE_ID, code: "COMPOSITION_WHOLE_OCCUPIED" },
+              ],
+              fenceViolations: 0,
+            });
+          });
+        });
+      },
+    );
+
+    describe.each(POPULATIONS)("%s, the new attachment alone", (population) => {
+      // A `one` move deletes the old row, so its export carries the new
+      // attachment alone; the target still holds the old one, which the
+      // document does not end, so the new row would give the part a second
+      // whole and is refused like any other.
+      describe.each(EXISTENCES)("%s", (existence) => {
+        it("refuses the new attachment while the part holds its old one", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            population,
+            existence,
+            (seeded) => [attachElsewhere(seeded, MOVED_AT)],
+          );
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [{ id: MOVED_EDGE_ID, code: "COMPOSITION_WHOLE_OCCUPIED" }],
+            fenceViolations: 0,
+          });
+        });
+      });
+    });
+
+    it("applies an end whose id the document repeats as its own row, not as half of a move", async () => {
+      // The repeat tightens the end the first row states. Repeats of an
+      // existing id are applied with the existing rows, before any move, so a
+      // first row taken as half of a move would then be written after its own
+      // repeat — widening the end the repeat set — and be refused.
+      const outcome = await importAtEveryBatchSize(
+        context,
+        "oneActive",
+        "optional",
+        (seeded) => [
+          endIncumbent(seeded, MOVED_AT),
+          attachElsewhere(seeded, MOVED_AT),
+          endIncumbent(seeded, INSIDE_INCUMBENT),
+        ],
+      );
+      expect(outcome).toEqual({
+        edges: [
+          {
+            id: MOVED_EDGE_ID,
+            whole: "new",
+            validFrom: MOVED_AT,
+            validTo: undefined,
+          },
+          {
+            id: INCUMBENT,
+            whole: "old",
+            validFrom: ATTACHED_AT,
+            validTo: INSIDE_INCUMBENT,
+          },
+        ],
+        counts: { created: 1, updated: 2, skipped: 0 },
+        errors: [],
+        fenceViolations: 0,
+      });
+    });
+
+    describe.each(EXISTENCES)(
+      "oneActive %s, the attach refused before anything is written",
+      (existence) => {
+        // The attach is refused while the document is classified, so no
+        // create ever runs; the end must still not be written alone.
+        const cases = [
+          {
+            name: "an attach to a whole that does not exist",
+            nodes: [],
+            attachError: "To node not found: IcmWhole:no-such-whole",
+            attach: (seeded: Seeded): EdgeRows[number] => ({
+              ...attachElsewhere(seeded, MOVED_AT),
+              to: { kind: "IcmWhole", id: "no-such-whole" },
+            }),
+          },
+          {
+            name: "an attach whose property is invalid",
+            nodes: [],
+            attachError:
+              "note: Invalid input: expected string, received number",
+            attach: (seeded: Seeded): EdgeRows[number] => ({
+              ...attachElsewhere(seeded, MOVED_AT),
+              properties: { note: 5 },
+            }),
+          },
+          {
+            name: "an attach to a whole whose own row the import refuses",
+            nodes: [
+              {
+                kind: "IcmWhole",
+                id: "refused-whole",
+                properties: { bogus: 1 },
+              },
+            ],
+            attachError: "To node not found: IcmWhole:refused-whole",
+            attach: (seeded: Seeded): EdgeRows[number] => ({
+              ...attachElsewhere(seeded, MOVED_AT),
+              to: { kind: "IcmWhole", id: "refused-whole" },
+            }),
+          },
+        ] as const;
+        describe.each(ORDERS)("%s", (order) => {
+          it.each(cases)(
+            "keeps the old attachment: $name",
+            async (testCase) => {
+              const outcome = await sameAtEveryBatchSize(async (batchSize) => {
+                const seeded = await seed(
+                  context,
+                  "oneActive",
+                  existence,
+                  `refused_attach_b${batchSize}`,
+                );
+                const result = await importGraph(
+                  seeded.store,
+                  {
+                    ...document(
+                      ordered(
+                        order,
+                        endIncumbent(seeded, MOVED_AT),
+                        testCase.attach(seeded),
+                      ),
+                    ),
+                    nodes: [...testCase.nodes],
+                  },
+                  options(batchSize),
+                );
+                return outcomeOf(seeded, result);
+              });
               expect(outcome).toEqual({
-                edges: [
+                edges: UNMOVED,
+                counts: { created: 0, updated: 0, skipped: 0 },
+                errors: [
+                  ...(testCase.nodes.length > 0 ?
+                    [{ id: "refused-whole", code: "Unknown properties: bogus" }]
+                  : []),
+                  { id: MOVED_EDGE_ID, code: testCase.attachError },
                   {
                     id: INCUMBENT,
-                    whole: "old",
-                    validFrom: ATTACHED_AT,
-                    validTo: ended ? MOVED_AT : undefined,
+                    code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
                   },
-                ],
-                counts: {
-                  created: 0,
-                  updated: ended ? 1 : 0,
-                  skipped: 0,
-                  replaced: 0,
-                },
-                errors: [
-                  ...(ended ?
-                    []
-                  : [{ id: INCUMBENT, code: "COMPOSITION_DETACH_REFUSED" }]),
-                  { id: MOVED_EDGE_ID, code: "COMPOSITION_WHOLE_OCCUPIED" },
                 ],
                 fenceViolations: 0,
               });
@@ -632,205 +652,99 @@ export function registerImportCompositionMoveIntegrationTests(
       },
     );
 
-    describe.each(POPULATIONS)("%s, the new attachment alone", (population) => {
-      describe.each(EXISTENCES)("%s", (existence) => {
-        it("refuses the move by default, naming the option", async () => {
-          const outcome = await importAtEveryBatchSize(
-            context,
-            population,
-            existence,
-            (seeded) => [attachElsewhere(seeded, MOVED_AT)],
-          );
-          expect(outcome).toEqual({
-            edges: UNMOVED,
-            counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
-            errors: [
-              { id: MOVED_EDGE_ID, code: "COMPOSITION_IMPORT_MOVE_REFUSED" },
-            ],
-            fenceViolations: 0,
-          });
-        });
-
-        it("moves the part under onCompositionIncumbent replace", async () => {
-          const outcome = await importAtEveryBatchSize(
-            context,
-            population,
-            existence,
-            (seeded) => [attachElsewhere(seeded, MOVED_AT)],
-            { onCompositionIncumbent: "replace" },
-          );
-          expect(outcome).toEqual({
-            // A `one` incumbent is deleted; a `oneActive` one ends at the new
-            // edge's validFrom, so the two windows abut.
-            edges:
-              population === "one" ?
-                [
-                  {
-                    id: MOVED_EDGE_ID,
-                    whole: "new",
-                    validFrom: MOVED_AT,
-                    validTo: undefined,
-                  },
-                ]
-              : MOVED,
-            counts: { created: 1, updated: 0, skipped: 0, replaced: 1 },
-            errors: [],
-            fenceViolations: 0,
-          });
-        });
-      });
-    });
-
-    it("refuses a replace move whose row states an end", async () => {
-      const outcome = await importAtEveryBatchSize(
-        context,
-        "one",
-        "optional",
-        (seeded) => [
-          { ...attachElsewhere(seeded, MOVED_AT), validTo: MOVED_AT },
-        ],
-        { onCompositionIncumbent: "replace" },
-      );
-      expect(outcome).toEqual({
-        edges: UNMOVED,
-        counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
-        errors: [
-          {
-            id: MOVED_EDGE_ID,
-            code: "COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED",
-          },
-        ],
-        fenceViolations: 0,
-      });
-    });
-
-    it("refuses a replace move that would end the incumbent before it opened", async () => {
-      const outcome = await importAtEveryBatchSize(
-        context,
-        "oneActive",
-        "required",
-        (seeded) => [attachElsewhere(seeded, BEFORE_INCUMBENT)],
-        { onCompositionIncumbent: "replace" },
-      );
-      expect(outcome).toEqual({
-        edges: UNMOVED,
-        counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
-        errors: [
-          { id: MOVED_EDGE_ID, code: "COMPOSITION_MOVE_BEFORE_INCUMBENT" },
-        ],
-        fenceViolations: 0,
-      });
-    });
-
-    it("refuses an onCompositionIncumbent value it does not declare", async () => {
-      const seeded = await seed(context, "one", "optional", "invalid_option");
-      await expect(
-        importGraph(seeded.store, document([]), {
-          ...options(1000),
-          onCompositionIncumbent: "move" as "replace",
-        }),
-      ).rejects.toThrow(/onCompositionIncumbent/u);
-    });
-
-    describe.each(POPULATIONS)(
-      "%s, one part attached twice beside an unrelated move",
-      (population) => {
-        it("refuses both rows naming the part and applies the unrelated move", async () => {
-          const report = await sameAtEveryBatchSize(async (batchSize) => {
-            const store = await context.createStore(
-              moveGraph(population, "optional", `contested_b${batchSize}`),
-            );
-            const w1 = await store.nodes.IcmWhole.create({});
-            const w2 = await store.nodes.IcmWhole.create({});
-            const w3 = await store.nodes.IcmWhole.create({});
-            const w4 = await store.nodes.IcmWhole.create({});
-            const p1 = await store.nodes.IcmPart.create(
-              {},
-              { partOf: { whole: w1, validFrom: ATTACHED_AT } },
-            );
-            const p2 = await store.nodes.IcmPart.create(
-              {},
-              { partOf: { whole: w1, validFrom: ATTACHED_AT } },
-            );
-            const result = await importGraph(
-              store,
-              document([
-                partAttachRow("a", p1.id, w2.id),
-                partAttachRow("b", p1.id, w3.id),
-                partAttachRow("c", p2.id, w4.id),
-              ]),
-              options(batchSize, { onCompositionIncumbent: "replace" }),
-            );
-            const open = await store.edges.icmPartOf.find({});
-            const name = (id: string): string =>
-              id === w1.id ? "w1"
-              : id === w4.id ? "w4"
-              : id;
-            return {
-              errors: result.errors.map((entry) => ({
-                id: entry.id,
-                code: errorCode(entry.error),
-                namesBothRows:
-                  entry.error.includes('"a"') && entry.error.includes('"b"'),
-              })),
-              edges: result.edges,
-              open: open
-                .map(
-                  (edge) =>
-                    `${edge.fromId === p1.id ? "p1" : "p2"}→${name(edge.toId)}`,
-                )
-                .toSorted(),
-              fenceViolations: await store.verifyConstraintFences(),
-            };
-          });
-          expect(report).toEqual({
-            errors: [
-              {
-                id: "a",
-                code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
-                namesBothRows: true,
-              },
-              {
-                id: "b",
-                code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
-                namesBothRows: true,
-              },
-            ],
-            edges: { created: 1, updated: 0, skipped: 0, replaced: 1 },
-            open: ["p1→w1", "p2→w4"],
-            fenceViolations: [],
-          });
-        });
-      },
-    );
-
-    describe("the properties a replace move writes", () => {
-      it("runs the realizing edge's schema transform once, as an ordinary create does", async () => {
-        const stored = await importMoveBesideCreate(
-          context,
-          "transform",
-          { note: "moved" },
+    it("keeps both items when one half of a slot swap is refused before anything is written", async () => {
+      const report = await sameAtEveryBatchSize(async (batchSize) => {
+        const store = await context.createStore(
+          slotGraph(`refused_swap_b${batchSize}`),
+        );
+        const s1 = await store.nodes.IcmSlot.create({});
+        const s2 = await store.nodes.IcmSlot.create({});
+        const firstItem = await store.nodes.IcmItem.create(
           {},
+          { partOf: { whole: s1, validFrom: ATTACHED_AT } },
         );
-        expect(stored).toEqual({
-          errors: [],
-          moved: { note: "moved!" },
-          created: { note: "moved!" },
-        });
+        const secondItem = await store.nodes.IcmItem.create(
+          {},
+          { partOf: { whole: s2, validFrom: ATTACHED_AT } },
+        );
+        const held = await store.edges.icmInSlot.find({});
+        const edgeOf = (itemId: string): string =>
+          requireDefined(held.find((edge) => edge.fromId === itemId)).id;
+        const result = await importGraph(
+          store,
+          document([
+            compositionRow(
+              "icmInSlot",
+              edgeOf(firstItem.id),
+              itemRef(firstItem.id),
+              slotRef(s1.id),
+              { validFrom: ATTACHED_AT, validTo: MOVED_AT },
+            ),
+            compositionRow(
+              "icmInSlot",
+              "i1-s2",
+              itemRef(firstItem.id),
+              slotRef(s2.id),
+              { validFrom: MOVED_AT },
+            ),
+            compositionRow(
+              "icmInSlot",
+              edgeOf(secondItem.id),
+              itemRef(secondItem.id),
+              slotRef(s2.id),
+              { validFrom: ATTACHED_AT, validTo: MOVED_AT },
+            ),
+            // The second item's new slot does not exist, so its end must not
+            // free s2 for the first item.
+            compositionRow(
+              "icmInSlot",
+              "i2-missing",
+              itemRef(secondItem.id),
+              slotRef("no-such-slot"),
+              { validFrom: MOVED_AT },
+            ),
+          ]),
+          options(batchSize),
+        );
+        const open = await store.edges.icmInSlot.find({});
+        const label = (id: string): string =>
+          id === edgeOf(firstItem.id) ? "i1-incumbent"
+          : id === edgeOf(secondItem.id) ? "i2-incumbent"
+          : id;
+        return {
+          // The refusal's leading clause: an occupied slot names a generated id.
+          errors: result.errors.map((entry) => ({
+            id: label(entry.id),
+            code: errorCode(entry.error).split(":")[0],
+          })),
+          edges: result.edges,
+          open: open
+            .map(
+              (edge) =>
+                `${edge.fromId === firstItem.id ? "i1" : "i2"}→${edge.toId === s1.id ? "s1" : "s2"}`,
+            )
+            .toSorted(),
+          fenceViolations: await store.verifyConstraintFences(),
+        };
       });
-
-      it('keeps a key onUnknownProperty "allow" admitted, as an ordinary create does', async () => {
-        const stored = await importMoveBesideCreate(
-          context,
-          "allow",
-          { note: "kept", extra: 1 },
-          { onUnknownProperty: "allow" },
-        );
-        expect(stored).toEqual({
-          errors: [],
-          moved: { note: "kept", extra: 1 },
-          created: { note: "kept", extra: 1 },
-        });
+      expect(report).toEqual({
+        // Classification, then the stranded end, then the first item's move,
+        // whose attach finds s2 still held.
+        errors: [
+          { id: "i2-missing", code: "To node not found" },
+          {
+            id: "i2-incumbent",
+            code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+          },
+          {
+            id: "i1-incumbent",
+            code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+          },
+          { id: "i1-s2", code: "Cardinality violation" },
+        ],
+        edges: { created: 0, updated: 0, skipped: 0 },
+        open: ["i1→s1", "i2→s2"],
+        fenceViolations: [],
       });
     });
 
@@ -840,112 +754,104 @@ export function registerImportCompositionMoveIntegrationTests(
         // mid2 is a required part whose own attachment names a root that
         // does not exist, so the import removes it once its edges are in —
         // after the leaf's move to it was written.
-        it.each(["oneActive", "one"] as const)(
-          // "oneActive": the move's two rows; "one": a replace move.
-          "keeps the leaf on its old whole: %s",
-          async (population) => {
-            const report = await sameAtEveryBatchSize(async (batchSize) => {
-              const store = await context.createStore(
-                nestedGraph(population, leafExistence, `b${batchSize}`),
-              );
-              const root = await store.nodes.IcmRoot.create({});
-              const mid1 = await store.nodes.IcmMid.create(
-                {},
-                { partOf: { whole: root, validFrom: ATTACHED_AT } },
-              );
-              const leaf = await store.nodes.IcmLeaf.create(
-                {},
-                { partOf: { whole: mid1, validFrom: ATTACHED_AT } },
-              );
-              const [incumbent] = await store.edges.icmLeafOf.find({});
-              const leafRef = { kind: "IcmLeaf", id: leaf.id };
-              const rows: EdgeRows = [
-                compositionRow(
-                  "icmMidOf",
-                  "mid2-of",
-                  { kind: "IcmMid", id: "mid2" },
-                  { kind: "IcmRoot", id: "no-such-root" },
-                  { validFrom: ATTACHED_AT },
-                ),
-                ...(population === "oneActive" ?
-                  [
-                    compositionRow(
-                      "icmLeafOf",
-                      requireDefined(incumbent).id,
-                      leafRef,
-                      { kind: "IcmMid", id: mid1.id },
-                      { validFrom: ATTACHED_AT, validTo: MOVED_AT },
-                    ),
-                  ]
-                : []),
-                compositionRow(
-                  "icmLeafOf",
-                  "leaf-moved",
-                  leafRef,
-                  { kind: "IcmMid", id: "mid2" },
-                  { validFrom: MOVED_AT },
-                ),
-              ];
-              const result = await importGraph(
-                store,
-                {
-                  ...document(rows),
-                  nodes: [{ kind: "IcmMid", id: "mid2", properties: {} }],
-                },
-                options(batchSize, { onCompositionIncumbent: "replace" }),
-              );
-              const leafEdges = await store.edges.icmLeafOf.find(
-                {},
-                { temporalMode: "includeEnded" },
-              );
-              const fenceViolations = await store.verifyConstraintFences();
-              const incumbentId = requireDefined(incumbent).id;
-              return {
-                leafEdges: leafEdges.map((edge) => ({
-                  id: edge.id === incumbentId ? INCUMBENT : edge.id,
-                  whole: edge.toId === mid1.id ? "mid1" : edge.toId,
-                  validTo: edge.meta.validTo,
+        it("keeps the leaf on its old whole", async () => {
+          const report = await sameAtEveryBatchSize(async (batchSize) => {
+            const store = await context.createStore(
+              nestedGraph("oneActive", leafExistence, `b${batchSize}`),
+            );
+            const root = await store.nodes.IcmRoot.create({});
+            const mid1 = await store.nodes.IcmMid.create(
+              {},
+              { partOf: { whole: root, validFrom: ATTACHED_AT } },
+            );
+            const leaf = await store.nodes.IcmLeaf.create(
+              {},
+              { partOf: { whole: mid1, validFrom: ATTACHED_AT } },
+            );
+            const [incumbent] = await store.edges.icmLeafOf.find({});
+            const leafRef = { kind: "IcmLeaf", id: leaf.id };
+            const rows: EdgeRows = [
+              compositionRow(
+                "icmMidOf",
+                "mid2-of",
+                { kind: "IcmMid", id: "mid2" },
+                { kind: "IcmRoot", id: "no-such-root" },
+                { validFrom: ATTACHED_AT },
+              ),
+              compositionRow(
+                "icmLeafOf",
+                requireDefined(incumbent).id,
+                leafRef,
+                { kind: "IcmMid", id: mid1.id },
+                { validFrom: ATTACHED_AT, validTo: MOVED_AT },
+              ),
+              compositionRow(
+                "icmLeafOf",
+                "leaf-moved",
+                leafRef,
+                { kind: "IcmMid", id: "mid2" },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+            const result = await importGraph(
+              store,
+              {
+                ...document(rows),
+                nodes: [{ kind: "IcmMid", id: "mid2", properties: {} }],
+              },
+              options(batchSize),
+            );
+            const leafEdges = await store.edges.icmLeafOf.find(
+              {},
+              { temporalMode: "includeEnded" },
+            );
+            const fenceViolations = await store.verifyConstraintFences();
+            const incumbentId = requireDefined(incumbent).id;
+            return {
+              leafEdges: leafEdges.map((edge) => ({
+                id: edge.id === incumbentId ? INCUMBENT : edge.id,
+                whole: edge.toId === mid1.id ? "mid1" : edge.toId,
+                validTo: edge.meta.validTo,
+              })),
+              mid2: await store.backend.getNode(
+                store.graphId,
+                "IcmMid",
+                "mid2",
+              ),
+              leafRowErrors: result.errors
+                .filter(
+                  (entry) =>
+                    entry.id === incumbentId || entry.id === "leaf-moved",
+                )
+                .map((entry) => ({
+                  id: entry.id === incumbentId ? INCUMBENT : entry.id,
+                  code: errorCode(entry.error),
                 })),
-                mid2: await store.backend.getNode(
-                  store.graphId,
-                  "IcmMid",
-                  "mid2",
-                ),
-                leafRowErrors: result.errors
-                  .filter(
-                    (entry) =>
-                      entry.id === incumbentId || entry.id === "leaf-moved",
-                  )
-                  .map((entry) => ({
-                    id: entry.id === incumbentId ? INCUMBENT : entry.id,
-                    code: errorCode(entry.error),
-                  })),
-                edges: result.edges,
-                fenceViolations,
-              };
-            });
-            expect(report).toEqual({
-              leafEdges: [{ id: INCUMBENT, whole: "mid1", validTo: undefined }],
-              mid2: undefined,
-              leafRowErrors: [
-                ...(population === "oneActive" ?
-                  [
-                    {
-                      id: INCUMBENT,
-                      code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
-                    },
-                  ]
-                : []),
-                {
-                  id: "leaf-moved",
-                  code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
-                },
-              ],
-              edges: { created: 0, updated: 0, skipped: 0, replaced: 0 },
-              fenceViolations: [],
-            });
-          },
-        );
+              // mid2 was created, then removed with the purge: once per
+              // round, so a round that rolls back must take its count back.
+              nodes: result.nodes,
+              edges: result.edges,
+              fenceViolations,
+            };
+          });
+          expect(report).toEqual({
+            leafEdges: [{ id: INCUMBENT, whole: "mid1", validTo: undefined }],
+            mid2: undefined,
+            leafRowErrors: [
+              {
+                id: INCUMBENT,
+                code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+              },
+              {
+                id: "leaf-moved",
+                code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+              },
+            ],
+            nodes: { created: 0, updated: 0, skipped: 0 },
+            edges: { created: 0, updated: 0, skipped: 0 },
+            fenceViolations: [],
+          });
+        });
       },
     );
 
@@ -1024,7 +930,7 @@ export function registerImportCompositionMoveIntegrationTests(
       });
       expect(report).toEqual({
         errors: [],
-        edges: { created: 2, updated: 2, skipped: 0, replaced: 0 },
+        edges: { created: 2, updated: 2, skipped: 0 },
         open: ["i1→s2", "i2→s1"],
         fenceViolations: [],
       });
@@ -1117,7 +1023,7 @@ export function registerImportCompositionMoveIntegrationTests(
         });
         expect(report).toEqual({
           errors: [],
-          edges: { created: 2, updated: 2, skipped: 0, replaced: 0 },
+          edges: { created: 2, updated: 2, skipped: 0 },
           open: ["a⊂b", "b⊂root"],
           fenceViolations: [],
         });
@@ -1125,52 +1031,7 @@ export function registerImportCompositionMoveIntegrationTests(
     );
 
     describe("importGraphStream", () => {
-      it("applies onCompositionIncumbent replace to each chunk", async () => {
-        const seeded = await seed(context, "one", "optional", "stream_one");
-        const result = await importGraphStream(
-          seeded.store,
-          chunks([attachElsewhere(seeded, MOVED_AT)]),
-          { ...options(1000), onCompositionIncumbent: "replace" },
-        );
-        expect(await outcomeOf(seeded, result)).toEqual({
-          edges: [
-            {
-              id: MOVED_EDGE_ID,
-              whole: "new",
-              validFrom: MOVED_AT,
-              validTo: undefined,
-            },
-          ],
-          counts: { created: 1, updated: 0, skipped: 0, replaced: 1 },
-          errors: [],
-          fenceViolations: 0,
-        });
-      });
-
-      it("converges a move split across chunks under replace", async () => {
-        const seeded = await seed(
-          context,
-          "oneActive",
-          "optional",
-          "stream_split",
-        );
-        const result = await importGraphStream(
-          seeded.store,
-          chunks(
-            [attachElsewhere(seeded, MOVED_AT)],
-            [endIncumbent(seeded, MOVED_AT)],
-          ),
-          { ...options(1000), onCompositionIncumbent: "replace" },
-        );
-        expect(await outcomeOf(seeded, result)).toEqual({
-          edges: MOVED,
-          counts: { created: 1, updated: 1, skipped: 0, replaced: 1 },
-          errors: [],
-          fenceViolations: 0,
-        });
-      });
-
-      it("refuses the first half of a move split across chunks by default", async () => {
+      it("refuses the first half of a move split across chunks", async () => {
         const seeded = await seed(
           context,
           "oneActive",
@@ -1186,7 +1047,7 @@ export function registerImportCompositionMoveIntegrationTests(
             ),
             options(1000),
           ),
-        ).rejects.toThrow(/COMPOSITION_IMPORT_MOVE_REFUSED/u);
+        ).rejects.toThrow(/already has a whole/u);
         const committed = await seeded.store.edges.icmPartOf.find({});
         expect(committed.map((edge) => edge.toId)).toEqual([seeded.oldWholeId]);
       });

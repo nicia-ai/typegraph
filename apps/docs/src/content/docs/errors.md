@@ -826,8 +826,6 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"existing"` | `COMPOSITION_WHOLE_CONFLICT` | A `getOrCreateByConstraint` call states a `partOf` that contradicts the whole (or realizing edge) the existing node already holds |
 | `"props"` | `COMPOSITION_PROPS_CONFLICT` | A `getOrCreateByConstraint` or `reparent` call states `partOf.props` that differ from the already-satisfied attachment's stored props |
 | `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
-| `"importMove"` | `COMPOSITION_IMPORT_MOVE_REFUSED` | An import row would attach a part to a new whole while the part holds an attachment the document does not mention, and `onCompositionIncumbent` is `"refuse"` (the default) |
-| `"importMoveWindow"` | `COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED` | Under `onCompositionIncumbent: "replace"`, the row that moves a part states a `validTo` or `validFrom: null`, which a move cannot write |
 
 A part holds exactly one whole across **every** declared composition pair,
 enforced by a single reserved claim axis — two different realizing edge
@@ -919,17 +917,6 @@ for a match: a call whose `partOf` equals the node's live whole, realizing edge
 and (when stated) props and window succeeds and is idempotent, and one whose
 node has no live whole writes the attachment — see
 [`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
-
-**An import row that would move a part.** Import reports both of these as
-per-row errors whose message starts with the code. `"importMove"` names the
-row's edge and whole and the incumbent edge and whole (`incumbentEdgeKind`,
-`incumbentEdgeId`, `incumbentWholeKind`, `incumbentWholeId`): the part already
-holds that attachment on the target, the document does not end it, so the row
-would move the part. Pass `onCompositionIncumbent: "replace"` to apply such a
-row as a move the way `reparent` does, or include the incumbent edge in the
-document with the `validTo` that ends it. `"importMoveWindow"` carries the
-`bound` (`"validTo"` or `"validFrom"`) and the `stated` value. See
-[A composition part that moved](/interchange#a-composition-part-that-moved).
 
 **A composition window never starts or ends later than its write.** A row
 with no `validTo` is the part's current attachment and an ended row is

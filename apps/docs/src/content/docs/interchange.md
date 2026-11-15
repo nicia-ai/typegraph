@@ -500,7 +500,6 @@ error entry you see in `result.errors`.
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
 | `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips and the order of create refusals in `result.errors`, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
-| `onCompositionIncumbent` | `"refuse" \| "replace"` | `"refuse"` | What a new composition edge does about an attachment its part already holds that the document does not mention — see [A composition part that moved](#a-composition-part-that-moved). |
 
 ### Evaluation order and `batchSize`
 
@@ -792,18 +791,14 @@ A source whose part moved to another whole re-imports with `onConflict:
   land or neither does. A required part moves this way too: the end is not
   refused as a detach, because the same move attaches the part again.
 - **`one` pair.** A `one` move deletes the old row, so its export carries the
-  new attachment alone, and the target still holds the old one. That row would
-  move the part away from an attachment the document does not mention, so by
-  default it is refused per row with
-  [`CompositionError`](/errors#compositionerror)
-  (`COMPOSITION_IMPORT_MOVE_REFUSED`), naming the incumbent edge and the
-  option below. The same refusal applies on a `oneActive` pair whose document
-  omits the ended row.
+  new attachment alone, and the target still holds the old one. The new row
+  would give the part a second whole, so it is refused per row as
+  `COMPOSITION_WHOLE_OCCUPIED`, like any other, and the part stays where it
+  was. To replay such a move, `reparent` the part on the target. The same
+  refusal applies on a `oneActive` pair whose document omits the ended row.
 
-Every move a document states — each pair, and each row
-`onCompositionIncumbent: "replace"` moves (below) — is applied together, as
-`bulkReparent` applies its moves: every old attachment is ended or retired
-before any new one is written. So moves that depend on each other land
+Every move a document states is applied together, as `bulkReparent` applies
+its moves: every old attachment is ended before any new one is written. So moves that depend on each other land
 whatever order the document lists them in: two parts exchanging a slot a
 whole-side `targetCardinality` bounds, or a hierarchy that inverts (a part
 moves under another that the same document moves out from under it).
@@ -816,6 +811,10 @@ could not attach, or one that is not live under `validateReferences: false`)
 — is taken out of the set and the rest is applied again without it: its
 refused row reports its own error, and its other rows a per-row error prefixed
 `INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`. The part keeps its current whole.
+That holds when the attach is refused before anything is written, too — an
+invalid property, or a whole that does not exist or whose own row this import
+refuses: the row ending the part's attachment is then refused with the same
+prefix rather than written alone.
 A refused row costs one more pass over the moves (not over the rest of the
 import) when its move had already written its other half; a moved part found
 without its whole costs one more pass over everything written after the moves.
@@ -827,44 +826,12 @@ transaction, which holds the per-graph write lock throughout: on SQLite a chain
 of 200 such failures took about 10 seconds, so one of 2,000 would hold the
 write lock for more than 15 minutes.
 
-`onCompositionIncumbent: "replace"` applies such a row as a move instead,
-through the owner `nodes.<Kind>.reparent(...)` uses: a `one` incumbent is
-deleted, and a `oneActive` incumbent's window ends at the new edge's
-`validFrom`, so the two windows abut (a row stating no `validFrom` moves the
-part at the import's clock). The new edge keeps the document's id and
-properties, and counts under `result.edges.created`; each incumbent a
-`"replace"` move retires counts under `result.edges.replaced`, the only count
-for a row the document does not contain. A move opens the new attachment at one instant with no end, so a
-row stating a `validTo`, or `validFrom: null`, is refused with
-`COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED`; a `validFrom` before the
-incumbent's own is refused with `COMPOSITION_MOVE_BEFORE_INCUMBENT`, as
-`reparent` refuses it. `"replace"` only retires an attachment the document
-does not mention: an incumbent that is itself a row of the document is the
-document's own statement, so a second attachment for the same part is refused
-as `COMPOSITION_WHOLE_OCCUPIED` under either setting. A part the document
-attaches more than once states no single destination, and a part moves at most
-once in one import (as in `bulkReparent`), so under `"replace"` every row
-attaching it is refused (`INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`, naming each
-of them) rather than applied as a move; the document's other moves are
-unaffected. A part this import itself creates holds no attachment to replace:
-its rows are ordinary creates, so an edge already holding it — written earlier
-under `validateReferences: false` — refuses them as `COMPOSITION_WHOLE_OCCUPIED`.
-
-```typescript
-const result = await importGraph(store, sourceExport, {
-  onConflict: "update",
-  onCompositionIncumbent: "replace",
-});
-```
-
 `importGraphStream` commits each chunk on its own, and the "document" every
 rule above speaks of is the chunk: the two halves of a `oneActive` move that
 land in different chunks are not paired, and an earlier chunk stays committed
 when a later one is refused. Chunk boundaries are yours to choose, so keep a
 move's rows in one chunk (or import with `importGraph`) when the move must be
-atomic. With `"replace"`, a new attachment whose chunk precedes the chunk
-ending its incumbent still converges: it ends the incumbent at its own
-`validFrom`, and the later row restates that end.
+atomic.
 
 #### An edge that would close a cycle
 

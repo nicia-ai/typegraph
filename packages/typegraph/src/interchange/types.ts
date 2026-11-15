@@ -347,19 +347,6 @@ export const ImportOptionsSchema = z.object({
    * `continue` is reserved for explicit best-effort ingestion.
    */
   onStreamChunkError: z.enum(["abort", "continue"]).default("abort"),
-  /**
-   * What a new composition edge does about an attachment its part already
-   * holds on the target that the document does not mention — the shape a
-   * `population: "one"` move exports as, since the move deletes the old row.
-   * `refuse` (the default) refuses the row with `CompositionError`
-   * (`COMPOSITION_IMPORT_MOVE_REFUSED`); `replace` applies it as a move, the
-   * way `nodes.<Kind>.reparent(...)` does: a `"one"` incumbent is deleted and a
-   * `"oneActive"` incumbent's window ends at the new edge's `validFrom`. A move
-   * whose old attachment the document itself ends is applied as one move
-   * under either setting. Applied per document — per chunk on
-   * `importGraphStream`.
-   */
-  onCompositionIncumbent: z.enum(["refuse", "replace"]).default("refuse"),
 });
 
 /**
@@ -484,12 +471,6 @@ export const ImportResultSchema = z.object({
     created: z.number().int().nonnegative(),
     updated: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
-    /**
-     * Edges the document never names that `onCompositionIncumbent: "replace"`
-     * retired to move a part: a `"one"` incumbent deleted, or a `"oneActive"`
-     * incumbent's window ended. Each also counts its new edge under `created`.
-     */
-    replaced: z.number().int().nonnegative(),
   }),
   identity: z.object({
     created: z.number().int().nonnegative(),

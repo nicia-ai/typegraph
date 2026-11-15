@@ -98,13 +98,11 @@ import {
   DisjointError,
   EdgeAcyclicityError,
   EdgeMatchIdentityConflictError,
-  EndpointNotFoundError,
   IdentityContradictionError,
   IdentityEndpointValidityError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
   NodeNotFoundError,
-  TypeGraphError,
   UniquenessError,
   ValidationError,
 } from "../errors";
@@ -156,19 +154,13 @@ import {
   compositionWindowSubject,
   declaresRequiredCompositionParts,
   edgeWriteEndsOpenWindow,
-  findLiveCompositionAttachment,
-  incumbentHoldsRequestedAttachment,
   readCompositionAttachmentsForPage,
   readCompositionPartStandings,
-  repeatedCompositionMoveParts,
-  resolveCompositionAttachmentRequest,
 } from "../store/operations/composition-create";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
-  type ImportedCompositionMove,
   type NodeCreateDraft,
-  openImportCompositionMoveFrame,
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
 import { lockNodeRows } from "../store/operations/node-row-locks";
@@ -250,12 +242,9 @@ export type ImportTarget<G extends GraphDef> =
  *
  * Edges are applied in one order at every `batchSize`: rows naming an existing
  * edge first, then the composition moves the document states (an update
- * ending a part's attachment paired with a create attaching it again, and
- * rows `onCompositionIncumbent: "replace"` moves), applied together as one set
- * with each move both-or-neither, then new edges. `batchSize` changes round trips, never the
- * committed state. A new composition edge whose part holds an attachment the
- * document does not mention is refused unless `onCompositionIncumbent:
- * "replace"` asks for it to be applied as a move.
+ * ending a part's attachment paired with a create attaching it again),
+ * applied together as one set with each move both-or-neither, then new edges.
+ * `batchSize` changes round trips, never the committed state.
  *
  * Refused with a typed {@link ConfigurationError} when the target writes through
  * a serialized database connection another long-lived interchange operation
@@ -445,14 +434,6 @@ type ImportWriteFrame = Readonly<{
     input: Readonly<{ kind: string; id: string; validTo?: string }>,
   ) => Promise<void>;
   /**
-   * Rows applied as composition moves under `onCompositionIncumbent:
-   * "replace"`, in one call bound to this frame's session, target and lock —
-   * `reparent`'s own owner, reached through the runtime port.
-   */
-  applyCompositionMoves: (
-    moves: readonly ImportedCompositionMove[],
-  ) => Promise<void>;
-  /**
    * Endpoint liveness verdicts this attempt already read, by node key. An
    * attempt is one write plan: inside its transaction the endpoint locks the
    * reads took are still held, so a later slice can reuse the verdict.
@@ -468,10 +449,10 @@ type ImportWriteFrame = Readonly<{
 
 /**
  * How a node the import accounted for became a valid edge endpoint:
- * `"created"` / `"updated"` — written by this attempt, inside its own write
+ * `"written"` — created or updated by this attempt, inside its own write
  * transaction; `"skippedLive"` — an existing live row the import left alone.
  */
-type ImportedNodeOrigin = "created" | "updated" | "skippedLive";
+type ImportedNodeOrigin = "written" | "skippedLive";
 
 /** The nodes this attempt accounted for, by node key. */
 type ImportedNodes = Map<string, ImportedNodeOrigin>;
@@ -579,11 +560,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     edgeWrites: new Map(),
   };
   let nextEdgeSavepointId = 0;
-  const compositionMoveFrame = openImportCompositionMoveFrame(
-    session,
-    target,
-    lock,
-  );
   const frame: ImportWriteFrame = {
     session,
     target,
@@ -599,8 +575,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     schema: inputs.schema,
     applyNodeWindowEnd: (input) =>
       inputs.runtime.applyImportedNodeWindowEnd(target, input),
-    applyCompositionMoves: (moves) =>
-      inputs.runtime.applyImportedCompositionMoves(compositionMoveFrame, moves),
     endpointLiveness: new Map<string, boolean>(),
     endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),
   };
@@ -849,14 +823,11 @@ async function importGraphData<G extends GraphDef>(
  * target store rather than retaining every imported node id in memory.
  *
  * Every rule {@link importGraph} applies to "the document" applies here to one
- * chunk: its evaluation order, the pairing of a composition move's two rows
- * into one unit, and which incumbents `onCompositionIncumbent` speaks for. A
- * move whose rows land in different chunks is therefore not paired, and an
- * earlier chunk stays committed when a later one is refused. Chunk boundaries
- * are the caller's, so keep a move's rows in one chunk when it must be atomic.
- * Under `onCompositionIncumbent: "replace"` a new attachment whose chunk comes
- * first still converges: it ends the incumbent at its own `validFrom`, and the
- * later row restates that end.
+ * chunk: its evaluation order and the pairing of a composition move's two
+ * rows into one unit. A move whose rows land in different chunks is therefore
+ * not paired, and an earlier chunk stays committed when a later one is
+ * refused. Chunk boundaries are the caller's, so keep a move's rows in one
+ * chunk when it must be atomic.
  *
  * Refused with a typed {@link ConfigurationError}
  * (`IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`) before any chunk is read
@@ -1745,7 +1716,7 @@ function emptyImportResult(): ImportResult {
   return {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
-    edges: { created: 0, updated: 0, skipped: 0, replaced: 0 },
+    edges: { created: 0, updated: 0, skipped: 0 },
     identity: { created: 0, skipped: 0 },
     errors: [],
   };
@@ -1802,7 +1773,6 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.edges.created += source.edges.created;
   target.edges.updated += source.edges.updated;
   target.edges.skipped += source.edges.skipped;
-  target.edges.replaced += source.edges.replaced;
   target.identity.created += source.identity.created;
   target.identity.skipped += source.identity.skipped;
   target.errors.push(...source.errors);
@@ -2048,12 +2018,12 @@ function recordNodeOutcome(
   switch (outcome.status) {
     case "created": {
       result.nodes.created++;
-      importedNodeIds.set(makeNodeKey(node.kind, node.id), "created");
+      importedNodeIds.set(makeNodeKey(node.kind, node.id), "written");
       break;
     }
     case "updated": {
       result.nodes.updated++;
-      importedNodeIds.set(makeNodeKey(node.kind, node.id), "updated");
+      importedNodeIds.set(makeNodeKey(node.kind, node.id), "written");
       break;
     }
     case "skipped": {
@@ -2522,25 +2492,17 @@ type EdgeCreateGuardAttempt<T> = Readonly<{
   rollbackProtection: "savepoint" | "none";
 }>;
 
-/** The refusals an edge create reports as that row's outcome. */
-function isEdgeCreateRefusal(error: unknown): error is Error {
-  return (
-    isDeclaredConstraintRefusal(error) || isEdgeMatchIdentityValueRefusal(error)
-  );
-}
-
-/**
- * Converts one row's refusal into an import result — by default an edge
- * create's ({@link isEdgeCreateRefusal}).
- */
+/** Converts one row's durable-identity refusal into an import result. */
 async function catchEdgeCreateRefusal<T>(
   fn: () => T | Promise<T>,
-  isRowRefusal: (error: unknown) => error is Error = isEdgeCreateRefusal,
 ): Promise<EdgeCreateGuardResult<T>> {
   try {
     return { ok: true, value: await fn() };
   } catch (error) {
-    if (isRowRefusal(error)) {
+    if (
+      isDeclaredConstraintRefusal(error) ||
+      isEdgeMatchIdentityValueRefusal(error)
+    ) {
       return { ok: false, error: error.message, cause: error };
     }
     throw error;
@@ -2563,12 +2525,11 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
     | "statementExecution"
   >,
   fn: () => T | Promise<T>,
-  isRowRefusal: (error: unknown) => error is Error = isEdgeCreateRefusal,
 ): Promise<EdgeCreateGuardAttempt<T>> {
   const { target } = frame;
   if (frame.transactionMode === "none") {
     return {
-      result: await catchEdgeCreateRefusal(fn, isRowRefusal),
+      result: await catchEdgeCreateRefusal(fn),
       rollbackProtection: "none",
     };
   }
@@ -2595,48 +2556,12 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
   const result = await runRecordedTransactionSavepoint<
     EdgeCreateGuardResult<T>
   >(target, statementExecution, frame.allocateEdgeSavepoint(), async () => {
-    const guarded = await catchEdgeCreateRefusal(fn, isRowRefusal);
+    const guarded = await catchEdgeCreateRefusal(fn);
     return guarded.ok ?
         { action: "release", value: guarded }
       : { action: "rollback", value: guarded, cause: guarded.cause };
   });
   return { result, rollbackProtection: "savepoint" };
-}
-
-/**
- * Runs `fn` behind a savepoint that is rolled back whether or not it refuses:
- * a probe asks whether writes would be refused without keeping them. A target
- * that offers no savepoint cannot be probed, so it runs nothing and answers
- * that it was refused, with `cause` saying why.
- */
-async function probeEdgeCreateRefusal<T>(
-  frame: Pick<
-    ImportWriteFrame,
-    "target" | "allocateEdgeSavepoint" | "statementExecution"
-  >,
-  fn: () => T | Promise<T>,
-  isRowRefusal: (error: unknown) => error is Error,
-): Promise<EdgeCreateGuardResult<T>> {
-  if (!frame.statementExecution.supported) {
-    const cause = new Error(
-      "This backend's transaction offers no savepoint to probe a write behind.",
-    );
-    return { ok: false, error: cause.message, cause };
-  }
-  return runRecordedTransactionSavepoint<EdgeCreateGuardResult<T>>(
-    frame.target,
-    frame.statementExecution,
-    frame.allocateEdgeSavepoint(),
-    async () => {
-      const guarded = await catchEdgeCreateRefusal(fn, isRowRefusal);
-      return {
-        action: "rollback",
-        value: guarded,
-        cause:
-          guarded.ok ? new Error("A probe keeps no write.") : guarded.cause,
-      };
-    },
-  );
 }
 
 /**
@@ -3390,8 +3315,7 @@ async function readLiveImportEndpoints(
     const key = makeNodeKey(endpoint.kind, endpoint.id);
     const origin = importedNodeIds.get(key);
     if (
-      origin === "created" ||
-      origin === "updated" ||
+      origin === "written" ||
       (origin === "skippedLive" && !frame.endpointLocksContend)
     ) {
       liveKeys.add(key);
@@ -3451,10 +3375,8 @@ async function readLiveImportEndpoints(
  *    ({@link applyExistingEdgeDisposition}), and every later row repeating
  *    such an id — except the halves of a composition move.
  * 3. Apply every composition move the payload states as one set
- *    ({@link applyCompositionMoveSet}): the pairs ({@link pairCompositionMoves})
- *    and the rows `onCompositionIncumbent: "replace"` moves
- *    ({@link classifyCompositionCreate}), every retire before any attach, each
- *    move both-or-neither.
+ *    ({@link applyCompositionMoveSet}): the pairs ({@link pairCompositionMoves}),
+ *    every end before any attach, each move both-or-neither.
  * 4. Create every other new edge ({@link createEdgeSlice}), in `batchSize`
  *    slices.
  * 5. Apply every later row repeating an id phase 4 created: it observes the
@@ -3482,11 +3404,6 @@ async function processEdges(
   settleRequiredParts: () => Promise<void>,
 ): Promise<void> {
   const record = edgeOutcomeRecorder(result, errors, requiredPartLedger);
-  const incumbents: CompositionIncumbentScope = {
-    onCompositionIncumbent: options.onCompositionIncumbent,
-    payloadEdgeIds: new Set(edges.map((edge) => edge.id)),
-    importedNodeIds,
-  };
   const classified = await classifyEdges(
     frame,
     graphId,
@@ -3499,9 +3416,18 @@ async function processEdges(
     record,
   );
 
-  const pairs = pairCompositionMoves(registry, classified, options);
+  const { pairs, stranded } = pairCompositionMoves(
+    registry,
+    classified,
+    options,
+  );
   const pairedEdgeIds = new Set(
     pairs.flatMap((pair) => [pair.end.edge.id, pair.attach.edge.id]),
+  );
+  const strandedEnds = new Map(
+    stranded.map(
+      (move) => [move.end.edge.id, strandedEndRefusal(move)] as const,
+    ),
   );
   const unpaired = classified.rows.filter(
     (row) => !pairedEdgeIds.has(row.edge.id),
@@ -3512,94 +3438,34 @@ async function processEdges(
     ...classified.repeatsOfExisting,
   ].toSorted((left, right) => left.index - right.index);
   for (const row of existingRows) {
+    const strandedEnd =
+      "existing" in row ? strandedEnds.get(row.edge.id) : undefined;
     record(
       row.edge,
-      "existing" in row ?
-        await applyExistingEdgeDisposition(
-          frame,
-          graphId,
-          registry,
-          row,
-          requireDefined(row.existing),
-          options,
-        )
-      : await processEdge(
-          frame,
-          graphId,
-          registry,
-          row.edge,
-          edgeSchemas,
-          nodeSchemas,
-          options,
-          importedNodeIds,
-          incumbents,
-        ),
+      strandedEnd ??
+        ("existing" in row ?
+          await applyExistingEdgeDisposition(
+            frame,
+            graphId,
+            registry,
+            row,
+            requireDefined(row.existing),
+            options,
+          )
+        : await processEdge(
+            frame,
+            graphId,
+            registry,
+            row.edge,
+            edgeSchemas,
+            nodeSchemas,
+            options,
+            importedNodeIds,
+          )),
     );
   }
 
-  // Every new composition edge is judged against its part's incumbent before
-  // anything is created, so the moves "replace" asks for join the pairs in
-  // one set.
-  const creates: ClassifiedEdgeRow[] = [];
-  const replaceMoves: CompositionMove[] = [];
-  const unpairedCreates = unpaired.filter((row) => row.existing === undefined);
-  const contested = contestedCompositionParts(registry, unpairedCreates);
-  const classifications = new Map<
-    ClassifiedEdgeRow,
-    Awaited<ReturnType<typeof classifyCompositionCreate>>
-  >();
-  for (const row of unpairedCreates) {
-    classifications.set(
-      row,
-      await classifyCompositionCreate(
-        frame,
-        graphId,
-        registry,
-        row,
-        incumbents,
-      ),
-    );
-  }
-  // A part one document attaches more than once moves at most once in one
-  // set, as in `bulkReparent`: such a document states no single destination,
-  // so none of its rows for that part is applied as a move.
-  const contestedMoves = new Set(
-    unpairedCreates.flatMap((row) => {
-      const part = contested.get(row);
-      return (
-          part !== undefined && classifications.get(row)?.kind === "replace"
-        ) ?
-          [part.key]
-        : [];
-    }),
-  );
-  for (const row of unpairedCreates) {
-    const part = contested.get(row);
-    if (part !== undefined && contestedMoves.has(part.key)) {
-      record(row.edge, contestedMoveRefusal(row, part));
-      continue;
-    }
-    const classification = requireDefined(classifications.get(row));
-    switch (classification.kind) {
-      case "ordinary": {
-        creates.push(row);
-        break;
-      }
-      case "refused": {
-        record(row.edge, classification.outcome);
-        break;
-      }
-      case "replace": {
-        replaceMoves.push({
-          kind: "replace",
-          part: classification.part,
-          whole: classification.whole,
-          attach: row,
-        });
-        break;
-      }
-    }
-  }
+  const creates = unpaired.filter((row) => row.existing === undefined);
 
   const writeCreatesAndRepeats = async (): Promise<void> => {
     // A slice flush makes its accepted keys visible to later database reads,
@@ -3630,14 +3496,13 @@ async function processEdges(
           nodeSchemas,
           options,
           importedNodeIds,
-          incumbents,
         ),
       );
     }
     await settleRequiredParts();
   };
 
-  const moves = [...pairs, ...replaceMoves].toSorted(
+  const moves = pairs.toSorted(
     (left, right) =>
       (compositionMoveRows(left)[0]?.index ?? 0) -
       (compositionMoveRows(right)[0]?.index ?? 0),
@@ -3653,9 +3518,6 @@ async function processEdges(
     moves,
     options,
     record,
-    () => {
-      result.edges.replaced++;
-    },
     () =>
       snapshotEdgeAttemptState(
         frame,
@@ -4159,6 +4021,13 @@ type RepeatedEdgeRow = Readonly<{ index: number; edge: InterchangeEdge }>;
 
 type ClassifiedEdges = Readonly<{
   rows: readonly ClassifiedEdgeRow[];
+  /**
+   * Rows the classification refused — invalid, or naming an endpoint that is
+   * not live — in document order. Their refusals are already recorded; they
+   * are kept only so a move whose attach was refused here still reads as a
+   * move ({@link pairCompositionMoves}).
+   */
+  refused: readonly RepeatedEdgeRow[];
   /** Repeats of an id that existed on the target when it was probed. */
   repeatsOfExisting: readonly RepeatedEdgeRow[];
   /** Repeats of an id this import creates, in document order. */
@@ -4269,6 +4138,7 @@ async function classifyEdges(
 ): Promise<ClassifiedEdges> {
   const rows: ClassifiedEdgeRow[] = [];
   const repeats: RepeatedEdgeRow[] = [];
+  const refused: RepeatedEdgeRow[] = [];
   const existedAtProbe = new Map<string, boolean>();
   const boundGetEdges = bindExtraIfReachable(
     frame.target,
@@ -4291,6 +4161,7 @@ async function classifyEdges(
       );
       if (!validation.ok) {
         record(edge, { status: "error", error: validation.error });
+        refused.push({ index, edge });
         continue;
       }
       if (existedAtProbe.has(edge.id)) {
@@ -4346,6 +4217,7 @@ async function classifyEdges(
         );
       if (endpointError !== undefined) {
         record(edge, { status: "error", error: endpointError });
+        refused.push({ index: candidate.index, edge });
         continue;
       }
       rows.push({ ...candidate, existing });
@@ -4354,6 +4226,7 @@ async function classifyEdges(
 
   return {
     rows,
+    refused: refused.toSorted((left, right) => left.index - right.index),
     repeatsOfExisting: repeats.filter(
       ({ edge }) => existedAtProbe.get(edge.id) === true,
     ),
@@ -4448,43 +4321,25 @@ async function applyExistingEdgeDisposition(
 type CompositionMoveHalf = Readonly<{ reattachedPart: CompositionNodeRef }>;
 
 /**
- * One composition move the payload states, applied as a unit:
- *
- * - `"pair"` — two rows: an update `end` whose `validTo` ends the open window
- *   attaching `part` to its current whole, and a create `attach` attaching the
- *   same part again. A `oneActive` move exports as exactly this pair.
- * - `"replace"` — one create `attach` whose part holds an attachment the
- *   document does not mention, applied as a move because the caller passed
- *   `onCompositionIncumbent: "replace"`. A `one` move exports as this row
- *   alone, since the move deletes the old one.
+ * One composition move the payload states, applied as a unit: an update `end`
+ * whose `validTo` ends the open window attaching `part` to its current whole,
+ * and a create `attach` attaching the same part again. A `oneActive` move
+ * exports as exactly this pair of rows.
  */
-type CompositionMove =
-  | Readonly<{
-      kind: "pair";
-      part: CompositionNodeRef;
-      whole: CompositionNodeRef;
-      end: ClassifiedEdgeRow & Readonly<{ existing: EdgeRow }>;
-      attach: ClassifiedEdgeRow;
-    }>
-  | Readonly<{
-      kind: "replace";
-      part: CompositionNodeRef;
-      whole: CompositionNodeRef;
-      attach: ClassifiedEdgeRow;
-    }>;
-
-type CompositionPairMove = Extract<CompositionMove, { kind: "pair" }>;
-type CompositionReplaceMove = Extract<CompositionMove, { kind: "replace" }>;
+type CompositionMove = Readonly<{
+  part: CompositionNodeRef;
+  whole: CompositionNodeRef;
+  end: ClassifiedEdgeRow & Readonly<{ existing: EdgeRow }>;
+  attach: ClassifiedEdgeRow;
+}>;
 
 /** The rows a move writes, in document order. */
 function compositionMoveRows(
   move: CompositionMove,
 ): readonly ClassifiedEdgeRow[] {
-  return move.kind === "pair" ?
-      [move.end, move.attach].toSorted(
-        (left, right) => left.index - right.index,
-      )
-    : [move.attach];
+  return [move.end, move.attach].toSorted(
+    (left, right) => left.index - right.index,
+  );
 }
 
 /**
@@ -4500,13 +4355,23 @@ function compositionMoveRows(
  * `population: "one"` row never pairs — an ended `one` binding still holds its
  * part, and ending it makes no room. A row whose id the document repeats never
  * pairs either: the repeat is applied after it and could undo the move.
+ *
+ * A move whose attach the classification already refused is still a move: a
+ * part with exactly one row ending its attachment, no surviving row attaching
+ * it, and exactly one refused row that would have attached it is returned as
+ * `stranded`, and its end is refused rather than written alone — which would
+ * leave an optional part with no whole, and which import could never repair,
+ * since it never clears an end.
  */
 function pairCompositionMoves(
   registry: KindRegistry,
   classified: ClassifiedEdges,
   options: ResolvedImportOptions,
-): readonly CompositionPairMove[] {
-  if (options.onConflict !== "update") return [];
+): Readonly<{
+  pairs: readonly CompositionMove[];
+  stranded: readonly StrandedCompositionMove[];
+}> {
+  if (options.onConflict !== "update") return { pairs: [], stranded: [] };
   const repeatedIds = new Set(
     [...classified.repeatsOfExisting, ...classified.repeatsOfCreated].map(
       ({ edge }) => edge.id,
@@ -4547,26 +4412,84 @@ function pairCompositionMoves(
     parts.set(partKey, part);
     ends.set(partKey, [...(ends.get(partKey) ?? []), { ...row, existing }]);
   }
-  const pairs: CompositionPairMove[] = [];
-  for (const [partKey, [end, ...otherEnds]] of ends) {
-    const [attach, ...otherAttaches] = attaches.get(partKey) ?? [];
-    if (
-      end === undefined ||
-      attach === undefined ||
-      otherEnds.length > 0 ||
-      otherAttaches.length > 0
-    ) {
+  const classifiedIds = new Set(classified.rows.map(({ edge }) => edge.id));
+  const refusedAttaches = new Map<
+    string,
+    Readonly<{ row: RepeatedEdgeRow; whole: CompositionNodeRef }>[]
+  >();
+  for (const row of classified.refused) {
+    const { edge } = row;
+    if (repeatedIds.has(edge.id) || classifiedIds.has(edge.id)) continue;
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) continue;
+    const { part, whole } = orientCompositionEndpoints(
+      partSide,
+      edge.from,
+      edge.to,
+    );
+    const partKey = makeNodeKey(part.kind, part.id);
+    // Only a part some row ends is a known composition part, the one kind
+    // `importedRowAttachesPart` can judge.
+    if (!ends.has(partKey) || !importedRowAttachesPart(registry, part, edge)) {
       continue;
     }
+    refusedAttaches.set(partKey, [
+      ...(refusedAttaches.get(partKey) ?? []),
+      { row, whole },
+    ]);
+  }
+
+  const pairs: CompositionMove[] = [];
+  const stranded: StrandedCompositionMove[] = [];
+  for (const [partKey, [end, ...otherEnds]] of ends) {
+    const [attach, ...otherAttaches] = attaches.get(partKey) ?? [];
+    if (end === undefined || otherEnds.length > 0) continue;
+    if (attach === undefined) {
+      const [refusedAttach, ...otherRefused] =
+        refusedAttaches.get(partKey) ?? [];
+      if (refusedAttach !== undefined && otherRefused.length === 0) {
+        stranded.push({
+          part: requireDefined(parts.get(partKey)),
+          whole: refusedAttach.whole,
+          end,
+          attach: refusedAttach.row,
+        });
+      }
+      continue;
+    }
+    if (otherAttaches.length > 0) continue;
     pairs.push({
-      kind: "pair",
       part: requireDefined(parts.get(partKey)),
       whole: requireDefined(wholes.get(partKey)),
       end,
       attach,
     });
   }
-  return pairs;
+  return { pairs, stranded };
+}
+
+/**
+ * A move whose attach the classification refused: the end that would have
+ * been written alone, and the refused row that was its other half.
+ */
+type StrandedCompositionMove = Readonly<{
+  part: CompositionNodeRef;
+  whole: CompositionNodeRef;
+  end: ClassifiedEdgeRow;
+  attach: RepeatedEdgeRow;
+}>;
+
+/** The per-row refusal of a stranded move's end ({@link pairCompositionMoves}). */
+function strandedEndRefusal(move: StrandedCompositionMove): ProcessResult {
+  const { part, whole, end, attach } = move;
+  return compositionMoveIncomplete(
+    end.edge.id,
+    part,
+    whole,
+    end.edge.id,
+    attach.edge.id,
+    `edge "${attach.edge.id}" was refused; see its own error`,
+  );
 }
 
 /** Whether a document row of a composition kind attaches its part once written. */
@@ -4612,11 +4535,7 @@ function compositionMoveFailureOutcomes(
   move: CompositionMove,
   failure: CompositionMoveFailure,
 ): readonly Readonly<{ row: ClassifiedEdgeRow; outcome: ProcessResult }>[] {
-  const { part, whole: destination, attach } = move;
-  const description =
-    move.kind === "pair" ?
-      `a move of ${part.kind} "${part.id}" to ${destination.kind} "${destination.id}" — edge "${move.end.edge.id}" ends the part's current attachment and edge "${attach.edge.id}" attaches it again`
-    : `a move of ${part.kind} "${part.id}" to ${destination.kind} "${destination.id}" that retires the attachment it holds (onCompositionIncumbent: "replace")`;
+  const { part, whole: destination, end, attach } = move;
   return compositionMoveRows(move).map((row) => {
     if (failure.cause === "refused" && row === failure.row) {
       return { row, outcome: failure.outcome };
@@ -4627,12 +4546,34 @@ function compositionMoveFailureOutcomes(
       : `once the import's other rows were written the part did not hold that whole — the whole was removed by this import (a required part it could not attach) or is not live`;
     return {
       row,
-      outcome: {
-        status: "error",
-        error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${row.edge.id}" was not applied: it is part of ${description}, and a move is applied whole or not at all; ${reason}.`,
-      },
+      outcome: compositionMoveIncomplete(
+        row.edge.id,
+        part,
+        destination,
+        end.edge.id,
+        attach.edge.id,
+        reason,
+      ),
     };
   });
+}
+
+/**
+ * The one spelling of `INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`: row `edgeId`
+ * of a move was not applied because the move could not land whole.
+ */
+function compositionMoveIncomplete(
+  edgeId: string,
+  part: CompositionNodeRef,
+  destination: CompositionNodeRef,
+  endEdgeId: string,
+  attachEdgeId: string,
+  reason: string,
+): ProcessResult {
+  return {
+    status: "error",
+    error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${edgeId}" was not applied: it is part of a move of ${part.kind} "${part.id}" to ${destination.kind} "${destination.id}" — edge "${endEdgeId}" ends the part's current attachment and edge "${attachEdgeId}" attaches it again, and a move is applied whole or not at all; ${reason}.`,
+  };
 }
 
 /**
@@ -4681,12 +4622,11 @@ function snapshotEdgeAttemptState(
  * the same savepoint, and judges every moved part on the state that leaves.
  *
  * The set is the shape `bulkReparent` writes and a graph merge applies: every
- * move's retire before any move's attach, so moves that depend on each other
+ * move's end before any move's attach, so moves that depend on each other
  * land together — two parts exchanging a slot a realizing edge bounds, or a
  * hierarchy that inverts (a part moves under one that leaves it) — whatever
- * order the document lists them in. Each pair's end runs under its own part's
- * `reattachedPart` exemption and every `"replace"` move goes through
- * `reparent`'s own owner in one call, which holds the same exemption; the
+ * order the document lists them in. Each move's end runs under its own part's
+ * `reattachedPart` exemption; the
  * required-existence rule the exemption postpones is asserted afterwards, for
  * every part a move touched, AFTER the purge ({@link judgeMovedParts}): the
  * purge can remove a whole a move attached its part to, and that part was not
@@ -4716,7 +4656,6 @@ async function applyCompositionMoveSet(
   moves: readonly CompositionMove[],
   options: ResolvedImportOptions,
   record: RecordEdgeOutcome,
-  recordReplacedIncumbent: () => void,
   snapshot: () => () => void,
   writeRest: () => Promise<void>,
 ): Promise<void> {
@@ -4746,11 +4685,6 @@ async function applyCompositionMoveSet(
             }))
           : compositionMoveFailureOutcomes(move, failure);
         for (const { row, outcome } of outcomes) record(row.edge, outcome);
-        // The store's move owner refuses a `"replace"` move that retired no
-        // incumbent, so every landed one retired exactly one.
-        if (failure === undefined && move.kind === "replace") {
-          recordReplacedIncumbent();
-        }
       }
       await writeRest();
       return judgeMovedParts(frame, graphId, registry, landed);
@@ -4802,8 +4736,8 @@ function compositionMoveRequiresSavepoint(graphId: string): ConfigurationError {
  * Writes every move not in `failed` until they land together, adding each move
  * that cannot to `failed`, and returns the moves that landed. Each pass runs
  * {@link applyCompositionMoves} behind its own savepoint. A pass whose refused
- * moves wrote nothing of their own — an end refused, a `"replace"` move
- * refused — is final: no other move can have depended on a write that never
+ * moves wrote nothing of their own — an end refused — is final: no other move
+ * can have depended on a write that never
  * happened. A pass that refused the attach of a pair whose end landed is rolled
  * back, and the next pass runs without that pair: its end may have freed what
  * another move's attach took.
@@ -4857,9 +4791,8 @@ type CompositionMovePass = Readonly<{
 }>;
 
 /**
- * One pass of a move set's writes: every pair's end, then every `"replace"`
- * move through `reparent`'s owner, then the attach of every pair whose end
- * landed.
+ * One pass of a move set's writes: every move's end, then the attach of every
+ * move whose end landed.
  */
 async function applyCompositionMoves(
   frame: ImportWriteFrame,
@@ -4870,181 +4803,36 @@ async function applyCompositionMoves(
 ): Promise<CompositionMovePass> {
   const failures = new Map<CompositionMove, CompositionMoveFailure>();
   let halfWritten = false;
-  const pairs = moves.filter(
-    (move): move is CompositionPairMove => move.kind === "pair",
-  );
-  const replaces = moves.filter(
-    (move): move is CompositionReplaceMove => move.kind === "replace",
-  );
 
-  for (const pair of pairs) {
+  for (const move of moves) {
     const outcome = await applyExistingEdgeDisposition(
       frame,
       graphId,
       registry,
-      pair.end,
-      pair.end.existing,
+      move.end,
+      move.end.existing,
       options,
-      { reattachedPart: pair.part },
+      { reattachedPart: move.part },
     );
     if (outcome.status !== "updated") {
-      failures.set(pair, { cause: "refused", row: pair.end, outcome });
+      failures.set(move, { cause: "refused", row: move.end, outcome });
     }
   }
 
-  for (const [move, outcome] of await applyReplaceStage(frame, replaces)) {
-    failures.set(move, { cause: "refused", row: move.attach, outcome });
-  }
-
-  for (const pair of pairs) {
-    if (failures.has(pair)) continue;
+  for (const move of moves) {
+    if (failures.has(move)) continue;
     const outcome = await createClassifiedEdge(
       frame,
       graphId,
       registry,
-      pair.attach,
+      move.attach,
     );
     if (outcome.status !== "created") {
-      failures.set(pair, { cause: "refused", row: pair.attach, outcome });
+      failures.set(move, { cause: "refused", row: move.attach, outcome });
       halfWritten = true;
     }
   }
   return { failures, halfWritten };
-}
-
-/**
- * Writes `"replace"` moves through `reparent`'s owner in one call, and returns
- * the ones refused, each with its own refusal. The call refuses as a whole, so
- * a refusal is attributed before it is retried without the move it belongs
- * to: to the move whose part the refusal names, or else to the move whose
- * addition first makes a prefix of the batch refuse — found by probes that
- * are always rolled back, so attributing a refusal never writes a move. No
- * move is refused for a refusal another move caused.
- */
-async function applyReplaceStage(
-  frame: ImportWriteFrame,
-  moves: readonly CompositionReplaceMove[],
-): Promise<ReadonlyMap<CompositionReplaceMove, ProcessResult>> {
-  const refused = new Map<CompositionReplaceMove, ProcessResult>();
-  let remaining = moves;
-  while (remaining.length > 0) {
-    const attempt = await applyReplaceMoves(frame, remaining, "write");
-    if (attempt.ok) break;
-    const offender = await replaceRefusalOffender(frame, remaining, attempt);
-    refused.set(offender.move, offender.outcome);
-    remaining = remaining.filter((move) => move !== offender.move);
-  }
-  return refused;
-}
-
-async function replaceRefusalOffender(
-  frame: ImportWriteFrame,
-  moves: readonly CompositionReplaceMove[],
-  refusal: ReplaceMovesRefusal,
-): Promise<Readonly<{ move: CompositionReplaceMove; outcome: ProcessResult }>> {
-  const named = moves.filter(
-    (move) =>
-      move.part.kind === refusal.partKind && move.part.id === refusal.partId,
-  );
-  if (named.length === 1) {
-    return { move: requireDefined(named[0]), outcome: refusal.outcome };
-  }
-  for (let length = 1; length < moves.length; length++) {
-    const probe = await applyReplaceMoves(
-      frame,
-      moves.slice(0, length),
-      "probe",
-    );
-    if (!probe.ok) {
-      return {
-        move: requireDefined(moves[length - 1]),
-        outcome: probe.outcome,
-      };
-    }
-  }
-  return { move: requireDefined(moves.at(-1)), outcome: refusal.outcome };
-}
-
-type ReplaceMovesRefusal = Readonly<{
-  ok: false;
-  outcome: ProcessResult;
-  /** The part the refusal names, when it names one. */
-  partKind: string | undefined;
-  partId: string | undefined;
-}>;
-
-/**
- * Runs `"replace"` moves through `reparent`'s owner in one call — every
- * incumbent retired before any new edge is inserted — behind a savepoint, so a
- * refusal leaves none of them written. A `"probe"` is rolled back even when it
- * succeeds: it only asks whether the moves would land.
- */
-async function applyReplaceMoves(
-  frame: ImportWriteFrame,
-  moves: readonly ReplaceMoveWrite[],
-  mode: "write" | "probe",
-): Promise<Readonly<{ ok: true }> | ReplaceMovesRefusal> {
-  const write = () =>
-    frame.applyCompositionMoves(
-      moves.map((move) => importedCompositionMove(move)),
-    );
-  const attempt =
-    mode === "write" ?
-      await catchEdgeCreateRefusalWithSavepoint(
-        frame,
-        write,
-        isImportedMoveRefusal,
-      )
-    : {
-        result: await probeEdgeCreateRefusal(
-          frame,
-          write,
-          isImportedMoveRefusal,
-        ),
-      };
-  const { result } = attempt;
-  if (result.ok) return { ok: true };
-  const details =
-    result.cause instanceof TypeGraphError ? result.cause.details : {};
-  return {
-    ok: false,
-    // Coded like every other composition refusal import reports, so the
-    // move's own refusals (`COMPOSITION_MOVE_BEFORE_INCUMBENT`, …) are
-    // branchable.
-    outcome: {
-      status: "error",
-      error:
-        result.cause instanceof TypeGraphError ?
-          `${result.cause.code}: ${result.cause.message}`
-        : result.error,
-    },
-    partKind:
-      typeof details["partKind"] === "string" ? details["partKind"] : undefined,
-    partId:
-      typeof details["partId"] === "string" ? details["partId"] : undefined,
-  };
-}
-
-/** What writing a `"replace"` move needs: the part, its new whole, and the row. */
-type ReplaceMoveWrite = Readonly<{
-  part: CompositionNodeRef;
-  whole: CompositionNodeRef;
-  attach: EdgeImportCandidate;
-}>;
-
-/** A `"replace"` move as the store's move owner takes it. */
-function importedCompositionMove(
-  move: ReplaceMoveWrite,
-): ImportedCompositionMove {
-  const { edge, props } = move.attach;
-  return {
-    part: move.part,
-    whole: move.whole,
-    via: edge.kind,
-    props,
-    edgeId: edge.id,
-    validFrom: edge.validFrom ?? undefined,
-  };
 }
 
 /**
@@ -5461,228 +5249,6 @@ async function createEdgeSlice(
 }
 
 /**
- * The first composition creates of a document that attach a part some other
- * one of them attaches too, each with the part and every row naming it. The
- * part is judged by the owner `bulkReparent` asks
- * ({@link repeatedCompositionMoveParts}): a part moves at most once in one set.
- */
-function contestedCompositionParts(
-  registry: KindRegistry,
-  creates: readonly ClassifiedEdgeRow[],
-): ReadonlyMap<
-  ClassifiedEdgeRow,
-  Readonly<{
-    key: string;
-    part: CompositionNodeRef;
-    edgeIds: readonly string[];
-  }>
-> {
-  const attaching = creates.flatMap((row) => {
-    const partSide = registry.compositionPartSide(row.edge.kind);
-    if (partSide === undefined) return [];
-    const { part } = orientCompositionEndpoints(
-      partSide,
-      row.edge.from,
-      row.edge.to,
-    );
-    return importedRowAttachesPart(registry, part, row.edge) ?
-        [{ row, part, key: nodeRefKey(part) }]
-      : [];
-  });
-  const repeated = repeatedCompositionMoveParts(
-    attaching.map(({ part }) => part),
-  );
-  const contested = new Map<
-    ClassifiedEdgeRow,
-    Readonly<{
-      key: string;
-      part: CompositionNodeRef;
-      edgeIds: readonly string[];
-    }>
-  >();
-  for (const { row, part, key } of attaching) {
-    if (!repeated.has(key)) continue;
-    contested.set(row, {
-      key,
-      part,
-      edgeIds: attaching
-        .filter((other) => other.key === key)
-        .map((other) => other.row.edge.id),
-    });
-  }
-  return contested;
-}
-
-/** The per-row refusal of a row whose part the document attaches more than once. */
-function contestedMoveRefusal(
-  row: ClassifiedEdgeRow,
-  contested: Readonly<{ part: CompositionNodeRef; edgeIds: readonly string[] }>,
-): ProcessResult {
-  const { part, edgeIds } = contested;
-  return {
-    status: "error",
-    error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${row.edge.id}" was not applied: ${part.kind} "${part.id}" holds an attachment the document does not mention, and the document attaches it ${edgeIds.length} times (edges ${edgeIds.map((id) => `"${id}"`).join(", ")}). A part moves at most once in one import, so none of them is applied as a move (onCompositionIncumbent: "replace"); state one destination for the part.`,
-  };
-}
-
-/**
- * What a new composition edge needs to decide about an incumbent attachment
- * ({@link classifyCompositionCreate}): the caller's `onCompositionIncumbent`,
- * every edge id the document names — an incumbent among them is the
- * document's own statement, never one `"replace"` retires — and the nodes this
- * import created, which can hold no incumbent of their own.
- */
-type CompositionIncumbentScope = Readonly<{
-  onCompositionIncumbent: ResolvedImportOptions["onCompositionIncumbent"];
-  payloadEdgeIds: ReadonlySet<string>;
-  importedNodeIds: ImportedNodes;
-}>;
-
-/**
- * The refusals a move under `onCompositionIncumbent: "replace"` reports per
- * row: every declared-constraint refusal an edge create reports, plus the
- * ones `reparent`'s own owner raises that an import create never reaches — a
- * part or whole that is not live (reachable with `validateReferences: false`)
- * and the realizing edge's schema refusing the properties the move writes.
- */
-function isImportedMoveRefusal(error: unknown): error is Error {
-  return (
-    isEdgeCreateRefusal(error) ||
-    error instanceof EndpointNotFoundError ||
-    error instanceof NodeNotFoundError ||
-    error instanceof ValidationError
-  );
-}
-
-/**
- * What a new composition edge does about an attachment its part already holds
- * that the document does not mention — the question `onCompositionIncumbent`
- * answers:
- *
- * - `"ordinary"` — no such attachment, and the row is created like any other:
- *   the row attaches nothing, the part was created by this import (so it holds
- *   no attachment of its own, and no read is spent on it), the part holds no
- *   whole, the incumbent is itself a row of the document (whose statement
- *   this row contradicts, refused as any second whole is), or the incumbent
- *   already attaches the part to this whole through this edge kind, which is
- *   not a move.
- * - `"refused"` — under `"refuse"`, the default, a {@link CompositionError}
- *   (`COMPOSITION_IMPORT_MOVE_REFUSED`) naming the incumbent and the option;
- *   under `"replace"`, a row whose window a move cannot write — a stated end,
- *   or no lower bound at all (`COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED`).
- * - `"replace"` — the row is a move: `reparent`'s owner retires the incumbent
- *   and writes this row at ONE instant, the row's `validFrom` (or the import's
- *   clock when it states none), which is both the end of a `oneActive`
- *   incumbent's window and the start of the new edge; a `one` incumbent is
- *   deleted.
- */
-async function classifyCompositionCreate(
-  frame: ImportWriteFrame,
-  graphId: string,
-  registry: KindRegistry,
-  row: EdgeImportCandidate,
-  incumbents: CompositionIncumbentScope,
-): Promise<
-  | Readonly<{ kind: "ordinary" }>
-  | Readonly<{ kind: "refused"; outcome: ProcessResult }>
-  | Readonly<{
-      kind: "replace";
-      part: CompositionNodeRef;
-      whole: CompositionNodeRef;
-    }>
-> {
-  const { edge, props } = row;
-  const partSide = registry.compositionPartSide(edge.kind);
-  if (partSide === undefined) return { kind: "ordinary" };
-  const { part, whole } = orientCompositionEndpoints(
-    partSide,
-    edge.from,
-    edge.to,
-  );
-  if (!importedRowAttachesPart(registry, part, edge)) {
-    return { kind: "ordinary" };
-  }
-  if (
-    incumbents.importedNodeIds.get(makeNodeKey(part.kind, part.id)) ===
-    "created"
-  ) {
-    return { kind: "ordinary" };
-  }
-  const incumbent = await findLiveCompositionAttachment(
-    registry,
-    frame.target,
-    graphId,
-    part.kind,
-    part.id,
-  );
-  if (
-    incumbent === undefined ||
-    incumbents.payloadEdgeIds.has(incumbent.edge.id)
-  ) {
-    return { kind: "ordinary" };
-  }
-  const request = resolveCompositionAttachmentRequest(
-    registry,
-    part,
-    { whole, viaKind: edge.kind, props, edgeWindow: {} },
-    incumbents.onCompositionIncumbent,
-  );
-  if (incumbentHoldsRequestedAttachment(request, incumbent)) {
-    return { kind: "ordinary" };
-  }
-
-  const subject = {
-    partKind: part.kind,
-    partId: part.id,
-    wholeKind: whole.kind,
-    wholeId: whole.id,
-    edgeKind: edge.kind,
-    edgeId: edge.id,
-  };
-  if (request.onIncumbent === "refuse") {
-    return {
-      kind: "refused",
-      outcome: codedCompositionRefusal(
-        new CompositionError({
-          situation: "importMove",
-          ...subject,
-          incumbentEdgeKind: incumbent.edge.kind,
-          incumbentEdgeId: incumbent.edge.id,
-          incumbentWholeKind: incumbent.whole.kind,
-          incumbentWholeId: incumbent.whole.id,
-        }),
-      ),
-    };
-  }
-  // A move opens the new attachment at one instant and ends nothing of its
-  // own, so a stated end, or a confirmed open-left window, is unwritable.
-  const unwritableBound =
-    edge.validTo === undefined ?
-      edge.validFrom === null ?
-        { bound: "validFrom" as const, stated: edge.validFrom }
-      : undefined
-    : { bound: "validTo" as const, stated: edge.validTo };
-  if (unwritableBound !== undefined) {
-    return {
-      kind: "refused",
-      outcome: codedCompositionRefusal(
-        new CompositionError({
-          situation: "importMoveWindow",
-          ...subject,
-          ...unwritableBound,
-        }),
-      ),
-    };
-  }
-  return { kind: "replace", part, whole };
-}
-
-/** A composition refusal as the coded per-row error import reports. */
-function codedCompositionRefusal(error: CompositionError): ProcessResult {
-  return { status: "error", error: `${error.code}: ${error.message}` };
-}
-
-/**
  * Writes one new edge on its own: the cardinality probe and the composition
  * window decision against the rows already stored, then the insert and — for
  * an acyclic kind — the acyclicity probe, inside one savepoint-guarded
@@ -5779,7 +5345,6 @@ async function processEdge(
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
   importedNodeIds: ImportedNodes,
-  incumbents: CompositionIncumbentScope,
 ): Promise<ProcessResult> {
   const validation = validateEdgeRow(
     registry,
@@ -5821,29 +5386,7 @@ async function processEdge(
       options,
     );
   }
-  const classification = await classifyCompositionCreate(
-    frame,
-    graphId,
-    registry,
-    row,
-    incumbents,
-  );
-  switch (classification.kind) {
-    case "ordinary": {
-      return createClassifiedEdge(frame, graphId, registry, row);
-    }
-    case "refused": {
-      return classification.outcome;
-    }
-    case "replace": {
-      // A move is judged with the payload's move set; a row whose id the
-      // document repeats is never one, as it never pairs.
-      return {
-        status: "error",
-        error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${edge.id}" was not applied: it would move ${classification.part.kind} "${classification.part.id}" to ${classification.whole.kind} "${classification.whole.id}" (onCompositionIncumbent: "replace"), but its id repeats in the document, and a row whose id repeats is never applied as a move — the rows around it could undo the move.`,
-      };
-    }
-  }
+  return createClassifiedEdge(frame, graphId, registry, row);
 }
 
 /**

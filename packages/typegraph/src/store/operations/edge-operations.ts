@@ -469,16 +469,6 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
      * its rows one at a time); see `CompositionWindowVerdict`.
      */
     decidedCompositionWindows?: CompositionWindowVerdict | undefined;
-    /**
-     * Who already validated `input.props` against the edge kind's schema, when
-     * this call must not validate them again: `"importGraph"` for an import
-     * row routed through a store owner (`applyImportedCompositionMoves`,
-     * `node-operations.ts`), whose properties the import validated under its
-     * own `onUnknownProperty` policy and writes as they stand on every other
-     * path. A second parse would run a schema transform twice and strip a key
-     * `"allow"` kept. Absent on every store surface, which validates here.
-     */
-    propsValidatedBy?: "importGraph" | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
@@ -516,14 +506,11 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     );
   }
 
-  // Validate props with full context, unless the caller already did.
-  const validatedProps =
-    options?.propsValidatedBy === "importGraph" ?
-      input.props
-    : validateEdgeProps(edgeKind.schema, input.props, {
-        kind,
-        operation: "create",
-      });
+  // Validate props with full context
+  const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
+    kind,
+    operation: "create",
+  });
   const matchIdentity = resolveEdgeMatchIdentityStorage(
     registration.matchIdentity,
     {

@@ -638,26 +638,6 @@ function resolveCompositionAttachment(
 }
 
 /**
- * THE rule that a part moves at most once in one set of moves: the parts
- * `parts` names more than once, by `nodeRefKey`. One part holds one whole, so
- * two moves of one part in one set have no final state to judge. Asked by
- * `bulkReparent`, which refuses such a batch, and by import, which refuses
- * such a document's rows for the part as moves.
- */
-export function repeatedCompositionMoveParts(
-  parts: readonly CompositionNodeRef[],
-): ReadonlySet<string> {
-  const seen = new Set<string>();
-  const repeated = new Set<string>();
-  for (const part of parts) {
-    const key = nodeRefKey(part);
-    if (seen.has(key)) repeated.add(key);
-    seen.add(key);
-  }
-  return repeated;
-}
-
-/**
  * Parts whose required existence a still-running write frame verifies itself,
  * once its last row has landed, keyed by the frame's transaction target.
  */
@@ -1446,7 +1426,7 @@ export function resolveCompositionAttachmentRequest(
  * one spelling, so the cheap skip and the authoritative verdict can never
  * disagree about what "already holds" means.
  */
-export function incumbentHoldsRequestedAttachment(
+function incumbentHoldsRequestedAttachment(
   request: CompositionAttachmentRequest,
   current: Readonly<{
     edge: Pick<EdgeRow, "kind">;

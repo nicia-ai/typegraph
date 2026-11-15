@@ -292,7 +292,6 @@ import {
   readCompositionAttachment,
   readNodeRowsByRef,
   readReparentOptions,
-  repeatedCompositionMoveParts,
   resolveCompositionAttachmentRequest,
   resolveCompositionCreate,
   resolveCompositionMoveInstant,
@@ -3630,28 +3629,19 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
     validateRelations: boolean;
     /** A `reparent`'s instant; see `assertCompositionEdgeWindowCurrent`. */
     moveInstant?: ResolvedCompositionMoveInstant | undefined;
-    /** An import row's own id and validated properties; see {@link ImportedAttachment}. */
-    imported?: ImportedAttachment | undefined;
   }>,
 ): Promise<EdgeCreatePrepared> {
   if (options.endpoints.source === "primedWhole") {
     assertCompositionWholeEndpointLive(work, options.endpoints.wholeRow);
   }
   const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
-  return validateAndPrepareEdgeCreate(
-    ctx,
-    edgeInput,
-    options.imported?.edgeId ?? generateId(),
-    target,
-    {
-      validateEndpoints: options.endpoints.source === "read",
-      validateCardinality: true,
-      validateRelations: options.validateRelations,
-      lock,
-      moveInstant: options.moveInstant,
-      propsValidatedBy: options.imported?.propsValidatedBy,
-    },
-  );
+  return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
+    validateEndpoints: options.endpoints.source === "read",
+    validateCardinality: true,
+    validateRelations: options.validateRelations,
+    lock,
+    moveInstant: options.moveInstant,
+  });
 }
 
 /**
@@ -3957,8 +3947,6 @@ async function insertPreparedCompositionEdges<G extends GraphDef>(
  */
 type AttachmentApplyResult = Readonly<{
   wrote: boolean;
-  /** Whether the write retired (deleted or ended) the part's incumbent. */
-  retiredIncumbent: boolean;
   edge: Edge | undefined;
 }>;
 
@@ -4002,24 +3990,6 @@ type DecidedAttachmentMove = Readonly<{
    * read by the caller.
    */
   endpoints: CompositionEndpointEvidence;
-  /**
-   * Absent on every store surface, which generates the new attachment's id and
-   * validates its properties; an import move states both
-   * ({@link applyImportedCompositionMoves}).
-   */
-  imported?: ImportedAttachment;
-}>;
-
-/**
- * What an import row brings to the attachment a move writes for it: the
- * document's own edge id, and the evidence that its properties were already
- * validated by the import under its `onUnknownProperty` policy — so the move
- * writes them as they stand, exactly as the import's ordinary create does,
- * rather than running the edge schema (and any transform) a second time.
- */
-type ImportedAttachment = Readonly<{
-  edgeId: string;
-  propsValidatedBy: "importGraph";
 }>;
 
 /**
@@ -4118,7 +4088,6 @@ async function prepareCompositionAttachmentMoves<G extends GraphDef>(
         endpoints,
         validateRelations: false,
         moveInstant,
-        imported: move.imported,
       },
     );
     registerPendingEdgeForCardinality(
@@ -4333,12 +4302,11 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
     }
   }
   const results: AttachmentApplyResult[] = [];
-  for (const { decided, replacement, retire } of moves) {
+  for (const { decided, replacement } of moves) {
     results.push(
       replacement === undefined ?
         {
           wrote: false,
-          retiredIncumbent: false,
           edge:
             decided.incumbent === undefined ?
               undefined
@@ -4346,7 +4314,6 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
         }
       : {
           wrote: true,
-          retiredIncumbent: retire !== undefined,
           edge: await readHeldEdge(
             target,
             ctx.graphId,
@@ -4439,13 +4406,12 @@ async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
   session: WriteSession,
   target: WriteTarget,
   lock: GraphWriteLock,
-  operation: "nodes.attach" | "nodes.reparent" | "importGraph",
+  operation: "nodes.attach" | "nodes.reparent",
   partKind: string,
   items: readonly Readonly<{
     id: string;
     request: CompositionAttachmentRequest;
     moveAt: CompositionMoveInstant | undefined;
-    imported?: ImportedAttachment;
   }>[],
 ): Promise<readonly AttachmentApplyResult[]> {
   // Every item is decided, then every move prepared, before the first
@@ -4460,7 +4426,6 @@ async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
       partId: item.id,
       moveAt: item.moveAt,
       endpoints: { source: "read" },
-      ...(item.imported === undefined ? {} : { imported: item.imported }),
       decided: await decideCompositionAttachmentUnderFence(
         ctx.registry,
         target,
@@ -4485,122 +4450,6 @@ async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
       decisions,
     ),
   );
-}
-
-/**
- * The write frame an import attempt runs in — its session, transaction target
- * and lock evidence — as an opaque token the store's runtime port can carry
- * without naming any of the three. Minted once per attempt
- * ({@link openImportCompositionMoveFrame}) and read back only by
- * {@link applyImportedCompositionMoves}, so a move always lands in the frame of
- * the import that routed it.
- */
-// eslint-disable-next-line @typescript-eslint/no-extraneous-class -- an opaque identity: the frame it stands for lives in `importCompositionMoveFrames`, keyed by the instance, so nothing of it is readable through the token.
-export class ImportCompositionMoveFrame {}
-
-const importCompositionMoveFrames = new WeakMap<
-  ImportCompositionMoveFrame,
-  Readonly<{ session: WriteSession; target: WriteTarget; lock: GraphWriteLock }>
->();
-
-/** Mints the {@link ImportCompositionMoveFrame} of one import attempt. */
-export function openImportCompositionMoveFrame(
-  session: WriteSession,
-  target: WriteTarget,
-  lock: GraphWriteLock,
-): ImportCompositionMoveFrame {
-  const frame = new ImportCompositionMoveFrame();
-  importCompositionMoveFrames.set(frame, { session, target, lock });
-  return frame;
-}
-
-/**
- * One import row applied as a composition move under `onCompositionIncumbent:
- * "replace"` (`src/interchange/import.ts`), as the document states it: the
- * part, the whole and realizing edge it moves to, the edge's own id and
- * properties, and its `validFrom` — the move instant, or the import's clock
- * when the row states none.
- */
-export type ImportedCompositionMove = Readonly<{
-  part: Readonly<{ kind: string; id: string }>;
-  whole: Readonly<{ kind: string; id: string }>;
-  via: string;
-  props: Readonly<Record<string, unknown>>;
-  edgeId: string;
-  validFrom: string | undefined;
-}>;
-
-/**
- * Applies import rows as moves through `reparent`'s own fenced owner
- * ({@link applyCompositionAttachmentsUnderFence}) with `onIncumbent:
- * "replace"`, in ONE call — every move decided and prepared before the first
- * write, every incumbent retired before any new edge is inserted, as
- * `bulkReparent` writes them — on the import's own frame, so the moves commit
- * or roll back with the import and add no write plan of their own. Each
- * incumbent retires by the population of its own pair: a `"one"` row is
- * deleted, a `"oneActive"` window ends at the move instant, which is also the
- * new edge's `validFrom`. Each new edge keeps the document's id and the
- * properties the import already validated.
- *
- * The moves must name distinct parts of one part kind each — import groups
- * them by part kind. Import routes a row here only after reading, under the
- * lock this frame holds, an incumbent that is neither the requested attachment
- * nor a row of its own document, so every fenced decision retires that
- * incumbent and writes the new edge; one that does not is an invariant failure.
- */
-export async function applyImportedCompositionMoves<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  frame: ImportCompositionMoveFrame,
-  moves: readonly ImportedCompositionMove[],
-): Promise<void> {
-  const { session, target, lock } = requireDefined(
-    importCompositionMoveFrames.get(frame),
-    "an imported composition move named a frame no import attempt opened",
-  );
-  const byPartKind = new Map<string, ImportedCompositionMove[]>();
-  for (const move of moves) {
-    const group = byPartKind.get(move.part.kind) ?? [];
-    byPartKind.set(move.part.kind, group);
-    group.push(move);
-  }
-  for (const [partKind, group] of byPartKind) {
-    const applied = await applyCompositionAttachmentsUnderFence(
-      ctx,
-      session,
-      target,
-      lock,
-      "importGraph",
-      partKind,
-      group.map((move) => ({
-        id: move.part.id,
-        request: resolveCompositionAttachmentRequest(
-          ctx.registry,
-          move.part,
-          {
-            whole: move.whole,
-            viaKind: move.via,
-            props: { ...move.props },
-            edgeWindow: {},
-          },
-          "replace",
-        ),
-        moveAt:
-          move.validFrom === undefined ?
-            { source: "defaulted" as const, at: nowIso() }
-          : { source: "stated" as const, at: move.validFrom },
-        imported: {
-          edgeId: move.edgeId,
-          propsValidatedBy: "importGraph" as const,
-        },
-      })),
-    );
-    if (applied.some((result) => !result.wrote || !result.retiredIncumbent)) {
-      throw new CompilerInvariantError(
-        `An imported composition move of "${partKind}" wrote no attachment, or retired no incumbent, under the fence that decided it.`,
-        { partKind },
-      );
-    }
-  }
 }
 
 /**
@@ -5439,11 +5288,11 @@ async function reparentParts<G extends GraphDef>(
       ),
     };
   });
-  const repeated = repeatedCompositionMoveParts(
-    resolved.map((item) => ({ kind, id: item.id })),
-  );
+  const seenIds = new Set<string>();
   for (const item of resolved) {
-    if (repeated.has(nodeRefKey({ kind, id: item.id }))) {
+    // One part holds one whole, so two moves of one part in one batch have no
+    // final state to judge.
+    if (seenIds.has(item.id)) {
       throw new ValidationError(
         `bulkReparent requires distinct part ids; received "${item.id}" more than once.`,
         {
@@ -5459,6 +5308,7 @@ async function reparentParts<G extends GraphDef>(
         },
       );
     }
+    seenIds.add(item.id);
   }
   const gates = await readNodeRowsByRef(
     backend,

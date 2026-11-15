@@ -41,10 +41,6 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
-import {
-  type ImportCompositionMoveFrame,
-  type ImportedCompositionMove,
-} from "./operations/node-operations";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";
 import {
@@ -470,16 +466,6 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
         Pick<GraphBackend, "executeStatement">
     >,
     reference: Readonly<{ kind: string; id: string }>,
-  ) => Promise<void>;
-  /**
-   * Applies import rows as composition moves, in one call, on the import's
-   * own frame (an opaque token the attempt minted), through `reparent`'s owner
-   * — `onCompositionIncumbent: "replace"` (`applyImportedCompositionMoves`,
-   * `operations/node-operations.ts`).
-   */
-  applyImportedCompositionMoves: (
-    frame: ImportCompositionMoveFrame,
-    moves: readonly ImportedCompositionMove[],
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
     target: Readonly<

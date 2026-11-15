@@ -1454,32 +1454,6 @@ export type CompositionErrorDetails =
       stated: string | null;
       /** The bound the realizing edge stores; absent when it stores none. */
       stored?: string;
-    }>
-  | Readonly<{
-      situation: "importMove";
-      partKind: string;
-      partId: string;
-      wholeKind: string;
-      wholeId: string;
-      edgeKind: string;
-      edgeId: string;
-      incumbentEdgeKind: string;
-      incumbentEdgeId: string;
-      incumbentWholeKind: string;
-      incumbentWholeId: string;
-    }>
-  | Readonly<{
-      situation: "importMoveWindow";
-      partKind: string;
-      partId: string;
-      wholeKind: string;
-      wholeId: string;
-      edgeKind: string;
-      edgeId: string;
-      /** The bound a move cannot write: a stated `validTo`, or a `null` `validFrom`. */
-      bound: "validFrom" | "validTo";
-      /** The stated bound; `null` states "no lower bound". */
-      stated: string | null;
     }>;
 
 function compositionWindowLabel(
@@ -1612,25 +1586,6 @@ function describeCompositionRefusal(
         code: "COMPOSITION_ATTACHMENT_WINDOW_CONFLICT",
         message: `Cannot apply \`${details.option}\` to ${partLabel}: it already holds this whole via "${details.edgeKind}" (edge ${details.edgeId}), which stores ${stored}, not the stated ${stated}.`,
         suggestion: `Omit \`${details.option}\` or restate the stored bound; an already-satisfied attachment only asserts placement. Change the window on the realizing edge with \`store.edges.${details.edgeKind}.update(${JSON.stringify(details.edgeId)}, ...)\`.`,
-      };
-    }
-    case "importMove": {
-      const wholeLabel = compositionRequestedWholeLabel(details);
-      return {
-        code: "COMPOSITION_IMPORT_MOVE_REFUSED",
-        message: `Cannot import composition edge "${details.edgeKind}" ${details.edgeId} attaching ${partLabel} to ${wholeLabel}: the part already holds ${details.incumbentWholeKind}/${details.incumbentWholeId} through edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which the document does not end, so the row would move the part. Import does not move a part unless asked to (\`onCompositionIncumbent: "refuse"\`).`,
-        suggestion: `Pass \`onCompositionIncumbent: "replace"\` to move the part as \`reparent\` does — a "oneActive" incumbent's window ends at this edge's validFrom, a "one" incumbent is deleted. On a "oneActive" pair, importing with \`onConflict: "update"\` and a document that also holds edge ${details.incumbentEdgeId} with the validTo that ends it moves the part too.`,
-      };
-    }
-    case "importMoveWindow": {
-      const wholeLabel = compositionRequestedWholeLabel(details);
-      const stated =
-        details.stated === null ? "no lower bound" : `"${details.stated}"`;
-      return {
-        code: "COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED",
-        message: `Cannot import composition edge "${details.edgeKind}" ${details.edgeId} as a move of ${partLabel} to ${wholeLabel} (\`onCompositionIncumbent: "replace"\`): it states ${details.bound} ${stated}, and a move opens the new attachment at one instant, its validFrom, with no end.`,
-        suggestion:
-          "State a validFrom (or omit it to move the part at the import clock) and no validTo on the row that moves the part. Record a bounded membership as history with a second import or `store.edges.<via>.update(...)` once the part has moved.",
       };
     }
   }

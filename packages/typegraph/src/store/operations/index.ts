@@ -38,7 +38,6 @@ export {
 } from "./edge-operations";
 export {
   applyIdentityWindowEnd,
-  applyImportedCompositionMoves,
   executeNodeBulkFindByConstraint,
   executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
@@ -62,8 +61,6 @@ export {
   executeNodeUpsertUpdate,
   executeNodeUpsertUpdateBatch,
   type IdentityWindowEndContext,
-  type ImportCompositionMoveFrame,
-  type ImportedCompositionMove,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
   prepareNodeReplacement,
