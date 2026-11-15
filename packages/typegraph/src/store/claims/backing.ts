@@ -32,7 +32,9 @@ import { type GraphBackend } from "../../backend/types";
  * that map's own keys and would be trivially true.
  */
 export const CONSTRAINT_FENCE_REASONS = [
+  "edgeAcyclicity",
   "edgeCardinality",
+  "edgeComposition",
   "edgeMatchKeyConvergence",
   "nodeDisjointness",
   "nodeUniquenessClaim",
@@ -72,15 +74,54 @@ type ConstraintFenceBacking = "uniques" | "edgeClaims" | "lockOnly";
  * declaration actually spans and the one the edges primary key `(graph_id, id)`
  * cannot fence. The classes still marked `lockOnly` are fenced by the per-graph
  * write lock alone, which is why they are also the classes a non-transactional
- * backend refuses.
+ * backend refuses. `edgeAcyclicity` is `lockOnly` because the axis a cycle
+ * spans is a whole reachable subgraph, not a tuple — there is no key that
+ * could refuse a second claimant.
  */
 export const CONSTRAINT_FENCE_BACKING = {
+  edgeAcyclicity: "lockOnly",
   edgeCardinality: "edgeClaims",
+  // The composition claim is an ordinary `typegraph_edge_claims` row
+  // at the reserved relation-wide axis (`COMPOSITION_RELATION_NAME`) — same
+  // relation, same key shape, as `edgeCardinality`. It is its own reason
+  // rather than folding into `edgeCardinality` so a backend that cannot hold
+  // the fence gets advice naming the `partOf`/`hasPart` declaration.
+  edgeComposition: "edgeClaims",
   edgeMatchKeyConvergence: "lockOnly",
   nodeDisjointness: "uniques",
   nodeUniquenessClaim: "uniques",
   nodeUniquenessScope: "uniques",
 } as const satisfies Record<ConstraintFenceReason, ConstraintFenceBacking>;
+
+/**
+ * Whether a write constrained for this reason makes a decision NOTHING BUT the
+ * per-graph write fence protects — a read with no claim row behind it, whose
+ * verdict a concurrent writer of the same class can invalidate. The
+ * `satisfies` forces totality.
+ *
+ * Not the same question as {@link CONSTRAINT_FENCE_BACKING}: a composition
+ * write claims its relation-wide axis in `typegraph_edge_claims` AND reads
+ * what no claim records — the acyclicity of the oriented composition
+ * relation, and a deleted whole's parts closure.
+ *
+ * It is a statement about the reason a write NAMES, and a write names one
+ * reason: an edge kind that is both cardinality-constrained and acyclic names
+ * `edgeCardinality`, and a batch names its first constrained member's. So for
+ * acyclicity and composition this decides only whether a write takes the
+ * fence in its deciding form up front; their decision sites
+ * (`fenceLockOnlyDecision`) are what guarantee a decider advanced the fence
+ * row, whatever reason its frame named. A match-key convergence has no other
+ * site: it is always its frame's own named reason.
+ */
+export const CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY = {
+  edgeAcyclicity: true,
+  edgeCardinality: false,
+  edgeComposition: true,
+  edgeMatchKeyConvergence: true,
+  nodeDisjointness: false,
+  nodeUniquenessClaim: false,
+  nodeUniquenessScope: false,
+} as const satisfies Record<ConstraintFenceReason, boolean>;
 
 /** The decision {@link claimSupport} returns — never a flag a caller re-derives. */
 export type ClaimSupport =

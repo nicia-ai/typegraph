@@ -1,7 +1,8 @@
 /**
- * The four schema-commit members every SQL engine profile exposes:
+ * The five schema-commit members every SQL engine profile exposes:
  * `commitSchemaVersion`, `commitSchemaVersionIfKindsEmpty`,
- * `commitSchemaVersionWithPreflight`, and `setActiveVersion`. All four are a
+ * `commitSchemaVersionWithPreflight`, `setActiveVersion`, and
+ * `setActiveVersionWithPreflight`. All five are a
  * full mirror — same body, same delegation — because every dialect
  * difference already lives one layer down, inside the write-fence-holding
  * transaction runner this group calls through `runSchemaWriteTransaction`
@@ -52,6 +53,14 @@ export type CreateSchemaVersionMembersDeps = Readonly<{
     graphId: string,
     fn: (target: InternalOperationBackend) => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Refuses with `BaseSchemaMigrationError` unless the database's base
+   * schema is this release's. Every commit below runs it first, so a schema
+   * document this release writes never lands on a database an earlier
+   * release still opens, whichever path (`ensureSchema`, `migrateSchema`,
+   * `evolve`, `removeKinds`) reached the commit.
+   */
+  assertBaseSchemaCurrent: () => Promise<void>;
 }>;
 
 export type SchemaVersionMembers = Readonly<{
@@ -70,22 +79,28 @@ export type SchemaVersionMembers = Readonly<{
     preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
+  setActiveVersionWithPreflight: (
+    params: SetActiveVersionParams,
+    preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+  ) => Promise<void>;
 }>;
 
 /**
  * Builds the schema-commit member group. Moved out of the two dialect files
  * unchanged: same fenced commit, same populated-kind guard, same
- * preflight-then-commit sequencing, same fenced `setActiveVersion`.
+ * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
+ * preflight form sequences its flip exactly as a commit does.
  */
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
 ): SchemaVersionMembers {
-  const { runSchemaWriteTransaction } = deps;
+  const { runSchemaWriteTransaction, assertBaseSchemaCurrent } = deps;
 
   return {
     async commitSchemaVersion(
       params: CommitSchemaVersionParams,
     ): Promise<SchemaVersionRow> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, (target) =>
         target.commitSchemaVersion(params),
       );
@@ -95,6 +110,7 @@ export function createSchemaVersionMembers(
       params: CommitSchemaVersionParams,
       probes: readonly SchemaKindEmptinessProbe[],
     ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, (target) =>
         commitSchemaVersionIfKindsEmpty(target, params, probes),
       );
@@ -104,6 +120,7 @@ export function createSchemaVersionMembers(
       params: CommitSchemaVersionParams,
       preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<SchemaVersionRow> {
+      await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, async (target) => {
         await preflight(target);
         return target.commitSchemaVersion(params);
@@ -114,6 +131,16 @@ export function createSchemaVersionMembers(
       await runSchemaWriteTransaction(params.graphId, (target) =>
         target.setActiveVersion(params),
       );
+    },
+
+    async setActiveVersionWithPreflight(
+      params: SetActiveVersionParams,
+      preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+    ): Promise<void> {
+      await runSchemaWriteTransaction(params.graphId, async (target) => {
+        await preflight(target);
+        await target.setActiveVersion(params);
+      });
     },
   };
 }

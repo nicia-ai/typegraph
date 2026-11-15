@@ -59,7 +59,7 @@ async function allocationOwnerFromOrigin(
   return origin === undefined ? undefined : recordedAnchorOwner(schema, origin);
 }
 
-async function readGraphAllocationOwner(
+export async function readGraphAllocationOwner(
   target: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,

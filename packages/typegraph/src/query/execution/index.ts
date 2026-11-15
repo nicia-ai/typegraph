@@ -16,6 +16,7 @@ export {
 // Pagination and streaming
 export {
   adjustOrderByForDirection,
+  applyCursorFilters,
   buildCursorFromContext,
   buildCursorPredicate,
   buildPaginatedResult,

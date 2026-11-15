@@ -18,7 +18,14 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type Node,
+  type Store,
+} from "../../../src";
+import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
 const SelfHealPerson = defineNode("SelfHealPerson", {
@@ -53,6 +60,9 @@ function buildSelfHealGraph(graphId: string) {
     },
   });
 }
+
+type SelfHealStore = Store<ReturnType<typeof buildSelfHealGraph>>;
+type SelfHealNode = Node<typeof SelfHealPerson>;
 
 export function registerEdgeClaimSelfHealIntegrationTests(
   context: IntegrationTestContext,
@@ -99,50 +109,97 @@ export function registerEdgeClaimSelfHealIntegrationTests(
       ).rejects.toThrow(/[Cc]ardinality/u);
     });
 
-    it("takes over a claim whose holder id was reused by an unrelated edge", async () => {
-      graphIdCounter += 1;
-      const graph = buildSelfHealGraph(`edge_claim_id_reuse_${graphIdCounter}`);
-      const store = await context.createStore(graph);
-      const backend = store.backend;
+    // A single create claims through the guarded statement, which re-reads
+    // the whole axis; a batch claims through the lock-then-takeover pair,
+    // whose takeover reads only the RECORDED holder. Both must tell a reused
+    // id from the holder it names, so both write shapes run every case.
+    const writes = [
+      {
+        name: "create",
+        run: (store: SelfHealStore, from: SelfHealNode, to: SelfHealNode) =>
+          store.edges.selfHealReportsTo.create(from, to, {}),
+      },
+      {
+        name: "bulkCreate",
+        run: async (
+          store: SelfHealStore,
+          from: SelfHealNode,
+          to: SelfHealNode,
+        ) => {
+          const [edge] = await store.edges.selfHealReportsTo.bulkCreate([
+            { from, to, props: {} },
+          ]);
+          return requireDefined(edge, "bulkCreate returned no edge");
+        },
+      },
+    ] as const;
 
-      const alice = await store.nodes.SelfHealPerson.create({ name: "Alice" });
-      const bob = await store.nodes.SelfHealPerson.create({ name: "Bob" });
-      const carol = await store.nodes.SelfHealPerson.create({ name: "Carol" });
+    // Where the hard-deleted holder's id is reused: by an edge of an
+    // unconstrained kind, or by an edge of the SAME constrained kind holding a
+    // different key on the axis. Either way the id is live and the edge it
+    // names is not one the original claim describes.
+    const reuses = [
+      { name: "an unrelated edge kind", kind: "selfHealKnows" },
+      { name: "another key of the same axis", kind: "selfHealReportsTo" },
+    ] as const;
 
-      const incumbent = await store.edges.selfHealReportsTo.create(
-        alice,
-        bob,
-        {},
-        { id: "reused-edge-id" },
-      );
-      expect(incumbent.id).toBe("reused-edge-id");
+    for (const write of writes) {
+      for (const reuse of reuses) {
+        it(`${write.name} takes over a claim whose holder id was reused by ${reuse.name}`, async () => {
+          graphIdCounter += 1;
+          const graph = buildSelfHealGraph(
+            `edge_claim_id_reuse_${graphIdCounter}`,
+          );
+          const store = await context.createStore(graph);
+          const backend = store.backend;
 
-      // Hard delete past the store, then re-use the id for a LIVE edge of a
-      // different kind from a different source. The claim row still names
-      // "reused-edge-id", and that id now belongs to something the axis does
-      // not describe.
-      await backend.hardDeleteEdge({
-        graphId: graph.id,
-        id: "reused-edge-id",
-        kind: "selfHealReportsTo",
-      });
-      await backend.insertEdge({
-        graphId: graph.id,
-        id: "reused-edge-id",
-        kind: "selfHealKnows",
-        fromKind: "SelfHealPerson",
-        fromId: carol.id,
-        toKind: "SelfHealPerson",
-        toId: bob.id,
-        props: {},
-      });
+          const alice = await store.nodes.SelfHealPerson.create({
+            name: "Alice",
+          });
+          const bob = await store.nodes.SelfHealPerson.create({ name: "Bob" });
+          const carol = await store.nodes.SelfHealPerson.create({
+            name: "Carol",
+          });
 
-      const replacement = await store.edges.selfHealReportsTo.create(
-        alice,
-        carol,
-        {},
-      );
-      expect(replacement.fromId).toBe(alice.id);
-    });
+          const incumbent = await store.edges.selfHealReportsTo.create(
+            alice,
+            bob,
+            {},
+            { id: "reused-edge-id" },
+          );
+          expect(incumbent.id).toBe("reused-edge-id");
+
+          // Hard delete past the store, then re-use the id for a LIVE edge
+          // from a different source. The claim row still names
+          // "reused-edge-id", and that id now belongs to something the axis
+          // and key do not describe.
+          await backend.hardDeleteEdge({
+            graphId: graph.id,
+            id: "reused-edge-id",
+            kind: "selfHealReportsTo",
+          });
+          await backend.insertEdge({
+            graphId: graph.id,
+            id: "reused-edge-id",
+            kind: reuse.kind,
+            fromKind: "SelfHealPerson",
+            fromId: carol.id,
+            toKind: "SelfHealPerson",
+            toId: bob.id,
+            props: {},
+          });
+
+          const replacement = await write.run(store, alice, carol);
+          expect(replacement.fromId).toBe(alice.id);
+          expect(replacement.toId).toBe(carol.id);
+
+          // The replacement now holds the axis: a second edge from Alice is
+          // refused on either write shape.
+          await expect(
+            store.edges.selfHealReportsTo.create(alice, bob, {}),
+          ).rejects.toThrow(/[Cc]ardinality/u);
+        });
+      }
+    }
   });
 }

@@ -48,6 +48,37 @@ function getPersonById(id: PersonId): Promise<Node<typeof Person>> {
 }
 ```
 
+### `PolymorphicNodeReference<N>`
+
+The `{ kind, id }` a polymorphic read carries for a node of type `N`: a row from a supertype query,
+an alias stated `{ expansion: "subclasses" }` (on any graph, including over a subclass a runtime
+extension adds), a widened edge endpoint (`{ kind: edge.toKind, id: edge.toId }`), or an expanded
+search hit. Every node-reference input accepts it: edge endpoints, `neighbors()`, the bulk edge
+reads, composition `partOf.whole` and `reparent`, `subgraph()`, the recorded-time `adjacency()` root,
+`getNodeByRef()`, the identity reads
+and the provenance retraction verbs.
+
+```typescript
+type PolymorphicNodeReference<N extends NodeType> = Readonly<{
+  kind: string;
+  id: NodeId<PolymorphicNodeType<N>>;
+}>;
+```
+
+What each reference form guarantees:
+
+- **An exact reference** (`NodeRef<N>`, `GraphNodeReference<G>`, a node) keeps its kind and id
+  correlated at compile time: a Run's id cannot be written under kind `"Task"`.
+- **A polymorphic reference** requires a branded id, so an unbranded `{ kind: string, id: string }`
+  and the id of an unrelated kind (even one with the same properties) do not compile. Its `kind` is
+  a `string`, so it cannot guarantee the kind and the id belong together: a Run's branded id under
+  kind `"Task"` compiles.
+- **The runtime** reads the `(kind, id)` pair as stated and checks registration
+  (`KindNotFoundError`), existence, and the operation's own constraints (`EndpointError` for a kind
+  an edge does not admit, the configured source kinds for a retraction). Brands are erased and one
+  id can exist under several kinds, so a mislabelled reference whose id also exists under the stated
+  kind names that other node: reads return it and writes affect it.
+
 ### `NodeProps<N>`
 
 Extracts just the property types from a node definition. Use this when you only
@@ -261,10 +292,16 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 }))
 ```
 
-### `TypedEdgeCollection<R>`
+### `TypedEdgeCollection<R, G>`
 
 A type-safe edge collection derived from the edge registration. This is what
-`store.edges.*` returns. With array-valued `to`, each source type can connect to
+`store.edges.*` returns, with `G` the store's graph. In `G`, each declared
+endpoint reads back as `SubsumedNodeType<G, N>` (its `kind` and `NodeId` widen
+when `G`'s ontology gives the kind subclasses or equivalent kinds) and endpoint
+arguments take an `EdgeEndpointRef<G, N>`, which also admits the kinds in
+`AssignableNodeKinds<G, N["kind"]>` and polymorphic query rows; see
+[typed edge collections under subsumption](/ontology#subsumption-type-inheritance).
+Named without `G`, the declared kinds are taken exactly. With array-valued `to`, each source type can connect to
 each target type. With a [source-dependent target map](/core-concepts#source-dependent-targets),
 typed writes preserve the allowed pairs instead of accepting independent endpoint unions.
 
@@ -439,8 +476,9 @@ type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
 
 The `{ kind, id }` key every subgraph lookup takes. A node, a `GraphNodeReference<G>`, or an
 edge's endpoint (`{ kind: edge.toKind, id: edge.toId }`) fits, so following an edge needs no
-cast. The subgraph root itself is a `GraphNodeReference<G>`, whose kind and branded id stay
-correlated.
+cast. The subgraph root is a `GraphNodeReferenceInput<G>`: an exact `GraphNodeReference<G>`,
+whose kind and branded id stay correlated, or a
+[`PolymorphicNodeReference`](#polymorphicnodereferencen), which cannot guarantee that.
 
 ```typescript
 type SubgraphNodeKey<K extends string = string> = Readonly<{ kind: K; id: string }>;
@@ -523,20 +561,24 @@ type Cardinality = "many" | "one" | "unique" | "oneActive";
 | `"unique"` | At most one edge per source-target pair |
 | `"oneActive"` | At most one active edge (`validTo` is `undefined`) per source node |
 
-### `InferenceType`
+### `TargetCardinality`
 
-Controls how ontology relationships affect queries.
+Controls how many edges of a type can point AT one target node, independent
+of `Cardinality`, which bounds the edges leaving one source.
 
 ```typescript
-type InferenceType =
-  | "subsumption"   // Query for X includes subclass instances
-  | "hierarchy"     // Enables broader/narrower traversal
-  | "substitution"  // Can substitute equivalent types
-  | "constraint"    // Validation rules
-  | "composition"   // Part-whole navigation
-  | "association"   // Discovery/recommendation
-  | "none";         // No automatic inference
+type TargetCardinality = "many" | "one" | "oneActive";
 ```
+
+| Value | Description |
+|-------|-------------|
+| `"many"` | No limit on edges (default) |
+| `"one"` | At most one edge per target node |
+| `"oneActive"` | At most one active edge (`validTo` is `undefined`) per target node |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, already declared from the source side by
+`Cardinality`'s `"unique"` value.
 
 ## Query Types
 
@@ -548,6 +590,7 @@ Configuration for variable-length (recursive) traversals.
 type VariableLengthSpec = Readonly<{
   minDepth: number;                   // Minimum hops (default: 1)
   maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  exhaustive?: boolean;               // No hop ceiling; needs cyclePolicy "prevent" and maxDepth -1
   cyclePolicy: "prevent" | "allow";   // Cycle handling mode
   pathAlias?: string;                 // Column alias for projected path
   depthAlias?: string;                // Column alias for projected depth

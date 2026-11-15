@@ -101,6 +101,26 @@ export type LineageConformanceContext = Readonly<{
   getStore: () => Readonly<{ backend: GraphBackend }>;
 }>;
 
+async function provisionIdentityHistoryStore(
+  context: LineageConformanceContext,
+) {
+  const backend = context.getStore().backend;
+  const [store] = await createStoreWithSchema(identityGapGraph, backend, {
+    history: true,
+  });
+  const first = await store.nodes.LineagePerson.create({ name: "First" });
+  const second = await store.nodes.LineagePerson.create({ name: "Second" });
+  return { backend, store, first, second };
+}
+
+async function requireLineageAnchor(
+  store: Awaited<ReturnType<typeof provisionIdentityHistoryStore>>["store"],
+): Promise<EngineRevision> {
+  const anchor = await store.lineageRevisionNow();
+  if (anchor === undefined) throw new Error("expected a lineage anchor");
+  return anchor;
+}
+
 export function registerLineageConformanceIntegrationTests(
   context: LineageConformanceContext,
 ): void {
@@ -375,6 +395,65 @@ export function registerLineageConformanceIntegrationTests(
       }
       expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);
       expect(delta.edges).toEqual([]);
+    });
+  });
+
+  describe("lineage: Store.changesSince and identity writes", () => {
+    it("answers unbounded for a span whose only change is an identity assertion, while the lineage source stays bounded", async () => {
+      const { backend, store, first, second } =
+        await provisionIdentityHistoryStore(context);
+      const anchor = await requireLineageAnchor(store);
+
+      await store.identity.assertSame(first, second);
+
+      // The keys name nodes and edges only: an exact empty delta here would
+      // tell the caller nothing changed although two classes fused.
+      expect(await store.changesSince(anchor)).toEqual({ kind: "unbounded" });
+      // The source graph-merge prunes by is deliberately NOT what changed: it
+      // stays a bounded node/edge delta across the same identity write.
+      expect(
+        await recordedRelationsLineage(store).changesSince(
+          backend,
+          anchor,
+          store.graphId,
+        ),
+      ).toEqual({ kind: "keys", nodes: [], edges: [] });
+    });
+
+    it("answers unbounded when an identity assertion shares the span with node writes, and when one is retracted", async () => {
+      const { store, first, second } =
+        await provisionIdentityHistoryStore(context);
+      const beforeAssert = await requireLineageAnchor(store);
+      const asserted = await store.identity.assertSame(first, second);
+      await store.nodes.LineagePerson.create({ name: "Third" });
+      expect(await store.changesSince(beforeAssert)).toEqual({
+        kind: "unbounded",
+      });
+
+      const beforeRetract = await requireLineageAnchor(store);
+      await store.identity.retractAssertion(asserted.assertion.id);
+      expect(await store.changesSince(beforeRetract)).toEqual({
+        kind: "unbounded",
+      });
+    });
+
+    it("still answers exact keys for a span that follows the identity write and holds none", async () => {
+      const { store, first, second } =
+        await provisionIdentityHistoryStore(context);
+      await store.identity.assertSame(first, second);
+      const afterAssert = await requireLineageAnchor(store);
+
+      expect(await store.changesSince(afterAssert)).toEqual({
+        kind: "keys",
+        nodes: [],
+        edges: [],
+      });
+      const third = await store.nodes.LineagePerson.create({ name: "Third" });
+      expect(await store.changesSince(afterAssert)).toEqual({
+        kind: "keys",
+        nodes: [{ kind: "LineagePerson", id: third.id }],
+        edges: [],
+      });
     });
   });
 }

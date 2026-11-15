@@ -32,11 +32,13 @@ import {
 } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
 import {
+  CandidatePlanningScopeError,
   CandidateWriteSetError,
   MergeError,
   MergePlanCapabilityError,
 } from "./errors";
 import {
+  assertMergeWritesStructurallySound,
   assertPlanningFenceUnchanged,
   assertStableMergePostimage,
   captureMergePlanTargetFence,
@@ -44,7 +46,8 @@ import {
 } from "./merge";
 import { finalizeMergePlanArtifact } from "./plan-canonical";
 import {
-  type MergePlanArtifact,
+  MERGE_PLAN_FORMAT_VERSION,
+  type MergePlanArtifactV3,
   type MergePlanEntityRef,
   type MergePlanTargetFence,
   mergePlanTargetFenceSchema,
@@ -52,7 +55,7 @@ import {
 import { type PlanningScope, resolvePlanningScope } from "./planning-scope";
 import { err, isErr, type Result } from "./result";
 import {
-  canUseSparseCandidatePlanning,
+  candidatePlanningScope,
   matchIdentityOwnerReader,
   matchIdentityOwnersAreCloneVisible,
   sparseCandidateWorkingCopyStrategy,
@@ -151,7 +154,7 @@ export type MutationPlanBuilder<G extends GraphDef> = Readonly<{
   ) => MutationPlanBuilder<G>;
   plan: (
     options: MutationPlanningOptions,
-  ) => Promise<Result<MergePlanArtifact, MergeError>>;
+  ) => Promise<Result<MergePlanArtifactV3, MergeError>>;
 }>;
 
 /** Reuse an externally reviewed base fence instead of silently choosing a newer base. */
@@ -582,7 +585,7 @@ function mutationBuilder<G extends GraphDef>(
 export async function planMutations<G extends GraphDef>(
   args: MutationPlanningOptions &
     Readonly<{ target: Store<G>; mutations: unknown }>,
-): Promise<Result<MergePlanArtifact, MergeError>> {
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
   try {
     const document = MutationDocumentSchema.parse(
       structuredClone(args.mutations),
@@ -761,22 +764,17 @@ async function planMutationSteps<G extends GraphDef>(
   fence: MergePlanTargetFence,
   steps: readonly Step[],
   options: MutationPlanningOptions,
-): Promise<Result<MergePlanArtifact, MergeError>> {
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
   try {
     const scope = resolvePlanningScope(options.planningScope);
     if (isErr(scope)) throw scope.error;
     await assertPlanningFenceUnchanged(target, fence);
     const bounded = scope.data === "candidate";
-    if (bounded && !canUseSparseCandidatePlanning(target))
-      throw new MergePlanCapabilityError(
-        "This graph cannot be mutation-planned with bounded candidate reads. Explicitly select full planning to permit a complete clone.",
-        {
-          details: {
-            capability: "boundedCandidatePlanning",
-            planningScope: "full",
-          },
-        },
-      );
+    if (bounded) {
+      const targetScope = candidatePlanningScope(target);
+      if (targetScope.scope === "full")
+        throw new CandidatePlanningScopeError(targetScope);
+    }
     const backend = storeBackend(target);
     const edgeRows: EdgeRow[] = [];
     const writeSet: CandidateWriteSet = {
@@ -1068,13 +1066,21 @@ async function planMutationSteps<G extends GraphDef>(
         });
         if (original.deleted_at !== undefined) nodeResurrections.push(ref);
       }
-      await assertPlanningFenceUnchanged(target, fence);
       const { digest: _digest, ...artifact } = planned.data;
+      const writes = {
+        ...artifact.writes,
+        nodeUpserts: [...nodeUpserts.values()],
+      };
+      // The recreations above change what the apply deletes, so the
+      // structural gate the merge planner already ran is run again over the
+      // write set this artifact will actually carry.
+      await assertMergeWritesStructurallySound(target, writes);
+      await assertPlanningFenceUnchanged(target, fence);
       return {
         success: true,
         data: await finalizeMergePlanArtifact({
           ...artifact,
-          formatVersion: 2,
+          formatVersion: MERGE_PLAN_FORMAT_VERSION,
           target: {
             ...artifact.target,
             revision: {
@@ -1086,10 +1092,7 @@ async function planMutationSteps<G extends GraphDef>(
             ...artifact.proposed,
             nodes: { ...artifact.proposed.nodes, upserts: nodeUpserts.size },
           },
-          writes: {
-            ...artifact.writes,
-            nodeUpserts: [...nodeUpserts.values()],
-          },
+          writes,
           guards: {
             ...artifact.guards,
             ...(nodeResurrections.length === 0 ? {} : { nodeResurrections }),

@@ -7,8 +7,10 @@
  */
 import { optionalRecordedInstantParts } from "../../core/temporal";
 import { type TemporalMode } from "../../core/types";
+import { type RowMembership } from "../../registry/row-membership";
 import { nowIso } from "../../utils/date";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { compileKindFilter } from "./predicate-utils";
 import { type RecordedReadBinding, requireRecordedReadBinding } from "./schema";
 
 /**
@@ -129,6 +131,37 @@ export type TemporalFilterOptions = Readonly<{
 }>;
 
 /**
+ * The columns {@link compileTemporalFilter} reads beyond
+ * `valid_from`/`valid_to`/`deleted_at` when `recordedAsOf` is set. A narrowed
+ * column projection (e.g. the recursive compiler's `<edgeAlias>_directed_edges`
+ * CTE) builds its column list from this via `TemporalFilterPass.recordedColumns`
+ * rather than re-deriving whether the read is recorded-pinned.
+ */
+export const RECORDED_TEMPORAL_COLUMNS = [
+  "recorded_from",
+  "recorded_to",
+] as const;
+
+/**
+ * The recorded columns a read's temporal filter references, so a narrowed
+ * projection of a recorded relation keeps them: {@link RECORDED_TEMPORAL_COLUMNS}
+ * when the read is recorded-pinned to a source that carries them
+ * (`RecordedReadSource.carriesInterval`), otherwise none. An engine-native
+ * `AS OF` source has no recorded interval, and its filter reads none.
+ */
+export function recordedIntervalColumns(
+  recordedAsOf: string | undefined,
+  recordedReadBinding: RecordedReadBinding | undefined,
+): readonly (typeof RECORDED_TEMPORAL_COLUMNS)[number][] {
+  return (
+      recordedAsOf !== undefined &&
+        recordedReadBinding?.carriesInterval === true
+    ) ?
+      RECORDED_TEMPORAL_COLUMNS
+    : [];
+}
+
+/**
  * Compiles a temporal filter to SQL.
  *
  * This is the unified temporal filter function that handles all temporal modes
@@ -189,12 +222,7 @@ export function compileTemporalFilter(
       }
 
       case "asOf": {
-        if (asOf === undefined) {
-          throw new Error(
-            `asOf timestamp is required for temporal mode "asOf"`,
-          );
-        }
-        const timestamp = asOf;
+        const timestamp = requireAsOf(asOf);
         return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${timestamp}) AND (${validTo} IS NULL OR ${validTo} > ${timestamp})`;
       }
 
@@ -210,15 +238,112 @@ export function compileTemporalFilter(
     }
   })();
 
-  if (recorded === undefined) return validFilter;
+  const recordedPredicate = compileRecordedPredicate(
+    prefix,
+    recordedAsOf,
+    recordedReadBinding,
+  );
+  if (recordedPredicate === undefined) return validFilter;
+  return sql`(${validFilter}) AND ${recordedPredicate}`;
+}
 
+/**
+ * The binding's narrowing of a recorded relation to the revision `recordedAsOf`
+ * pins, or `undefined` when the read is not recorded-pinned or the binding's
+ * source already reads exactly that revision (an engine-native `AS OF`).
+ */
+function compileRecordedPredicate(
+  prefix: SqlFragment,
+  recordedAsOf: string | undefined,
+  recordedReadBinding: RecordedReadBinding | undefined,
+): SqlFragment | undefined {
+  const recorded = optionalRecordedInstantParts(recordedAsOf, "recordedAsOf");
+  if (recorded === undefined) return undefined;
   const binding = requireRecordedReadBinding(
     recordedReadBinding,
     "recorded-temporal-filter",
   );
-  const recordedPredicate = binding.predicate(prefix, recorded);
-  if (recordedPredicate === undefined) return validFilter;
-  return sql`(${validFilter}) AND ${recordedPredicate}`;
+  return binding.predicate(prefix, recorded);
+}
+
+/** One edge kind and the rule deciding which of its rows are members. */
+export type EdgeKindMembership = Readonly<{
+  edgeKind: string;
+  membership: RowMembership;
+}>;
+
+/**
+ * THE SQL rendering of `membershipCountsRow`
+ * (`src/store/claims/edge-claims.ts`) for rows of `members`' edge kinds, each
+ * under its own rule, at a read coordinate: a non-deleted row is a member; an
+ * `"openRows"` kind's row only while its window is open. Every reader of a
+ * membership relation in stored rows calls this — the acyclicity walk, the
+ * `subgraph({ composition })` closure and the query compiler's composition
+ * navigation — so none can disagree with the cascade, the claims or each other
+ * about which rows bind.
+ *
+ * A membership is not a validity window: an `"allRows"` row binds for its
+ * whole life, ended or not. So the coordinate moves the evaluation INSTANT,
+ * never the rule:
+ *
+ * - `"asOf"` evaluates membership at `asOf` — the row existed by then
+ *   (`valid_from <= asOf`), and an `"openRows"` row had not yet ended.
+ * - Every other mode evaluates it now. `includeEnded`/`includeTombstones`
+ *   widen what a READ may see, not what a membership relation contains, so
+ *   they do not admit an ended `"openRows"` row or a deleted one. Composition
+ *   refuses a window that starts or ends later than its write, so "now" needs
+ *   no instant comparison: an open row is current and an ended one is history.
+ *
+ * A recorded-pinned read narrows to its revision through the binding's own
+ * predicate, so a source that carries no recorded interval is never asked for
+ * one. Empty-window rules render no window term: a relation whose members all
+ * count every row reads `deleted_at IS NULL` alone.
+ */
+export function compileEdgeMembershipFilters(
+  options: Readonly<{
+    members: readonly EdgeKindMembership[];
+    tableAlias: string;
+    mode: TemporalMode;
+    asOf?: string | undefined;
+    recordedAsOf?: string | undefined;
+    recordedReadBinding?: RecordedReadBinding | undefined;
+  }>,
+): readonly SqlFragment[] {
+  const column = (name: string): SqlFragment =>
+    sql.raw(`${options.tableAlias}.${name}`);
+  const instant =
+    options.mode === "asOf" ? requireAsOf(options.asOf) : undefined;
+  const filters: SqlFragment[] = [sql`${column("deleted_at")} IS NULL`];
+  if (instant !== undefined) {
+    filters.push(
+      sql`(${column("valid_from")} IS NULL OR ${column("valid_from")} <= ${instant})`,
+    );
+  }
+  const openRowsKinds = options.members
+    .filter((member) => member.membership === "openRows")
+    .map((member) => member.edgeKind);
+  if (openRowsKinds.length > 0) {
+    const isOpenRowsKind = compileKindFilter(column("kind"), openRowsKinds);
+    const stillOpen =
+      instant === undefined ?
+        sql`${column("valid_to")} IS NULL`
+      : sql`${column("valid_to")} IS NULL OR ${column("valid_to")} > ${instant}`;
+    filters.push(sql`(NOT (${isOpenRowsKind}) OR ${stillOpen})`);
+  }
+  const recordedPredicate = compileRecordedPredicate(
+    sql.raw(`${options.tableAlias}.`),
+    options.recordedAsOf,
+    options.recordedReadBinding,
+  );
+  if (recordedPredicate !== undefined) filters.push(recordedPredicate);
+  return filters;
+}
+
+function requireAsOf(asOf: string | undefined): string {
+  if (asOf === undefined) {
+    throw new Error(`asOf timestamp is required for temporal mode "asOf"`);
+  }
+  return asOf;
 }
 
 /**

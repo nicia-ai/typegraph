@@ -1,4 +1,28 @@
 export { rebuildIdentityClosure } from "./rebuild";
+export {
+  IDENTITY_REPLAY_DEFAULT_LIMIT,
+  IDENTITY_REPLAY_MAX_LIMIT,
+  type IdentityHistoryCompleteness,
+  type IdentityHistoryIncompleteReason,
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityReplayStep,
+  type IdentityTransition,
+  type IdentityTransitionHistory,
+  type RecordedIdentityTransition,
+  type RestoredIdentityTransition,
+  type TransitionPageCursor,
+} from "./replay";
+export {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionCause,
+  type IdentityTransitionCursor,
+  type IdentityTransitionCut,
+  type IdentityTransitionPruneResult,
+  type IdentityTransitionRetention,
+  type IdentityTransitionTransfer,
+  pruneIdentityTransitions,
+} from "./transition-log";
 export type {
   IdentityAssertion,
   IdentityAssertionId,

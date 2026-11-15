@@ -8,6 +8,7 @@ import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../backend/recorded-storage";
 import { type GraphBackend } from "../backend/types";
 import {
   createRecordedInstant,
+  RECORDED_FIRST_REVISION,
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
@@ -28,10 +29,7 @@ import {
   recordedAnchorScope,
 } from "./recorded-anchor-log-sql";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
-import {
-  lockRecordedGraphWrite,
-  RECORDED_FIRST_REVISION,
-} from "./recorded-capture/clock";
+import { lockRecordedGraphWrite } from "./recorded-capture/clock";
 import { requireRecordedAnchorLog } from "./recorded-capture/guards";
 
 export type PruneRecordedInstantsOptions = Readonly<{

@@ -199,8 +199,10 @@ exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDelete
     "one:knows",
     "unique:knows",
     "oneActive:knows",
+    "toone:knows",
+    "tooneActive:knows",
   ],
-  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = $1 AND "axis" IN ($2, $3, $4)",
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = $1 AND "axis" IN ($2, $3, $4, $5, $6)",
 }
 `;
 
@@ -211,8 +213,10 @@ exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDelete
     "one:knows",
     "unique:knows",
     "oneActive:knows",
+    "toone:knows",
+    "tooneActive:knows",
   ],
-  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = ? AND "axis" IN (?, ?, ?)",
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = ? AND "axis" IN (?, ?, ?, ?, ?)",
 }
 `;
 

@@ -95,6 +95,15 @@ To build the package for distribution:
 pnpm build
 ```
 
+The build has two ordered stages, which `packages/typegraph/scripts/build.ts`
+owns: `tsc` emits the declarations once into `.declaration-emit/`, then tsup
+bundles the JavaScript and rolls each entrypoint's `.d.ts` out of that emit.
+Running `tsup` directly skips the first stage, so its declaration entries do not
+resolve and the build fails — use `pnpm build` (or `pnpm dev`, which keeps both
+stages watching). Deriving declarations from source inside the rollup instead
+costs about 10 GiB of resident memory for any entrypoint; rolling the emitted
+tree costs about 1.5 GiB for the whole build.
+
 ## Making Changes
 
 1. **Branch:** Create a new branch for your feature or fix.

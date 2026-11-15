@@ -550,8 +550,13 @@ export type PredicateCompilerContext = Readonly<{
    */
   recursiveTraversal?: RecursiveTraversalVerdict;
   databaseExpressionAggregates?: boolean;
-  /** Resolves completed-match fields to the CTE carrying their columns. */
-  resolveFieldCteAlias?: (field: FieldRef) => string | undefined;
+  /**
+   * Resolves completed-match fields to the CTE carrying their columns. Read
+   * by database expressions and by the comparison, tuple-comparison and
+   * null-check predicates a keyset cursor is built from; the other predicate
+   * forms are never placed in a completed-match filter.
+   */
+  resolveFieldCteAlias?: FieldCteAliasResolver;
   /** Final recursive CTE qualifier used by completed-result expressions. */
   recursiveResultAlias?: string;
 }>;
@@ -603,6 +608,8 @@ export function assertRecursiveTraversalSupported(
   );
 }
 
+type FieldCteAliasResolver = (field: FieldRef) => string | undefined;
+
 /**
  * Compiles a predicate expression to SQL.
  */
@@ -616,11 +623,21 @@ export function compilePredicateExpression(
 
   switch (expr.__type) {
     case "comparison": {
-      return compileComparisonPredicate(expr, dialect, cteColumnPrefix);
+      return compileComparisonPredicate(
+        expr,
+        dialect,
+        cteColumnPrefix,
+        ctx.resolveFieldCteAlias,
+      );
     }
 
     case "tuple_comparison": {
-      return compileTupleComparisonPredicate(expr, dialect, cteColumnPrefix);
+      return compileTupleComparisonPredicate(
+        expr,
+        dialect,
+        cteColumnPrefix,
+        ctx.resolveFieldCteAlias,
+      );
     }
 
     case "string_op": {
@@ -669,7 +686,7 @@ export function compilePredicateExpression(
       const field = compileFieldTextValue(
         expr.field,
         dialect,
-        undefined,
+        ctx.resolveFieldCteAlias?.(expr.field),
         undefined,
         cteColumnPrefix,
       );
@@ -806,6 +823,7 @@ function compileComparisonPredicate(
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
+  resolveFieldCteAlias?: FieldCteAliasResolver,
 ): SqlFragment {
   // Handle ParameterRef on the right side
   if (isParameterRef(expr.right)) {
@@ -814,7 +832,7 @@ function compileComparisonPredicate(
       expr.left,
       dialect,
       parameterValueType,
-      undefined,
+      resolveFieldCteAlias?.(expr.left),
       undefined,
       cteColumnPrefix,
     );
@@ -848,7 +866,7 @@ function compileComparisonPredicate(
     expr.left,
     dialect,
     valueType,
-    undefined,
+    resolveFieldCteAlias?.(expr.left),
     undefined,
     cteColumnPrefix,
   );
@@ -877,7 +895,7 @@ function compileComparisonPredicate(
       right,
       dialect,
       valueType,
-      undefined,
+      resolveFieldCteAlias?.(right),
       undefined,
       cteColumnPrefix,
     );
@@ -907,6 +925,7 @@ function compileTupleComparisonPredicate(
   expr: Extract<PredicateExpression, { __type: "tuple_comparison" }>,
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
+  resolveFieldCteAlias?: FieldCteAliasResolver,
 ): SqlFragment {
   if (expr.fields.length !== expr.values.length)
     throw new UnsupportedPredicateError(
@@ -917,7 +936,7 @@ function compileTupleComparisonPredicate(
       field,
       dialect,
       resolveComparisonValueType(field, requireDefined(expr.values[index])),
-      undefined,
+      resolveFieldCteAlias?.(field),
       undefined,
       cteColumnPrefix,
     ),

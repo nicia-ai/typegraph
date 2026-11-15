@@ -10,16 +10,20 @@ import {
   defineNode,
   defineNodeIndex,
   disjointWith,
+  partOf,
   type Store,
   subClassOf,
 } from "../../../src";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   applyMergePlan,
+  CandidatePlanningScopeError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
   ingestionBranch,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   type MergeOptions,
   planCandidateWriteSet,
   planCandidateWriteSetReview,
@@ -30,10 +34,11 @@ import {
 import { captureMergePlanTargetFence } from "../../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../../src/graph-merge/result";
-import { canUseSparseCandidatePlanning } from "../../../src/graph-merge/sparse-candidate-branch";
+import { candidatePlanningScope } from "../../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { importGraph } from "../../../src/interchange";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
+import { storeBackend } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -168,6 +173,84 @@ const boundedOntologyIdentityGraph = defineGraph({
     disjointWith(BaseKind, ExcludedKind),
   ],
 });
+const Peer = defineNode("Peer", { schema: z.object({ label: z.string() }) });
+const crossRow = defineEdge("crossRow", { schema: z.object({}) });
+const PEER_IDS = ["a", "b", "c", "d"] as const;
+
+/**
+ * A graph whose edge constraint reads rows outside a candidate's own scope.
+ * `seeded` and `conflicting` close the constraint over a row the sparse base
+ * never reads; `clean` does not.
+ */
+const crossRowCases = [
+  {
+    name: "target-side cardinality",
+    planningScope: { scope: "full", reason: "target-side-cardinality" },
+    graph: defineGraph({
+      id: "cross_row_target_cardinality",
+      nodes: { Peer: { type: Peer } },
+      edges: {
+        crossRow: {
+          type: crossRow,
+          from: [Peer],
+          to: [Peer],
+          targetCardinality: "one",
+        },
+      },
+    }),
+    seeded: ["a", "c"],
+    conflicting: ["b", "c"],
+    clean: ["b", "d"],
+  },
+  {
+    name: "acyclic edge",
+    planningScope: { scope: "full", reason: "acyclic-relation" },
+    graph: defineGraph({
+      id: "cross_row_acyclic",
+      nodes: { Peer: { type: Peer } },
+      edges: {
+        crossRow: { type: crossRow, from: [Peer], to: [Peer], acyclic: true },
+      },
+    }),
+    seeded: ["a", "b"],
+    conflicting: ["b", "a"],
+    clean: ["b", "c"],
+  },
+  {
+    name: "composition",
+    planningScope: { scope: "full", reason: "composition" },
+    graph: defineGraph({
+      id: "cross_row_composition",
+      nodes: { Peer: { type: Peer } },
+      edges: {
+        crossRow: {
+          type: crossRow,
+          from: [Peer],
+          to: [Peer],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(Peer, Peer, { via: crossRow, partSide: "from" })],
+    }),
+    seeded: ["a", "b"],
+    conflicting: ["b", "a"],
+    clean: ["b", "c"],
+  },
+] as const;
+function crossRowEdge(
+  id: string,
+  [from, to]: readonly [string, string],
+): CandidateWriteSet["edges"][number] {
+  return {
+    kind: "crossRow",
+    id,
+    from: { kind: "Peer", id: from },
+    to: { kind: "Peer", id: to },
+    properties: {},
+    validFrom,
+  };
+}
+
 const policy = {
   id: "review-policy-v1",
   context: { minimumApprovals: 1 },
@@ -295,8 +378,12 @@ export function registerGraphMergeReviewIntegrationTests(
               )
             : undefined;
           const actualJson =
-            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
-          expect(canUseSparseCandidatePlanning(target)).toBe(true);
+            isErr(bounded) ? undefined : (
+              canonicalMergePlanJson(bounded.data.plan)
+            );
+          expect(candidatePlanningScope(target)).toEqual({
+            scope: "candidate",
+          });
           expect(imported.success).toBe(peerState !== "disjoint");
           expect(actualJson).toBe(expectedJson);
         } finally {
@@ -391,7 +478,7 @@ export function registerGraphMergeReviewIntegrationTests(
           isErr(bounded) && bounded.error instanceof CandidateWriteSetError ?
             bounded.error.details["errors"]
           : undefined;
-        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
         expect(imported.success).toBe(false);
         expect(boundedImportErrors).toEqual(imported.errors);
       } finally {
@@ -548,7 +635,9 @@ export function registerGraphMergeReviewIntegrationTests(
               )
             : undefined;
           const actualJson =
-            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+            isErr(bounded) ? undefined : (
+              canonicalMergePlanJson(bounded.data.plan)
+            );
           expect(actualJson).toBe(expectedJson);
         } finally {
           await full.close();
@@ -633,7 +722,7 @@ export function registerGraphMergeReviewIntegrationTests(
             },
           ],
         };
-        expect(canUseSparseCandidatePlanning(target)).toBe(true);
+        expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
         const full = unwrap(
           await ingestionBranch(target, makeBackend, {
             id: asBranchId(writeSet.sourceId),
@@ -682,7 +771,9 @@ export function registerGraphMergeReviewIntegrationTests(
               )
             : undefined;
           const actualJson =
-            isErr(bounded) ? undefined : canonicalMergePlanJson(bounded.data);
+            isErr(bounded) ? undefined : (
+              canonicalMergePlanJson(bounded.data.plan)
+            );
           expect(actualJson).toBe(expectedJson);
         } finally {
           await full.close();
@@ -789,7 +880,9 @@ export function registerGraphMergeReviewIntegrationTests(
               )
             : undefined;
           const actualJson =
-            isErr(planned) ? undefined : canonicalMergePlanJson(planned.data);
+            isErr(planned) ? undefined : (
+              canonicalMergePlanJson(planned.data.plan)
+            );
           expect(actualJson).toBe(expectedJson);
         } finally {
           await full.close();
@@ -880,7 +973,7 @@ export function registerGraphMergeReviewIntegrationTests(
         );
         const actual = unwrap(
           await planCandidateWriteSet({ target, writeSet, makeBackend }),
-        );
+        ).plan;
         expect(canonicalMergePlanJson(actual)).toBe(
           canonicalMergePlanJson(expected),
         );
@@ -920,7 +1013,9 @@ export function registerGraphMergeReviewIntegrationTests(
         reviewScope: "candidate" as const,
       };
       const review = unwrap(await planCandidateWriteSetReview(args));
-      expect(review.formatVersion).toBe(2);
+      expect(review.formatVersion).toBe(
+        MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+      );
       expect(review.baseline.scope).toBe("referenced");
       expect(await target.nodes.Item.getById(existing.id)).toMatchObject({
         label: "Existing",
@@ -939,7 +1034,89 @@ export function registerGraphMergeReviewIntegrationTests(
           .status,
       ).toBe("changed");
     });
-    it("preserves V1 and V2 approval decisions for an unrelated original row update", async () => {
+    it("refuses to revalidate a candidate-scoped review once the target can no longer be read sparsely", async () => {
+      const target = await context.createHistoryStore(
+        boundedActiveCardinalityGraph,
+      );
+      const source = await target.nodes.Item.create(itemProps("source"), {
+        id: "source",
+        validFrom,
+      });
+      const proposed = await target.nodes.Artifact.create(
+        { content: "proposed" },
+        { id: "proposed", validFrom },
+      );
+      const writeSet: CandidateWriteSet = {
+        formatVersion: 1,
+        sourceId: "scope-capability-loss",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [
+          {
+            kind: "activeLimited",
+            id: "candidate-edge",
+            from: { kind: "Item", id: source.id },
+            to: { kind: "Artifact", id: proposed.id },
+            properties: {},
+            validFrom,
+          },
+        ],
+      };
+      const args = {
+        target,
+        writeSet,
+        makeBackend,
+        policy,
+        reviewScope: "candidate" as const,
+      };
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.baseline.scope).toBe("referenced");
+      const {
+        writeSet: _writeSet,
+        reviewScope: _reviewScope,
+        ...revalidate
+      } = args;
+      expect(
+        unwrap(
+          await revalidateCandidateWriteSetReview({ ...revalidate, review }),
+        ).status,
+      ).toBe("compatible");
+
+      const backend = storeBackend(target);
+      const descriptor = Object.getOwnPropertyDescriptor(
+        backend,
+        "findActiveEdgesBySourceV1",
+      );
+      expect(descriptor).toBeDefined();
+      Reflect.deleteProperty(backend, "findActiveEdgesBySourceV1");
+      try {
+        expect(candidatePlanningScope(target)).toEqual({
+          scope: "full",
+          reason: "missing-active-source-read",
+        });
+        const refused = await revalidateCandidateWriteSetReview({
+          ...revalidate,
+          review,
+        });
+        expect(isErr(refused) && refused.error.code).toBe("GRAPH_MERGE_REVIEW");
+        expect(isErr(refused) && refused.error.details["reason"]).toBe(
+          "candidate-scope-ineligible",
+        );
+      } finally {
+        if (descriptor)
+          Object.defineProperty(
+            backend,
+            "findActiveEdgesBySourceV1",
+            descriptor,
+          );
+      }
+      expect(
+        unwrap(
+          await revalidateCandidateWriteSetReview({ ...revalidate, review }),
+        ).status,
+      ).toBe("compatible");
+    });
+    it("preserves whole-target and candidate-scoped approval decisions for an unrelated original row update", async () => {
       const target = await context.createHistoryStore(boundedGraph);
       const candidate = await target.nodes.Item.create(itemProps("candidate"), {
         id: "candidate",
@@ -971,8 +1148,10 @@ export function registerGraphMergeReviewIntegrationTests(
           reviewScope: "candidate",
         }),
       );
-      expect(v1.formatVersion).toBe(1);
-      expect(v2.formatVersion).toBe(2);
+      expect(v1.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      expect(v2.formatVersion).toBe(
+        MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+      );
       expect(v2.plan.writes).toEqual(v1.plan.writes);
 
       await target.nodes.Artifact.update(unrelated.id, { content: "revised" });
@@ -994,7 +1173,7 @@ export function registerGraphMergeReviewIntegrationTests(
       });
       expect(v2Decision.status).toBe("compatible");
     });
-    it("bounds V2 review reads across unrelated rows and identity assertions", async () => {
+    it("bounds candidate-scoped review reads across unrelated rows and identity assertions", async () => {
       const target = await context.createHistoryStore(boundedIdentityGraph);
       const candidate = await target.nodes.Item.create(itemProps("candidate"), {
         id: "candidate",
@@ -1130,7 +1309,9 @@ export function registerGraphMergeReviewIntegrationTests(
       expect(await captureMergePlanTargetFence(args.target)).toEqual(
         beforeRevalidation,
       );
-      unwrap(await applyMergePlan(args.target, result.plan));
+      unwrap(
+        await applyMergePlan(args.target, result.plan, { review: result }),
+      );
       expect(await args.target.nodes.Item.getById(proposed.id)).toMatchObject({
         status: "accepted",
       });
@@ -1151,7 +1332,7 @@ export function registerGraphMergeReviewIntegrationTests(
       );
       const review = unwrap(await planCandidateWriteSetReview(args));
       await args.target.nodes.Item.update(item.id, { status: "rejected" });
-      const fresh = unwrap(await planCandidateWriteSet(args));
+      const fresh = unwrap(await planCandidateWriteSet(args)).plan;
       expect(fresh.writes).toEqual(review.plan.writes);
       const result = unwrap(
         await revalidateCandidateWriteSetReview({ ...args, review }),
@@ -1550,6 +1731,200 @@ export function registerGraphMergeReviewIntegrationTests(
       expect(
         await args.target.nodes.Item.getById(asNodeId("candidate")),
       ).toBeUndefined();
+    });
+  });
+
+  describe("candidate planning on a graph with cross-row constraints", () => {
+    async function seededTarget(testCase: (typeof crossRowCases)[number]) {
+      const target = await context.createHistoryStore(testCase.graph);
+      const seeded = await importGraph(
+        target,
+        {
+          formatVersion: "2.0",
+          exportedAt: "1970-01-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: PEER_IDS.map((id) => ({
+            kind: "Peer",
+            id,
+            properties: { label: id },
+            validFrom,
+          })),
+          edges: [crossRowEdge("seed-edge", testCase.seeded)],
+        },
+        { onConflict: "error", onUnknownProperty: "error" },
+      );
+      expect(seeded.success).toBe(true);
+      return target;
+    }
+
+    async function writeSetOf(
+      target: Awaited<ReturnType<typeof seededTarget>>,
+      edge: CandidateWriteSet["edges"][number],
+    ): Promise<CandidateWriteSet> {
+      return {
+        formatVersion: 1,
+        sourceId: "cross-row-source",
+        target: await captureCandidateWriteSetTarget(target),
+        nodes: [],
+        edges: [edge],
+      };
+    }
+
+    describe.each(crossRowCases)("$name", (testCase) => {
+      it("plans against the whole target with an explicit full scope", async () => {
+        const target = await seededTarget(testCase);
+        expect(candidatePlanningScope(target)).toEqual(testCase.planningScope);
+
+        const conflicting = await writeSetOf(
+          target,
+          crossRowEdge("candidate-edge", testCase.conflicting),
+        );
+        const refused = await planCandidateWriteSet({
+          target,
+          writeSet: conflicting,
+          makeBackend,
+          planningScope: "full",
+        });
+        expect(isErr(refused)).toBe(true);
+        expect(isErr(refused) ? refused.error : undefined).not.toBeInstanceOf(
+          CandidatePlanningScopeError,
+        );
+
+        const clean = await writeSetOf(
+          target,
+          crossRowEdge("candidate-edge", testCase.clean),
+        );
+        let stagedIds: readonly string[] = [];
+        const { plan: planned, planningScope } = unwrap(
+          await planCandidateWriteSet({
+            target,
+            writeSet: clean,
+            planningScope: "full",
+            makeBackend: async () => {
+              const staging = await makeBackend();
+              const readStaged = staging.findNodesAcrossKinds;
+              if (readStaged === undefined)
+                throw new Error("Expected cross-kind read");
+              vi.spyOn(staging, "findNodesAcrossKinds").mockImplementation(
+                async (query) => {
+                  const rows = await readStaged(query);
+                  stagedIds = rows.map((row) => row.id);
+                  return rows;
+                },
+              );
+              return staging;
+            },
+          }),
+        );
+        // A sparse base stages only the rows the candidate touches; the
+        // full copy stages every target row.
+        expect(stagedIds.toSorted()).toEqual([...PEER_IDS]);
+        expect(planningScope).toEqual({
+          scope: "full",
+          reason: "full-requested",
+        });
+        const full = unwrap(
+          await ingestionBranch(target, makeBackend, {
+            id: asBranchId(clean.sourceId),
+          }),
+        );
+        try {
+          const imported = await importGraph(
+            full,
+            {
+              formatVersion: "2.0",
+              exportedAt: "1970-01-01T00:00:00.000Z",
+              source: { type: "external" },
+              nodes: clean.nodes,
+              edges: clean.edges,
+            },
+            {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              refreshStatistics: false,
+            },
+          );
+          expect(imported.success).toBe(true);
+          const expected = unwrap(
+            await planMergeIncremental({
+              forkPoint: target,
+              target,
+              branches: [full],
+            }),
+          );
+          expect(canonicalMergePlanJson(planned)).toBe(
+            canonicalMergePlanJson(expected),
+          );
+        } finally {
+          await full.close();
+        }
+      });
+
+      it.each([undefined, "candidate"] as const)(
+        "refuses the bounded planning scope (%s) before staging",
+        async (planningScope) => {
+          const target = await seededTarget(testCase);
+          const writeSet = await writeSetOf(
+            target,
+            crossRowEdge("candidate-edge", testCase.clean),
+          );
+          const planBackend = vi.fn(makeBackend);
+
+          const refused = await planCandidateWriteSet({
+            target,
+            writeSet,
+            makeBackend: planBackend,
+            ...(planningScope === undefined ? {} : { planningScope }),
+          });
+          if (!isErr(refused))
+            throw new Error(
+              `expected a candidate planning scope refusal, planned ${JSON.stringify(refused.data.planningScope)}`,
+            );
+          expect(refused.error).toBeInstanceOf(CandidatePlanningScopeError);
+          expect(refused.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
+          expect(refused.error.details).toEqual({
+            capability: "boundedCandidatePlanning",
+            requiredPlanningScope: "full",
+            planningScope: testCase.planningScope,
+          });
+          expect(planBackend).not.toHaveBeenCalled();
+        },
+      );
+
+      it("refuses an explicitly requested candidate review scope and keeps the whole-target review", async () => {
+        const target = await seededTarget(testCase);
+        const writeSet = await writeSetOf(
+          target,
+          crossRowEdge("candidate-edge", testCase.clean),
+        );
+        const planBackend = vi.fn(makeBackend);
+
+        const scoped = await planCandidateWriteSetReview({
+          target,
+          writeSet,
+          makeBackend: planBackend,
+          policy,
+          reviewScope: "candidate",
+        });
+        expect(isErr(scoped) && scoped.error.code).toBe("GRAPH_MERGE_REVIEW");
+        expect(isErr(scoped) && scoped.error.details).toEqual({
+          reason: "candidate-scope-ineligible",
+          planningScope: testCase.planningScope,
+        });
+        expect(planBackend).not.toHaveBeenCalled();
+
+        const whole = unwrap(
+          await planCandidateWriteSetReview({
+            target,
+            writeSet,
+            makeBackend,
+            policy,
+            planningScope: "full",
+          }),
+        );
+        expect(whole.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      });
     });
   });
 }

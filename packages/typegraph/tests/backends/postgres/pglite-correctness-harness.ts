@@ -39,7 +39,10 @@ import {
  */
 const MANAGED_TABLE_NAMES: readonly string[] = Object.values(defaultTables)
   .filter((value) => is(value, Table))
-  .map((table) => getTableName(table));
+  .map((table) => getTableName(table))
+  // The base-schema marker is a deployment fact, not test data: every schema
+  // commit refuses a database without it.
+  .filter((name) => name !== getTableName(defaultTables.baseSchemaVersions));
 
 /** Single TRUNCATE over every managed table — built once from the static list. */
 const TRUNCATE_MANAGED_SQL = `TRUNCATE ${MANAGED_TABLE_NAMES.map(

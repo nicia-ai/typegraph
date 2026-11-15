@@ -12,7 +12,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, KindNotFoundError } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  KindNotFoundError,
+  partOf,
+} from "../src";
 import { defineGraphExtension } from "../src/graph-extension";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
@@ -97,6 +103,64 @@ describe("Store.introspect", () => {
     expect(edge?.origin).toBe("runtime");
     expect(edge?.from).toEqual(["Tag"]);
     expect(edge?.to).toEqual(["Person"]);
+    expect(edge?.acyclic).toBe(false);
+  });
+
+  it("includes a graph-extension edge's acyclic: true declaration", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Task: { properties: { name: { type: "string" } } } },
+        edges: {
+          dependsOn: {
+            from: ["Task"],
+            to: ["Task"],
+            properties: {},
+            acyclic: true,
+          },
+        },
+      }),
+    );
+
+    const result = evolved.introspect();
+    const edge = result.edges.find((entry) => entry.name === "dependsOn");
+    expect(edge?.acyclic).toBe(true);
+  });
+
+  it("reports a composition-realizing edge kind as acyclic, and an ordinary one as not", async () => {
+    const Folder = defineNode("Folder", {
+      schema: z.object({ name: z.string() }),
+    });
+    const parentFolder = defineEdge("parentFolder", { schema: z.object({}) });
+    const links = defineEdge("links", { schema: z.object({}) });
+    const graph = defineGraph({
+      id: "introspect_composition_acyclic",
+      nodes: { Folder: { type: Folder } },
+      edges: {
+        parentFolder: {
+          type: parentFolder,
+          from: [Folder],
+          to: [Folder],
+          cardinality: "one",
+        },
+        links: { type: links, from: [Folder], to: [Folder] },
+      },
+      ontology: [
+        partOf(Folder, Folder, { via: parentFolder, partSide: "from" }),
+      ],
+    });
+    const [store] = await createStoreWithSchema(graph, createTestBackend());
+
+    // MUTATION CHECK: report `registration.acyclic ?? false` in
+    // `introspectSchema` (src/store/introspect.ts), as it once did, and the
+    // composition kind — which every write probes for cycles through the
+    // composition relation — reads `false` — verified and reverted.
+    const edges = new Map(
+      store.introspect().edges.map((edge) => [edge.name, edge.acyclic]),
+    );
+    expect(edges.get("parentFolder")).toBe(true);
+    expect(edges.get("links")).toBe(false);
   });
 
   it("includes runtime ontology with origin: runtime", async () => {
@@ -117,6 +181,44 @@ describe("Store.introspect", () => {
     );
     expect(relation?.origin).toBe("runtime");
     expect(relation?.metaEdge).toBe("subClassOf");
+  });
+
+  it("reports `via` and `partSide` on a composition relation", async () => {
+    // The only test of this copy site: OntologyIntrospection is the sole
+    // one of the five via/partSide representations with no coverage, so a
+    // dropped spread here is silent public-API data loss even though every
+    // other copy site (serializer, deserializer, compiler, builders,
+    // extension-validation) is caught by its own test.
+    const Section = defineNode("Section", {
+      schema: z.object({ title: z.string() }),
+    });
+    const parentSection = defineEdge("parentSection", {
+      schema: z.object({}),
+    });
+    const graph = defineGraph({
+      id: "introspect_composition_test",
+      nodes: { Section: { type: Section } },
+      edges: {
+        parentSection: {
+          type: parentSection,
+          from: [Section],
+          to: [Section],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(Section, Section, { via: parentSection, partSide: "from" }),
+      ],
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const relation = store
+      .introspect()
+      .ontology.find((entry) => entry.metaEdge === "partOf");
+
+    expect(relation?.via).toBe("parentSection");
+    expect(relation?.partSide).toBe("from");
   });
 
   it("extension round-trips through defineGraphExtension", async () => {

@@ -17,6 +17,7 @@ import {
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
+import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, type Store } from "../src/store";
 import { resolveAtomicEdgeConvergenceExecutor } from "../src/store/operations/atomic-mutation-program";
 import { requireDefined } from "../src/utils/presence";
@@ -308,6 +309,7 @@ describe("atomic durable bulk edge convergence", () => {
     await withLibsqlStore(async (_store, _client, backend) => {
       const common = {
         backend,
+        registry: buildKindRegistry(durableGraph),
         schemaVersion: 1,
         historyEnabled: false,
         revisionTrackingEnabled: false,
@@ -390,6 +392,7 @@ describe("atomic durable bulk edge convergence", () => {
           resolveAtomicEdgeConvergenceExecutor({
             backend,
             graph: durableGraph,
+            registry: buildKindRegistry(durableGraph),
             schemaVersion: 1,
             historyEnabled,
             revisionTrackingEnabled,

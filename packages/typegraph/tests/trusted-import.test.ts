@@ -11,6 +11,8 @@ import {
   defineGraphExtension,
   defineNode,
   embedding,
+  hasPart,
+  partOf,
   searchable,
   StaleVersionError,
   TrustedImportError,
@@ -334,6 +336,44 @@ describe("trusted import", () => {
                 a: { kind: "TrustedPerson", id: "alice" },
                 b: { kind: "TrustedPerson", id: "alias" },
                 validFrom: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          },
+          { type: "edges", edges },
+        ]),
+      ),
+    ).rejects.toEqual(expectReason("invalid_stream"));
+
+    expect(
+      await store.nodes.TrustedPerson.getById(asNodeId<typeof Person>("alice")),
+    ).toBeUndefined();
+  });
+
+  it("refuses an identity-transitions chunk instead of dropping identity history", async () => {
+    const backend = createTestBackend();
+    const store = createStore(trustedGraph, backend);
+    const data = graphData([
+      { kind: "TrustedPerson", id: "alice", properties: { name: "Alice" } },
+    ]);
+    const { nodes, edges, ...header } = data;
+
+    await expect(
+      trustedImportGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header },
+          { type: "nodes", nodes },
+          {
+            type: "identity-transitions",
+            transitions: [
+              {
+                transitionId: "transition-1",
+                cause: "assert",
+                recordedRevision: 1,
+                recordedAt: "2026-01-01T00:00:00.000Z",
+                validAt: "2026-01-01T00:00:00.000Z",
+                class: { kind: "TrustedPerson", id: "alice" },
+                assertionIds: ["assertion-1"],
               },
             ],
           },
@@ -705,6 +745,139 @@ describe("trusted import", () => {
     const store = createStore(graph, createTestBackend());
     await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
       expectReason("uniqueness_unsupported"),
+    );
+  });
+
+  it("rejects an acyclic edge kind", async () => {
+    const Task = defineNode("TrustedTask", { schema: z.object({}) });
+    const dependsOn = defineEdge("trustedDependsOn", {
+      schema: z.object({}),
+    });
+    const graph = defineGraph({
+      id: "trusted_import_reject_acyclicity",
+      nodes: { TrustedTask: { type: Task } },
+      edges: {
+        trustedDependsOn: {
+          type: dependsOn,
+          from: [Task],
+          to: [Task],
+          acyclic: true,
+        },
+      },
+    });
+    const store = createStore(graph, createTestBackend());
+    await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+      expectReason("acyclicity_unsupported"),
+    );
+  });
+
+  it.each([
+    { name: "source-only", cardinality: { cardinality: "one" as const } },
+    {
+      name: "target-only",
+      cardinality: { targetCardinality: "one" as const },
+    },
+    {
+      name: "both axes",
+      cardinality: {
+        cardinality: "one" as const,
+        targetCardinality: "one" as const,
+      },
+    },
+  ])(
+    "rejects a declared edge cardinality ($name) — trusted import maintains no claim",
+    async ({ cardinality }) => {
+      const node = defineNode("CardinalityPerson", { schema: z.object({}) });
+      const relation = defineEdge("cardinalityKnows", {
+        schema: z.object({}),
+      });
+      const graph = defineGraph({
+        id: "trusted_import_reject_cardinality",
+        nodes: { CardinalityPerson: { type: node } },
+        edges: {
+          cardinalityKnows: {
+            type: relation,
+            from: [node],
+            to: [node],
+            ...cardinality,
+          },
+        },
+      });
+      const store = createStore(graph, createTestBackend());
+      await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+        expectReason("cardinality_unsupported"),
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: "partOf with cardinality one",
+      cardinality: "one" as const,
+      existence: "optional" as const,
+    },
+    {
+      name: "required partOf with cardinality oneActive",
+      cardinality: "oneActive" as const,
+      existence: "required" as const,
+    },
+  ])(
+    "rejects a composition pair ($name) as composition, not as the cardinality it must declare",
+    async ({ cardinality, existence }) => {
+      // A composition edge has to declare a part-side cardinality, so the
+      // cardinality refusal would always fire first and name advice — make
+      // the kind unconstrained — the ontology itself refuses.
+      const part = defineNode("CompositionPart", { schema: z.object({}) });
+      const whole = defineNode("CompositionWhole", { schema: z.object({}) });
+      const holds = defineEdge("compositionHolds", { schema: z.object({}) });
+      const graph = defineGraph({
+        id: "trusted_import_reject_composition",
+        nodes: {
+          CompositionPart: { type: part },
+          CompositionWhole: { type: whole },
+        },
+        edges: {
+          compositionHolds: {
+            type: holds,
+            from: [part],
+            to: [whole],
+            cardinality,
+          },
+        },
+        ontology: [partOf(part, whole, { via: holds, existence })],
+      });
+      const store = createStore(graph, createTestBackend());
+      const refusal = await trustedImportGraph(store, graphData([])).catch(
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(TrustedImportError);
+      const error = refusal as TrustedImportError;
+      console.info("trusted composition refusal", error.details);
+      expect(error.details["reason"]).toBe("composition_unsupported");
+      expect(error.details["edgeKinds"]).toEqual(["compositionHolds"]);
+    },
+  );
+
+  it("rejects a hasPart pair with a target cardinality as composition", async () => {
+    const part = defineNode("HasPartPart", { schema: z.object({}) });
+    const whole = defineNode("HasPartWhole", { schema: z.object({}) });
+    const contains = defineEdge("hasPartContains", { schema: z.object({}) });
+    const graph = defineGraph({
+      id: "trusted_import_reject_has_part",
+      nodes: { HasPartPart: { type: part }, HasPartWhole: { type: whole } },
+      edges: {
+        hasPartContains: {
+          type: contains,
+          from: [whole],
+          to: [part],
+          targetCardinality: "one",
+        },
+      },
+      ontology: [hasPart(whole, part, { via: contains })],
+    });
+    const store = createStore(graph, createTestBackend());
+    await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+      expectReason("composition_unsupported"),
     );
   });
 

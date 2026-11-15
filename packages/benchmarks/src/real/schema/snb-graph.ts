@@ -9,7 +9,7 @@
  * costs zero storage). It exists solely so the `replyOf` reply chain, whose
  * target is polymorphic (a Comment replies to either a Post or another
  * Comment), can be walked with a single recursive query via
- * `includeSubClasses`, instead of hand-rolled per-kind SQL. `Forum`'s
+ * the `expansion` option, instead of hand-rolled per-kind SQL. `Forum`'s
  * moderator is a plain `moderatorId` field rather than a fifth edge kind —
  * the plan enumerates exactly four edge kinds, and IS6's "moderator of a
  * forum" is a single point read by id either way.
@@ -155,7 +155,7 @@ export const snbGraph = defineGraph({
     containerOf: { type: containerOf, from: [Forum], to: [Post] },
     // `Message` must be listed alongside its concrete subclasses here (not
     // just declared via `ontology` below) for `.to("Message", alias, {
-    // includeSubClasses: true })` to type-check — matching how
+    // expansion: "subclasses" })` to type-check — matching how
     // `examples/03-subclass-hierarchy.ts` lists a supertype directly in an
     // edge's `to` array next to its subclasses.
     replyOf: { type: replyOf, from: [Comment], to: [Post, Comment, Message] },

@@ -13,12 +13,18 @@
     "test": {
       "dependsOn": ["^build"],
       "cache": false,
-      "passThroughEnv": ["TYPEGRAPH_LIBSQL_TMPDIR"]
+      "passThroughEnv": [
+        "TYPEGRAPH_LIBSQL_TMPDIR",
+        "TYPEGRAPH_HEAVY_FILE_PARALLELISM"
+      ]
     },
     "test:unit": {
       "dependsOn": ["^build"],
       "cache": false,
-      "passThroughEnv": ["TYPEGRAPH_LIBSQL_TMPDIR"]
+      "passThroughEnv": [
+        "TYPEGRAPH_LIBSQL_TMPDIR",
+        "TYPEGRAPH_HEAVY_FILE_PARALLELISM"
+      ]
     },
     "test:property": {
       "dependsOn": ["^build"],

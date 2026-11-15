@@ -360,6 +360,7 @@ export type NodeSystemColumnName = (typeof NODE_SYSTEM_COLUMN_NAMES)[number];
 // @public
 type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
     [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
     kind: K;
     schema: S;
     description: string | undefined;

@@ -35,8 +35,8 @@ import {
 import { branch } from "../../src/graph-merge/branch";
 import {
   BaseVersionMismatchError,
+  CardinalityMergeConflictError,
   InvalidMergeOptionsError,
-  MergeConstraintConflictError,
 } from "../../src/graph-merge/errors";
 import {
   mergeIncremental,
@@ -1344,7 +1344,7 @@ describe.each(backendMatrix())(
       ).toEqual(["base-primary"]);
     });
 
-    it("reports an authored oneActive reopening and rolls it back", async () => {
+    it("refuses an authored oneActive reopening that collides with the target's active edge", async () => {
       cleanups = [];
       const forkPoint = await emptyStore();
       await forkPoint.nodes.Patient.create(
@@ -1388,7 +1388,9 @@ describe.each(backendMatrix())(
 
       expect(isErr(result)).toBe(true);
       if (!isErr(result)) return;
-      expect(result.error).toBeInstanceOf(MergeConstraintConflictError);
+      // The reopened row and the target's own active edge would both hold the
+      // patient's one active slot: a certain apply refusal, refused at plan time.
+      expect(result.error).toBeInstanceOf(CardinalityMergeConflictError);
       expect(result.error.cause).toBeInstanceOf(CardinalityError);
       expect(result.error.details).toMatchObject({
         constraintCode: "CARDINALITY_ERROR",

@@ -22,6 +22,7 @@ import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { AnyPgTransaction } from "../../../src/backend/drizzle/execution";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import { bindNamesToAllocationSchema } from "../../../src/backend/drizzle/postgres-allocation-schema";
+import { allocationNames } from "../../../src/backend/drizzle/postgres-working-copy-names";
 import {
   createPostgresTables,
   defaultPostgresTableNames,
@@ -1047,14 +1048,9 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
-    it("refuses a bound backend on a driver that cannot hold the transaction its DDL needs", () => {
+    it("refuses a bound backend on a driver that cannot hold the transaction its DDL needs", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
-      const names = Object.fromEntries(
-        Object.keys(defaultPostgresTableNames).map((key) => [
-          key,
-          `tgw_${"c".repeat(DIGEST_LENGTH)}_${key.slice(0, 15)}`,
-        ]),
-      ) as PostgresTableNames;
+      const names = await allocationNames("non-interactive-driver");
       bindNamesToAllocationSchema(names, "public");
       let refusal: unknown;
       try {

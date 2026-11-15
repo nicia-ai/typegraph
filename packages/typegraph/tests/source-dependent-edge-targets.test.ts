@@ -23,7 +23,11 @@ import { importGraph } from "../src/interchange/import";
 import { buildKindRegistry } from "../src/registry";
 import { computeSchemaHash, serializeSchema } from "../src/schema";
 import { computeSchemaDiff } from "../src/schema/migration";
-import { type NodeRef, type TypedEdgeCollection } from "../src/store/types";
+import {
+  type NodeRef,
+  type PolymorphicNodeReference,
+  type TypedEdgeCollection,
+} from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -972,18 +976,18 @@ describe("Source-dependent edge targets (Issue #603)", () => {
 
       type TestCollection = TypedEdgeCollection<TestRegistration>;
 
-      // findTo accepts Department
+      // findTo accepts Department, or a polymorphic row read over it
       expectTypeOf<Parameters<TestCollection["findTo"]>[0]>().toEqualTypeOf<
-        NodeRef<typeof Department>
+        NodeRef<typeof Department> | PolymorphicNodeReference<typeof Department>
       >();
 
       // Valid create args
       type CreateArguments = Parameters<TestCollection["create"]>;
       expectTypeOf<CreateArguments[0]>().toEqualTypeOf<
-        NodeRef<typeof Employee>
+        NodeRef<typeof Employee> | PolymorphicNodeReference<typeof Employee>
       >();
       expectTypeOf<CreateArguments[1]>().toEqualTypeOf<
-        NodeRef<typeof Department>
+        NodeRef<typeof Department> | PolymorphicNodeReference<typeof Department>
       >();
     });
 

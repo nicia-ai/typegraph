@@ -5,11 +5,14 @@ import {
   finalizeMergePlanArtifact,
 } from "./plan-canonical";
 import {
+  LEGACY_MERGE_PLAN_FORMAT_VERSIONS,
+  legacyMergePlanArtifactSchema,
   MERGE_PLAN_FORMAT_VERSION,
   type MergePlanArtifact,
-  type MergePlanArtifactInput,
-  mergePlanArtifactInputSchema,
-  mergePlanArtifactSchema,
+  type MergePlanArtifactV3,
+  type MergePlanArtifactV3Input,
+  mergePlanArtifactV3InputSchema,
+  mergePlanArtifactV3Schema,
 } from "./plan-schema";
 
 type MergePlanParseFailure =
@@ -37,16 +40,26 @@ export type MergePlanValidationResult =
           }>;
     }>;
 
-/** Parses an untrusted value without conflating an unknown version with bad V1 data. */
+/**
+ * Parses an untrusted value without conflating an unknown version with
+ * malformed data. A legacy format parses under its own grammar, for
+ * inspection; applying it is refused.
+ */
 export function parseMergePlanArtifact(input: unknown): MergePlanParseResult {
   const version = readFormatVersion(input);
-  if (version !== 1 && version !== MERGE_PLAN_FORMAT_VERSION) {
+  if (
+    version !== MERGE_PLAN_FORMAT_VERSION &&
+    !(LEGACY_MERGE_PLAN_FORMAT_VERSIONS as readonly unknown[]).includes(version)
+  ) {
     return {
       success: false,
       error: { kind: "unsupported-version", received: version },
     };
   }
-  const parsed = mergePlanArtifactSchema.safeParse(input);
+  const parsed =
+    version === MERGE_PLAN_FORMAT_VERSION ?
+      mergePlanArtifactV3Schema.safeParse(input)
+    : legacyMergePlanArtifactSchema.safeParse(input);
   if (!parsed.success) {
     return {
       success: false,
@@ -90,21 +103,26 @@ export async function validateMergePlanArtifact(
   return parsed;
 }
 
-/** Validates untrusted plan input and hashes the complete versioned wire artifact. */
+/** Constructs and hashes a current-format wire artifact. */
 export async function constructMergePlanArtifact(
-  input: unknown,
-): Promise<MergePlanArtifact> {
-  const validatedInput = mergePlanArtifactInputSchema.parse(input);
+  input: MergePlanArtifactV3Input,
+): Promise<MergePlanArtifactV3> {
+  const validatedInput = mergePlanArtifactV3InputSchema.parse(input);
   return finalizeMergePlanArtifact(
-    validatedInput as unknown as MergePlanArtifactInput,
+    validatedInput as unknown as MergePlanArtifactV3Input,
   );
 }
 
-function readFormatVersion(input: unknown): unknown {
+/** Reads a wire artifact's `formatVersion` before any schema validation. */
+export function readFormatVersion(input: unknown): unknown {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return undefined;
   }
   return Reflect.get(input, "formatVersion") as unknown;
 }
 
-export type { MergePlanArtifact } from "./plan-schema";
+export type {
+  MergePlanArtifact,
+  MergePlanArtifactV3,
+  MergePlanArtifactV3Input,
+} from "./plan-schema";

@@ -110,6 +110,15 @@ export function assertPathTokenSafeKind(kind: string): void {
 }
 
 /**
+ * The composite `kind + SEP + id` token for one node. Distinct (kind, id)
+ * pairs always spell distinct tokens, because node kinds cannot contain the
+ * separator ({@link assertPathTokenSafeKind}).
+ */
+export function kindQualifiedToken(kind: string, id: string): string {
+  return `${kind}${KIND_QUALIFIED_PATH_TOKEN_SEPARATOR}${id}`;
+}
+
+/**
  * Strips the composite wrapper from kind-qualified recursive path tokens,
  * restoring the bare node ids that the public path contract promises.
  *

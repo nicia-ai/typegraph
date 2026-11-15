@@ -8,11 +8,13 @@ import {
 } from "../identity/types";
 import { type Assert, type Equal } from "../utils/type-assert";
 import type {
+  IDENTITY_HISTORY_NAMES,
   IDENTITY_READ_NAMES,
   IDENTITY_WRITE_NAMES,
 } from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
 import type {
+  CompositionCascadedPart,
   EdgeWrites,
   GraphEdgeCollections,
   GraphNodeCollections,
@@ -40,7 +42,8 @@ type _receiptEdgeSurfaceIsComplete = Assert<
 type _receiptIdentityFacadeIsComplete = Assert<
   Equal<
     | (typeof IDENTITY_READ_NAMES)[number]
-    | (typeof IDENTITY_WRITE_NAMES)[number],
+    | (typeof IDENTITY_WRITE_NAMES)[number]
+    | (typeof IDENTITY_HISTORY_NAMES)[number],
     keyof IdentityFacade<GraphDef>
   >
 >;
@@ -54,13 +57,45 @@ type _identityReadSplitIsHonest = Assert<
   >
 >;
 
-/** The receipt's identity counter buckets, minus the derived total. */
-type IdentityWriteCounterName = Exclude<keyof IdentityWriteSummary, "total">;
+/**
+ * The receipt's identity counter buckets, minus the derived `total` and
+ * `transitions` — `transitions` is an annotation count recorded through its
+ * own {@link TransactionReceiptRecorder.recordIdentityTransitions}, never
+ * through {@link TransactionReceiptRecorder.recordIdentity}, because it must
+ * not bump `identity.total` or the receipt's overall `total` the way a real
+ * write kind does.
+ */
+type IdentityWriteCounterName = Exclude<
+  keyof IdentityWriteSummary,
+  "total" | "transitions"
+>;
 
 export type TransactionReceiptRecorder = Readonly<{
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
+  /**
+   * Records `count` identity transition-log notes flushed for this
+   * transaction's graph — an annotation of the writes `recordIdentity`
+   * already counted, so it touches only `identity.transitions`, never
+   * `identity.total` or the receipt's overall `total`.
+   */
+  recordIdentityTransitions: (count: number) => void;
+  /**
+   * Records the composition parts one node delete's cascade removed. Not a
+   * write intent at the collection surface — the caller issued ONE `delete`,
+   * which `recordNode` already counted — so this touches no counter; it only
+   * appends to the receipt's `cascadedParts`. Called by the delete's own row
+   * work (`node-operations.ts`), which is the only place the cascade plan
+   * exists.
+   */
+  recordCascadedParts: (parts: readonly CompositionCascadedPart[]) => void;
+  /**
+   * Marks the counts recorded so far and returns the restore that puts them
+   * back: for a scope of the transaction whose rows a savepoint rolled back,
+   * so the receipt never counts a write that does not commit.
+   */
+  checkpoint: () => () => void;
   snapshot: (recorded?: TransactionReceipt["recorded"]) => TransactionReceipt;
   /**
    * Seals the recorder: every subsequent write through a collection wrapped with
@@ -101,6 +136,8 @@ const NODE_WRITE_INTENT_COUNTERS = {
   create: countSingleWrite,
   createFromRecord: countSingleWrite,
   update: countSingleWrite,
+  reparent: countSingleWrite,
+  bulkReparent: countBulkInputAt(0),
   compareAndSet: countSingleWrite,
   updateWhere: countSingleWrite,
   delete: countSingleWrite,
@@ -146,6 +183,17 @@ function increment(
   counts[kind] = (counts[kind] ?? 0) + count;
 }
 
+/** Puts a count bucket back to `saved`, its contents at a checkpoint. */
+function restoreCounts(
+  counts: Record<string, number>,
+  saved: Readonly<Record<string, number>>,
+): void {
+  for (const kind of Object.keys(counts)) {
+    if (!Object.hasOwn(saved, kind)) Reflect.deleteProperty(counts, kind);
+  }
+  for (const [kind, count] of Object.entries(saved)) counts[kind] = count;
+}
+
 /**
  * One receipt's running counts. Each recorder owns exactly one: the outer
  * transaction's receipt, or the sub-receipt of one `tx.measure` scope. Scope
@@ -158,6 +206,8 @@ interface WriteCounters {
   readonly edges: Record<string, number>;
   readonly identity: { -readonly [K in keyof IdentityWriteSummary]: number };
   total: number;
+  /** Appended in delete order; each entry is one cascade's leaf-first closure. */
+  readonly cascadedParts: CompositionCascadedPart[];
 }
 
 export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
@@ -168,9 +218,11 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       sameAssertions: 0,
       differentAssertions: 0,
       retractions: 0,
+      transitions: 0,
       total: 0,
     },
     total: 0,
+    cascadedParts: [],
   };
   let sealed = false;
 
@@ -191,6 +243,30 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       counters.total += count;
     },
 
+    recordIdentityTransitions(count): void {
+      if (count === 0) return;
+      counters.identity.transitions += count;
+    },
+
+    recordCascadedParts(parts): void {
+      counters.cascadedParts.push(...parts);
+    },
+
+    checkpoint(): () => void {
+      const nodes = { ...counters.nodes };
+      const edges = { ...counters.edges };
+      const identity = { ...counters.identity };
+      const { total } = counters;
+      const cascadedPartCount = counters.cascadedParts.length;
+      return () => {
+        restoreCounts(counters.nodes, nodes);
+        restoreCounts(counters.edges, edges);
+        Object.assign(counters.identity, identity);
+        counters.total = total;
+        counters.cascadedParts.length = cascadedPartCount;
+      };
+    },
+
     snapshot(recorded): TransactionReceipt {
       // Spread, not `Object.assign` onto a fresh null-prototype bucket. Both
       // keep a prototype-colliding kind name readable, but the receipt is
@@ -207,6 +283,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
           identity: Object.freeze({ ...counters.identity }),
           total: counters.total,
         }),
+        cascadedParts: Object.freeze([...counters.cascadedParts]),
         ...(recorded === undefined ? {} : { recorded }),
       });
     },
@@ -243,6 +320,8 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     areDifferent: (a, b) => identity.areDifferent(a, b),
     assertionsOf: (ref) => identity.assertionsOf(ref),
     explainSame: (a, b) => identity.explainSame(a, b),
+    transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
+    replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b) {
       recorder.assertWritable();
       const result = await identity.assertSame(a, b);

@@ -4,7 +4,7 @@ import type { CandidateWriteSet } from "./candidate-write-set";
 import { parseRowProps } from "./canonical-props";
 import { MergeReviewError } from "./errors";
 import { compareStrings } from "./node-key";
-import type { MergePlanArtifact, MergePlanEntityRef } from "./plan-schema";
+import type { MergePlanArtifactV3, MergePlanEntityRef } from "./plan-schema";
 import { reviewDigest } from "./review-evidence";
 import type {
   MergeReviewBaseline,
@@ -84,7 +84,7 @@ export async function captureReviewBaseline<G extends GraphDef>(
 }
 
 /**
- * Captures a V2 review baseline over candidate references and their exact
+ * Captures a candidate-scoped review baseline over candidate references and their exact
  * archival identity closure. The retained scope is re-read during approval
  * revalidation; newly connected peers/assertions therefore change the evidence.
  */
@@ -277,7 +277,7 @@ async function readReviewIdentityClosure<G extends GraphDef>(
 /** Candidate-local row keys that can affect writes, guards, or identity probes. */
 export function candidateReviewReferenceRows<G extends GraphDef>(
   writeSet: CandidateWriteSet,
-  plan: MergePlanArtifact,
+  plan: MergePlanArtifactV3,
   graph: G,
 ): readonly MergeReviewRow[] {
   const rows = new Map<string, MergeReviewRow>();
@@ -335,7 +335,7 @@ export function candidateReviewReferenceRows<G extends GraphDef>(
 export function withReviewAbsences<G extends GraphDef>(
   baseline: MergeReviewBaseline,
   writeSet: CandidateWriteSet,
-  plan: MergePlanArtifact,
+  plan: MergePlanArtifactV3,
   graph: G,
 ): MergeReviewBaseline {
   const rows = new Map(baseline.rows.map((row) => [reviewRowKey(row), row]));

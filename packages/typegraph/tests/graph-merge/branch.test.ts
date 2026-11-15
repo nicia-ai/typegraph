@@ -4,6 +4,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  subClassOf,
 } from "@nicia-ai/typegraph";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -28,7 +29,10 @@ import {
   enumerateAllNodes,
 } from "../../src/graph-merge/state-diff";
 import { asBranchId } from "../../src/graph-merge/types";
-import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
+import {
+  cloneIngestionWorkingCopyStrategy,
+  cloneWorkingCopyStrategy,
+} from "../../src/graph-merge/working-copy";
 import { exportGraph, importGraph } from "../../src/interchange";
 import {
   backendMatrix,
@@ -54,6 +58,17 @@ const graph = defineGraph({
 });
 
 type G = typeof graph;
+
+const Media = defineNode("Media", { schema: z.object({ title: z.string() }) });
+const Podcast = defineNode("Podcast", {
+  schema: z.object({ title: z.string(), rssUrl: z.string() }),
+});
+const catalogGraph = defineGraph({
+  id: "branch-query-defaults-test",
+  nodes: { Media: { type: Media }, Podcast: { type: Podcast } },
+  edges: {},
+  ontology: [subClassOf(Podcast, Media)],
+});
 
 const WorkItem = defineNode("WorkItem", {
   schema: z.object({
@@ -584,6 +599,87 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
       expect(result.error.cause).toBe(failure);
     }
     expect(closeCount).toBe(1);
+  });
+
+  describe("query defaults", () => {
+    const QUERY_DEFAULTS = {
+      expansion: "exact",
+      traversalExpansion: "none",
+    } as const;
+
+    async function seedCatalog() {
+      const [baseStore] = await createStoreWithSchema(
+        catalogGraph,
+        await makeBackend(),
+        { queryDefaults: QUERY_DEFAULTS },
+      );
+      await baseStore.nodes.Media.create({ title: "plain" });
+      await baseStore.nodes.Podcast.create({ title: "cast", rssUrl: "u" });
+      return baseStore;
+    }
+
+    async function mediaKinds(
+      store: Store<typeof catalogGraph>,
+    ): Promise<readonly string[]> {
+      const kinds = await store
+        .query()
+        .from("Media", "media")
+        .select((ctx) => ctx.media.kind)
+        .execute();
+      return kinds.toSorted();
+    }
+
+    it("answers a supertype query on the clone as the base store does", async () => {
+      const baseStore = await seedCatalog();
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      const baseKinds = await mediaKinds(baseStore);
+      const cloneKinds = await mediaKinds(created.store);
+      console.log("supertype query kinds", { baseKinds, cloneKinds });
+
+      expect(baseKinds).toEqual(["Media"]);
+      expect(cloneKinds).toEqual(baseKinds);
+      expect(created.store.workingCopyOptions.queryDefaults).toEqual(
+        QUERY_DEFAULTS,
+      );
+    });
+
+    it("carries them onto an ingestion working copy", async () => {
+      const baseStore = await seedCatalog();
+      const created = unwrap(
+        await branch<typeof catalogGraph>(
+          baseStore,
+          () => Promise.reject(new Error("default factory must not run")),
+          undefined,
+          cloneIngestionWorkingCopyStrategy(() => makeBackend()),
+        ),
+      );
+
+      expect(await mediaKinds(created.store)).toEqual(["Media"]);
+      expect(created.store.workingCopyOptions.queryDefaults).toEqual(
+        QUERY_DEFAULTS,
+      );
+    });
+
+    it("leaves the clone on the library defaults when the base states none", async () => {
+      const { baseStore } = await seedBase();
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      expect(created.store.workingCopyOptions).not.toHaveProperty(
+        "queryDefaults",
+      );
+    });
+
+    it("does not carry the base's hooks or upsert coalescing", async () => {
+      const [baseStore] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { coalesceUnchangedUpserts: true, hooks: {} },
+      );
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      expect(created.store.workingCopyOptions).toEqual({});
+    });
   });
 
   it("accepts an explicit working-copy strategy override", async () => {

@@ -45,7 +45,7 @@ typegraph/
 - **Vitest** - Test runner
 - **fast-check** - Property-based testing
 - **Stryker** - Mutation testing
-- **tsup** - Build tool
+- **tsup** - Bundler; `pnpm build` runs `scripts/build.ts`, which emits declarations with `tsc` first and then bundles with tsup
 
 # Common Commands
 

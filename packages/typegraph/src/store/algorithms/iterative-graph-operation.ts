@@ -20,7 +20,11 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { jsonPointer } from "../../query/json-pointer";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
+import {
+  countSqlParameters,
+  sql,
+  type SqlFragment,
+} from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledTemporaryStatementSql,
@@ -167,7 +171,7 @@ export async function seedWorkingTableFromNodes(
   const parameterLimit =
     context.operation.backend.capabilities.maxBindParameters ??
     DEFAULT_MAX_BIND_PARAMETERS;
-  const fixedParameterCount = countBindParameters(fixedStatement);
+  const fixedParameterCount = countSqlParameters(fixedStatement);
   // The full-graph seed carries no kind binds and only has to fit; a scoped
   // seed also needs room for at least one kind bind before it can be chunked.
   const kindBindBudget = parameterLimit - fixedParameterCount;
@@ -191,15 +195,6 @@ export async function seedWorkingTableFromNodes(
       compileSeedStatement(compileKindFilter(sql.raw("n.kind"), kindChunk)),
     );
   }
-}
-
-function countBindParameters(fragment: SqlFragment): number {
-  return fragment.chunks.reduce(
-    (count, chunk) =>
-      count +
-      (chunk.kind === "parameter" || chunk.kind === "placeholder" ? 1 : 0),
-    0,
-  );
 }
 
 export type IterativeGraphPlan<

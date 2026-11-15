@@ -68,6 +68,8 @@ describe("session savepoints", () => {
   it("rolls a driver scope back for a rollback decision and still returns its value", async () => {
     const { events, port } = createRecordingSession();
     let restored = 0;
+    const failure = new Error("refusal");
+    const causes: unknown[] = [];
 
     const value = await runSessionSavepoint(
       port,
@@ -76,9 +78,10 @@ describe("session savepoints", () => {
         Promise.resolve({
           action: "rollback",
           value: "refused row",
-          cause: new Error("refusal"),
+          cause: failure,
         }),
-      () => {
+      (cause) => {
+        causes.push(cause);
         restored += 1;
         events.push("restored");
       },
@@ -86,6 +89,7 @@ describe("session savepoints", () => {
 
     expect(value).toBe("refused row");
     expect(restored).toBe(1);
+    expect(causes).toEqual([failure]);
     expect(events).toEqual([
       "SAVEPOINT sp_decision",
       "driver scope opened",
@@ -99,10 +103,19 @@ describe("session savepoints", () => {
   it("rolls back and rethrows the scope's own failure", async () => {
     const { events, port } = createRecordingSession();
     const failure = new Error("statement failed");
+    const causes: unknown[] = [];
 
     await expect(
-      runSessionSavepoint(port, "sp_throw", () => Promise.reject(failure)),
+      runSessionSavepoint(
+        port,
+        "sp_throw",
+        () => Promise.reject(failure),
+        (cause) => {
+          causes.push(cause);
+        },
+      ),
     ).rejects.toBe(failure);
+    expect(causes).toEqual([failure]);
     expect(events).toEqual([
       "SAVEPOINT sp_throw",
       "driver scope opened",

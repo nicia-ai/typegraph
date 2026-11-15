@@ -145,12 +145,29 @@ const evidenceSchema = z
                 sameAssertions: countSchema,
                 differentAssertions: countSchema,
                 retractions: countSchema,
+                // Absent from evidence written before the identity transition
+                // log existed; no transition could be recorded then.
+                transitions: countSchema.optional(),
                 total: countSchema,
               })
               .strict(),
             total: countSchema,
           })
           .strict(),
+        // Absent from evidence written before composition existed; no
+        // delete could cascade through a part then.
+        cascadedParts: z
+          .array(
+            z
+              .object({
+                kind: z.string(),
+                id: z.string(),
+                whole: z.object({ kind: z.string(), id: z.string() }).strict(),
+                viaEdgeKind: z.string(),
+              })
+              .strict(),
+          )
+          .optional(),
         recorded: z
           .string()
           .transform((value) => asRecordedInstant(value))
@@ -342,7 +359,14 @@ async function decodeEvidence(
     return {
       ...evidence,
       receipt: {
-        writes: evidence.receipt.writes,
+        writes: {
+          ...evidence.receipt.writes,
+          identity: {
+            ...evidence.receipt.writes.identity,
+            transitions: evidence.receipt.writes.identity.transitions ?? 0,
+          },
+        },
+        cascadedParts: evidence.receipt.cascadedParts ?? [],
         ...(evidence.receipt.recorded === undefined ?
           {}
         : { recorded: evidence.receipt.recorded }),

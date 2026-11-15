@@ -30,11 +30,11 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { shortHash } from "../../../utils/hash";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
-  shortHash,
   VECTOR_CONTRIBUTION_PREFIX,
   vectorMinScoreCondition,
   vectorPhysicalName,

@@ -5,6 +5,7 @@ import {
   StaleVersionError,
 } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
+import { activeSchemaHash } from "../schema/manager";
 import type { SchemaIdentity } from "../schema/types";
 import { type StoreRef, type TransactionOutcome } from "./types";
 
@@ -96,10 +97,10 @@ export function assertEvolutionOptions(
 }
 
 /** Checks the fenced active schema against the snapshot that minted a plan. */
-export function assertEvolutionPlanBaseline(
+export async function assertEvolutionPlanBaseline(
   plan: EvolutionPlan,
   active: SchemaVersionRow | undefined,
-): void {
+): Promise<void> {
   if (active?.version !== plan.baseline.version) {
     throw new StaleVersionError({
       graphId: plan.graphId,
@@ -107,11 +108,12 @@ export function assertEvolutionPlanBaseline(
       actual: active?.version ?? 0,
     });
   }
-  if (active.schema_hash !== plan.baseline.hash) {
+  const activeHash = await activeSchemaHash(active);
+  if (activeHash !== plan.baseline.hash) {
     throw new SchemaContentConflictError({
       graphId: plan.graphId,
       version: active.version,
-      existingHash: active.schema_hash,
+      existingHash: activeHash,
       incomingHash: plan.baseline.hash,
     });
   }

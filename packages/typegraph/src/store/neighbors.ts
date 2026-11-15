@@ -26,7 +26,7 @@ import { rowToEdge, rowToNode } from "./row-mappers";
 import type {
   Edge,
   GraphEdgeForKinds,
-  GraphNodeReference,
+  GraphNodeReferenceInput,
   Node,
 } from "./types";
 
@@ -130,7 +130,7 @@ export type NeighborRead<
 
 export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
   ctx: NeighborContext,
-  source: GraphNodeReference<G>,
+  source: GraphNodeReferenceInput<G>,
   options: NeighborReadOptions<G, K>,
 ): NeighborRead<G, K> {
   validateOptions(ctx, options);
@@ -165,7 +165,7 @@ export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
 
 export async function readNeighbors<G extends GraphDef, K extends EdgeKinds<G>>(
   ctx: NeighborContext,
-  source: GraphNodeReference<G>,
+  source: GraphNodeReferenceInput<G>,
   options: NeighborReadOptions<G, K>,
 ): Promise<readonly NeighborResult<G, K>[]> {
   return createNeighborRead(ctx, source, options).execute();
@@ -176,7 +176,7 @@ export async function countNeighbors<
   K extends EdgeKinds<G>,
 >(
   ctx: NeighborContext,
-  source: GraphNodeReference<G>,
+  source: GraphNodeReferenceInput<G>,
   options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
 ): Promise<number> {
   return createNeighborCountRead(ctx, source, options).execute();
@@ -187,7 +187,7 @@ export function createNeighborCountRead<
   K extends EdgeKinds<G>,
 >(
   ctx: NeighborContext,
-  source: GraphNodeReference<G>,
+  source: GraphNodeReferenceInput<G>,
   options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
 ): ExecutableOneStatementRead<number> {
   validateEdgeReadBounds(options, "countNeighbors");
@@ -214,7 +214,7 @@ export function createNeighborCountRead<
 
 function buildNeighborQuery<G extends GraphDef, K extends EdgeKinds<G>>(
   ctx: NeighborContext,
-  source: GraphNodeReference<G>,
+  source: GraphNodeReferenceInput<G>,
   options: NeighborReadOptions<G, K>,
   aggregate: boolean,
 ): SqlFragment {

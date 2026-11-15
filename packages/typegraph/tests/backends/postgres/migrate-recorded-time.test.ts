@@ -15,9 +15,9 @@ import {
 import { type RecordedTableNames } from "../../../src/backend/types";
 import { createRecordedInstant } from "../../../src/core/temporal";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
-import { shortHash } from "../../../src/query/dialect/vector-strategy";
 import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
 import { ensureRevisionOriginRow } from "../../../src/store/recorded-capture/clock";
+import { shortHash } from "../../../src/utils/hash";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 

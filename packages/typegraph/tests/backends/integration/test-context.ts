@@ -56,7 +56,7 @@ export type SerializedBackendOverrides = Readonly<{
  * that mistakenly passes `capabilities` on that lane fails loudly instead of
  * silently exercising a default backend under a capability-driven
  * assertion that was never actually applied. Both SQLite lanes
- * (`sqlite-backend.test.ts`, `libsql-backend.test.ts`) call this; the
+ * (`sqlite-integration-lane.ts`, `libsql-integration-lane.ts`) call this; the
  * PostgreSQL lanes never do, since they forward `overrides.capabilities`
  * into their own `createPostgresBackend` call instead.
  */

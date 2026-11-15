@@ -23,7 +23,7 @@ function parameterComparison(name: string): PredicateExpression {
 function queryWithResultAndStopParameters(): QueryAst {
   return {
     graphId: "prepared-predicates",
-    start: { alias: "root", includeSubClasses: false, kinds: ["Node"] },
+    start: { alias: "root", expansion: "exact", kinds: ["Node"] },
     traversals: [
       {
         direction: "out",

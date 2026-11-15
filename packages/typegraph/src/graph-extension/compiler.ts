@@ -15,14 +15,20 @@ import { embedding } from "../core/embedding";
 import { defineNode } from "../core/node";
 import { searchable } from "../core/searchable";
 import {
+  type Cardinality,
   type KindAnnotations,
   type NodeType,
   type NullCheckOp,
+  type TargetCardinality,
   type UniqueConstraint,
 } from "../core/types";
-import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
-import { core as coreOntology } from "../ontology/core-meta-edges";
-import { type MetaEdge, type OntologyRelation } from "../ontology/types";
+import {
+  EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
+import { metaEdgesByName } from "../ontology/core-meta-edges";
+import { type OntologyRelation } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { compactUndefined, createDataKeyedBag } from "../utils/object";
 import {
   type ExtensionArrayItemType,
@@ -93,6 +99,9 @@ type CompiledEdge = Readonly<{
   to:
     | readonly (NodeType | string)[]
     | Readonly<Record<string, readonly (NodeType | string)[]>>;
+  cardinality?: Cardinality;
+  targetCardinality?: TargetCardinality;
+  acyclic?: boolean;
 }>;
 
 // ============================================================
@@ -258,6 +267,9 @@ function compileEdge(
       annotations: document.annotations,
       from: Object.freeze(from),
       to,
+      cardinality: document.cardinality,
+      targetCardinality: document.targetCardinality,
+      acyclic: document.acyclic,
     }),
   );
 }
@@ -398,11 +410,15 @@ function applyOptional(
 function compileUniqueConstraint(
   document: ExtensionUniqueConstraint,
 ): UniqueConstraint {
+  const { scope, collation } = withUniqueConstraintDefaults(
+    document,
+    EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+  );
   const base = {
     name: document.name,
     fields: document.fields,
-    scope: document.scope ?? "kind",
-    collation: document.collation ?? "binary",
+    scope,
+    collation,
   };
   if (document.where === undefined) {
     return base;
@@ -462,19 +478,16 @@ function makeWherePredicate(
 // Ontology compilation
 // ============================================================
 
-const META_EDGE_BY_NAME: Readonly<Record<MetaEdgeName, MetaEdge>> =
-  Object.fromEntries(
-    ALL_META_EDGE_NAMES.map((name) => [name, coreOntology[`${name}MetaEdge`]]),
-  ) as Readonly<Record<MetaEdgeName, MetaEdge>>;
-
 function compileOntologyRelation(
   relation: ExtensionOntologyRelation,
   nodeTypeByName: ReadonlyMap<string, NodeType>,
 ): OntologyRelation {
   // `relation.metaEdge` is typed as `MetaEdgeName` so the lookup is
   // total. Validation rejects out-of-range names before they ever
-  // reach the compiler.
-  const metaEdge = META_EDGE_BY_NAME[relation.metaEdge];
+  // reach the compiler. `metaEdgesByName` (`../ontology/core-meta-edges`,
+  // internal — not the public `core` export) is the one record that still
+  // carries `sameAs`/`differentFrom` by name for this by-name reader.
+  const metaEdge = metaEdgesByName[relation.metaEdge];
 
   const fromNode = nodeTypeByName.get(relation.from);
   const toNode = nodeTypeByName.get(relation.to);
@@ -486,5 +499,6 @@ function compileOntologyRelation(
     metaEdge,
     from: fromNode ?? relation.from,
     to: toNode ?? relation.to,
+    ...compositionRelationFields(relation),
   };
 }

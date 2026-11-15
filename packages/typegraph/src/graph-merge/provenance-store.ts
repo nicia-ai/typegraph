@@ -147,6 +147,7 @@ import type {
   Store,
 } from "./typegraph-internal";
 import {
+  activeSchemaHash,
   asCompiledRowsSql,
   asCompiledStatementSql,
   computeSchemaHash,
@@ -567,7 +568,8 @@ async function inspectSidecarGraphId(
   const ownedHash = await computeSchemaHash(
     serializeSchema(graph, activeSchema.version),
   );
-  if (activeSchema.schema_hash === ownedHash) {
+  const activeHash = await activeSchemaHash(activeSchema);
+  if (activeHash === ownedHash) {
     // The current sidecar schema with no marker. This module writes the marker
     // FIRST, so it cannot have produced this state: whatever registered the
     // schema, it was not an interrupted creation of ours. Contents are not
@@ -580,7 +582,7 @@ async function inspectSidecarGraphId(
   const legacyHash = await computeSchemaHash(
     serializeSchema(buildProvenanceGraph(targetGraphId), activeSchema.version),
   );
-  if (activeSchema.schema_hash !== legacyHash) {
+  if (activeHash !== legacyHash) {
     return { state: "refuse", reason: "application-graph" };
   }
   return LEGACY_SCHEMA_DISPOSITION[

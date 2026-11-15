@@ -3,6 +3,7 @@
  * generation, SHA-256 (truncated) for collision-resistant signatures.
  */
 import { FNV1A_OFFSET_BASIS, FNV1A_PRIME } from "../constants";
+import { requireDefined } from "./presence";
 
 /**
  * FNV-1a hash of `input`, returned as a base-36 encoded string. Used for
@@ -43,4 +44,28 @@ export async function sha256Hex(
     hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+/**
+ * Deterministic 8-char hash for collision-safe truncation of over-long
+ * identifiers. Self-contained so the strategy layer has no backend-runtime
+ * dependency.
+ */
+export function shortHash(input: string): string {
+  let h1 = 0xde_ad_be_ef;
+  let h2 = 0x41_c6_ce_57;
+  for (let index = 0; index < input.length; index++) {
+    const ch = requireDefined(input.codePointAt(index));
+    h1 = Math.imul(h1 ^ ch, 0x9e_37_79_b1);
+    h2 = Math.imul(h2 ^ ch, 0x5f_35_64_95);
+  }
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 0x85_eb_ca_6b) ^
+    Math.imul(h2 ^ (h2 >>> 13), 0xc2_b2_ae_35);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 0x85_eb_ca_6b) ^
+    Math.imul(h1 ^ (h1 >>> 13), 0xc2_b2_ae_35);
+  const hi = (h2 >>> 0).toString(16).padStart(8, "0");
+  const lo = (h1 >>> 0).toString(16).padStart(8, "0");
+  return `${hi}${lo}`.slice(0, 8);
 }

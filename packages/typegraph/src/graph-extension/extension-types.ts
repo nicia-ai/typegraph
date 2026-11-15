@@ -15,11 +15,14 @@
 import { type z } from "zod";
 
 import {
+  type Cardinality,
   type GraphAnnotations,
   type KindAnnotations,
   type NullCheckOp,
+  type TargetCardinality,
 } from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
+import { type CompositionRealization } from "../registry/composition-relation";
 
 // ============================================================
 // Property Types
@@ -287,6 +290,10 @@ export type ExtensionEdgeDef = Readonly<{
   from: readonly string[];
   to: readonly string[] | Readonly<Record<string, readonly string[]>>;
   properties?: Readonly<Record<string, ExtensionPropertyType>>;
+  cardinality?: Cardinality;
+  targetCardinality?: TargetCardinality;
+  /** See `EdgeRegistration.acyclic`. A runtime-authored edge may declare it. */
+  acyclic?: boolean;
 }>;
 
 // ============================================================
@@ -360,7 +367,8 @@ export type ExtensionOntologyRelation = Readonly<{
   metaEdge: MetaEdgeName;
   from: string;
   to: string;
-}>;
+}> &
+  CompositionRealization;
 
 // ============================================================
 // Document

@@ -16,6 +16,7 @@ import {
   mergeIncremental,
   planMerge,
   planMergeIncremental,
+  RestrictedDeleteMergeConflictError,
   unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -184,7 +185,7 @@ for (const entry of backendMatrix()) {
         expect(isErr(result)).toBe(true);
         if (!isErr(result))
           throw new Error("Expected restricted node deletion");
-        expect(result.error).toBeInstanceOf(MergeConstraintConflictError);
+        expect(result.error).toBeInstanceOf(RestrictedDeleteMergeConflictError);
         expect(result.error.cause).toBeInstanceOf(RestrictedDeleteError);
         expect(result.error.cause).toMatchObject({ details: { edgeCount: 1 } });
         expect(await target.nodes.Item.getById(left.id)).toBeDefined();
@@ -193,6 +194,45 @@ for (const entry of backendMatrix()) {
         expect(await target.revisionNow()).toEqual(before);
       });
     }
+
+    it("refuses at plan time a restricted delete blocked by an edge the target added after the fork", async () => {
+      const [forkPoint] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const a = await forkPoint.nodes.Item.create({ name: "a" });
+      const b = await forkPoint.nodes.Item.create({ name: "b" });
+      const c = await forkPoint.nodes.Item.create({ name: "c" });
+      const inherited = await forkPoint.edges.links.create(a, b, {});
+      const source = unwrap(await branch(forkPoint, () => makeBackend()));
+      const target = unwrap(await branch(forkPoint, () => makeBackend())).store;
+      const blocking = await target.edges.links.create(c, b, {});
+      await source.store.edges.links.delete(inherited.id);
+      await source.store.nodes.Item.delete(b.id);
+
+      const planned = await planMergeIncremental({
+        forkPoint,
+        target,
+        branches: [source],
+      });
+
+      // The plan used to come back `ok`, listing the target's own blocking
+      // edge under `dropped` as `edge:endpoint-deleted`, and its apply always
+      // refused with RESTRICTED_DELETE.
+      expect(isErr(planned)).toBe(true);
+      if (!isErr(planned)) throw new Error("Expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(RestrictedDeleteMergeConflictError);
+      expect(planned.error.cause).toBeInstanceOf(RestrictedDeleteError);
+      expect(planned.error.details).toMatchObject({
+        constraintCode: "RESTRICTED_DELETE",
+        nodeId: b.id,
+        edgeCount: 1,
+        edgeKinds: ["links"],
+      });
+      expect(await target.edges.links.getById(blocking.id)).toBeDefined();
+      expect(await target.nodes.Item.getById(b.id)).toBeDefined();
+    });
 
     for (const onDelete of ["cascade", "disconnect"] as const) {
       for (const mode of MODES) {

@@ -9,7 +9,7 @@ import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
-import { buildQueryAst } from "./ast-builder";
+import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
@@ -126,7 +126,7 @@ export class ExecutableProjectionQuery<
   }
 
   toAst(): QueryAst {
-    return buildQueryAst(this.#config, this.#state);
+    return buildRowQueryAst(this.#config, this.#state);
   }
   getExpressionScopeIdentity(): symbol {
     return getExpressionScope(this.#config);

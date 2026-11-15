@@ -5,7 +5,12 @@ import {
   computeMergePlanDigest,
   finalizeMergePlanArtifact,
 } from "../../src/graph-merge/plan-canonical";
-import type { MergePlanArtifactV1Input } from "../../src/graph-merge/plan-schema";
+import {
+  LEGACY_MERGE_PLAN_FORMAT_VERSIONS,
+  MERGE_PLAN_FORMAT_VERSION,
+  type MergePlanArtifactInput,
+  type MergePlanArtifactV3Input,
+} from "../../src/graph-merge/plan-schema";
 import {
   constructMergePlanArtifact,
   parseMergePlanArtifact,
@@ -14,14 +19,45 @@ import {
 } from "../../src/graph-merge/plan-wire";
 import { requireDefined } from "../../src/utils/presence";
 
-function planInput(): MergePlanArtifactV1Input {
+const ALLOCATION_OWNER = { origin: "store-origin", namespace: "a".repeat(32) };
+
+/** A legacy-format input built from the current fixture, digested by hand. */
+async function legacyArtifact(
+  formatVersion: 1 | 2,
+  overrides: Readonly<Record<string, unknown>> = {},
+): Promise<unknown> {
+  const { review, target, ...body } = planInput();
+  const { identityConflicts: _conflicts, ...legacyReview } = review;
+  const { owner: _owner, ...unownedRevision } = target.revision;
+  const input = {
+    ...body,
+    formatVersion,
+    target:
+      formatVersion === 1 ? { ...target, revision: unownedRevision } : target,
+    review: legacyReview,
+    ...overrides,
+  } as unknown as MergePlanArtifactInput;
   return {
-    formatVersion: 1,
+    ...input,
+    digest: {
+      algorithm: "sha256",
+      value: await computeMergePlanDigest(input),
+    },
+  };
+}
+
+function planInput(): MergePlanArtifactV3Input {
+  return {
+    formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode: "snapshot",
     target: {
       graphId: "care",
       schema: { managed: true, version: 3, hash: "schema-hash" },
-      revision: { origin: "store-origin", revision: "revision-7" },
+      revision: {
+        owner: ALLOCATION_OWNER,
+        origin: "store-origin",
+        revision: "revision-7",
+      },
     },
     anchors: {
       kind: "snapshot",
@@ -69,7 +105,7 @@ function planInput(): MergePlanArtifactV1Input {
   };
 }
 
-function resolutionPlanInput(): MergePlanArtifactV1Input {
+function resolutionPlanInput(): MergePlanArtifactV3Input {
   const input = planInput();
   const evidence = {
     a: { kind: "Patient", id: "a" },
@@ -103,7 +139,7 @@ function resolutionPlanInput(): MergePlanArtifactV1Input {
   };
 }
 
-describe("merge plan V1 wire format", () => {
+describe("merge plan wire format", () => {
   it("round-trips through JSON with explicit property removals intact", async () => {
     const artifact = await constructMergePlanArtifact(planInput());
     const roundTripped: unknown = JSON.parse(JSON.stringify(artifact));
@@ -120,7 +156,7 @@ describe("merge plan V1 wire format", () => {
 
   it("canonicalizes nested object keys before hashing", async () => {
     const left = planInput();
-    const right: MergePlanArtifactV1Input = {
+    const right: MergePlanArtifactV3Input = {
       ...left,
       writes: {
         ...left.writes,
@@ -163,10 +199,24 @@ describe("merge plan V1 wire format", () => {
     });
   });
 
-  it("distinguishes unsupported versions from malformed V1 artifacts", async () => {
-    expect(parseMergePlanArtifact({ formatVersion: 99 })).toEqual({
+  it("distinguishes unsupported versions from malformed artifacts", async () => {
+    // A legacy format parses under its own grammar, for inspection, so an
+    // empty legacy artifact is malformed rather than unsupported.
+    for (const legacy of LEGACY_MERGE_PLAN_FORMAT_VERSIONS) {
+      const parsed = parseMergePlanArtifact({ formatVersion: legacy });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+    }
+    expect(
+      parseMergePlanArtifact({
+        formatVersion: MERGE_PLAN_FORMAT_VERSION + 1,
+      }),
+    ).toEqual({
       success: false,
-      error: { kind: "unsupported-version", received: 99 },
+      error: {
+        kind: "unsupported-version",
+        received: MERGE_PLAN_FORMAT_VERSION + 1,
+      },
     });
 
     const artifact = await constructMergePlanArtifact(planInput());
@@ -176,56 +226,139 @@ describe("merge plan V1 wire format", () => {
     if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
   });
 
-  it("requires version 2 for allocation-bound fences", async () => {
-    const base = planInput();
-    const target = {
-      ...base.target,
-      revision: {
-        ...base.target.revision,
-        owner: { origin: "store-origin", namespace: "a".repeat(32) },
-      },
-    };
-    const legacy = await finalizeMergePlanArtifact(base);
-    expect(parseMergePlanArtifact({ ...legacy, target }).success).toBe(false);
-    const current = await finalizeMergePlanArtifact({
-      ...base,
-      formatVersion: 2,
-      target,
+  it("parses legacy formats 1 and 2 under their own grammar", async () => {
+    const v1 = await legacyArtifact(1);
+    const v2 = await legacyArtifact(2);
+    expect(parseMergePlanArtifact(v1).success).toBe(true);
+    expect(parseMergePlanArtifact(v2).success).toBe(true);
+    expect((await validateMergePlanArtifact(v2)).success).toBe(true);
+    // Format 1 carries no allocation owner; format 2 requires one.
+    const ownedV1 = await legacyArtifact(1, {
+      target: planInput().target,
     });
-    expect(parseMergePlanArtifact(current).success).toBe(true);
+    expect(parseMergePlanArtifact(ownedV1).success).toBe(false);
+    // Neither legacy format carries the identity-conflict review field.
+    const identityConflicts = [
+      {
+        kind: "separation",
+        a: { kind: "Person", id: "a" },
+        b: { kind: "Person", id: "b" },
+        assertionIds: ["different-ab"],
+      },
+    ] as const;
+    const withIdentityConflicts = await legacyArtifact(2, {
+      review: {
+        ...planInput().review,
+        identityConflicts,
+      },
+    });
+    expect(parseMergePlanArtifact(withIdentityConflicts).success).toBe(false);
+    expect(
+      parseMergePlanArtifact(
+        await constructMergePlanArtifact({
+          ...planInput(),
+          review: {
+            ...planInput().review,
+            identityConflicts,
+          },
+        }),
+      ).success,
+    ).toBe(true);
   });
 
-  it("requires version 2 for validity clearing and recreation", async () => {
+  it("requires format 2 or later for validity clearing and recreation", async () => {
     const base = planInput();
-    const node = {
-      kind: "Person",
-      id: "new",
-      setProps: { name: "new" },
-      unsetProps: [],
-      clearValidTo: true as const,
-      recreate: true as const,
-    };
-    const document = {
-      ...base,
-      proposed: { ...base.proposed, nodes: { upserts: 1, deletions: 0 } },
-      writes: { ...base.writes, nodeUpserts: [node] },
-    };
-    await expect(constructMergePlanArtifact(document)).rejects.toThrow();
-    const current = await constructMergePlanArtifact({
-      ...document,
-      formatVersion: 2,
-      target: {
-        ...document.target,
-        revision: {
-          ...document.target.revision,
-          owner: { origin: "store-origin", namespace: "a".repeat(32) },
+    const writes = {
+      ...base.writes,
+      nodeUpserts: [
+        {
+          kind: "Patient",
+          id: "new",
+          setProps: { name: "new" },
+          unsetProps: [],
+          clearValidTo: true as const,
+          recreate: true as const,
         },
-      },
-    });
+      ],
+    };
+    expect(
+      parseMergePlanArtifact(await legacyArtifact(1, { writes })).success,
+    ).toBe(false);
+    expect(
+      parseMergePlanArtifact(await legacyArtifact(2, { writes })).success,
+    ).toBe(true);
+    const current = await constructMergePlanArtifact({ ...base, writes });
     expect(
       (await validateMergePlanArtifact(JSON.parse(JSON.stringify(current))))
         .success,
     ).toBe(true);
+  });
+
+  describe("refuses identity arbitration shapes the merge no longer produces", () => {
+    const SEPARATION_CONFLICT = {
+      kind: "separation",
+      a: { kind: "Patient", id: "a" },
+      b: { kind: "Patient", id: "b" },
+      assertionIds: ["assertion-1"],
+    };
+
+    async function artifactWithReview(
+      extraReview: Readonly<Record<string, unknown>>,
+    ): Promise<unknown> {
+      const artifact = await constructMergePlanArtifact(planInput());
+      return { ...artifact, review: { ...artifact.review, ...extraReview } };
+    }
+
+    function expectMalformed(artifact: unknown): void {
+      const parsed = parseMergePlanArtifact(artifact);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) expect(parsed.error.kind).toBe("malformed");
+    }
+
+    it("accepts a separation conflict, the one identity conflict arm a merge still writes", async () => {
+      const parsed = parseMergePlanArtifact(
+        await artifactWithReview({ identityConflicts: [SEPARATION_CONFLICT] }),
+      );
+      expect(parsed.success).toBe(true);
+    });
+
+    it.each(["assertion", "edge", "uniqueness"])(
+      "rejects an identity conflict of removed kind %s",
+      async (kind) => {
+        expectMalformed(
+          await artifactWithReview({
+            identityConflicts: [{ ...SEPARATION_CONFLICT, kind }],
+          }),
+        );
+      },
+    );
+
+    it("rejects review.identityReconciliations", async () => {
+      expectMalformed(
+        await artifactWithReview({ identityReconciliations: [] }),
+      );
+    });
+
+    it("rejects an identity match source on a resolution", async () => {
+      const input = resolutionPlanInput();
+      const artifact = await constructMergePlanArtifact(input);
+      const [resolution] = artifact.review.resolutions;
+      const [edge] = requireDefined(resolution).decisiveEdges;
+      expectMalformed({
+        ...artifact,
+        review: {
+          ...artifact.review,
+          resolutions: [
+            {
+              ...requireDefined(resolution),
+              decisiveEdges: [
+                { ...requireDefined(edge), sources: [{ kind: "identity" }] },
+              ],
+            },
+          ],
+        },
+      });
+    });
   });
 
   it("rejects non-finite evidence numbers", async () => {

@@ -45,6 +45,19 @@ describe.skipIf(spawnSync("bash", ["--version"]).status !== 0)(
       expect(args).not.toContain("tests/graph-merge/");
       expect(args.slice(-4, -1)).toEqual([file, "-t", "queued"]);
     });
+    it("forwards each caller option exactly once", () => {
+      // A repeated `--outputFile.json` reaches vitest as an array, and its
+      // JSON reporter then crashes after the run without writing the report.
+      const reportOption = "--outputFile.json=.vitest-durations/postgres.json";
+      const args = laneArguments(["--reporter=json", reportOption]);
+      expect(
+        args.filter((argument) => argument === "--reporter=json"),
+      ).toHaveLength(1);
+      expect(args.filter((argument) => argument === reportOption)).toHaveLength(
+        1,
+      );
+      expect(args).toContain("tests/backends/postgres/");
+    });
     it("keeps the default lane for option-only filters", () => {
       const args = laneArguments([
         "-t",

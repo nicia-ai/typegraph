@@ -17,6 +17,7 @@ import {
   normalizeTargetMap,
   validateTargetMapEntries,
 } from "./edge-endpoints";
+import { assertEdgeIntegrityOptions } from "./edge-integrity-options";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   assertGraphAnnotations,
@@ -39,6 +40,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "./types";
+import {
+  assertUniqueConstraintOptions,
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  type StatedUniqueConstraintOptions,
+  withUniqueConstraintDefaults,
+} from "./unique-constraint-options";
 
 // ============================================================
 // Graph Definition Brand Symbol
@@ -185,6 +192,8 @@ function normalizeEdgeEntry(
     // Unconstrained EdgeType — allow any→any
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
+
+  assertEdgeIntegrityOptions(name, entry);
 
   let normalizedRegistration: AnyEdgeRegistration = entry;
   if (!Array.isArray(entry.to)) {
@@ -560,7 +569,7 @@ export type AllEdgeTypes<G extends GraphDef> = {
 export function defineGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -577,7 +586,7 @@ export function defineGraph<
 function defineGraphUnchecked<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -597,8 +606,9 @@ function defineGraphUnchecked<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
-  assertClaimNamesAreSafe(config.nodes);
-  assertUniqueConstraintsAreDeclared(config.nodes);
+  assertClaimNamesAreSafe(config.nodes, normalizedEdges);
+  const nodes = withUniqueConstraintDefaultsWritten(config.nodes);
+  assertUniqueConstraintsAreDeclared(nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
   // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
@@ -628,7 +638,7 @@ function defineGraphUnchecked<
     [GRAPH_DEF_BRAND]: true as const,
     id: config.id,
     annotations,
-    nodes: config.nodes,
+    nodes,
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),
     identity: config.identity as TIdentity,
@@ -655,7 +665,7 @@ function defineGraphUnchecked<
 export function defineInternalGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
   const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
   config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
@@ -687,6 +697,7 @@ const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
  */
 function assertClaimNamesAreSafe(
   nodes: Record<string, NodeRegistration>,
+  edges: Record<string, AnyEdgeRegistration>,
 ): void {
   for (const registration of Object.values(nodes)) {
     assertNodeKindNameSafe(registration.type.kind);
@@ -694,6 +705,62 @@ function assertClaimNamesAreSafe(
       assertClaimAxisSafe(constraint.name, "Unique constraint");
     }
   }
+  // Edge kinds are checked here too: no collision is reachable today or
+  // after `targetCardinality` (a source axis always begins with a
+  // cardinality literal, a target axis always with U+001E), but the
+  // reserved-vocabulary rule should hold for every name that reaches an
+  // axis, not only the ones that currently could collide.
+  for (const registration of Object.values(edges)) {
+    assertClaimAxisSafe(registration.type.kind, "Edge kind");
+  }
+}
+
+/**
+ * `nodes` with every unique constraint's `scope` and `collation` written out,
+ * refusing a stated value outside its domain.
+ *
+ * Every reader of a registration — the claim axis, the serializer, and
+ * through it the stored-schema parser — then sees one declaration, read as
+ * {@link NODE_UNIQUE_CONSTRAINT_DEFAULTS} says. Only an untyped caller can
+ * omit either member, so a graph whose declarations state both is returned
+ * as given.
+ *
+ * @throws ConfigurationError (`UNIQUE_CONSTRAINT_OPTION_INVALID`)
+ */
+function withUniqueConstraintDefaultsWritten<
+  TNodes extends Record<string, NodeRegistration>,
+>(nodes: TNodes): TNodes {
+  const registrations = Object.entries(nodes);
+  for (const [, registration] of registrations) {
+    for (const constraint of registration.unique ?? []) {
+      assertUniqueConstraintOptions(registration.type.kind, constraint);
+    }
+  }
+  const statesEveryOption = registrations.every(([, registration]) =>
+    (registration.unique ?? []).every(
+      (constraint: StatedUniqueConstraintOptions) =>
+        constraint.scope !== undefined && constraint.collation !== undefined,
+    ),
+  );
+  if (statesEveryOption) return nodes;
+  const written = createDataKeyedBag<NodeRegistration>();
+  for (const [kind, registration] of registrations) {
+    written[kind] =
+      registration.unique === undefined ?
+        registration
+      : {
+          ...registration,
+          unique: registration.unique.map((constraint) =>
+            withUniqueConstraintDefaults(
+              constraint,
+              NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+            ),
+          ),
+        };
+  }
+  // Spread at the boundary: this becomes `GraphDef.nodes`. See
+  // `createDataKeyedBag` in ../utils/object.ts.
+  return { ...written } as TNodes;
 }
 
 /**

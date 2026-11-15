@@ -35,8 +35,9 @@ import {
 } from "../backend/graph-relations";
 import { ConfigurationError } from "../errors";
 import { getDialect, type SqlDialect } from "../query/dialect";
-import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import { quoteIdentifier } from "../query/dialect/vector-strategy";
 import { renderSqlInline, sql } from "../query/sql-fragment";
+import { shortHash } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */

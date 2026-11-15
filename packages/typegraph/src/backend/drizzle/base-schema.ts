@@ -94,12 +94,12 @@ export const BASE_SCHEMA_RELEASES = [
   },
   {
     version: 9,
-    id: "recorded-anchor-retention-watermark",
+    id: "recorded-retention-and-identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "473b1e867ce4b37ba343b076e881fe461f64bc619cb5fc32f1e3891985a7770c",
+        "d4e733e6481d14ebee5f16720cec6869c2ceb3b1fd7dc583bfff0a239c5a5b2e",
       sqlite:
-        "175083c94394427c766bae0df5cc07357447bc8b9910fbfe6964a85a51b2cf99",
+        "6f348b73972697312da6742c0c34c84676d77926c1d1bf04cdaeeb51ddd45968",
     },
   },
 ] as const;
@@ -172,6 +172,21 @@ function migrationError(
 }
 
 /**
+ * Refuses with `BaseSchemaMigrationError` unless `installedVersion` is this
+ * release's base schema. The one verdict both the root backend's
+ * `assertBaseSchemaCurrent` and a schema-write adoption (which reads the
+ * marker on the caller's own transaction) apply.
+ */
+export function assertBaseSchemaVersionCurrent(
+  installedVersion: number | undefined,
+  currentVersion: number = CURRENT_BASE_SCHEMA_VERSION,
+): void {
+  const state = classifyVersion(installedVersion, currentVersion);
+  if (state === "current") return;
+  throw migrationError(installedVersion, currentVersion, state);
+}
+
+/**
  * One owner for deployment-wide physical schema adoption.
  *
  * The ordered registry is deliberately separate from per-graph schema
@@ -213,14 +228,8 @@ export function createBaseSchemaLifecycle(
     );
   }
 
-  function requireCurrent(installedVersion: number | undefined): void {
-    const state = classifyVersion(installedVersion, currentVersion);
-    if (state === "current") return;
-    throw migrationError(installedVersion, currentVersion, state);
-  }
-
   async function assertCurrent(): Promise<void> {
-    requireCurrent(await options.readVersion());
+    assertBaseSchemaVersionCurrent(await options.readVersion(), currentVersion);
   }
 
   async function writeVersion(version: number): Promise<number> {
@@ -256,7 +265,7 @@ export function createBaseSchemaLifecycle(
       await adoptStep(step);
       observedVersion = await writeVersion(step.version);
     }
-    requireCurrent(observedVersion);
+    assertBaseSchemaVersionCurrent(observedVersion, currentVersion);
   }
 
   async function adopt(): Promise<void> {

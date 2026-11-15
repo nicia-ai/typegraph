@@ -114,7 +114,45 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   ensureRecordedAnchorRetentionStorage?: (
     clockProvisioned: boolean,
   ) => Promise<void>;
+  /**
+   * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
+   * statements for the identity transition log, the version-9 adoption
+   * step — rendered once by the caller from its own dialect's DDL
+   * generators, the same way `fencesTableDdl` is. A brand-new relation
+   * needs no ALTER-shaped migration, so bootstrap's generated DDL already
+   * creates it; `adopt()` still ensures it for the OFFLINE adoption path,
+   * which never calls `generateDdl()`. Scoped to
+   * exactly this relation (not the identity-enablement `ensureIdentityTables`
+   * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
+   * relation: a database that predates this release owes it regardless of
+   * whether any graph in it has Operational Identity enabled. Older callers
+   * may omit it; version-9 adoption then refuses with a clear error.
+   */
+  identityTransitionsTableDdl?: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` for the transition log's per-graph
+   * retention watermark, adopted by the same version-9 step.
+   */
+  identityTransitionRetentionTableDdl?: string;
 }>;
+
+/**
+ * The refusal an adoption step raises when the profile omitted DDL it needs.
+ * A dep added after a profile was written is optional so that profile still
+ * constructs; the step that needs it is where its absence is an error.
+ */
+function missingAdoptionDeps(
+  adoptionVersion: number,
+  deps: Readonly<Record<string, unknown>>,
+): ConfigurationError {
+  const missingDependencies = Object.entries(deps)
+    .filter(([, value]) => value === undefined)
+    .map(([name]) => name);
+  return new ConfigurationError(
+    `Base-schema version ${adoptionVersion} adoption requires ${missingDependencies.join(" and ")}.`,
+    { missingDependencies, adoptionVersion },
+  );
+}
 
 export type BaseSchemaMembers = Readonly<{
   adoptBaseSchema: () => Promise<void>;
@@ -129,9 +167,12 @@ export type BaseSchemaMembers = Readonly<{
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
  * rows table), version 3 (the recorded-relations' and recorded
  * identity-assertions relation's `since_idx` indexes), version 4 (the
- * revision-changes relation), and version 5 (the byte-ordered `graph_id`
- * indexes) all follow the same prepare/adopt-before/adopt-after bootstrap
- * sequencing.
+ * revision-changes relation), version 5 (the byte-ordered `graph_id`
+ * indexes), version 6 (the recorded adjacency indexes), version 7 (the
+ * recorded-anchor log), version 8 (durable Store outcomes) and version 9 (the
+ * recorded-allocation retention column plus the identity transition log and
+ * its retention watermark) all follow the same
+ * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -154,17 +195,32 @@ export function createBaseSchemaMembers(
     recordedAnchorsDdl,
     storeOperationsDdl,
     ensureRecordedAnchorRetentionStorage,
+    identityTransitionsTableDdl,
+    identityTransitionRetentionTableDdl,
   } = deps;
 
-  async function adoptRecordedAnchorRetention(
-    clockProvisioned: boolean,
-  ): Promise<void> {
-    if (ensureRecordedAnchorRetentionStorage === undefined)
-      throw new ConfigurationError(
-        "Base-schema version 9 requires recorded-retention storage adoption.",
-        { missingDependencies: ["ensureRecordedAnchorRetentionStorage"] },
-      );
-    await ensureRecordedAnchorRetentionStorage(clockProvisioned);
+  /**
+   * Version 9 adds the recorded clock's retention column and the identity
+   * transition log. Every dependency is checked before either half runs, so
+   * a profile missing one creates nothing and stamps nothing.
+   */
+  function requireVersion9Deps() {
+    if (
+      ensureRecordedAnchorRetentionStorage === undefined ||
+      identityTransitionsTableDdl === undefined ||
+      identityTransitionRetentionTableDdl === undefined
+    ) {
+      throw missingAdoptionDeps(9, {
+        ensureRecordedAnchorRetentionStorage,
+        identityTransitionsTableDdl,
+        identityTransitionRetentionTableDdl,
+      });
+    }
+    return {
+      ensureRecordedAnchorRetentionStorage,
+      identityTransitionsTableDdl,
+      identityTransitionRetentionTableDdl,
+    };
   }
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -208,20 +264,10 @@ export function createBaseSchemaMembers(
             revisionChangesTableDdl === undefined ||
             revisionChangesIndexDdl === undefined
           ) {
-            throw new ConfigurationError(
-              "Base-schema version 4 adoption requires revision-change table and index DDL.",
-              {
-                missingDependencies: [
-                  ...(revisionChangesTableDdl === undefined ?
-                    ["revisionChangesTableDdl"]
-                  : []),
-                  ...(revisionChangesIndexDdl === undefined ?
-                    ["revisionChangesIndexDdl"]
-                  : []),
-                ],
-                adoptionVersion: 4,
-              },
-            );
+            throw missingAdoptionDeps(4, {
+              revisionChangesTableDdl,
+              revisionChangesIndexDdl,
+            });
           }
           await ensureTable(revisionChangesTableDdl);
           for (const ddl of revisionChangesIndexDdl) {
@@ -242,11 +288,9 @@ export function createBaseSchemaMembers(
       {
         version: 6,
         async adopt(): Promise<void> {
-          if (adjacencyIndexDdl === undefined)
-            throw new ConfigurationError(
-              "Base-schema version 6 adoption requires recorded adjacency index DDL.",
-              { missingDependencies: ["adjacencyIndexDdl"] },
-            );
+          if (adjacencyIndexDdl === undefined) {
+            throw missingAdoptionDeps(6, { adjacencyIndexDdl });
+          }
           for (const ddl of adjacencyIndexDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
@@ -254,11 +298,9 @@ export function createBaseSchemaMembers(
       {
         version: 7,
         async adopt(): Promise<void> {
-          if (recordedAnchorsDdl === undefined)
-            throw new ConfigurationError(
-              "Base-schema version 7 adoption requires recorded-anchor log DDL.",
-              { missingDependencies: ["recordedAnchorsDdl"] },
-            );
+          if (recordedAnchorsDdl === undefined) {
+            throw missingAdoptionDeps(7, { recordedAnchorsDdl });
+          }
           for (const ddl of recordedAnchorsDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
@@ -266,21 +308,35 @@ export function createBaseSchemaMembers(
       {
         version: 8,
         async adopt(): Promise<void> {
-          if (storeOperationsDdl === undefined)
-            throw new ConfigurationError(
-              "Base-schema version 8 adoption requires durable Store-operation DDL.",
-              { missingDependencies: ["storeOperationsDdl"] },
-            );
+          if (storeOperationsDdl === undefined) {
+            throw missingAdoptionDeps(8, { storeOperationsDdl });
+          }
           for (const ddl of storeOperationsDdl) await ensureTable(ddl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },
       {
         version: 9,
-        adopt: () => adoptRecordedAnchorRetention(false),
+        async adopt(): Promise<void> {
+          const version9 = requireVersion9Deps();
+          for (const ddl of version9.identityTransitionsTableDdl) {
+            await ensureTable(ddl);
+          }
+          await ensureTable(version9.identityTransitionRetentionTableDdl);
+          await version9.ensureRecordedAnchorRetentionStorage(false);
+        },
+        // Generated DDL already carries the transition-log relations; an
+        // existing clock still needs its retention column.
         bootstrap: {
           phase: "after",
-          adopt: () => adoptRecordedAnchorRetention(true),
+          async adopt(): Promise<void> {
+            if (ensureRecordedAnchorRetentionStorage === undefined) {
+              throw missingAdoptionDeps(9, {
+                ensureRecordedAnchorRetentionStorage,
+              });
+            }
+            await ensureRecordedAnchorRetentionStorage(true);
+          },
         },
       },
     ],

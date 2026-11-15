@@ -21,7 +21,12 @@ import { BranchError } from "./errors";
 import type { Result } from "./result";
 import { err, ok } from "./result";
 import type { EngineRevision, GraphDef } from "./typegraph-internal";
-import { generateId, resolveLineage, storeBackend } from "./typegraph-internal";
+import {
+  activeSchemaHash,
+  generateId,
+  resolveLineage,
+  storeBackend,
+} from "./typegraph-internal";
 import type { BranchOptions, GraphBranch } from "./types";
 import { asBranchId } from "./types";
 import type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
@@ -155,7 +160,7 @@ export async function readBranchForkState<G extends GraphDef>(
   const schemaRow = await storeBackend(store).getActiveSchema(store.graphId);
   const schemaAnchor =
     schemaRow === undefined ? undefined : (
-      { version: schemaRow.version, hash: schemaRow.schema_hash }
+      { version: schemaRow.version, hash: await activeSchemaHash(schemaRow) }
     );
   const lineage = captureRevision ? resolveLineage(store) : undefined;
   // The session is the working copy's own root backend — the same object

@@ -36,18 +36,12 @@ import {
   codePointOrderKey,
   expectedValidFromPredicate,
   nodeColumnList,
+  qualifiedColumn,
   quotedColumn,
   type RowLockClause,
   sqlNull,
   type Tables,
 } from "./shared";
-
-function qualifiedColumn(
-  alias: string,
-  column: Readonly<{ name: string }>,
-): SQL {
-  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
-}
 
 const INITIAL_NODE_VERSION = 1;
 const NODE_VERSION_INCREMENT = 1;
@@ -1084,11 +1078,7 @@ function buildNodeExpectationPredicate(
   if (expectation.kind === "absent") {
     return portableSql`NOT ${adapter.jsonHasPath(propsColumn, pointer)}`;
   }
-  return adapter.jsonScalarPathEquals(
-    propsColumn,
-    pointer,
-    expectation.value,
-  );
+  return adapter.jsonScalarPathEquals(propsColumn, pointer, expectation.value);
 }
 
 /**

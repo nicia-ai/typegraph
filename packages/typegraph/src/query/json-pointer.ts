@@ -266,7 +266,8 @@ export function encodeJsonPointerSegment(segment: string): string {
   return segment.replaceAll("~", "~0").replaceAll("/", "~1");
 }
 
-function decodeJsonPointerSegment(segment: string): string {
+/** Unescape a single JSON Pointer reference segment per RFC 6901: `~1` then `~0`. */
+export function decodeJsonPointerSegment(segment: string): string {
   return segment.replaceAll("~1", "/").replaceAll("~0", "~");
 }
 

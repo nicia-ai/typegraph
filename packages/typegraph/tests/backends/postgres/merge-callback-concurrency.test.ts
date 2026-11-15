@@ -17,7 +17,7 @@ import {
   unwrap,
 } from "@nicia-ai/typegraph/graph-merge";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -37,24 +37,82 @@ const Resource = defineNode("Resource", {
   schema: z.object({ owner: z.string() }),
 });
 let pool: Pool | undefined;
+/** A connection outside both stores, for observing what their sessions wait on. */
+let probe: Pool | undefined;
 
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
   const candidate = new Pool({ connectionString: databaseUrl, max: 2 });
-  await runServerSuiteSetup("merge callbacks", [candidate], async () => {
-    await candidate.query(generatePostgresMigrationSQL());
-  });
+  const observer = new Pool({ connectionString: databaseUrl, max: 1 });
+  await runServerSuiteSetup(
+    "merge callbacks",
+    [candidate, observer],
+    async () => {
+      await candidate.query(generatePostgresMigrationSQL());
+    },
+  );
   pool = candidate;
+  probe = observer;
 });
 
 afterAll(async () => {
   await pool?.end();
+  await probe?.end();
 });
+
+const LOCK_WAIT_DEADLINE_MS = 10_000;
+const LOCK_WAIT_POLL_MS = 10;
+
+/**
+ * Resolves once the session `pid` is parked on a heavyweight lock, and fails
+ * if `operation` settles first or the deadline passes: "blocked" is read off
+ * the server's own wait state, never inferred from a promise staying pending
+ * for a while.
+ */
+async function expectLockWait(
+  pid: number,
+  operation: Promise<unknown>,
+): Promise<void> {
+  const state = { settled: false };
+  void operation.then(
+    () => {
+      state.settled = true;
+    },
+    () => {
+      state.settled = true;
+    },
+  );
+  const deadline = Date.now() + LOCK_WAIT_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    expect(state.settled, "the operation settled instead of waiting").toBe(
+      false,
+    );
+    const waiting = await requireDefined(probe).query<{ waiting: boolean }>(
+      `SELECT wait_event_type = 'Lock' AS waiting
+       FROM pg_stat_activity WHERE pid = $1`,
+      [pid],
+    );
+    if (waiting.rows[0]?.waiting === true) return;
+    await new Promise((resolve) => setTimeout(resolve, LOCK_WAIT_POLL_MS));
+  }
+  throw new Error(
+    `Session ${String(pid)} never waited on a lock within ${String(LOCK_WAIT_DEADLINE_MS)} ms.`,
+  );
+}
+
+async function backendPid(client: PoolClient): Promise<number> {
+  const result = await client.query<{ pid: number }>(
+    "SELECT pg_backend_pid() AS pid",
+  );
+  return requireDefined(result.rows[0]).pid;
+}
 
 async function fixture(id: string, history: boolean) {
   const activePool = requireDefined(pool);
   const first = await activePool.connect();
   const second = await activePool.connect();
+  const targetPid = await backendPid(first);
+  const writerPid = await backendPid(second);
   const local = createLocalSqliteBackend();
   const graph = defineGraph({
     id,
@@ -89,6 +147,8 @@ async function fixture(id: string, history: boolean) {
       writer,
       resource,
       plan,
+      targetPid,
+      writerPid,
       close: async () => {
         await local.backend.close();
         first.release();
@@ -147,10 +207,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
     );
     for (const history of [false, true]) {
       it(`holds the fence before application reads against an ordinary conditional writer (history=${history})`, async () => {
-        const { target, writer, resource, plan, close } = await fixture(
-          `callbacks_winner_${history}`,
-          history,
-        );
+        const { target, writer, writerPid, resource, plan, close } =
+          await fixture(`callbacks_winner_${history}`, history);
         const checked = createGate();
         const release = createGate();
         const applying = applyMergePlan(target, plan, {
@@ -173,7 +231,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             expected: { owner: "unclaimed" },
             patch: { owner: "writer" },
           });
-          expect(await raceTimeout(competing, 200)).toBe(TIMEOUT_SENTINEL);
+          await expectLockWait(writerPid, competing);
           release.open();
           unwrap(await applying);
           expect(await competing).toBe(false);
@@ -187,10 +245,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
       });
 
       it(`refuses a plan made stale by an ordinary writer before invoking checks (history=${history})`, async () => {
-        const { target, writer, resource, plan, close } = await fixture(
-          `callbacks_loser_${history}`,
-          history,
-        );
+        const { target, writer, targetPid, resource, plan, close } =
+          await fixture(`callbacks_loser_${history}`, history);
         const written = createGate();
         const release = createGate();
         const writing = writer.transaction(async (tx) => {
@@ -205,7 +261,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             TIMEOUT_SENTINEL,
           );
           applying = applyMergePlan(target, plan, { beforeApply });
-          expect(await raceTimeout(applying, 200)).toBe(TIMEOUT_SENTINEL);
+          await expectLockWait(targetPid, applying);
           expect(beforeApply).not.toHaveBeenCalled();
           release.open();
           await writing;

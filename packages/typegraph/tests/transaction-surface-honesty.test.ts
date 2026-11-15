@@ -209,6 +209,48 @@ describe("portable runtime capability boundaries", () => {
     });
   });
 
+  it("gives no transaction context a statement-execution handle on tx.backend", async () => {
+    // A rollback to a savepoint issued between two TypeGraph writes releases
+    // the fence the first write took while the transaction keeps reusing it,
+    // so `tx.sql` stays the one raw handle a context can carry and the write
+    // session's fence decision keys on it alone.
+    const statementExecution = [
+      "execute",
+      "executeRaw",
+      "executeStatement",
+      "executeDdl",
+    ] as const;
+    const backend = createTestBackend();
+    const portable = createStore(graph, backend);
+    const adapter = createAdapterStore(graph, backend);
+    const [history] = await createAdapterStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    const observed: string[] = [];
+    const recordExposed = (
+      surface: string,
+      projection: object,
+    ): Promise<void> => {
+      for (const member of statementExecution) {
+        if (
+          member in projection ||
+          Reflect.get(projection, member) !== undefined
+        )
+          observed.push(`${surface}.${member}`);
+      }
+      return Promise.resolve();
+    };
+
+    await portable.transaction((tx) => recordExposed("portable", tx.backend));
+    await adapter.transaction((tx) => recordExposed("adapter", tx.backend));
+    await history.transaction((tx) => recordExposed("history", tx.backend));
+    await backend.transactionWithNative((_target, native) =>
+      recordExposed("adopted", adapter.withTransaction(native).backend),
+    );
+
+    expect(observed).toEqual([]);
+  });
+
   it("projects adapter-native methods out of the public AdapterStore backend", () => {
     const adapterBackend = createTestBackend();
     const store = createAdapterStore(graph, adapterBackend);
@@ -487,6 +529,7 @@ function portableFactoryTypeAssertions(backend: GraphBackend): void {
     expectTypeOf(tx.backend).toEqualTypeOf<TransactionReadBackend>();
     expectTypeOf(tx.backend).not.toHaveProperty("insertNode");
     expectTypeOf(tx.backend).not.toHaveProperty("executeRaw");
+    expectTypeOf(tx.backend).not.toHaveProperty("execute");
     return Promise.resolve();
   });
 }

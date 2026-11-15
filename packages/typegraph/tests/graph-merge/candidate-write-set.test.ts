@@ -20,6 +20,7 @@ import {
 import {
   BaseVersionMismatchError,
   BranchError,
+  CandidatePlanningScopeError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
@@ -35,7 +36,7 @@ import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
 import { canonicalMergePlanJson } from "../../src/graph-merge/plan-canonical";
 import { isErr, unwrap } from "../../src/graph-merge/result";
 import {
-  canUseSparseCandidatePlanning,
+  candidatePlanningScope,
   matchIdentityOwnersAreCloneVisible,
   readCandidateMatchIdentityOwners,
 } from "../../src/graph-merge/sparse-candidate-branch";
@@ -405,7 +406,7 @@ describe("candidate write-set planning", () => {
     const [target] = await createStoreWithSchema(oneActiveGraph, baseBackend, {
       revisionTracking: true,
     });
-    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
     const writeSet: CandidateWriteSet = {
       formatVersion: 1,
       sourceId: "one-active-capability",
@@ -436,7 +437,10 @@ describe("candidate write-set planning", () => {
     expect(descriptor).toBeDefined();
     Reflect.deleteProperty(baseBackend, "findActiveEdgesBySourceV1");
     try {
-      expect(canUseSparseCandidatePlanning(target)).toBe(false);
+      expect(candidatePlanningScope(target)).toEqual({
+        scope: "full",
+        reason: "missing-active-source-read",
+      });
       unwrap(
         await planCandidateWriteSet({
           planningScope: "full",
@@ -645,7 +649,7 @@ describe("candidate write-set planning", () => {
           makeBackend: candidateBackend().makeBackend,
           writeSet,
         }),
-      );
+      ).plan;
       expect(canonicalMergePlanJson(actual)).toBe(
         canonicalMergePlanJson(expected),
       );
@@ -757,7 +761,7 @@ describe("candidate write-set planning", () => {
           makeBackend: candidateBackend().makeBackend,
           writeSet,
         }),
-      );
+      ).plan;
       expect(canonicalMergePlanJson(actual)).toBe(
         canonicalMergePlanJson(expected),
       );
@@ -850,7 +854,7 @@ describe("candidate write-set planning", () => {
             makeBackend: candidateBackend().makeBackend,
             writeSet,
           }),
-        );
+        ).plan;
         expect(canonicalMergePlanJson(actual)).toBe(
           canonicalMergePlanJson(expected),
         );
@@ -1186,7 +1190,7 @@ describe("candidate write-set planning", () => {
       makeBackend: candidateBackend().makeBackend,
       writeSet,
     });
-    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
     expect(isErr(bounded)).toBe(true);
   });
 
@@ -1254,7 +1258,7 @@ describe("candidate write-set planning", () => {
         { id: `other-${index}` },
       );
     const after = await measure();
-    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
     expect(after.statements).toBeLessThanOrEqual(before.statements);
     expect(after.returnedRows).toBe(before.returnedRows);
     expect(after.targetWrites).toBe(0);
@@ -1402,7 +1406,10 @@ describe("candidate write-set planning", () => {
         },
       ],
     };
-    expect(canUseSparseCandidatePlanning(target)).toBe(false);
+    expect(candidatePlanningScope(target)).toEqual({
+      scope: "full",
+      reason: "missing-match-identity-read",
+    });
     expect(
       await fullCloneImportSucceeded(
         target,
@@ -1507,7 +1514,7 @@ describe("candidate write-set planning", () => {
       );
     }
     const after = await measure();
-    expect(canUseSparseCandidatePlanning(target)).toBe(true);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
     expect(after.statements).toBeLessThanOrEqual(before.statements);
     expect(after.returnedRows).toBe(before.returnedRows);
     expect(after.revisionUnchanged).toBe(true);
@@ -1557,31 +1564,39 @@ describe("candidate write-set planning", () => {
         "full-match-identity-tombstone",
       ),
     ).toBe(true);
-    const owners = await readCandidateMatchIdentityOwners(target, writeSet);
-    expect(owners).toHaveLength(1);
-    expect(owners?.[0]?.deleted_at).toBeDefined();
-    if (owners === undefined) throw new Error("Expected the exact owner read");
-    expect(matchIdentityOwnersAreCloneVisible(owners)).toBe(false);
+    const ownerRead = await readCandidateMatchIdentityOwners(target, writeSet);
+    expect(ownerRead.status).toBe("complete");
+    expect(ownerRead.owners).toHaveLength(1);
+    expect(ownerRead.owners[0]?.deleted_at).toBeDefined();
+    expect(matchIdentityOwnersAreCloneVisible(ownerRead.owners)).toBe(false);
 
     const bounded = await planCandidateWriteSet({
       target,
       makeBackend: candidateBackend().makeBackend,
       writeSet,
     });
-    expect(canUseSparseCandidatePlanning(target)).toBe(true);
-    expect(isErr(bounded)).toBe(true);
-    if (isErr(bounded))
-      expect(bounded.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
-    expect(
-      isErr(
-        await planCandidateWriteSet({
-          target,
-          makeBackend: candidateBackend().makeBackend,
-          writeSet,
-          planningScope: "full",
-        }),
-      ),
-    ).toBe(false);
+    expect(candidatePlanningScope(target)).toEqual({ scope: "candidate" });
+    // The capability sees the durable tombstone, so bounded planning would
+    // seed a state the full clone never shows: it is refused, naming why.
+    if (!isErr(bounded)) throw new Error("expected a bounded-planning refusal");
+    expect(bounded.error).toBeInstanceOf(CandidatePlanningScopeError);
+    expect(bounded.error.code).toBe("GRAPH_MERGE_PLAN_CAPABILITY");
+    expect(bounded.error.details?.["planningScope"]).toEqual({
+      scope: "full",
+      reason: "match-identity-owner-not-clone-visible",
+    });
+    const full = unwrap(
+      await planCandidateWriteSet({
+        target,
+        makeBackend: candidateBackend().makeBackend,
+        writeSet,
+        planningScope: "full",
+      }),
+    );
+    expect(full.planningScope).toEqual({
+      scope: "full",
+      reason: "full-requested",
+    });
   });
 
   it("returns a deterministic serialized property-conflict plan with source attribution", async () => {
@@ -1596,7 +1611,7 @@ describe("candidate write-set planning", () => {
         writeSet: JSON.parse(JSON.stringify(writeSet)) as unknown,
         options,
       }),
-    );
+    ).plan;
     const second = unwrap(
       await planCandidateWriteSet({
         target,
@@ -1604,7 +1619,7 @@ describe("candidate write-set planning", () => {
         writeSet: structuredClone(writeSet),
         options,
       }),
-    );
+    ).plan;
 
     expect(canonicalMergePlanJson(first)).toBe(canonicalMergePlanJson(second));
     expect(first.review.conflicts).toEqual([
@@ -1675,7 +1690,7 @@ describe("candidate write-set planning", () => {
         writeSet: updated,
         options,
       }),
-    );
+    ).plan;
     const fullBranch = unwrap(
       await ingestionBranch(target, candidateBackend().makeBackend, {
         id: asBranchId(updated.sourceId),
@@ -1991,7 +2006,7 @@ describe("candidate write-set planning", () => {
         writeSet,
         options,
       }),
-    );
+    ).plan;
     expect(
       planned.writes.nodeDeletes.some((entry) => entry.id === "legacy-extra"),
     ).toBe(false);
@@ -2077,8 +2092,12 @@ describe("candidate evolution planning scope", () => {
         success: false,
         error: {
           details: {
-            capability: "boundedEvolutionPlanning",
-            planningScope: "full",
+            capability: "boundedCandidatePlanning",
+            requiredPlanningScope: "full",
+            planningScope: {
+              scope: "full",
+              reason: "planned-evolution",
+            },
           },
         },
       });

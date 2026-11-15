@@ -85,7 +85,7 @@ async function decideInsideDriverScope<T>(
  *
  * A `release` decision releases the savepoint and returns its value. A
  * `rollback` decision, or a throw, rolls back to the savepoint, calls
- * `onRolledBack`, and releases it; the decision's value is returned, the
+ * `onRolledBack` with the rollback cause, and releases it; the decision's value is returned, the
  * thrown error rethrown. A failed rollback is reported as a
  * {@link SavepointRecoveryFailure}, since the session can no longer be
  * trusted to be at the savepoint's state.
@@ -94,14 +94,14 @@ export async function runSessionSavepoint<T>(
   port: SessionSavepointPort,
   savepoint: string,
   scope: () => Promise<SavepointDecision<T>>,
-  onRolledBack?: () => void,
+  onRolledBack?: (cause: unknown) => void,
 ): Promise<T> {
   const { executeControl, enterDriverScope } = port;
 
   async function rollBack(cause: unknown): Promise<void> {
     try {
       await executeControl(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-      onRolledBack?.();
+      onRolledBack?.(cause);
       await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
     } catch (recoveryError) {
       throw new SavepointRecoveryFailure(cause, recoveryError);

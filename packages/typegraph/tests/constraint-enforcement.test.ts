@@ -1426,6 +1426,28 @@ describe("names that could spell a reserved claim axis", () => {
       defineNode("PlainGhost", { schema: z.object({}) }),
     ).not.toThrow();
   });
+
+  it("refuses an edge kind name at defineGraph", () => {
+    const Ghost = defineNode("ReservedEdgeGhost", { schema: z.object({}) });
+    const haunts = defineEdge(`haunts${RESERVED}target`, {
+      schema: z.object({}),
+    });
+
+    expect(() =>
+      defineGraph({
+        id: "reserved_edge_kind_name",
+        nodes: { ReservedEdgeGhost: { type: Ghost } },
+        edges: {
+          [`haunts${RESERVED}target`]: {
+            type: haunts,
+            from: [Ghost],
+            to: [Ghost],
+          },
+        },
+        ontology: [],
+      }),
+    ).toThrow(ConfigurationError);
+  });
 });
 
 describe("node kind names that could spell another node's path token", () => {

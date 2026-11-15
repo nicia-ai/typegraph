@@ -18,7 +18,7 @@
  * its cases is there to catch; the historical half of the same contract lives in
  * `identity-historical-traversal.ts`.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { compareStrings } from "../../../src/utils/compare";
 import {
@@ -29,7 +29,6 @@ import {
   IGNORE_GRAPH,
   provisionIdentityFixture,
   readLedger,
-  settle,
 } from "./identity-traversal-model";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -247,41 +246,55 @@ export function registerCurrentIdentityTraversalTests(
      * of that: nothing about the graph changes, only the clock.
      */
     it("binds a fresh read instant per execution of a reused query", async () => {
-      const store = await context.createStore(IGNORE_GRAPH);
-      const alice = await store.nodes.Person.create(
-        { name: "Alice" },
-        { id: "instant-alice" },
-      );
-      const peer = await store.nodes.Person.create(
-        { name: "Peer" },
-        {
-          id: "instant-peer",
-          validTo: new Date(Date.now() + 500).toISOString(),
-        },
-      );
-      const target = await store.nodes.Person.create(
-        { name: "Target" },
-        { id: "instant-target" },
-      );
-      // The edge leaves the peer and outlives it, so only a stale read instant
-      // could keep returning the target after the peer's window closes.
-      await store.edges.link.create(peer, target, {}, { id: "instant-peer-t" });
-      await store.identity.assertSame(alice, peer);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const peerWindowCloses = Date.now() + 1000;
+        const store = await context.createStore(IGNORE_GRAPH);
+        const alice = await store.nodes.Person.create(
+          { name: "Alice" },
+          { id: "instant-alice" },
+        );
+        const peer = await store.nodes.Person.create(
+          { name: "Peer" },
+          {
+            id: "instant-peer",
+            validTo: new Date(peerWindowCloses).toISOString(),
+          },
+        );
+        const target = await store.nodes.Person.create(
+          { name: "Target" },
+          { id: "instant-target" },
+        );
+        // The edge leaves the peer and outlives it, so only a stale read
+        // instant could keep returning the target after the peer's window
+        // closes.
+        await store.edges.link.create(
+          peer,
+          target,
+          {},
+          { id: "instant-peer-t" },
+        );
+        await store.identity.assertSame(alice, peer);
 
-      const query = store
-        .query()
-        .from("Person", "person")
-        .whereNode("person", (node) => node.name.eq("Alice"))
-        .traverse("link", "edge", {
-          expand: "none",
-          includeIdentityMembers: true,
-        })
-        .to("Person", "friend")
-        .select((queryContext) => queryContext.friend.id);
+        const query = store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.name.eq("Alice"))
+          .traverse("link", "edge", {
+            expand: "none",
+            includeIdentityMembers: true,
+          })
+          .to("Person", "friend")
+          .select((queryContext) => queryContext.friend.id);
 
-      expect(await query.execute()).toEqual([target.id]);
-      await settle(700);
-      expect(await query.execute()).toEqual([]);
+        expect(await query.execute()).toEqual([target.id]);
+        vi.setSystemTime(peerWindowCloses - 1);
+        expect(await query.execute()).toEqual([target.id]);
+        vi.setSystemTime(peerWindowCloses);
+        expect(await query.execute()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 }

@@ -81,9 +81,14 @@ expectError<VectorSearchOptions>({ fieldPath: "embedding", limit: 10 });
 expectError<VectorSearchOptions>({ queryEmbedding, limit: 10 });
 expectError<VectorSearchOptions>({ fieldPath: "embedding", queryEmbedding });
 
-declare const vectorHits: Awaited<
-  ReturnType<typeof store.search.vector<"Doc">>
->;
+async function vectorSearchDocs() {
+  return store.search.vector("Doc", {
+    fieldPath: "embedding",
+    queryEmbedding,
+    limit: 10,
+  });
+}
+declare const vectorHits: Awaited<ReturnType<typeof vectorSearchDocs>>;
 const vectorHit = vectorHits[0]!;
 expectAssignable<Node<typeof Doc>>(vectorHit.node);
 expectType<number>(vectorHit.score);

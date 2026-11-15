@@ -263,7 +263,25 @@ These changes are backwards compatible and can be auto-migrated:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties with defaults
-- Adding new ontology relations
+- Adding `broader`, `narrower`, or `relatedTo` ontology relations
+- Removing `disjointWith` ontology relations
+
+Adding `disjointWith`, `subClassOf`, `equivalentTo`, `partOf`, or `hasPart` —
+and removing `subClassOf` or `equivalentTo` — also auto-migrate, but
+only after a data check inside the commit transaction. A `partOf` or `hasPart`
+addition is checked against the live parts of its realizing edge kind (one whole
+per part, no cycles, and a required whole when `existence: "required"`), and a
+tightened `cardinality` or `targetCardinality` is checked against live edges.
+Both refuse the commit when the data does not satisfy them. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+and
+[Edge cardinality tightenings are checked against your data](/schema-evolution#edge-cardinality-tightenings-are-checked-against-your-data)
+for what each one checks and how a refusal is reported.
+
+Enabling `identity` on an existing graph does not backfill identity
+transitions for events that happened before enablement — replay begins at
+the coordinate identity was turned on, not at the graph's own origin. See
+[Replay and identity history](/identity/#replay-and-identity-history).
 
 ### Breaking Changes (Require Manual Action)
 
@@ -273,8 +291,9 @@ These changes require manual migration:
 - Renaming node or edge types
 - Changing property types
 - Removing properties
-- Changing cardinality constraints to be more restrictive
 - Removing allowed endpoint pairs from a source-dependent edge
+- Adding or removing an `inverseOf` or `implies` ontology relation
+- Removing a `partOf` or `hasPart` ontology relation
 
 ### Endpoint Pair Changes
 

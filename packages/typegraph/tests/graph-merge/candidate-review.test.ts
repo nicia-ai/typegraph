@@ -7,6 +7,8 @@ import {
   asBranchId,
   captureCandidateWriteSetTarget,
   isErr,
+  MERGE_REVIEW_FORMAT_VERSION,
+  MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
   MergePlanningStaleError,
   MergeReviewError,
   planCandidateWriteSetReview,
@@ -18,7 +20,11 @@ import {
   reviewDigest,
   reviewOptionEvidence,
 } from "../../src/graph-merge/review-evidence";
-import type { MergeReviewArtifact } from "../../src/graph-merge/review-schema";
+import {
+  isSupportedMergeReviewFormatVersion,
+  type MergeReviewArtifact,
+  SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS,
+} from "../../src/graph-merge/review-schema";
 import { storeBackend } from "../../src/store/runtime-port";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
@@ -134,6 +140,46 @@ describe("candidate review wire and coherent capture", () => {
       if (isErr(result)) expect(result.error).toBeInstanceOf(MergeReviewError);
       expect(makeBackend).not.toHaveBeenCalled();
       expect(await args.target.nodes.Item.count()).toBe(0);
+    },
+  );
+
+  it("supports exactly the whole-target and candidate-scoped formats", () => {
+    expect(MERGE_REVIEW_FORMAT_VERSION).toBe(3);
+    expect(MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED).toBe(4);
+    expect(SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS).toEqual([3, 4]);
+    for (const earlier of [1, 2])
+      expect(isSupportedMergeReviewFormatVersion(earlier)).toBe(false);
+    for (const supported of SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)
+      expect(isSupportedMergeReviewFormatVersion(supported)).toBe(true);
+  });
+
+  it.each([1, 2])(
+    "refuses a review stored under earlier format %d as an unsupported version, not as malformed",
+    async (earlierFormat) => {
+      const { args } = await setup();
+      const review = unwrap(await planCandidateWriteSetReview(args));
+      expect(review.formatVersion).toBe(MERGE_REVIEW_FORMAT_VERSION);
+      const stored: unknown = { ...review, formatVersion: earlierFormat };
+      const makeBackend = vi.fn(args.makeBackend);
+
+      const result = await revalidateCandidateWriteSetReview({
+        ...args,
+        makeBackend,
+        review: stored,
+      });
+
+      if (!isErr(result))
+        throw new Error("Expected an unsupported-version refusal.");
+      expect(result.error).toBeInstanceOf(MergeReviewError);
+      expect(result.error.details).toEqual({
+        reason: "unsupported-version",
+        received: earlierFormat,
+        supported: [
+          MERGE_REVIEW_FORMAT_VERSION,
+          MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
+        ],
+      });
+      expect(makeBackend).not.toHaveBeenCalled();
     },
   );
 

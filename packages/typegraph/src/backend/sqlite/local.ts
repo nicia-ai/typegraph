@@ -95,7 +95,9 @@ function installLocalSqliteBaseSchema(
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
   // Versioned installations use privileged asynchronous adoption. Marker-less
-  // bootstrap must finish current storage before installation SQL stamps it.
+  // bootstrap must finish current storage before installation SQL stamps it:
+  // v9's clock column below; its transition-log relations are covered by the
+  // installation SQL's CREATE TABLE IF NOT EXISTS.
   if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
     throw new CompilerInvariantError(
       "The synchronous managed SQLite bootstrap plan must be reviewed when the current base-schema version changes.",

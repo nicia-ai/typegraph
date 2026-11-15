@@ -23,6 +23,10 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { type KindRegistry } from "../../registry/kind-registry";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+} from "../registered-kinds";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -214,13 +218,34 @@ export function assertPositiveSafeIntegerOption(
   }
 }
 
-export function assertEdgeKinds(edges: readonly string[]): void {
+/**
+ * @throws ConfigurationError when `edges` is empty.
+ * @throws KindNotFoundError when it names an edge kind the graph does not
+ *   register, which would otherwise traverse nothing and answer as if the
+ *   graph were simply disconnected.
+ */
+export function assertEdgeKinds(
+  ctx: Pick<AlgorithmContext, "graph">,
+  edges: readonly string[],
+): void {
   if (edges.length === 0) {
     throw new ConfigurationError(
       `Graph algorithms require at least one edge kind in 'edges'.`,
       { edges },
     );
   }
+  assertRegisteredEdgeKinds(ctx.graph, edges);
+}
+
+/**
+ * @throws KindNotFoundError when a stated `nodeKinds` scope names a node kind
+ *   the graph does not register, which would otherwise seed nothing.
+ */
+export function assertNodeKindScope(
+  ctx: Pick<AlgorithmContext, "graph">,
+  nodeKinds: readonly string[] | undefined,
+): void {
+  assertRegisteredNodeKinds(ctx.graph, nodeKinds ?? []);
 }
 
 export function assertGraphAnalyticsSupported(
