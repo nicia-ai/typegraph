@@ -520,7 +520,7 @@ export function registerImportCompositionMoveIntegrationTests(
           );
           expect(outcome).toEqual({
             edges: MOVED,
-            counts: { created: 1, updated: 1, skipped: 0 },
+            counts: { created: 1, updated: 1, skipped: 0, replaced: 0 },
             errors: [],
             fenceViolations: 0,
           });
@@ -548,7 +548,7 @@ export function registerImportCompositionMoveIntegrationTests(
           };
           expect(outcome).toEqual({
             edges: UNMOVED,
-            counts: { created: 0, updated: 0, skipped: 0 },
+            counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
             errors:
               order === "endFirst" ?
                 [endError, attachError]
@@ -572,7 +572,7 @@ export function registerImportCompositionMoveIntegrationTests(
           );
           expect(outcome).toEqual({
             edges: MOVED,
-            counts: { created: 1, updated: 1, skipped: 0 },
+            counts: { created: 1, updated: 1, skipped: 0, replaced: 0 },
             errors: [],
             fenceViolations: 0,
           });
@@ -612,7 +612,12 @@ export function registerImportCompositionMoveIntegrationTests(
                     validTo: ended ? MOVED_AT : undefined,
                   },
                 ],
-                counts: { created: 0, updated: ended ? 1 : 0, skipped: 0 },
+                counts: {
+                  created: 0,
+                  updated: ended ? 1 : 0,
+                  skipped: 0,
+                  replaced: 0,
+                },
                 errors: [
                   ...(ended ?
                     []
@@ -638,7 +643,7 @@ export function registerImportCompositionMoveIntegrationTests(
           );
           expect(outcome).toEqual({
             edges: UNMOVED,
-            counts: { created: 0, updated: 0, skipped: 0 },
+            counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
             errors: [
               { id: MOVED_EDGE_ID, code: "COMPOSITION_IMPORT_MOVE_REFUSED" },
             ],
@@ -668,7 +673,7 @@ export function registerImportCompositionMoveIntegrationTests(
                   },
                 ]
               : MOVED,
-            counts: { created: 1, updated: 0, skipped: 0 },
+            counts: { created: 1, updated: 0, skipped: 0, replaced: 1 },
             errors: [],
             fenceViolations: 0,
           });
@@ -688,7 +693,7 @@ export function registerImportCompositionMoveIntegrationTests(
       );
       expect(outcome).toEqual({
         edges: UNMOVED,
-        counts: { created: 0, updated: 0, skipped: 0 },
+        counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
         errors: [
           {
             id: MOVED_EDGE_ID,
@@ -709,7 +714,7 @@ export function registerImportCompositionMoveIntegrationTests(
       );
       expect(outcome).toEqual({
         edges: UNMOVED,
-        counts: { created: 0, updated: 0, skipped: 0 },
+        counts: { created: 0, updated: 0, skipped: 0, replaced: 0 },
         errors: [
           { id: MOVED_EDGE_ID, code: "COMPOSITION_MOVE_BEFORE_INCUMBENT" },
         ],
@@ -791,7 +796,7 @@ export function registerImportCompositionMoveIntegrationTests(
                 namesBothRows: true,
               },
             ],
-            edges: { created: 1, updated: 0, skipped: 0 },
+            edges: { created: 1, updated: 0, skipped: 0, replaced: 1 },
             open: ["p1→w1", "p2→w4"],
             fenceViolations: [],
           });
@@ -936,7 +941,7 @@ export function registerImportCompositionMoveIntegrationTests(
                   code: "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
                 },
               ],
-              edges: { created: 0, updated: 0, skipped: 0 },
+              edges: { created: 0, updated: 0, skipped: 0, replaced: 0 },
               fenceViolations: [],
             });
           },
@@ -1019,7 +1024,7 @@ export function registerImportCompositionMoveIntegrationTests(
       });
       expect(report).toEqual({
         errors: [],
-        edges: { created: 2, updated: 2, skipped: 0 },
+        edges: { created: 2, updated: 2, skipped: 0, replaced: 0 },
         open: ["i1→s2", "i2→s1"],
         fenceViolations: [],
       });
@@ -1112,7 +1117,7 @@ export function registerImportCompositionMoveIntegrationTests(
         });
         expect(report).toEqual({
           errors: [],
-          edges: { created: 2, updated: 2, skipped: 0 },
+          edges: { created: 2, updated: 2, skipped: 0, replaced: 0 },
           open: ["a⊂b", "b⊂root"],
           fenceViolations: [],
         });
@@ -1136,7 +1141,7 @@ export function registerImportCompositionMoveIntegrationTests(
               validTo: undefined,
             },
           ],
-          counts: { created: 1, updated: 0, skipped: 0 },
+          counts: { created: 1, updated: 0, skipped: 0, replaced: 1 },
           errors: [],
           fenceViolations: 0,
         });
@@ -1159,7 +1164,7 @@ export function registerImportCompositionMoveIntegrationTests(
         );
         expect(await outcomeOf(seeded, result)).toEqual({
           edges: MOVED,
-          counts: { created: 1, updated: 1, skipped: 0 },
+          counts: { created: 1, updated: 1, skipped: 0, replaced: 1 },
           errors: [],
           fenceViolations: 0,
         });

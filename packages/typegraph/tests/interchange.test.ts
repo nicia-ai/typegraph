@@ -478,7 +478,7 @@ describe("Interchange Round-Trip", () => {
     expect(result).toMatchObject({
       success: true,
       nodes: { created: 3, updated: 0, skipped: 0 },
-      edges: { created: 2, updated: 0, skipped: 0 },
+      edges: { created: 2, updated: 0, skipped: 0, replaced: 0 },
       errors: [],
     });
     expect(await targetStore.nodes.Person.getById(alice.id)).toMatchObject({

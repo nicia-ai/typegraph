@@ -3957,6 +3957,8 @@ async function insertPreparedCompositionEdges<G extends GraphDef>(
  */
 type AttachmentApplyResult = Readonly<{
   wrote: boolean;
+  /** Whether the write retired (deleted or ended) the part's incumbent. */
+  retiredIncumbent: boolean;
   edge: Edge | undefined;
 }>;
 
@@ -4331,11 +4333,12 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
     }
   }
   const results: AttachmentApplyResult[] = [];
-  for (const { decided, replacement } of moves) {
+  for (const { decided, replacement, retire } of moves) {
     results.push(
       replacement === undefined ?
         {
           wrote: false,
+          retiredIncumbent: false,
           edge:
             decided.incumbent === undefined ?
               undefined
@@ -4343,6 +4346,7 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
         }
       : {
           wrote: true,
+          retiredIncumbent: retire !== undefined,
           edge: await readHeldEdge(
             target,
             ctx.graphId,
@@ -4541,8 +4545,8 @@ export type ImportedCompositionMove = Readonly<{
  * The moves must name distinct parts of one part kind each — import groups
  * them by part kind. Import routes a row here only after reading, under the
  * lock this frame holds, an incumbent that is neither the requested attachment
- * nor a row of its own document, so every fenced decision writes; one that
- * writes nothing is an invariant failure.
+ * nor a row of its own document, so every fenced decision retires that
+ * incumbent and writes the new edge; one that does not is an invariant failure.
  */
 export async function applyImportedCompositionMoves<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -4590,9 +4594,9 @@ export async function applyImportedCompositionMoves<G extends GraphDef>(
         },
       })),
     );
-    if (applied.some((result) => !result.wrote)) {
+    if (applied.some((result) => !result.wrote || !result.retiredIncumbent)) {
       throw new CompilerInvariantError(
-        `An imported composition move of "${partKind}" wrote no attachment under the fence that decided it.`,
+        `An imported composition move of "${partKind}" wrote no attachment, or retired no incumbent, under the fence that decided it.`,
         { partKind },
       );
     }

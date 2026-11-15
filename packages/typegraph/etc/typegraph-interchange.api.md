@@ -4244,6 +4244,7 @@ export const ImportResultSchema: z.ZodObject<{
         created: z.ZodNumber;
         updated: z.ZodNumber;
         skipped: z.ZodNumber;
+        replaced: z.ZodNumber;
     }, z.core.$strip>;
     identity: z.ZodObject<{
         created: z.ZodNumber;

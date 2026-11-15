@@ -499,7 +499,7 @@ error entry you see in `result.errors`.
 | `onConflict` | `"skip" \| "update" \| "error"` | required | How to handle existing entities |
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
-| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips only, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
+| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips and the order of create refusals in `result.errors`, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
 | `onCompositionIncumbent` | `"refuse" \| "replace"` | `"refuse"` | What a new composition edge does about an attachment its part already holds that the document does not mention — see [A composition part that moved](#a-composition-part-that-moved). |
 
 ### Evaluation order and `batchSize`
@@ -515,13 +515,24 @@ The order matters because rows depend on each other. An update that ends a
 `oneActive` window frees the slot a create in the same document takes, so the
 create sees the end wherever either row sits in the document. Import only ever
 ends or tightens a window — it never resurrects a row or clears an end — so
-applying existing rows first can only make room for a create. `batchSize`
-therefore decides round trips and nothing else: the same document commits the
-same rows at `batchSize: 1` and `batchSize: 100000`.
+applying existing rows first can only make room for a create. The same
+document therefore commits the same rows at `batchSize: 1` and
+`batchSize: 100000`.
 
 `result.errors` lists refusals in that phase order rather than document order:
 validation refusals first, then refusals of existing rows, then of moves, then
-of creates.
+of creates. Within the create phase the order also depends on `batchSize`:
+each slice reports the refusals of the rows it writes as a batch before those
+of the rows it must write one at a time (rows checked for cycles), so at
+`batchSize: 1` create refusals follow document order and at larger sizes they
+need not. Match an error to its row by `kind` and `id`, not by position.
+
+`importGraph` classifies the whole document before it writes an edge, so it
+holds every edge row of the document, and for each row that names an existing
+edge the stored row it read, until the edge phase ends. A re-import that
+updates most of its edges therefore needs roughly twice the edge memory of the
+document itself. Use `importGraphStream` for a document too large to hold
+twice: it holds one chunk at a time.
 
 ### Trusted initial import
 
@@ -810,14 +821,20 @@ import) when its move had already written its other half; a moved part found
 without its whole costs one more pass over everything written after the moves.
 Failures that depend on each other — a chain of moves, each into the slot the
 one before it frees, whose first link is refused — are found one link per pass,
-so such a chain costs passes in proportion to its length.
+so such a chain costs passes in proportion to its length and move writes in
+proportion to its length squared. Every pass runs inside the import's
+transaction, which holds the per-graph write lock throughout: on SQLite a chain
+of 200 such failures took about 10 seconds, so one of 2,000 would hold the
+write lock for more than 15 minutes.
 
 `onCompositionIncumbent: "replace"` applies such a row as a move instead,
 through the owner `nodes.<Kind>.reparent(...)` uses: a `one` incumbent is
 deleted, and a `oneActive` incumbent's window ends at the new edge's
 `validFrom`, so the two windows abut (a row stating no `validFrom` moves the
 part at the import's clock). The new edge keeps the document's id and
-properties. A move opens the new attachment at one instant with no end, so a
+properties, and counts under `result.edges.created`; each incumbent a
+`"replace"` move retires counts under `result.edges.replaced`, the only count
+for a row the document does not contain. A move opens the new attachment at one instant with no end, so a
 row stating a `validTo`, or `validFrom: null`, is refused with
 `COMPOSITION_IMPORT_MOVE_WINDOW_UNSUPPORTED`; a `validFrom` before the
 incumbent's own is refused with `COMPOSITION_MOVE_BEFORE_INCUMBENT`, as

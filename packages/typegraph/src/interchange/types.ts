@@ -484,6 +484,12 @@ export const ImportResultSchema = z.object({
     created: z.number().int().nonnegative(),
     updated: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
+    /**
+     * Edges the document never names that `onCompositionIncumbent: "replace"`
+     * retired to move a part: a `"one"` incumbent deleted, or a `"oneActive"`
+     * incumbent's window ended. Each also counts its new edge under `created`.
+     */
+    replaced: z.number().int().nonnegative(),
   }),
   identity: z.object({
     created: z.number().int().nonnegative(),

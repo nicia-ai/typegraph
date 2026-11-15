@@ -151,7 +151,12 @@ export function registerImportRequiredPartPurgeIntegrationTests(
 
       console.info("purge of a part with a pre-existing edge", second);
       expect(second.nodes).toEqual({ created: 0, updated: 0, skipped: 0 });
-      expect(second.edges).toEqual({ created: 0, updated: 0, skipped: 0 });
+      expect(second.edges).toEqual({
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        replaced: 0,
+      });
       const remaining = await store.edges.irpTagged.find();
       const reported = second.errors.some(
         (error) => error.entityType === "edge" && error.id === "tag-edge",
@@ -293,7 +298,12 @@ export function registerImportRequiredPartPurgeIntegrationTests(
       expect(await store.nodes.IrpPart.count()).toBe(0);
       expect(await store.edges.irpTagged.count()).toBe(0);
       expect(result.nodes).toEqual({ created: 1, updated: 0, skipped: 0 });
-      expect(result.edges).toEqual({ created: 0, updated: 0, skipped: 0 });
+      expect(result.edges).toEqual({
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        replaced: 0,
+      });
       expect(result.errors.map((error) => error.id).toSorted()).toEqual([
         "dup",
         "e",

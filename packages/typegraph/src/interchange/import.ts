@@ -1745,7 +1745,7 @@ function emptyImportResult(): ImportResult {
   return {
     success: true,
     nodes: { created: 0, updated: 0, skipped: 0 },
-    edges: { created: 0, updated: 0, skipped: 0 },
+    edges: { created: 0, updated: 0, skipped: 0, replaced: 0 },
     identity: { created: 0, skipped: 0 },
     errors: [],
   };
@@ -1802,6 +1802,7 @@ function mergeImportResult(target: ImportResult, source: ImportResult): void {
   target.edges.created += source.edges.created;
   target.edges.updated += source.edges.updated;
   target.edges.skipped += source.edges.skipped;
+  target.edges.replaced += source.edges.replaced;
   target.identity.created += source.identity.created;
   target.identity.skipped += source.identity.skipped;
   target.errors.push(...source.errors);
@@ -3652,6 +3653,9 @@ async function processEdges(
     moves,
     options,
     record,
+    () => {
+      result.edges.replaced++;
+    },
     () =>
       snapshotEdgeAttemptState(
         frame,
@@ -4712,6 +4716,7 @@ async function applyCompositionMoveSet(
   moves: readonly CompositionMove[],
   options: ResolvedImportOptions,
   record: RecordEdgeOutcome,
+  recordReplacedIncumbent: () => void,
   snapshot: () => () => void,
   writeRest: () => Promise<void>,
 ): Promise<void> {
@@ -4741,6 +4746,11 @@ async function applyCompositionMoveSet(
             }))
           : compositionMoveFailureOutcomes(move, failure);
         for (const { row, outcome } of outcomes) record(row.edge, outcome);
+        // The store's move owner refuses a `"replace"` move that retired no
+        // incumbent, so every landed one retired exactly one.
+        if (failure === undefined && move.kind === "replace") {
+          recordReplacedIncumbent();
+        }
       }
       await writeRest();
       return judgeMovedParts(frame, graphId, registry, landed);
