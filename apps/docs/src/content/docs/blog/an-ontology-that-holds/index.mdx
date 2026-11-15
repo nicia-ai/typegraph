@@ -1,0 +1,352 @@
+---
+title: "An Ontology That Holds"
+date: 2026-11-14
+excerpt: "TypeGraph 0.75 makes every ontology relation do something: supertype queries return subtypes, parts are deleted with their whole, acyclic and target-side cardinality refuse bad edges, and tightening a relation is checked against the rows you already have."
+tags:
+  - announcements
+cover:
+  alt: "A field of muted dependency nodes with one chain lit in blue from left to right, and a red dashed arc running from the chain's last node back toward its first, stopped by a red refusal mark before it lands"
+  image: "./cover.png"
+social:
+  alt: "An Ontology That Holds"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Until now, parts of a TypeGraph ontology were labels. You could declare that a
+`Section` is part of a `Document`, but the declaration wasn't tied to the edge
+that stored the containment, so deleting the document left its sections
+behind. A subclass only showed up in a supertype query when you asked for it,
+and a custom meta-edge was metadata that no read or write consulted.
+
+In 0.75 every relation the ontology declares has a defined effect on reads,
+writes, schema changes and merges, and the store refuses the writes that would
+break one. This post walks through the parts you'll touch
+first on a small documentation graph: documents, runbooks (a kind of
+document), and the sections they're made of. The outputs below come from
+running this code on SQLite.
+
+```typescript
+const Document = defineNode("Document", {
+  schema: z.object({ title: z.string() }),
+});
+const Runbook = defineNode("Runbook", {
+  schema: z.object({ title: z.string(), service: z.string() }),
+});
+const Section = defineNode("Section", {
+  schema: z.object({ heading: z.string() }),
+});
+
+const sectionOf = defineEdge("sectionOf");
+const dependsOn = defineEdge("dependsOn");
+const supersedes = defineEdge("supersedes");
+const linksTo = defineEdge("linksTo");
+
+const graph = defineGraph({
+  id: "docs",
+  nodes: {
+    Document: { type: Document },
+    Runbook: { type: Runbook },
+    Section: { type: Section },
+  },
+  edges: {
+    sectionOf: {
+      type: sectionOf,
+      from: [Section],
+      to: [Document],
+      cardinality: "one",
+    },
+    dependsOn: {
+      type: dependsOn,
+      from: [Document],
+      to: [Document],
+      acyclic: true,
+    },
+    supersedes: {
+      type: supersedes,
+      from: [Document],
+      to: [Document],
+      targetCardinality: "one",
+    },
+    linksTo: { type: linksTo, from: [Document], to: [Document] },
+  },
+  ontology: [
+    subClassOf(Runbook, Document),
+    partOf(Section, Document, { via: sectionOf }),
+  ],
+});
+```
+
+The graph holds one plain document, `doc-architecture`, and two runbooks,
+`rb-failover` and `rb-cache-flush`.
+
+## Supertypes include their subtypes
+
+```typescript
+const titles = await store
+  .query()
+  .from("Document", "d")
+  .orderBy("d", "title")
+  .select((ctx) => `${ctx.d.kind}: ${ctx.d.title}`)
+  .execute();
+
+const documentsOnly = await store
+  .query()
+  .from("Document", "d", { expansion: "exact" })
+  .select((ctx) => `${ctx.d.kind}: ${ctx.d.title}`)
+  .execute();
+```
+
+```text
+[
+  'Document: Architecture overview',
+  'Runbook: Cache flush',
+  'Runbook: Database failover'
+]
+[ 'Document: Architecture overview' ]
+```
+
+A query over `Document` now returns runbooks too, because a runbook is a
+document. One option, `expansion: "exact" | "subclasses" | "narrower"`,
+replaces `includeSubClasses` on `from()`, `to()` and `search()`, and the same
+answer drives endpoint admission, uniqueness scope, merge reconciliation and
+search. The `sectionOf` edge above never mentions `Runbook`, yet a runbook can
+hold sections, as the next section shows.
+
+That only makes sense if a runbook really is a document, so `subClassOf` is
+now checked: the child's Zod schema has to accept only values the parent's
+schema accepts, both at compile time and when the registry is built.
+`isStructuralSubtype(child, parent)` exposes the same verdict.
+`equivalentTo` between two registered kinds is now subsumption in both
+directions.
+
+## Parts go with their whole
+
+`partOf(Section, Document, { via: sectionOf })` declares a composition, and
+`via` names the edge that stores it. A part has at most one whole, enforced by
+a claim across every edge that realizes the relation. You attach a part when
+you create it:
+
+```typescript
+const steps = ["Detect the failure", "Promote the replica", "Repoint clients"];
+for (const [index, heading] of steps.entries()) {
+  await store.nodes.Section.create(
+    { heading },
+    { id: `failover-${index + 1}`, partOf: { whole: failover } },
+  );
+}
+```
+
+Deleting a whole deletes its parts in the same transaction, leaf-first. Since
+that is a bigger delete than it looks, `planDelete` shows what it would remove,
+computed by the same planner the delete runs:
+
+```typescript
+const plan = await store.nodes.Runbook.planDelete(failover.id);
+for (const part of plan.cascadedParts) {
+  console.log(
+    `${part.kind} ${part.id} (part of ${part.whole.id} via ${part.viaEdgeKind})`,
+  );
+}
+console.log(`${plan.removedEdgeIds.length} edges removed`);
+```
+
+```text
+Section failover-1 (part of rb-failover via sectionOf)
+Section failover-2 (part of rb-failover via sectionOf)
+Section failover-3 (part of rb-failover via sectionOf)
+3 edges removed
+```
+
+Show that to a person, and pass it back as a guard when they confirm. If
+someone adds a step while the dialog is open, the delete refuses instead of
+removing a section nobody saw:
+
+```typescript
+await store.nodes.Section.create(
+  { heading: "Verify replication lag" },
+  { id: "failover-4", partOf: { whole: failover } },
+);
+await store.nodes.Runbook.delete(failover.id, { expect: plan });
+```
+
+```text
+NodeDeletePlanMismatchError: Delete of Runbook/rb-failover no longer matches the expected plan: 1 part(s) added, 0 dropped; 1 edge id(s) added, 0 dropped.
+```
+
+Planning again and confirming deletes all four:
+
+```text
+4 sections deleted, 0 left
+```
+
+The delete reports the same parts as `cascadedParts` on its receipt and on
+`onOperationEnd`. `reparent` moves a part to another whole at one instant,
+`parts()` and `wholes()` walk the closure, and `subgraph({ composition: true })`
+returns a whole with everything it owns. On a `oneActive` relation, the
+one-whole rule holds at every point in valid time, so an `asOf` read never sees
+a part in two wholes at once.
+
+## Relations that can't close a loop
+
+`acyclic: true` declares that an edge kind never forms a cycle. Every write
+that could add an edge to it is checked first, and a batch is checked as a
+whole before its first row is written:
+
+```typescript
+await store.edges.dependsOn.create(overview, incident, {}, { id: "dep-1" });
+await store.edges.dependsOn.create(incident, cacheFlush, {}, { id: "dep-2" });
+try {
+  await store.edges.dependsOn.create(cacheFlush, overview, {}, { id: "dep-3" });
+} catch (error) {
+  if (!(error instanceof EdgeAcyclicityError)) throw error;
+  const witness = error.details.witness;
+  console.log(error.message);
+  console.log(witness?.nodes.map((node) => node.id).join(" -> "));
+  console.log(witness?.edges.map((edge) => `${edge.edgeId} (${edge.source})`));
+}
+```
+
+```text
+Acyclicity violation: "dependsOn" edge dep-3 would close a cycle in the "dependsOn" relation (Document/doc-architecture already reaches Runbook/rb-cache-flush).
+doc-architecture -> rb-incident -> rb-cache-flush
+[ 'dep-1 (stored)', 'dep-2 (stored)' ]
+```
+
+The refusal carries a witness: the path the new edge would close, so you can
+show someone which dependency to remove instead of only saying no. Graph merge
+runs the same check while it builds a plan and reports a cycle the plan would
+close as an `AcyclicityMergeConflictError` with the same witness.
+
+The check walks the edges reachable from the new edge's target. On a relation
+of 100,000 edges, a typical insert costs about as much as a `cardinality: "one"`
+insert (0.2 ms on SQLite, about 4 ms on PostgreSQL). The worst case is an edge
+pointing at the head of a long chain, where the walk visits every reachable
+edge: about 220 ms on SQLite for a chain of that size.
+
+## Bounds on both ends
+
+`cardinality` limits the edges leaving a node. `targetCardinality` limits the
+edges arriving at one, so "each document is superseded at most once" is now a
+declaration rather than application code:
+
+```typescript
+await store.edges.supersedes.create(overviewV2, overview);
+await store.edges.supersedes.create(overviewDraft, overview);
+```
+
+```text
+CardinalityError: Cardinality violation: "supersedes" targeting Document/doc-architecture allows "one" but 1 edge(s) already exist
+```
+
+It's enforced atomically on every write path, through the same claims as the
+source side.
+
+## Tightening a schema checks your data first
+
+Declaring a relation is easy on an empty graph. On a populated one, the
+question is whether the rows you already have satisfy it. Here two documents
+link to each other, and a new release of the graph declares `linksTo` acyclic:
+
+```typescript
+await store.edges.linksTo.create(overview, incident, {}, { id: "link-1" });
+await store.edges.linksTo.create(incident, overview, {}, { id: "link-2" });
+
+try {
+  await createStoreWithSchema(graphWithAcyclicLinks, backend);
+} catch (error) {
+  if (
+    error instanceof MigrationError &&
+    error.details.reason === "ontology-tightening-violated"
+  ) {
+    console.log(error.details.violations);
+  }
+}
+```
+
+```text
+[
+  {
+    family: 'edgeAcyclicity',
+    relation: 'linksTo',
+    edgeIds: [ 'link-1', 'link-2' ]
+  }
+]
+```
+
+The commit is refused and nothing is published. Remove the back-link and the
+same call migrates:
+
+```text
+[ 'Edge "linksTo" declared acyclic: true' ]
+```
+
+The ontology change classifier calls this kind of change a `warning`: a
+tightening that is checked against live data inside the schema-commit
+transaction. Adding `disjointWith`, `subClassOf`, `equivalentTo` or a
+`partOf` pair, narrowing an edge's endpoints, and declaring a stricter
+`cardinality`, `targetCardinality` or `acyclic: true` are all checked the same
+way. One refusal lists every violated family, in the same shape
+`store.verifyConstraintFences()` returns, so you can fix the rows and retry
+once. Adding or reshaping a unique constraint on a kind that already holds rows
+is refused outright, because a schema commit doesn't rebuild the claims that
+enforce it.
+
+## Identity history
+
+On a graph with [operational identity](/identity) and `history: true`, the
+store now keeps an append-only log of every change to a node's identity class.
+`store.identity.transitionsOf(ref)` and `replay(ref)` return each change with
+its cause, both temporal coordinates and, for a change a merge applied, the
+branch, plan and review that produced it. Replay reconstructs membership
+through the same historical reader as `asOfRecorded`, so it can't disagree
+with a read.
+
+Graph merge carries identity through branches with fixed rules: a three-way
+classification of every staged assertion, a hard conflict when two branches
+assert opposite relations for one pair, and a veto that drops a scored match
+between two entities a `different` assertion holds apart. Conflicts that are
+certain to fail at apply (two branches filling one `targetCardinality` slot,
+moving one part to different wholes, closing a cycle) are now refused while
+the plan is built, not halfway through the commit.
+
+## Upgrading
+
+- **Base schema version 9.** This release adds the identity transition log
+  and a retention column on the recorded clock. A privileged open
+  (`createStoreWithSchema`) or `backend.adoptBaseSchema()` adopts it in place.
+  Until one runs, a DML-only runtime such as `createVerifiedStore` refuses with
+  `BaseSchemaMigrationError`. The bump is one-way, so upgrade every reader of a
+  shared database before any process opens it with 0.75.
+- **Supertype queries return subtypes by default.** Pass
+  `queryDefaults: { expansion: "exact" }` to `createStore` to keep the old
+  behavior in one place. `includeSubClasses` is replaced by `expansion`.
+- **Deleting a whole deletes its parts.** A graph that declared `partOf`
+  without `via` must name the realizing edge before it opens.
+- **Stored merge plans and reviews must be planned again.** Plans move to
+  format 3 and reviews to formats 3 and 4.
+- **`zod` peer range is now `^4.5.0`**, which the structural subtype check
+  needs.
+- **Custom `metaEdge()` is gone**, along with the `InferenceType` union and the
+  deprecated `sameAs`/`differentFrom` factories. Move free-form vocabulary to
+  `defineGraph({ annotations })` and run `migrateSchema()` once.
+- **On PostgreSQL**, a role that writes into an `acyclic` or composition
+  relation needs `INSERT` and `UPDATE` on `typegraph_fences`.
+
+The [changelog](/changelog) has every breaking change with its migration.
+
+## Try it
+
+- [Composition](/ontology#composition) and
+  [previewing a delete](/ontology#previewing-a-delete)
+- [Acyclic edges](/ontology#enforce-an-instance-level-taxonomy-with-acyclic-true)
+  and [target cardinality](/core-concepts#target-cardinality)
+- [Subclass expansion](/queries/source#subclass-expansion)
+- [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+- [Replay and identity history](/identity#replay-and-identity-history)
+- [Base-schema version 9](/backend-setup#base-schema-version-9-allocation-retention-and-the-identity-transition-log)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />
