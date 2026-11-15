@@ -10,6 +10,7 @@ import {
   graphRelationsProvisionedBy,
   resolveGraphRelationNames,
 } from "../backend/graph-relations";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../backend/recorded-storage";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
@@ -133,6 +134,20 @@ const DIGEST_BASELINES: readonly ReadonlySet<string>[] = [
     "storeOperations",
   ] as const satisfies readonly GraphRelationKey[],
 ].map((keys) => new Set(keys.map((key) => FORK_RELATION_NAMES[key])));
+
+/**
+ * The column-level analogue of {@link DIGEST_BASELINES}: per relation, the
+ * columns a release added after the first fork release. A digested row omits
+ * each of them while it is NULL, so a proof recorded before the column existed
+ * (rows without it) and one recorded after (the column, NULL) hash alike, and a
+ * fork taken before an upgrade keeps verifying. A non-NULL value is real
+ * content and stays in the digest. Append only; never remove an entry.
+ */
+const DIGEST_COLUMNS_ADDED_AFTER_FIRST_FORK_RELEASE: Readonly<
+  Record<string, readonly string[]>
+> = {
+  [FORK_RELATION_NAMES.recordedClock]: [RECORDED_ANCHOR_RETENTION_COLUMN],
+};
 
 /** The relations every target holds, since the first baseline required them. */
 const REQUIRED_RELATION_TABLES = requireDefined(DIGEST_BASELINES[0]);
@@ -340,9 +355,26 @@ async function graphRows(
   return rows.map((entry) => entry.row);
 }
 
-async function digestRows(rows: readonly JsonRow[]): Promise<string> {
+/** The row as the digest reads it: late-added columns omitted while NULL. */
+function digestedRow(table: string, row: JsonRow): JsonRow {
+  const lateColumns =
+    DIGEST_COLUMNS_ADDED_AFTER_FIRST_FORK_RELEASE[table] ?? [];
+  if (!lateColumns.some((column) => row[column] === null)) return row;
+  return Object.fromEntries(
+    Object.entries(row).filter(
+      ([column, value]) => !(lateColumns.includes(column) && value === null),
+    ),
+  );
+}
+
+async function digestRows(
+  table: string,
+  rows: readonly JsonRow[],
+): Promise<string> {
   return sha256Hex(
-    JSON.stringify(rows.map((row) => JSON.stringify(row)).sort()),
+    JSON.stringify(
+      rows.map((row) => JSON.stringify(digestedRow(table, row))).sort(),
+    ),
     32,
   );
 }
@@ -367,10 +399,10 @@ async function forkContentDigest(
   const digests: [string, string][] = [];
   for (const [table, rows] of relations) {
     if (rows.length === 0 && !baseline.has(table)) continue;
-    digests.push([table, await digestRows(rows)]);
+    digests.push([table, await digestRows(table, rows)]);
   }
   for (const [table, rows] of vectors) {
-    digests.push([table, await digestRows(rows)]);
+    digests.push([table, await digestRows(table, rows)]);
   }
   return sha256Hex(JSON.stringify(digests), 32);
 }

@@ -1171,7 +1171,9 @@ versioned local SQLite file, run `await backend.adoptBaseSchema()` or
 `createStoreWithSchema()` with DDL privileges. The managed libSQL factory is
 asynchronous and adopts on open.
 Custom schema providers must include the column and supply the version 9 adoption
-step. Pruning requires both `recordedAnchorLookup` and `recordedAnchorPruning` capabilities, plus the backend-owned
+step: the three `baseSchemaRuntime` members listed under
+[Base-schema adoption DDL](/backend-authoring/#base-schema-adoption-ddl-baseschemaruntime).
+Pruning requires both `recordedAnchorLookup` and `recordedAnchorPruning` capabilities, plus the backend-owned
 `assertBaseSchemaCurrent` lifecycle assertion, which reports the actual installed
 version in `BaseSchemaMigrationError`. `recordedAnchorLookup` advertises lookup only;
 a backend claiming pruning without the required member raises `ConfigurationError`.

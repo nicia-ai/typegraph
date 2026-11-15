@@ -1512,7 +1512,8 @@ issue codes on `GraphExtensionValidationError` instead (see
 | `ONTOLOGY_COMPOSITION_OPTION_UNKNOWN` | `partOf()` / `hasPart()` was given an option key other than `via`, `partSide` and `existence`. `details.unknownKeys` names them. |
 | `ONTOLOGY_COMPOSITION_EXISTENCE_INVALID` | `existence` is not `"optional"` or `"required"`, on a factory or on a persisted relation. |
 | `ONTOLOGY_COMPOSITION_PART_SIDE_INVALID` | `partSide` is not `"from"` or `"to"`, or contradicts the endpoints the `via` edge admits. |
-| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` (extension) | A `partOf` / `hasPart` relation has no `via`. Name the realizing edge kind, or delete the relation. A persisted schema that carries one is refused on load until it is rewritten. |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` (extension) | A `partOf` / `hasPart` relation has no `via`, including a `partOf()` / `hasPart()` call from untyped code that omits the options argument or its `via`. Name the realizing edge kind, or delete the relation. A persisted schema that carries one is refused on load until it is rewritten. |
+| `ONTOLOGY_COMPOSITION_VIA_INVALID` | `partOf()` / `hasPart()` was given a `via` that is not an edge type (a string name, a node type). Pass the edge type itself: `{ via: someEdge }`. |
 | `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `via`. |
 | `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `partSide`. |
 | `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `existence`. |
