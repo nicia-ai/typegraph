@@ -377,7 +377,9 @@ row, candidate, and optional watermark in one statement, without checking the ma
 PostgreSQL executes this schema-sensitive projection unnamed so a warm connection
 can read before and after column adoption without a stale prepared result type.
 An absent watermark means no recorded pruning on that storage. This supports
-synchronous local SQLite upgrades and previously allocated PostgreSQL working copies.
+synchronous local SQLite upgrades. A previously allocated durable PostgreSQL working copy
+is adopted when it is reopened: the reopen brings its missing base-schema steps
+to the current version in place before any read or write, so it never reaches a lookup unadopted.
 For an existing versioned local SQLite file, run `await backend.adoptBaseSchema()`
 or `createStoreWithSchema()` with DDL privileges before pruning; synchronous opening
 preserves its marker. The managed libSQL factory is asynchronous and adopts on open.
