@@ -1710,8 +1710,8 @@ in `result.errors`:
 A write that records an identity transition, a `transitionsOf` or `replay`
 read, a `pruneIdentityTransitions` call or an archival transition restore on a
 database whose transition-log relations were never created (base-schema
-version 10 not yet adopted; see
-[Base-schema version 10](/backend-setup/#base-schema-version-10-the-identity-transition-log))
+version 9 not yet adopted; see
+[Base-schema version 9](/backend-setup/#base-schema-version-9-allocation-retention-and-the-identity-transition-log))
 throws a `ConfigurationError` whose `details.code` is
 `IDENTITY_TRANSITION_RELATIONS_MISSING`, whose `details.relations` names
 both relations, and whose `details.surface` is `capture-flush`,
@@ -2107,7 +2107,7 @@ using that table finish. A stricter caller `lock_timeout` remains effective.
 ### `BaseSchemaMigrationError`
 
 `pruneRecordedInstants` also raises this error when the installed base schema is
-older than the current version. Its backend lifecycle assertion reads the marker and reports
+older than version 9. Its backend lifecycle assertion reads the marker and reports
 the actual installed version. `resolveRecordedInstant` can read pre-v9 allocation
 logs without this assertion and treats absent retention metadata as unpruned storage.
 

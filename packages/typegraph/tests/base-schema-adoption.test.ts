@@ -1230,7 +1230,7 @@ describe("deployment-wide base-schema adoption", () => {
 
   it("catches an installed version-8 PGlite database up to the current version through adoptBaseSchema() directly, gaining the identity transition log", async () => {
     // `adoptBaseSchema()` is the offline path, which never calls
-    // `generateDdl()`, so only the version-10 step body itself can recreate
+    // `generateDdl()`, so only the version-9 step body itself can recreate
     // the relations a real version-8 deployment lacks — including the
     // transition log's `restored_at` column, which ships with the table.
     const { backend, client } = await createLocalPgliteBackend({

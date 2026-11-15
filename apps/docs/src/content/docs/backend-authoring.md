@@ -110,10 +110,10 @@ Render both from your dialect's own DDL generators over the profile's table
 bindings, as the bundled profiles do, so a custom table name reaches the
 statements. A derived profile that leaves `baseSchemaRuntime` alone keeps the
 bundled members; one that replaces it must carry them over. When either is
-absent, version-10 adoption refuses with a `ConfigurationError` whose
+absent, version-9 adoption refuses with a `ConfigurationError` whose
 `details.missingDependencies` names what is missing and
-`details.adoptionVersion` is `10`; nothing is stamped, so adoption retries from
-version 9 once the profile supplies them. A profile whose adoption-step registry
+`details.adoptionVersion` is `9`; nothing is stamped, so adoption retries from
+version 8 once the profile supplies them. A profile whose adoption-step registry
 stops below the current version fails to construct with
 `CompilerInvariantError` ("adoption registry must end at the current version").
 

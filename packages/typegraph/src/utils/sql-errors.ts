@@ -1010,8 +1010,8 @@ const IDENTITY_TRANSITION_RELATIONS_MISSING_CODE =
  * restore — see `withIdentityTransitionLogRelations` in
  * `identity/transition-log.ts`, the one seam every such statement runs
  * through) into an error that names the transition-log relations and the
- * base-schema adoption that creates them. They are base-schema version 10
- * relations, so a database adopted only through version 9 lacks them while
+ * base-schema adoption that creates them. They are base-schema version 9
+ * relations, so a database adopted only through version 8 lacks them while
  * every recorded-time relation exists; the generic recorded-relations error
  * would send its reader after tables that are already there.
  */
@@ -1034,7 +1034,7 @@ export async function withIdentityTransitionRelationsPrecondition<T>(
       {
         cause: error,
         suggestion:
-          "They are base-schema version 10 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker reads or writes the transition log. Externally managed DDL applies the version-10 statements and advances the base-schema marker to 10.",
+          "They are base-schema version 9 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker reads or writes the transition log. Externally managed DDL applies the version-9 statements and advances the base-schema marker to 9.",
       },
     );
   }

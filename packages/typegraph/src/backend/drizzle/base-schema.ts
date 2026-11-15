@@ -94,17 +94,7 @@ export const BASE_SCHEMA_RELEASES = [
   },
   {
     version: 9,
-    id: "recorded-anchor-retention-watermark",
-    orderedShapeDigests: {
-      postgres:
-        "473b1e867ce4b37ba343b076e881fe461f64bc619cb5fc32f1e3891985a7770c",
-      sqlite:
-        "175083c94394427c766bae0df5cc07357447bc8b9910fbfe6964a85a51b2cf99",
-    },
-  },
-  {
-    version: 10,
-    id: "identity-transition-log",
+    id: "recorded-retention-and-identity-transition-log",
     orderedShapeDigests: {
       postgres:
         "d4e733e6481d14ebee5f16720cec6869c2ceb3b1fd7dc583bfff0a239c5a5b2e",

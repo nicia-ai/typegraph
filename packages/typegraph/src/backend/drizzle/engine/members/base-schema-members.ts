@@ -116,22 +116,22 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   ) => Promise<void>;
   /**
    * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
-   * statements for the identity transition log, the version-10 adoption
+   * statements for the identity transition log, the version-9 adoption
    * step — rendered once by the caller from its own dialect's DDL
    * generators, the same way `fencesTableDdl` is. A brand-new relation
-   * needs no ALTER-shaped migration, so this step's `bootstrap` is
-   * `"covered-by-generated-ddl"`; `adopt()` still ensures it for the
-   * OFFLINE adoption path, which never calls `generateDdl()`. Scoped to
+   * needs no ALTER-shaped migration, so bootstrap's generated DDL already
+   * creates it; `adopt()` still ensures it for the OFFLINE adoption path,
+   * which never calls `generateDdl()`. Scoped to
    * exactly this relation (not the identity-enablement `ensureIdentityTables`
    * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
    * relation: a database that predates this release owes it regardless of
    * whether any graph in it has Operational Identity enabled. Older callers
-   * may omit it; version-10 adoption then refuses with a clear error.
+   * may omit it; version-9 adoption then refuses with a clear error.
    */
   identityTransitionsTableDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` for the transition log's per-graph
-   * retention watermark, the version-10 adoption step's other half.
+   * retention watermark, adopted by the same version-9 step.
    */
   identityTransitionRetentionTableDdl?: string;
 }>;
@@ -169,9 +169,9 @@ export type BaseSchemaMembers = Readonly<{
  * identity-assertions relation's `since_idx` indexes), version 4 (the
  * revision-changes relation), version 5 (the byte-ordered `graph_id`
  * indexes), version 6 (the recorded adjacency indexes), version 7 (the
- * recorded-anchor log), version 8 (durable Store outcomes), version 9 (the
- * recorded-allocation retention watermark) and version 10 (the identity
- * transition log plus its retention watermark) all follow the same
+ * recorded-anchor log), version 8 (durable Store outcomes) and version 9 (the
+ * recorded-allocation retention column plus the identity transition log and
+ * its retention watermark) all follow the same
  * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
@@ -199,13 +199,28 @@ export function createBaseSchemaMembers(
     identityTransitionRetentionTableDdl,
   } = deps;
 
-  async function adoptRecordedAnchorRetention(
-    clockProvisioned: boolean,
-  ): Promise<void> {
-    if (ensureRecordedAnchorRetentionStorage === undefined) {
-      throw missingAdoptionDeps(9, { ensureRecordedAnchorRetentionStorage });
+  /**
+   * Version 9 adds the recorded clock's retention column and the identity
+   * transition log. Every dependency is checked before either half runs, so
+   * a profile missing one creates nothing and stamps nothing.
+   */
+  function requireVersion9Deps() {
+    if (
+      ensureRecordedAnchorRetentionStorage === undefined ||
+      identityTransitionsTableDdl === undefined ||
+      identityTransitionRetentionTableDdl === undefined
+    ) {
+      throw missingAdoptionDeps(9, {
+        ensureRecordedAnchorRetentionStorage,
+        identityTransitionsTableDdl,
+        identityTransitionRetentionTableDdl,
+      });
     }
-    await ensureRecordedAnchorRetentionStorage(clockProvisioned);
+    return {
+      ensureRecordedAnchorRetentionStorage,
+      identityTransitionsTableDdl,
+      identityTransitionRetentionTableDdl,
+    };
   }
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -302,30 +317,27 @@ export function createBaseSchemaMembers(
       },
       {
         version: 9,
-        adopt: () => adoptRecordedAnchorRetention(false),
-        bootstrap: {
-          phase: "after",
-          adopt: () => adoptRecordedAnchorRetention(true),
-        },
-      },
-      {
-        version: 10,
         async adopt(): Promise<void> {
-          if (
-            identityTransitionsTableDdl === undefined ||
-            identityTransitionRetentionTableDdl === undefined
-          ) {
-            throw missingAdoptionDeps(10, {
-              identityTransitionsTableDdl,
-              identityTransitionRetentionTableDdl,
-            });
-          }
-          for (const ddl of identityTransitionsTableDdl) {
+          const version9 = requireVersion9Deps();
+          for (const ddl of version9.identityTransitionsTableDdl) {
             await ensureTable(ddl);
           }
-          await ensureTable(identityTransitionRetentionTableDdl);
+          await ensureTable(version9.identityTransitionRetentionTableDdl);
+          await version9.ensureRecordedAnchorRetentionStorage(false);
         },
-        bootstrap: { phase: "covered-by-generated-ddl" },
+        // Generated DDL already carries the transition-log relations; an
+        // existing clock still needs its retention column.
+        bootstrap: {
+          phase: "after",
+          async adopt(): Promise<void> {
+            if (ensureRecordedAnchorRetentionStorage === undefined) {
+              throw missingAdoptionDeps(9, {
+                ensureRecordedAnchorRetentionStorage,
+              });
+            }
+            await ensureRecordedAnchorRetentionStorage(true);
+          },
+        },
       },
     ],
   });

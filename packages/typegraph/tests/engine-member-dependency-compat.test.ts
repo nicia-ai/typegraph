@@ -31,21 +31,25 @@ describe("engine member dependency compatibility", () => {
     expect(ensureTable).not.toHaveBeenCalled();
   });
 
-  it("accepts base-schema deps without transition-log DDL and refuses version-10 adoption naming it", async () => {
+  it("accepts base-schema deps without transition-log DDL and refuses version-9 adoption naming it", async () => {
     const ensureTable = vi.fn((_ddl: string): Promise<void> =>
       Promise.resolve(),
+    );
+    const ensureRecordedAnchorRetentionStorage = vi.fn(
+      (_clockProvisioned: boolean): Promise<void> => Promise.resolve(),
     );
     const deps: CreateBaseSchemaMembersDeps = {
       baseSchemaVersionsTableDdl: "CREATE TABLE versions",
       ensureTable,
       executeDdl: (_ddl: string): Promise<void> => Promise.resolve(),
       generateDdl: () => [],
-      readVersion: () => Promise.resolve(9),
+      readVersion: () => Promise.resolve(8),
       writeVersion: (version) => Promise.resolve(version),
       ensureGraphTemplatesTable: () => Promise.resolve(),
       fencesTableDdl: "CREATE TABLE fences",
       ensureEdgeMatchIdentityStorage: () => Promise.resolve(),
       sinceIndexDdl: [],
+      ensureRecordedAnchorRetentionStorage,
       identityTransitionsTableDdl: ["CREATE TABLE transitions"],
     };
     const members = createBaseSchemaMembers(deps);
@@ -54,10 +58,11 @@ describe("engine member dependency compatibility", () => {
       code: "CONFIGURATION_ERROR",
       details: {
         missingDependencies: ["identityTransitionRetentionTableDdl"],
-        adoptionVersion: 10,
+        adoptionVersion: 9,
       },
     });
     expect(ensureTable).not.toHaveBeenCalledWith("CREATE TABLE transitions");
+    expect(ensureRecordedAnchorRetentionStorage).not.toHaveBeenCalled();
   });
 
   it("accepts legacy identity deps and refuses journal setup before partial DDL", async () => {

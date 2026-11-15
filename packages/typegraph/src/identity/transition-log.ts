@@ -335,7 +335,7 @@ export type IdentityTransitionLogSurface =
 
 /**
  * THE detection seam for a database that lacks the transition-log relations
- * (base-schema version 10): every statement against either relation runs
+ * (base-schema version 9): every statement against either relation runs
  * through it, so a read, a prune and a write on such a database all refuse
  * with the same typed `IDENTITY_TRANSITION_RELATIONS_MISSING` error rather
  * than a raw driver error for whichever statement happened to run first.

@@ -1147,75 +1147,13 @@ including tombstones. Export the affected edges, hard-delete them, publish the
 new schema, and import them again so every row receives a key under the new
 declaration.
 
-### Base-schema version 10: the identity transition log
+### Base-schema version 9: allocation retention and the identity transition log
 
-Version 10 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
-`store.identity.transitionsOf()` and `store.identity.replay()` read, and
-`typegraph_identity_transition_retention`, one row per graph holding the watermark
-`pruneIdentityTransitions()` advances and the cut an archival restore carried in, each with the
-recorded time of the instant it was made at. Every database gets both, whether or not any graph in
-it enables identity, the same way version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
-`identityTransitionRetention`; replace the default names below consistently when the adapter
-overrides them. The step only creates relations, so it never rewrites existing rows and finishes in
-the time two `CREATE TABLE` statements and three `CREATE INDEX` statements on empty tables take.
+Version 9 is one release with two parts: a nullable retention column on the recorded clock, and
+the two identity transition-log relations. Privileged adoption applies both before it advances the
+marker, so a database stamped 9 has the column and both relations.
 
-The privileged open adopts it in place: `createStoreWithSchema()`, `createAdapterStoreWithSchema()`
-or an explicit `backend.adoptBaseSchema()`. Until one of them has run, a DML-only or zero-DDL
-runtime (`createVerifiedStore()`, graph-template attach) refuses with `BaseSchemaMigrationError`,
-so finish privileged adoption before those workers start. A plain `createStore()` attaches without
-reading the marker; on an identity graph opened with `history: true`, its first write that records
-an identity transition, and any `transitionsOf()`, `replay()` or `pruneIdentityTransitions()` call,
-then fails with `ConfigurationError` and `details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`,
-naming both relations.
-
-Externally managed DDL applies these statements, then advances the marker to 10 with the monotonic
-`INSERT ... ON CONFLICT` shown above. For PostgreSQL:
-
-```sql
-CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
-  "graph_id" TEXT NOT NULL,
-  "transition_id" TEXT NOT NULL,
-  "recorded_revision" BIGINT NOT NULL,
-  "recorded_at" TIMESTAMPTZ NOT NULL,
-  "valid_at" TIMESTAMPTZ NOT NULL,
-  "cause" TEXT NOT NULL,
-  "class_kind" TEXT NOT NULL,
-  "class_id" TEXT NOT NULL,
-  "prior_class_kind" TEXT,
-  "prior_class_id" TEXT,
-  "assertion_ids" JSONB NOT NULL,
-  "decision" JSONB,
-  "tx_id" TEXT,
-  "restored_at" TIMESTAMPTZ,
-  PRIMARY KEY ("graph_id", "transition_id")
-);
-CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx"
-  ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");
-CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx"
-  ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");
-CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx"
-  ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");
-CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
-  "graph_id" TEXT NOT NULL,
-  "pruned_before_revision" BIGINT NOT NULL,
-  "pruned_before_recorded_at" TIMESTAMPTZ,
-  "restored_pruned_before_revision" BIGINT,
-  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
-  PRIMARY KEY ("graph_id")
-);
-```
-
-SQLite uses the same statements with `INTEGER` for the three revision columns and `TEXT` for the
-timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_before_recorded_at`,
-`restored_pruned_before_recorded_at`, `assertion_ids`, `decision`).
-
-Advancing the marker to 10 is one-way: a library release that knows only version 9 or lower refuses a
-database stamped 10 as newer, so roll forward rather than back once any process has adopted it. A
-PostgreSQL durable working copy carries its own marker; reopening one provisioned under an earlier
-version adopts the current base schema into the allocation in place (see
-[PostgreSQL table-backed working copies](/graph-merge/#postgresql-table-backed-working-copies)).
-
-### Base-schema version 9: allocation retention watermark
+#### Allocation retention watermark
 
 Among recorded-time APIs, only `pruneRecordedInstants` requires version 9.
 As with every base-schema bump, verified-schema loading, graph-template entry points,
@@ -1262,6 +1200,74 @@ resumed batches do not rewrite a watermark whose boundary has not advanced.
 Its result reports `deletedCount`,
 `retainedBoundary`, and `hasMore`; resume until cleanup finishes. See
 [allocation metadata retention](/queries/temporal#retain-and-prune-allocation-metadata).
+
+#### The identity transition log
+
+Version 9 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
+`store.identity.transitionsOf()` and `store.identity.replay()` read, and
+`typegraph_identity_transition_retention`, one row per graph holding the watermark
+`pruneIdentityTransitions()` advances and the cut an archival restore carried in, each with the
+recorded time of the instant it was made at. Every database gets both, whether or not any graph in
+it enables identity, the same way version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
+`identityTransitionRetention`; replace the default names below consistently when the adapter
+overrides them. The step only creates relations, so it never rewrites existing rows and finishes in
+the time two `CREATE TABLE` statements and three `CREATE INDEX` statements on empty tables take.
+
+The privileged open adopts it in place: `createStoreWithSchema()`, `createAdapterStoreWithSchema()`
+or an explicit `backend.adoptBaseSchema()`. Until one of them has run, a DML-only or zero-DDL
+runtime (`createVerifiedStore()`, graph-template attach) refuses with `BaseSchemaMigrationError`,
+so finish privileged adoption before those workers start. A plain `createStore()` attaches without
+reading the marker; on an identity graph opened with `history: true`, its first write that records
+an identity transition, and any `transitionsOf()`, `replay()` or `pruneIdentityTransitions()` call,
+then fails with `ConfigurationError` and `details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`,
+naming both relations.
+
+Externally managed DDL applies these statements and the retention column above, then advances the
+marker to 9 with the monotonic `INSERT ... ON CONFLICT` shown above. For PostgreSQL:
+
+```sql
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  "valid_at" TIMESTAMPTZ NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" JSONB NOT NULL,
+  "decision" JSONB,
+  "tx_id" TEXT,
+  "restored_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "transition_id")
+);
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" BIGINT NOT NULL,
+  "pruned_before_recorded_at" TIMESTAMPTZ,
+  "restored_pruned_before_revision" BIGINT,
+  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id")
+);
+```
+
+SQLite uses the same statements with `INTEGER` for the three revision columns and `TEXT` for the
+timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_before_recorded_at`,
+`restored_pruned_before_recorded_at`, `assertion_ids`, `decision`).
+
+Advancing the marker to 9 is one-way: a library release that knows only version 8 or lower refuses a
+database stamped 9 as newer, so roll forward rather than back once any process has adopted it. A
+PostgreSQL durable working copy carries its own marker; reopening one provisioned under an earlier
+version adopts the current base schema into the allocation in place (see
+[PostgreSQL table-backed working copies](/graph-merge/#postgresql-table-backed-working-copies)).
 
 ### Base-schema version 8: durable Store outcomes
 
