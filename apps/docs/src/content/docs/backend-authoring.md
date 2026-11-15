@@ -99,21 +99,27 @@ runs (see [Upgrading deployment-wide base
 storage](/backend-setup/#upgrading-deployment-wide-base-storage)). Members a
 release added after profiles already existed are optional, so a profile written
 before them still constructs; the adoption step that needs a missing member is
-where its absence is an error. Version 6 reads two of them:
+where its absence is an error. Version 9 reads three of them:
 
 | Member | What it holds |
 | --- | --- |
+| `ensureRecordedAnchorRetentionStorage` | An async function taking `clockProvisioned: boolean` that makes the recorded clock relation carry its nullable `anchor_retention` column. It creates the relation first when `clockProvisioned` is `false` (offline adoption never ran the generated DDL) and only adds the column when it is missing. |
 | `identityTransitionsTableDdl` | The identity transition log's idempotent `CREATE TABLE`, followed by its `CREATE INDEX` statements, in run order. |
 | `identityTransitionRetentionTableDdl` | The retention watermark relation's idempotent `CREATE TABLE`. |
 
-Render both from your dialect's own DDL generators over the profile's table
-bindings, as the bundled profiles do, so a custom table name reaches the
-statements. A derived profile that leaves `baseSchemaRuntime` alone keeps the
-bundled members; one that replaces it must carry them over. When either is
-absent, version-9 adoption refuses with a `ConfigurationError` whose
-`details.missingDependencies` names what is missing and
-`details.adoptionVersion` is `9`; nothing is stamped, so adoption retries from
-version 8 once the profile supplies them. A profile whose adoption-step registry
+Render the two DDL members from your dialect's own DDL generators over the
+profile's table bindings, as the bundled profiles do, so a custom table name
+reaches the statements, and implement the retention function against the same
+recorded-clock binding. A derived profile that leaves `baseSchemaRuntime` alone
+keeps the bundled members; one that replaces it must carry all three over. When
+any is absent, version-9 adoption refuses with a `ConfigurationError` whose
+`details.missingDependencies` names every missing member (all three, for a
+profile that supplies none) and `details.adoptionVersion` is `9`; the check runs
+before any half of the step, so nothing is created or stamped and adoption
+retries from version 8 once the profile supplies them. Bootstrapping a database
+whose recorded clock already exists needs only
+`ensureRecordedAnchorRetentionStorage` and refuses the same way naming just that
+member. A profile whose adoption-step registry
 stops below the current version fails to construct with
 `CompilerInvariantError` ("adoption registry must end at the current version").
 

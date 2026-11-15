@@ -751,6 +751,36 @@ describe("composition registration checks (buildKindRegistry)", () => {
     }
   });
 
+  it("ONTOLOGY_COMPOSITION_VIA_REQUIRED: partOf and hasPart refuse missing options or a missing via", () => {
+    // MUTATION CHECK: remove `requireCompositionVia` — each call throws a raw
+    // TypeError reading `.via` / `.kind` of undefined.
+    const untyped: readonly unknown[] = [undefined, {}, { via: undefined }];
+    for (const options of untyped) {
+      for (const factory of [
+        () => (partOf as (...args: unknown[]) => unknown)(Part, Whole, options),
+        () =>
+          (hasPart as (...args: unknown[]) => unknown)(Whole, Part, options),
+      ]) {
+        expectCompositionCode(factory, "ONTOLOGY_COMPOSITION_VIA_REQUIRED");
+      }
+    }
+  });
+
+  it("ONTOLOGY_COMPOSITION_VIA_INVALID: partOf and hasPart refuse a via that is not an edge type", () => {
+    // MUTATION CHECK: remove the `isEdgeType` branch — a string via throws
+    // a raw TypeError or is persisted as `undefined`.
+    for (const via of ["realizes", Part, {}, 42]) {
+      expectCompositionCode(
+        () => partOf(Part, Whole, { via } as unknown as never),
+        "ONTOLOGY_COMPOSITION_VIA_INVALID",
+      );
+      expectCompositionCode(
+        () => hasPart(Whole, Part, { via } as unknown as never),
+        "ONTOLOGY_COMPOSITION_VIA_INVALID",
+      );
+    }
+  });
+
   it("existence on a non-composition meta-edge is refused (ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN)", () => {
     const issues = validateOntologyRelations([
       {

@@ -1,4 +1,4 @@
-import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, isEdgeType, type NodeType } from "../core/types";
 import { ConfigurationError } from "../errors";
 import {
   COMPOSITION_EXISTENCE_VALUES,
@@ -343,6 +343,34 @@ const COMPOSITION_ENUM_OPTIONS = [
 }>[];
 
 /**
+ * `via` is a compile-time requirement, so only an untyped caller can omit it
+ * (or the whole options argument, optional before this release) — refuse that
+ * with a typed error instead of a raw `TypeError` from the property read.
+ */
+function requireCompositionVia(
+  factory: typeof META_EDGE_PART_OF | typeof META_EDGE_HAS_PART,
+  options: CompositionOptions | undefined,
+): AnyEdgeType {
+  const suggestion = `Pass the edge type that realizes the composition: ${factory}(a, b, { via: someEdge }).`;
+  const via: unknown = options?.via;
+  if (via === undefined) {
+    throw new ConfigurationError(
+      `${factory}() requires a \`via\` option naming the edge type that realizes the composition.`,
+      { code: "ONTOLOGY_COMPOSITION_VIA_REQUIRED", factory },
+      { suggestion },
+    );
+  }
+  if (!isEdgeType(via)) {
+    throw new ConfigurationError(
+      `${factory}() was given a \`via\` that is not an edge type.`,
+      { code: "ONTOLOGY_COMPOSITION_VIA_INVALID", factory },
+      { suggestion },
+    );
+  }
+  return via;
+}
+
+/**
  * THE one read of a `partOf` / `hasPart` options object, shared by both
  * factories so neither can accept what the other refuses. A key this library
  * does not know is refused rather than dropped — a misspelled `existence`
@@ -354,6 +382,7 @@ function compositionRelationOptions(
   factory: typeof META_EDGE_PART_OF | typeof META_EDGE_HAS_PART,
   options: CompositionOptions,
 ): ReturnType<typeof compositionRelationFields> {
+  const via = requireCompositionVia(factory, options);
   const unknownKeys = Object.keys(options).filter(
     (key) => !COMPOSITION_OPTION_KEYS.includes(key),
   );
@@ -376,7 +405,7 @@ function compositionRelationOptions(
     );
   }
   return compositionRelationFields({
-    via: options.via.kind,
+    via: via.kind,
     partSide: options.partSide,
     existence: options.existence,
   });

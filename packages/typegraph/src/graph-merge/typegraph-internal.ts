@@ -113,9 +113,13 @@ export {
   edgeKindOwesAnyClaim,
 } from "../store/claims/composition-claims";
 export {
+  assertCompositionWindowsDisjoint,
   compositionWindowOverlapError,
   type CompositionWindowTransition,
+  type CompositionWindowVerdict,
+  type CompositionWindowWrites,
   readCompositionWindowConflict,
+  withDecidedCompositionWindows,
 } from "../store/claims/composition-windows";
 export {
   claimRefusalFor,

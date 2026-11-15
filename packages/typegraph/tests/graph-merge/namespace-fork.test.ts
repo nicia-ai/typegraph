@@ -17,6 +17,7 @@ import {
   resolveGraphRelationNames,
 } from "../../src/backend/graph-relations";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../src/backend/recorded-storage";
 import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
 import type { GraphBackend } from "../../src/backend/types";
 import {
@@ -100,6 +101,14 @@ const SECOND_RELEASED_FORK_RELATION_KEYS = [
 const RELATION_NAMES = resolveGraphRelationNames(defaultPostgresTableNames);
 
 /** The content digest exactly as the released library computed it. */
+/** A released digest read rows from before the retention column existed. */
+function asReleasedRow(row: unknown): unknown {
+  if (typeof row !== "object" || row === null) return row;
+  const { [RECORDED_ANCHOR_RETENTION_COLUMN]: retention, ...rest } =
+    row as Record<string, unknown>;
+  return retention === null ? rest : row;
+}
+
 async function releasedForkDigest(
   backend: GraphBackend,
   graphId: string,
@@ -115,7 +124,9 @@ async function releasedForkDigest(
       ),
     );
     const rowDigest = await sha256Hex(
-      JSON.stringify(rows.map((entry) => JSON.stringify(entry.row)).sort()),
+      JSON.stringify(
+        rows.map((entry) => JSON.stringify(asReleasedRow(entry.row))).sort(),
+      ),
       32,
     );
     digests.push([table, rowDigest]);
