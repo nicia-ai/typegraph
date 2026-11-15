@@ -3325,6 +3325,34 @@ async function readLiveImportEndpoints(
   return liveKeys;
 }
 
+/**
+ * Imports the payload's edges under ONE evaluation order, the same for every
+ * `batchSize`: every row that names an EXISTING edge is disposed of (skipped,
+ * refused or updated) before any row creates one.
+ *
+ * The order is a payload-level decision because rows depend on each other. An
+ * update that ends a `oneActive` window frees the slot a create in the same
+ * document takes, so the create must see the end whatever slice either row
+ * lands in. Import only ever ends or tightens a window — it never resurrects
+ * a row or clears an end — so disposing of existing rows first can only free
+ * room for a create, never take it away. `batchSize` therefore decides round
+ * trips and nothing else.
+ *
+ * The phases, each in document order:
+ *
+ * 1. Classify ({@link classifyEdges}): validate every row, read its
+ *    endpoints' liveness, and probe whether its id exists. Validation refusals
+ *    are recorded here.
+ * 2. Dispose of every row naming an existing edge
+ *    ({@link applyExistingEdgeDisposition}), and every later row repeating
+ *    such an id.
+ * 3. Create every new edge ({@link createEdgeSlice}), in `batchSize` slices.
+ * 4. Apply every later row repeating an id phase 3 created: it observes the
+ *    row the first occurrence wrote, as a second import would.
+ *
+ * `result.errors` lists refusals in that phase order, so a create refused
+ * because of an update is reported after the update.
+ */
 async function processEdges(
   frame: ImportWriteFrame,
   graphId: string,
@@ -3338,28 +3366,78 @@ async function processEdges(
   importedNodeIds: ImportedNodes,
   requiredPartLedger: RequiredPartLedger,
 ): Promise<void> {
-  const batchSize = options.batchSize;
+  const record = edgeOutcomeRecorder(result, errors, requiredPartLedger);
+  const classified = await classifyEdges(
+    frame,
+    graphId,
+    registry,
+    edges,
+    edgeSchemas,
+    nodeSchemas,
+    options,
+    importedNodeIds,
+    record,
+  );
+
+  const existingRows: (ClassifiedEdgeRow | RepeatedEdgeRow)[] = [
+    ...classified.rows.filter((row) => row.existing !== undefined),
+    ...classified.repeatsOfExisting,
+  ].toSorted((left, right) => left.index - right.index);
+  for (const row of existingRows) {
+    record(
+      row.edge,
+      "existing" in row ?
+        await applyExistingEdgeDisposition(
+          frame,
+          graphId,
+          registry,
+          row,
+          requireDefined(row.existing),
+          options,
+        )
+      : await processEdge(
+          frame,
+          graphId,
+          registry,
+          row.edge,
+          edgeSchemas,
+          nodeSchemas,
+          options,
+          importedNodeIds,
+        ),
+    );
+  }
+
   // A slice flush makes its accepted keys visible to later database reads, but
   // candidates in the same slice have not been written yet. Keep the durable
   // owner keys accepted by this import so two rows in one payload receive the
   // same first-wins, per-row disposition as two rows in separate imports.
   const pendingMatchIdentityOwners = new Set<string>();
-
-  for (let index = 0; index < edges.length; index += batchSize) {
-    const batch = edges.slice(index, index + batchSize);
-    await processEdgeSlice(
+  const creates = classified.rows.filter((row) => row.existing === undefined);
+  for (const slice of chunk(creates, options.batchSize)) {
+    await createEdgeSlice(
       frame,
       graphId,
       registry,
-      batch,
-      edgeSchemas,
-      nodeSchemas,
-      options,
-      result,
-      errors,
-      importedNodeIds,
+      slice,
+      record,
       pendingMatchIdentityOwners,
-      requiredPartLedger,
+    );
+  }
+
+  for (const repeat of classified.repeatsOfCreated) {
+    record(
+      repeat.edge,
+      await processEdge(
+        frame,
+        graphId,
+        registry,
+        repeat.edge,
+        edgeSchemas,
+        nodeSchemas,
+        options,
+        importedNodeIds,
+      ),
     );
   }
 }
@@ -3801,30 +3879,25 @@ function isHeterogeneousReadBindBudgetRefusal(error: unknown): boolean {
   );
 }
 
+/** Records one edge row's outcome in the import result. */
+type RecordEdgeOutcome = (
+  edge: InterchangeEdge,
+  outcome: ProcessResult,
+) => void;
+
 /**
- * Processes one batchSize slice of edges with batched round trips: one
- * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
- * existence, one durable-owner endpoint read when needed, and one multi-row
- * insert for the accepted creates. Per-row semantics are unchanged; duplicate
- * ids within a slice defer to the per-row path after the flush.
+ * The one recorder every edge phase reports through: the result counters and
+ * error list, plus — for a graph that can purge a required part — how each
+ * written edge was counted, so a purge takes back exactly those counts.
  */
-async function processEdgeSlice(
-  frame: ImportWriteFrame,
-  graphId: string,
-  registry: KindRegistry,
-  batch: readonly InterchangeEdge[],
-  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
-  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ResolvedImportOptions,
+function edgeOutcomeRecorder(
   result: ImportResult,
   errors: ImportError[],
-  importedNodeIds: ImportedNodes,
-  pendingMatchIdentityOwners: Set<string>,
   requiredPartLedger: RequiredPartLedger,
-): Promise<void> {
+): RecordEdgeOutcome {
   // Only a graph that can purge a part ever reads how its edges were counted.
   const tracksEdgeWrites = requiredPartLedger.declaresRequiredParts;
-  const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
+  return (edge, outcome) => {
     recordEdgeOutcome(edge, outcome, result, errors);
     if (
       !tracksEdgeWrites ||
@@ -3839,7 +3912,319 @@ async function processEdgeSlice(
     counts[outcome.status] += 1;
     requiredPartLedger.edgeWrites.set(edge.id, counts);
   };
+}
 
+/**
+ * One edge row the classification accepted: valid, with live endpoints when
+ * references are validated, and the FIRST row of the document naming its id.
+ */
+type ClassifiedEdgeRow = Readonly<{
+  /** Position in the document; every phase applies its rows in this order. */
+  index: number;
+  edge: InterchangeEdge;
+  props: Record<string, unknown>;
+  registration: EdgeRegistration;
+  /** The row the existence probe found under this id; `undefined` creates. */
+  existing: EdgeRow | undefined;
+}>;
+
+/** A later row naming an id an earlier valid row of the document named. */
+type RepeatedEdgeRow = Readonly<{ index: number; edge: InterchangeEdge }>;
+
+type ClassifiedEdges = Readonly<{
+  rows: readonly ClassifiedEdgeRow[];
+  /** Repeats of an id that existed on the target when it was probed. */
+  repeatsOfExisting: readonly RepeatedEdgeRow[];
+  /** Repeats of an id this import creates, in document order. */
+  repeatsOfCreated: readonly RepeatedEdgeRow[];
+}>;
+
+/**
+ * The checks a row passes before anything is read for it: a known kind and
+ * endpoint kinds, endpoints the kind accepts (subclass-aware, as the
+ * collection API judges them), valid properties, and a well-formed validity
+ * window that no composition rule refuses. The one owner both the classifying
+ * pass and the per-row path call, so a row is refused for the same reason
+ * whichever path reaches it.
+ */
+function validateEdgeRow(
+  registry: KindRegistry,
+  edge: InterchangeEdge,
+  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
+  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
+  options: ResolvedImportOptions,
+):
+  | Readonly<{
+      ok: true;
+      props: Record<string, unknown>;
+      registration: EdgeRegistration;
+    }>
+  | Readonly<{ ok: false; error: string }> {
+  const schemaEntry = edgeSchemas.get(edge.kind);
+  if (!schemaEntry) {
+    return { ok: false, error: `Unknown edge kind: ${edge.kind}` };
+  }
+  if (!nodeSchemas.has(edge.from.kind)) {
+    return { ok: false, error: `Unknown from node kind: ${edge.from.kind}` };
+  }
+  if (!nodeSchemas.has(edge.to.kind)) {
+    return { ok: false, error: `Unknown to node kind: ${edge.to.kind}` };
+  }
+  const endpointError = validateEdgeEndpoints(
+    edge.kind,
+    edge.from.kind,
+    edge.to.kind,
+    schemaEntry.registration,
+    registry,
+  );
+  if (endpointError !== undefined) {
+    return { ok: false, error: endpointError.message };
+  }
+  const propsResult = validateImportProperties(
+    edge.properties,
+    schemaEntry.schema,
+    options.onUnknownProperty,
+  );
+  if (!propsResult.success) {
+    return { ok: false, error: propsResult.error };
+  }
+  const validityError =
+    validateValidityWindow(edge) ??
+    importedCompositionWindowError(registry, edge);
+  if (validityError !== undefined) {
+    return { ok: false, error: validityError };
+  }
+  return {
+    ok: true,
+    props: propsResult.data,
+    registration: schemaEntry.registration,
+  };
+}
+
+/**
+ * The refusal for a row naming an endpoint that is not live, or `undefined`
+ * when both are — under `validateReferences: false`, always `undefined`.
+ */
+function missingEndpointError(
+  edge: InterchangeEdge,
+  liveEndpointKeys: ReadonlySet<string>,
+): string | undefined {
+  if (!liveEndpointKeys.has(makeNodeKey(edge.from.kind, edge.from.id))) {
+    return `From node not found: ${edge.from.kind}:${edge.from.id}`;
+  }
+  if (!liveEndpointKeys.has(makeNodeKey(edge.to.kind, edge.to.id))) {
+    return `To node not found: ${edge.to.kind}:${edge.to.id}`;
+  }
+  return undefined;
+}
+
+/**
+ * The classifying pass of {@link processEdges}: every row is validated, its
+ * endpoints' liveness read, and its id probed, one `batchSize` slice at a time
+ * with batched round trips — one locked endpoint read per kind, one `getEdges`
+ * for existence. Nothing is written.
+ *
+ * The FIRST valid row naming an id is that id's row; a later row naming it is
+ * a repeat, applied after the row it repeats so it observes that row's
+ * outcome, whichever slice either lands in. Repeats are classified by what the
+ * probe found under their id, which is why every first row is probed — a
+ * row refused for a missing endpoint included.
+ */
+async function classifyEdges(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  edges: readonly InterchangeEdge[],
+  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
+  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
+  options: ResolvedImportOptions,
+  importedNodeIds: ImportedNodes,
+  record: RecordEdgeOutcome,
+): Promise<ClassifiedEdges> {
+  const rows: ClassifiedEdgeRow[] = [];
+  const repeats: RepeatedEdgeRow[] = [];
+  const existedAtProbe = new Map<string, boolean>();
+  const boundGetEdges = bindExtraIfReachable(
+    frame.target,
+    frame.batchPointRead.extras.getEdges,
+    BATCH_POINT_READ.id,
+  );
+
+  for (let start = 0; start < edges.length; start += options.batchSize) {
+    const candidates: Omit<ClassifiedEdgeRow, "existing">[] = [];
+    for (const [offset, edge] of edges
+      .slice(start, start + options.batchSize)
+      .entries()) {
+      const index = start + offset;
+      const validation = validateEdgeRow(
+        registry,
+        edge,
+        edgeSchemas,
+        nodeSchemas,
+        options,
+      );
+      if (!validation.ok) {
+        record(edge, { status: "error", error: validation.error });
+        continue;
+      }
+      if (existedAtProbe.has(edge.id)) {
+        repeats.push({ index, edge });
+        continue;
+      }
+      // Claimed before the probe answers, so a repeat later in this same
+      // slice is recognized as one.
+      existedAtProbe.set(edge.id, false);
+      candidates.push({
+        index,
+        edge,
+        props: validation.props,
+        registration: validation.registration,
+      });
+    }
+    if (candidates.length === 0) continue;
+
+    const liveEndpointKeys =
+      options.validateReferences ?
+        await readLiveImportEndpoints(
+          frame,
+          graphId,
+          candidates.flatMap(({ edge }) => [edge.from, edge.to]),
+          importedNodeIds,
+        )
+      : undefined;
+
+    // Batch the existence reads. Falls back to per-row getEdge when the
+    // backend lacks getEdges.
+    const existingById = new Map<string, EdgeRow>();
+    if (boundGetEdges === undefined) {
+      for (const { edge } of candidates) {
+        const row = await frame.target.getEdge(graphId, edge.id);
+        if (row !== undefined) existingById.set(edge.id, row);
+      }
+    } else {
+      for (const row of await boundGetEdges.getEdges(
+        graphId,
+        candidates.map(({ edge }) => edge.id),
+      )) {
+        existingById.set(row.id, row);
+      }
+    }
+
+    for (const candidate of candidates) {
+      const { edge } = candidate;
+      const existing = existingById.get(edge.id);
+      existedAtProbe.set(edge.id, existing !== undefined);
+      const endpointError =
+        liveEndpointKeys === undefined ? undefined : (
+          missingEndpointError(edge, liveEndpointKeys)
+        );
+      if (endpointError !== undefined) {
+        record(edge, { status: "error", error: endpointError });
+        continue;
+      }
+      rows.push({ ...candidate, existing });
+    }
+  }
+
+  return {
+    rows,
+    repeatsOfExisting: repeats.filter(
+      ({ edge }) => existedAtProbe.get(edge.id) === true,
+    ),
+    repeatsOfCreated: repeats.filter(
+      ({ edge }) => existedAtProbe.get(edge.id) !== true,
+    ),
+  };
+}
+
+/**
+ * What `onConflict` does with a row whose id names an edge that already
+ * exists. THE single owner of the existing-row leg, reached by the payload's
+ * phase of existing rows and by the per-row path alike.
+ *
+ * A row occupying the id under a different immutable identity is not this
+ * edge, and is refused before any strategy runs ({@link edgeIdentityConflict}).
+ */
+async function applyExistingEdgeDisposition(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  row: Readonly<{
+    edge: InterchangeEdge;
+    props: Record<string, unknown>;
+    registration: EdgeRegistration;
+  }>,
+  existing: EdgeRow,
+  options: ResolvedImportOptions,
+): Promise<ProcessResult> {
+  const { edge, props, registration } = row;
+  const identityConflict = edgeIdentityConflict(edge, existing);
+  if (identityConflict !== undefined) {
+    return { status: "error", error: identityConflict };
+  }
+  switch (options.onConflict) {
+    case "skip": {
+      return {
+        status: "skipped",
+        liveTarget: existing.deleted_at === undefined,
+      };
+    }
+    case "error": {
+      return { status: "error", error: `Edge already exists: ${edge.id}` };
+    }
+    case "update": {
+      // Same contract as nodes: import never resurrects a tombstone, and the
+      // backend's update targets live rows only.
+      if (existing.deleted_at !== undefined) {
+        return { status: "skipped", liveTarget: false };
+      }
+      const identityUpdateError = importedEdgeIdentityUpdateError(
+        registration,
+        edge,
+        existing,
+        props,
+      );
+      if (identityUpdateError !== undefined) {
+        return { status: "error", error: identityUpdateError };
+      }
+      const updateWindow = validateUpdateValidityWindow(
+        edge,
+        existing.valid_from,
+      );
+      if (!updateWindow.ok) {
+        return { status: "error", error: updateWindow.error };
+      }
+      const updateError = await updateImportedEdge(
+        frame,
+        graphId,
+        registry,
+        edge,
+        existing,
+        props,
+        updateWindow.value,
+      );
+      return updateError === undefined ?
+          { status: "updated" }
+        : { status: "error", error: updateError };
+    }
+  }
+}
+
+/**
+ * Creates one slice of new edges with batched round trips: one durable-owner
+ * endpoint read when needed, one primed cardinality read, and one multi-row
+ * insert for the accepted rows. A row of an acyclic kind (every composition
+ * kind among them) is written one at a time after the flush, in document
+ * order ({@link createEdgeRow}).
+ */
+async function createEdgeSlice(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  slice: readonly ClassifiedEdgeRow[],
+  record: RecordEdgeOutcome,
+  pendingMatchIdentityOwners: Set<string>,
+): Promise<void> {
   // The store's own in-batch cardinality accounting, constructed once per
   // slice against the REAL backend — the same wrapper `prepareEdgeBatchCreates`
   // uses, not a second implementation. Per slice rather than per import is
@@ -3852,214 +4237,13 @@ async function processEdgeSlice(
     seedCardinalityRows,
   } = createEdgeBatchValidationBackend(frame.target);
 
-  // Pass 1 (synchronous): kind, endpoint-kind, endpoint-assignability,
-  // property, and validity validation, plus in-slice duplicate deferral.
-  const candidates: EdgeImportCandidate[] = [];
-  // Rows written one at a time after the flush, each with its slice position.
-  // They are deferred from two places — a repeated id here, an acyclic kind
-  // in the routing loop below — and written in DOCUMENT order, not deferral
-  // order: the second row naming an id must observe the first one's row.
-  const deferred: Readonly<{ edge: InterchangeEdge; sliceIndex: number }>[] =
-    [];
-  // The slice position of each id's FIRST occurrence — the one candidate.
-  const firstSliceIndexById = new Map<string, number>();
-  for (const [sliceIndex, edge] of batch.entries()) {
-    const schemaEntry = edgeSchemas.get(edge.kind);
-    if (!schemaEntry) {
-      record(edge, {
-        status: "error",
-        error: `Unknown edge kind: ${edge.kind}`,
-      });
-      continue;
-    }
-    if (!nodeSchemas.has(edge.from.kind)) {
-      record(edge, {
-        status: "error",
-        error: `Unknown from node kind: ${edge.from.kind}`,
-      });
-      continue;
-    }
-    if (!nodeSchemas.has(edge.to.kind)) {
-      record(edge, {
-        status: "error",
-        error: `Unknown to node kind: ${edge.to.kind}`,
-      });
-      continue;
-    }
-    const endpointError = validateEdgeEndpoints(
-      edge.kind,
-      edge.from.kind,
-      edge.to.kind,
-      schemaEntry.registration,
-      registry,
-    );
-    if (endpointError !== undefined) {
-      record(edge, { status: "error", error: endpointError.message });
-      continue;
-    }
-    const propsResult = validateImportProperties(
-      edge.properties,
-      schemaEntry.schema,
-      options.onUnknownProperty,
-    );
-    if (!propsResult.success) {
-      record(edge, { status: "error", error: propsResult.error });
-      continue;
-    }
-    const validityError =
-      validateValidityWindow(edge) ??
-      importedCompositionWindowError(registry, edge);
-    if (validityError !== undefined) {
-      record(edge, { status: "error", error: validityError });
-      continue;
-    }
-    if (firstSliceIndexById.has(edge.id)) {
-      deferred.push({ edge, sliceIndex });
-      continue;
-    }
-    firstSliceIndexById.set(edge.id, sliceIndex);
-    candidates.push({ edge, props: propsResult.data });
-  }
-
-  const liveEndpointKeys =
-    options.validateReferences ?
-      await readLiveImportEndpoints(
-        frame,
-        graphId,
-        candidates.flatMap(({ edge }) => [edge.from, edge.to]),
-        importedNodeIds,
-      )
-    : new Set<string>();
-  const endpointIsLive = (endpoint: { kind: string; id: string }): boolean =>
-    liveEndpointKeys.has(makeNodeKey(endpoint.kind, endpoint.id));
-
-  // Batch the existence reads. Falls back to per-row getEdge when the
-  // backend lacks getEdges.
-  const existingById = new Map<
-    string,
-    Awaited<ReturnType<GraphBackend["getEdge"]>>
-  >();
-  const boundGetEdges = bindExtraIfReachable(
-    frame.target,
-    frame.batchPointRead.extras.getEdges,
-    BATCH_POINT_READ.id,
-  );
-  if (candidates.length > 0 && boundGetEdges !== undefined) {
-    const rows = await boundGetEdges.getEdges(
-      graphId,
-      candidates.map((candidate) => candidate.edge.id),
-    );
-    for (const row of rows) {
-      existingById.set(row.id, row);
-    }
-    for (const { edge } of candidates) {
-      if (!existingById.has(edge.id)) existingById.set(edge.id, undefined);
-    }
-  }
-
   const preparedCreates: PreparedEdgeImportCreate[] = [];
-  for (const candidate of candidates) {
-    const { edge, props } = candidate;
-
-    if (options.validateReferences) {
-      if (!endpointIsLive(edge.from)) {
-        record(edge, {
-          status: "error",
-          error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
-        });
-        continue;
-      }
-      if (!endpointIsLive(edge.to)) {
-        record(edge, {
-          status: "error",
-          error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
-        });
-        continue;
-      }
-    }
-
-    const existing =
-      existingById.has(edge.id) ?
-        existingById.get(edge.id)
-      : await frame.target.getEdge(graphId, edge.id);
-
-    if (existing) {
-      // Prior to every strategy: a row occupying this id under a different
-      // immutable identity is not this edge, and none of the three arms may
-      // treat it as one.
-      const identityConflict = edgeIdentityConflict(edge, existing);
-      if (identityConflict !== undefined) {
-        record(edge, { status: "error", error: identityConflict });
-        continue;
-      }
-      switch (options.onConflict) {
-        case "skip": {
-          record(edge, {
-            status: "skipped",
-            liveTarget: existing.deleted_at === undefined,
-          });
-          break;
-        }
-        case "error": {
-          record(edge, {
-            status: "error",
-            error: `Edge already exists: ${edge.id}`,
-          });
-          break;
-        }
-        case "update": {
-          if (existing.deleted_at !== undefined) {
-            record(edge, { status: "skipped", liveTarget: false });
-            break;
-          }
-          const identityUpdateError = importedEdgeIdentityUpdateError(
-            requireDefined(edgeSchemas.get(edge.kind)).registration,
-            edge,
-            existing,
-            props,
-          );
-          if (identityUpdateError !== undefined) {
-            record(edge, { status: "error", error: identityUpdateError });
-            break;
-          }
-          const updateWindow = validateUpdateValidityWindow(
-            edge,
-            existing.valid_from,
-          );
-          if (!updateWindow.ok) {
-            record(edge, { status: "error", error: updateWindow.error });
-            break;
-          }
-          const updateError = await updateImportedEdge(
-            frame,
-            graphId,
-            registry,
-            edge,
-            existing,
-            props,
-            updateWindow.value,
-          );
-          if (updateError !== undefined) {
-            record(edge, { status: "error", error: updateError });
-            break;
-          }
-          record(edge, { status: "updated" });
-          break;
-        }
-      }
-      continue;
-    }
-
+  for (const row of slice) {
     const preparation = await catchEdgeCreateRefusal(() =>
-      prepareEdgeImportCreate(
-        registry,
-        graphId,
-        candidate,
-        requireDefined(edgeSchemas.get(edge.kind)).registration,
-      ),
+      prepareEdgeImportCreate(registry, graphId, row, row.registration),
     );
     if (!preparation.ok) {
-      record(edge, { status: "error", error: preparation.error });
+      record(row.edge, { status: "error", error: preparation.error });
       continue;
     }
     preparedCreates.push(preparation.value);
@@ -4170,6 +4354,7 @@ async function processEdgeSlice(
   }
 
   const accepted: PreparedEdgeImportCreate[] = [];
+  const sequential: PreparedEdgeImportCreate[] = [];
   for (const prepared of preparedCreates) {
     const { candidate, params, declarations, work } = prepared;
     const { edge } = candidate;
@@ -4177,16 +4362,12 @@ async function processEdgeSlice(
     // Acyclic-kind rows never join the batched flush below: the
     // in-batch overlay `cardinalityValidationBackend` intercepts
     // `countEdgesFrom` / `edgeExistsBetween`, not a recursive `execute`
-    // statement, so it cannot account for an in-batch cycle. Each instead
-    // joins the same sequential write-as-you-go fallback in-slice duplicate
-    // ids already use (`deferred`, processed via `processEdge` below),
-    // where the row lands inside the transaction before the next row's
-    // probe runs and the database itself carries the in-batch state.
+    // statement, so it cannot account for an in-batch cycle. Each is written
+    // one at a time after the flush instead ({@link createEdgeRow}), where the
+    // row lands inside the transaction before the next row's probe runs and
+    // the database itself carries the in-batch state.
     if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
-      deferred.push({
-        edge,
-        sliceIndex: requireDefined(firstSliceIndexById.get(edge.id)),
-      });
+      sequential.push(prepared);
       continue;
     }
 
@@ -4334,188 +4515,31 @@ async function processEdgeSlice(
     }
   }
 
-  for (const { edge } of deferred.toSorted(
-    (left, right) => left.sliceIndex - right.sliceIndex,
-  )) {
+  for (const prepared of sequential) {
     record(
-      edge,
-      await processEdge(
-        frame,
-        graphId,
-        registry,
-        edge,
-        edgeSchemas,
-        nodeSchemas,
-        options,
-        importedNodeIds,
-      ),
+      prepared.candidate.edge,
+      await createEdgeRow(frame, graphId, registry, prepared),
     );
   }
 }
 
 /**
- * Processes rows deferred from the set-oriented slice (currently duplicate
- * ids). The savepoint cost below is therefore paid only on this exceptional
- * path, or during the rare per-row retry after a durable batch refusal.
+ * Writes one new edge on its own: the cardinality probe and the composition
+ * window decision against the rows already stored, then the insert and — for
+ * an acyclic kind — the acyclicity probe, inside one savepoint-guarded
+ * attempt. This path writes each edge as it goes, so the next row's probe
+ * reads the previous one from the same transaction and needs no pending
+ * state.
  */
-async function processEdge(
+async function createEdgeRow(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
-  edge: InterchangeEdge,
-  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
-  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
-  options: ResolvedImportOptions,
-  importedNodeIds: ImportedNodes,
+  prepared: PreparedEdgeImportCreate,
 ): Promise<ProcessResult> {
-  // Validate edge kind exists
-  const schemaEntry = edgeSchemas.get(edge.kind);
-  if (!schemaEntry) {
-    return { status: "error", error: `Unknown edge kind: ${edge.kind}` };
-  }
-
-  // Validate endpoint kinds exist
-  if (!nodeSchemas.has(edge.from.kind)) {
-    return {
-      status: "error",
-      error: `Unknown from node kind: ${edge.from.kind}`,
-    };
-  }
-  if (!nodeSchemas.has(edge.to.kind)) {
-    return { status: "error", error: `Unknown to node kind: ${edge.to.kind}` };
-  }
-
-  // Validate endpoint kinds are allowed for this edge type. Uses the shared,
-  // subclass-aware check (registry.isAssignableTo) that the collection API uses,
-  // so an edge whose endpoint is a subclass of a declared kind — legal in the
-  // store and emitted verbatim by export — imports cleanly instead of being
-  // rejected by an exact-kind comparison.
-  const endpointError = validateEdgeEndpoints(
-    edge.kind,
-    edge.from.kind,
-    edge.to.kind,
-    schemaEntry.registration,
-    registry,
-  );
-  if (endpointError !== undefined) {
-    return { status: "error", error: endpointError.message };
-  }
-
-  // Validate references exist (in DB or in import batch)
-  if (options.validateReferences) {
-    const liveEndpointKeys = await readLiveImportEndpoints(
-      frame,
-      graphId,
-      [edge.from, edge.to],
-      importedNodeIds,
-    );
-    if (!liveEndpointKeys.has(makeNodeKey(edge.from.kind, edge.from.id))) {
-      return {
-        status: "error",
-        error: `From node not found: ${edge.from.kind}:${edge.from.id}`,
-      };
-    }
-    if (!liveEndpointKeys.has(makeNodeKey(edge.to.kind, edge.to.id))) {
-      return {
-        status: "error",
-        error: `To node not found: ${edge.to.kind}:${edge.to.id}`,
-      };
-    }
-  }
-
-  // Validate and transform properties
-  const propsResult = validateImportProperties(
-    edge.properties,
-    schemaEntry.schema,
-    options.onUnknownProperty,
-  );
-
-  if (!propsResult.success) {
-    return { status: "error", error: propsResult.error };
-  }
-
-  const validityError =
-    validateValidityWindow(edge) ??
-    importedCompositionWindowError(registry, edge);
-  if (validityError !== undefined) {
-    return { status: "error", error: validityError };
-  }
-
-  // Check if edge already exists
-  const existing = await frame.target.getEdge(graphId, edge.id);
-
-  if (existing) {
-    // Same prior question as the batched path, answered by the same owner.
-    const identityConflict = edgeIdentityConflict(edge, existing);
-    if (identityConflict !== undefined) {
-      return { status: "error", error: identityConflict };
-    }
-    switch (options.onConflict) {
-      case "skip": {
-        return {
-          status: "skipped",
-          liveTarget: existing.deleted_at === undefined,
-        };
-      }
-      case "error": {
-        return { status: "error", error: `Edge already exists: ${edge.id}` };
-      }
-      case "update": {
-        // Same contract as nodes: import never resurrects a tombstone, and
-        // the backend's update targets live rows only.
-        if (existing.deleted_at !== undefined) {
-          return { status: "skipped", liveTarget: false };
-        }
-        const identityUpdateError = importedEdgeIdentityUpdateError(
-          schemaEntry.registration,
-          edge,
-          existing,
-          propsResult.data,
-        );
-        if (identityUpdateError !== undefined) {
-          return { status: "error", error: identityUpdateError };
-        }
-        const updateWindow = validateUpdateValidityWindow(
-          edge,
-          existing.valid_from,
-        );
-        if (!updateWindow.ok) {
-          return { status: "error", error: updateWindow.error };
-        }
-        const updateError = await updateImportedEdge(
-          frame,
-          graphId,
-          registry,
-          edge,
-          existing,
-          propsResult.data,
-          updateWindow.value,
-        );
-        if (updateError !== undefined) {
-          return { status: "error", error: updateError };
-        }
-        return { status: "updated" };
-      }
-    }
-  }
-
-  const preparation = await catchEdgeCreateRefusal(() =>
-    prepareEdgeImportCreate(
-      registry,
-      graphId,
-      { edge, props: propsResult.data },
-      schemaEntry.registration,
-    ),
-  );
-  if (!preparation.ok) {
-    return { status: "error", error: preparation.error };
-  }
-
+  const { params, work } = prepared;
   // Probe first (for the error text), then create through the session, which
-  // claims before it writes — the same order the collection create uses. No
-  // pending state is needed: this path writes each edge as it goes, so the next
-  // row's probe reads the previous one from the same transaction.
-  const { params, work } = preparation.value;
+  // claims before it writes — the same order the collection create uses.
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
     checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
@@ -4544,13 +4568,13 @@ async function processEdge(
   // Acyclicity is checked AFTER the row lands, inside the same
   // savepoint-guarded attempt as the insert: import writes each row as it
   // goes, so this row's own probe already sees the previous rows in this
-  // same transaction, and a cycle rolls back to the savepoint and reports as
-  // this row's per-row error rather than aborting the whole chunk.
+  // same transaction, and a cycle rolls back to the savepoint and is reported
+  // as this row's per-row error rather than aborting the whole chunk.
   const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
     frame,
     async () => {
       const row = await frame.session.createEdge(work);
-      if (edgeKindIsInAcyclicRelation(frame.graph, registry, edge.kind)) {
+      if (edgeKindIsInAcyclicRelation(frame.graph, registry, params.kind)) {
         await assertEdgeRelationsAcyclic(
           acyclicityProbeContext({
             graphId,
@@ -4580,8 +4604,71 @@ async function processEdge(
   if (!createResult.ok) {
     return { status: "error", error: createResult.error };
   }
-
   return { status: "created" };
+}
+
+/**
+ * Applies one row on its own, from validation through its write — the path a
+ * repeated id takes, so the repeat observes whatever the row before it left.
+ */
+async function processEdge(
+  frame: ImportWriteFrame,
+  graphId: string,
+  registry: KindRegistry,
+  edge: InterchangeEdge,
+  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
+  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
+  options: ResolvedImportOptions,
+  importedNodeIds: ImportedNodes,
+): Promise<ProcessResult> {
+  const validation = validateEdgeRow(
+    registry,
+    edge,
+    edgeSchemas,
+    nodeSchemas,
+    options,
+  );
+  if (!validation.ok) return { status: "error", error: validation.error };
+  const row = {
+    edge,
+    props: validation.props,
+    registration: validation.registration,
+  };
+
+  if (options.validateReferences) {
+    const endpointError = missingEndpointError(
+      edge,
+      await readLiveImportEndpoints(
+        frame,
+        graphId,
+        [edge.from, edge.to],
+        importedNodeIds,
+      ),
+    );
+    if (endpointError !== undefined) {
+      return { status: "error", error: endpointError };
+    }
+  }
+
+  const existing = await frame.target.getEdge(graphId, edge.id);
+  if (existing) {
+    return applyExistingEdgeDisposition(
+      frame,
+      graphId,
+      registry,
+      row,
+      existing,
+      options,
+    );
+  }
+
+  const preparation = await catchEdgeCreateRefusal(() =>
+    prepareEdgeImportCreate(registry, graphId, row, row.registration),
+  );
+  if (!preparation.ok) {
+    return { status: "error", error: preparation.error };
+  }
+  return createEdgeRow(frame, graphId, registry, preparation.value);
 }
 
 /**
