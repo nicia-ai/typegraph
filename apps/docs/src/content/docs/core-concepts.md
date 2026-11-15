@@ -52,7 +52,8 @@ const Person = defineNode("Person", {
 
 ### Schema Features
 
-TypeGraph supports all Zod validation features:
+A property schema can use any Zod validation feature, with one requirement
+on transforms (below):
 
 ```typescript
 const Product = defineNode("Product", {
@@ -80,6 +81,32 @@ const Product = defineNode("Product", {
   }),
 });
 ```
+
+#### Transforms must be idempotent
+
+TypeGraph stores a schema's parsed output, and an `update()` parses the
+merged stored properties through the schema again. A `.transform()` therefore
+runs again on every update, on the value it produced last time. A transform
+is safe when its output is valid input that parses to itself, as `slug` above
+is: slugging an already-slugged value changes nothing.
+
+Two kinds of transform are not safe:
+
+- **One that is not idempotent is applied again.** With
+  `z.string().transform((v) => v + "!")`, a create stores `"x!"`, and an
+  `update()` that does not touch the field stores `"x!!"`.
+- **One that changes the type makes every later update throw.** With
+  `z.string().transform((v) => v.length)`, a create stores a number, and the
+  next `update()` is refused with a `ValidationError`, even one that does not
+  touch the field, because the stored number is not a string.
+
+This holds for node and edge properties, and for every write that updates a
+stored row: an edge `update()` that only states `validTo`, and a `reparent`
+that ends a `oneActive` incumbent's window, re-parse the stored properties too.
+Keep a value that must change type in its input form and derive the other form
+when you read it. Planning a [graph merge](/graph-merge) from staged
+operations already refuses a schema whose output does not survive a second
+parse.
 
 ### Node Operations
 
