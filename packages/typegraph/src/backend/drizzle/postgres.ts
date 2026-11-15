@@ -59,6 +59,7 @@ import {
 import { PgTransaction, type PgTransactionConfig } from "drizzle-orm/pg-core";
 
 import {
+  BaseSchemaAdoptionTimeoutError,
   CompilerInvariantError,
   ConfigurationError,
   SchemaFenceTimeoutError,
@@ -150,6 +151,10 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import {
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+  recordedAnchorAdoptionTimeoutBudget,
+} from "../recorded-storage";
 import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
 import {
   createEdgeRowMapper,
@@ -224,6 +229,7 @@ import {
   generatePostgresEdgeMatchIdentityUpgradeDDL,
   postgresContributions,
   postgresIdentifierRegclassName,
+  postgresRecordedAnchorRetentionAdoptionDDL,
 } from "./ddl";
 import {
   type BaseSchemaRuntime,
@@ -1980,6 +1986,58 @@ function buildPostgresEngineProfileInternal(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
     storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
+    async ensureRecordedAnchorRetentionStorage(clockProvisioned) {
+      const tableName = getTableName(tables.recordedClock);
+      const relation =
+        allocationSchema === undefined ?
+          postgresIdentifierRegclassName(tableName)
+        : `${postgresIdentifierRegclassName(allocationSchema)}.${postgresIdentifierRegclassName(tableName)}`;
+      // Existing storage needs no DDL. Missing storage uses a bounded queued
+      // ALTER, allowing it to make progress through overlapping writers.
+      const readStorage = async () => {
+        const [storage] = await executionAdapter.execute<{
+          table_name?: unknown;
+          has_retention?: unknown;
+        }>(portableSql`
+          SELECT to_regclass(${relation}) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass(${relation})
+                AND attname=${RECORDED_ANCHOR_RETENTION_COLUMN} AND NOT attisdropped) AS has_retention
+        `);
+        return storage;
+      };
+      const storage = await readStorage();
+      if (storage?.has_retention === true) return;
+      if (!clockProvisioned && typeof storage?.table_name !== "string") {
+        await executeConcurrentCreateDdl(
+          generatePgCreateTableSQL(tables.recordedClock),
+        );
+        const createdStorage = await readStorage();
+        if (createdStorage?.has_retention === true) return;
+      }
+      try {
+        const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
+        if (db instanceof PgTransaction) {
+          // Savepoint rollback restores both the caller's session and GUC after a timeout.
+          await withConcurrentCreateRetry(() =>
+            db.transaction(async (transaction: AnyPgTransaction) => {
+              await bindSchemaWriteSessionToAllocation(transaction);
+              await transaction.execute(sql.raw(ddl));
+            }),
+          );
+        } else {
+          await executeConcurrentCreateDdl(ddl);
+        }
+      } catch (error) {
+        const waitBudgetMs = recordedAnchorAdoptionTimeoutBudget(error);
+        if (waitBudgetMs === undefined) throw error;
+        throw new BaseSchemaAdoptionTimeoutError(
+          tableName,
+          waitBudgetMs,
+          error,
+        );
+      }
+    },
     recordedAnchorsDdl: [
       generatePgCreateTableSQL(tables.recordedAnchors),
       ...generatePgCreateIndexSQL(tables.recordedAnchors),

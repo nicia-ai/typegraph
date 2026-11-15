@@ -162,31 +162,32 @@ type StoreFlavor = "history" | "revisionTracking" | "schemaManaged";
  * Statements each write issues on a graph declaring no lock-only-fenced
  * relation, per store flavor — counted on the commit that precedes the fence
  * row, so an equal count here is "no new statement". Every commit binds its
- * recorded instant to the graph's allocation owner (one origin read, plus
- * creating the origin on the graph's first commit), and a history store also
+ * recorded instant to the graph's allocation owner (read in the same
+ * statement as the clock, plus creating the origin on the graph's first
+ * commit), and a history store also
  * retains that instant in the recorded-anchor log.
  */
 const STATEMENTS_WITHOUT_A_FENCE_ROW = {
   history: {
-    nodeCreate: 12,
-    nodeUpdate: 11,
-    unconstrainedEdgeCreate: 10,
-    cardinalityEdgeCreate: 10,
-    nodeDelete: 15,
+    nodeCreate: 11,
+    nodeUpdate: 10,
+    unconstrainedEdgeCreate: 9,
+    cardinalityEdgeCreate: 9,
+    nodeDelete: 14,
   },
   revisionTracking: {
-    nodeCreate: 8,
-    nodeUpdate: 7,
-    unconstrainedEdgeCreate: 6,
-    cardinalityEdgeCreate: 6,
-    nodeDelete: 10,
+    nodeCreate: 7,
+    nodeUpdate: 6,
+    unconstrainedEdgeCreate: 5,
+    cardinalityEdgeCreate: 5,
+    nodeDelete: 9,
   },
   schemaManaged: {
-    nodeCreate: 8,
-    nodeUpdate: 7,
-    unconstrainedEdgeCreate: 6,
-    cardinalityEdgeCreate: 6,
-    nodeDelete: 10,
+    nodeCreate: 7,
+    nodeUpdate: 6,
+    unconstrainedEdgeCreate: 5,
+    cardinalityEdgeCreate: 5,
+    nodeDelete: 9,
   },
 } as const satisfies Record<StoreFlavor, Record<string, number>>;
 

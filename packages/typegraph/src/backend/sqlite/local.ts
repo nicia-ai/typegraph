@@ -34,19 +34,26 @@ import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
-  isSqliteDuplicateColumnError,
+  isMissingTableError,
   isSqliteMissingEdgeMatchIdentityColumnError,
 } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
-import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
-  EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
+  assertBaseSchemaVersionNotNewer,
+  CURRENT_BASE_SCHEMA_VERSION,
+} from "../drizzle/base-schema";
+import {
+  edgeMatchIdentityColumnAdoption,
   generateSqliteMigrationSQL,
-  planSqliteEdgeMatchIdentityAdoption,
   quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
+import {
+  adoptSqliteColumnsSync,
+  type SqliteColumnRow,
+} from "../drizzle/sqlite-column-adoption";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
@@ -87,24 +94,48 @@ function installLocalSqliteBaseSchema(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
-  // v2 (the fences relation), v3 (the recorded-relations' and recorded
-  // identity-assertions relation's `since_idx` indexes), v4 (the revision
-  // changes relation) and v5 (PostgreSQL's byte-ordered `graph_id` indexes,
-  // which SQLite has no counterpart for), v6 (the recorded adjacency
-  // indexes), v7 (the retained allocation-anchor log), v8 (durable Store
-  // outcomes) and v9 (the identity transition log plus its retention
-  // watermark) need no adoption
-  // logic beyond what `generateSqliteMigrationSQL` already emits: a
-  // brand-new relation or index is fully covered by its own `CREATE TABLE
-  // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, on both a fresh database
-  // and one that already has every OTHER base table or index. Only v1's
-  // edge-match-identity `ADD COLUMN` migration — handled by the catch block
-  // below — needed runtime introspection this synchronous path writes by
-  // hand instead of running `BaseSchemaLifecycle`'s async state machine.
-  if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
+  // Versioned installations use privileged asynchronous adoption. Marker-less
+  // bootstrap must finish current storage before installation SQL stamps it:
+  // v9's clock column below; v10's transition-log relations are covered by the
+  // installation SQL's CREATE TABLE IF NOT EXISTS.
+  if (CURRENT_BASE_SCHEMA_VERSION !== 10) {
     throw new CompilerInvariantError(
-      "The synchronous managed SQLite installation path only implements base-schema v1 through v9 adoption.",
+      "The synchronous managed SQLite bootstrap plan must be reviewed when the current base-schema version changes.",
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
+    );
+  }
+  const installedVersion = (() => {
+    try {
+      const marker = sqlite
+        .prepare(
+          `SELECT version FROM ${quoteDdlIdentifier(getTableName(tables.baseSchemaVersions))} WHERE installation=1`,
+        )
+        .get() as Readonly<{ version: number }> | undefined;
+      assertBaseSchemaVersionNotNewer(marker?.version);
+      return marker?.version;
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+      return;
+    }
+  })();
+  function columnDriver(tableName: string) {
+    return {
+      readColumns: () =>
+        sqlite
+          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(tableName)})`)
+          .all() as readonly SqliteColumnRow[],
+      execute: (statement: string) => {
+        sqlite.exec(statement);
+      },
+    };
+  }
+  // Marker-less bootstrap publishes the current release, so finish its clock
+  // upgrade first. A versioned installation stays on asynchronous adoption.
+  if (installedVersion === undefined) {
+    const clockTable = getTableName(tables.recordedClock);
+    adoptSqliteColumnsSync(
+      recordedAnchorRetentionColumnAdoption(clockTable),
+      columnDriver(clockTable),
     );
   }
   const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
@@ -113,32 +144,11 @@ function installLocalSqliteBaseSchema(
   } catch (error) {
     if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
     const edgeTableName = getTableName(tables.edges);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const rows = sqlite
-        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
-        .all() as readonly Readonly<{ name?: unknown }>[];
-      const columns = new Set(
-        rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-      );
-      const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
-        edgeTableName,
-        columns,
-      );
-      try {
-        sqlite.exec([...adoptionSql, installationSql].join("\n"));
-        break;
-      } catch (repairError) {
-        if (
-          attempt === 2 ||
-          !isSqliteDuplicateColumnError(
-            repairError,
-            EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS,
-          )
-        ) {
-          throw repairError;
-        }
-      }
-    }
+    adoptSqliteColumnsSync(
+      edgeMatchIdentityColumnAdoption(edgeTableName),
+      columnDriver(edgeTableName),
+    );
+    sqlite.exec(installationSql);
   }
 }
 

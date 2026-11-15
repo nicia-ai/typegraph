@@ -31,7 +31,7 @@ describe("engine member dependency compatibility", () => {
     expect(ensureTable).not.toHaveBeenCalled();
   });
 
-  it("accepts base-schema deps without transition-log DDL and refuses version-9 adoption naming it", async () => {
+  it("accepts base-schema deps without transition-log DDL and refuses version-10 adoption naming it", async () => {
     const ensureTable = vi.fn((_ddl: string): Promise<void> =>
       Promise.resolve(),
     );
@@ -40,7 +40,7 @@ describe("engine member dependency compatibility", () => {
       ensureTable,
       executeDdl: (_ddl: string): Promise<void> => Promise.resolve(),
       generateDdl: () => [],
-      readVersion: () => Promise.resolve(8),
+      readVersion: () => Promise.resolve(9),
       writeVersion: (version) => Promise.resolve(version),
       ensureGraphTemplatesTable: () => Promise.resolve(),
       fencesTableDdl: "CREATE TABLE fences",
@@ -54,7 +54,7 @@ describe("engine member dependency compatibility", () => {
       code: "CONFIGURATION_ERROR",
       details: {
         missingDependencies: ["identityTransitionRetentionTableDdl"],
-        adoptionVersion: 9,
+        adoptionVersion: 10,
       },
     });
     expect(ensureTable).not.toHaveBeenCalledWith("CREATE TABLE transitions");

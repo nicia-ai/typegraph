@@ -16,6 +16,8 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import {
   countGraphStorage,
   inventoryRelationTargets,
+  isInteractiveTransactionSession,
+  sessionReadsShareOneSnapshot,
 } from "../src/backend/graph-storage";
 import type { GraphBackend } from "../src/backend/types";
 import { requireDefined } from "../src/utils/presence";
@@ -91,5 +93,16 @@ describe("graph storage consistency without interactive transactions", () => {
     expect(single.consistency).toBe("snapshot");
     expect(none.consistency).toBe("snapshot");
     expect(none.totalRows).toBe(0);
+  });
+
+  it("does not promote sequential execution from a transaction port or an isolation value", async () => {
+    await transactional.transaction((target) => {
+      const execution = { mode: "sequential" } as const;
+      expect(isInteractiveTransactionSession(target, execution)).toBe(false);
+      expect(
+        sessionReadsShareOneSnapshot(target, execution, "serializable"),
+      ).toBe(false);
+      return Promise.resolve();
+    });
   });
 });

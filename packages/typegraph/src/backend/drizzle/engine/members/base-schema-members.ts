@@ -110,9 +110,13 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   recordedAnchorsDdl?: readonly string[];
   /** Version-8 durable ordinary Store operation outcomes. */
   storeOperationsDdl?: readonly string[];
+  /** Version-9 persisted recorded-allocation retention state. */
+  ensureRecordedAnchorRetentionStorage?: (
+    clockProvisioned: boolean,
+  ) => Promise<void>;
   /**
    * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
-   * statements for the identity transition log, the version-9 adoption
+   * statements for the identity transition log, the version-10 adoption
    * step — rendered once by the caller from its own dialect's DDL
    * generators, the same way `fencesTableDdl` is. A brand-new relation
    * needs no ALTER-shaped migration, so this step's `bootstrap` is
@@ -122,12 +126,12 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
    * relation: a database that predates this release owes it regardless of
    * whether any graph in it has Operational Identity enabled. Older callers
-   * may omit it; version-9 adoption then refuses with a clear error.
+   * may omit it; version-10 adoption then refuses with a clear error.
    */
   identityTransitionsTableDdl?: readonly string[];
   /**
    * Idempotent `CREATE TABLE ...` for the transition log's per-graph
-   * retention watermark, the version-9 adoption step's other half.
+   * retention watermark, the version-10 adoption step's other half.
    */
   identityTransitionRetentionTableDdl?: string;
 }>;
@@ -165,9 +169,10 @@ export type BaseSchemaMembers = Readonly<{
  * identity-assertions relation's `since_idx` indexes), version 4 (the
  * revision-changes relation), version 5 (the byte-ordered `graph_id`
  * indexes), version 6 (the recorded adjacency indexes), version 7 (the
- * recorded-anchor log), version 8 (durable Store outcomes) and version 9 (the
- * identity transition log plus its retention watermark) all follow the same prepare/adopt-before/adopt-after bootstrap
- * sequencing.
+ * recorded-anchor log), version 8 (durable Store outcomes), version 9 (the
+ * recorded-allocation retention watermark) and version 10 (the identity
+ * transition log plus its retention watermark) all follow the same
+ * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -189,9 +194,19 @@ export function createBaseSchemaMembers(
     adjacencyIndexDdl,
     recordedAnchorsDdl,
     storeOperationsDdl,
+    ensureRecordedAnchorRetentionStorage,
     identityTransitionsTableDdl,
     identityTransitionRetentionTableDdl,
   } = deps;
+
+  async function adoptRecordedAnchorRetention(
+    clockProvisioned: boolean,
+  ): Promise<void> {
+    if (ensureRecordedAnchorRetentionStorage === undefined) {
+      throw missingAdoptionDeps(9, { ensureRecordedAnchorRetentionStorage });
+    }
+    await ensureRecordedAnchorRetentionStorage(clockProvisioned);
+  }
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
     readVersion,
@@ -287,12 +302,20 @@ export function createBaseSchemaMembers(
       },
       {
         version: 9,
+        adopt: () => adoptRecordedAnchorRetention(false),
+        bootstrap: {
+          phase: "after",
+          adopt: () => adoptRecordedAnchorRetention(true),
+        },
+      },
+      {
+        version: 10,
         async adopt(): Promise<void> {
           if (
             identityTransitionsTableDdl === undefined ||
             identityTransitionRetentionTableDdl === undefined
           ) {
-            throw missingAdoptionDeps(9, {
+            throw missingAdoptionDeps(10, {
               identityTransitionsTableDdl,
               identityTransitionRetentionTableDdl,
             });

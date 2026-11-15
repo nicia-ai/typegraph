@@ -53,6 +53,7 @@ import {
   type IndexDeclaration,
   type RelationalIndexDeclaration,
 } from "../../../indexes/types";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../recorded-storage";
 import { regconfig, tsvector } from "../columns/fulltext";
 import { carryAllocationSchemaToTables } from "../postgres-allocation-schema";
 import { defaultPostgresTableNames } from "./postgres-table-names";
@@ -260,6 +261,7 @@ export function createPostgresTables(
       graphId: text("graph_id").notNull(),
       revision: bigint("revision", { mode: "number" }).notNull(),
       recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      anchorRetention: text(RECORDED_ANCHOR_RETENTION_COLUMN),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );

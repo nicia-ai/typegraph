@@ -1,5 +1,6 @@
 import { CompilerInvariantError } from "../../../errors";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { markRecursivePlan } from "../../sql-intent";
 import { type LogicalPlan } from "../plan";
 import { inspectRecursiveProjectPlan } from "./plan-inspector";
 
@@ -75,5 +76,7 @@ export function emitRecursiveQuerySql(
     parts.push(input.limitOffset);
   }
 
-  return sql.join(parts, sql` `);
+  const query = sql.join(parts, sql` `);
+  markRecursivePlan(query);
+  return query;
 }

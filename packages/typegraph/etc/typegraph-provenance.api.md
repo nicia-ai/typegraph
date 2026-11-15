@@ -209,6 +209,7 @@ type AssignableNodeTypes<G extends GraphDef, N extends NodeType> = N extends Nod
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
@@ -5379,6 +5380,18 @@ type ProvenanceSourceConfig<G extends GraphDef = GraphDef> = Readonly<{
 // @public
 export type ProvenanceSourceInput<G extends GraphDef = GraphDef, K extends NodeKind<G> = NodeKind<G>> = ProvenanceNodeRef<G, K> | PolymorphicNodeReference<G["nodes"][K]["type"]>;
 
+// @public (undocumented)
+type PruneRecordedInstantsOptions = Readonly<{
+    limit?: number;
+}>;
+
+// @public (undocumented)
+type PruneRecordedInstantsResult = Readonly<{
+    deletedCount: number;
+    retainedBoundary: RecordedInstant | undefined;
+    hasMore: boolean;
+}>;
+
 // @public
 type PurgeEdgeClaimsParams = Readonly<{
     graphId: string;
@@ -6093,7 +6106,7 @@ type ResolvedSqlTableNames = Readonly<{
 }>;
 
 // @public
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Readonly<{
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> & Readonly<{
     rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
 }>;
 
@@ -6724,6 +6737,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     bulkFindEdgesTo: <const K extends EdgeKinds<G>>(params: BulkFindEdgesToParams<G, K>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
     bulkFindRuntimeEdgesFrom: <NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind>(params: BulkFindRuntimeEdgesFromParams<NT, ET>, options?: EdgeBulkFindEndpointOptions) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(root: GraphNodeReferenceInput<G>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    pruneRecordedInstants?: (before: string, options?: PruneRecordedInstantsOptions) => Promise<PruneRecordedInstantsResult>;
     clear: (options?: Readonly<{
         preserveContributionMaterializations?: boolean;
     }>) => Promise<void>;

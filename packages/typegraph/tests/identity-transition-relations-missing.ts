@@ -1,6 +1,6 @@
 /**
  * Shared check, run on every dialect: on a database whose transition-log
- * relations (base-schema version 9) are missing, every surface that touches
+ * relations (base-schema version 10) are missing, every surface that touches
  * them — the two reads, the prune, and the capture flush a write reaches —
  * refuses with the same typed `IDENTITY_TRANSITION_RELATIONS_MISSING`
  * `ConfigurationError`, naming the relations and the adoption that creates
@@ -57,7 +57,7 @@ function expectMissingRelations(error: unknown, surface: string): void {
     relations: [...TRANSITION_LOG_RELATIONS],
   });
   expect(refusal.suggestion).toMatch(/adoptBaseSchema\(\)/);
-  expect(refusal.suggestion).toMatch(/version-9 statements/);
+  expect(refusal.suggestion).toMatch(/version-10 statements/);
 }
 
 /**

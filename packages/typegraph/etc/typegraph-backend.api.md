@@ -494,6 +494,7 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
 // @public
 export type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;
@@ -1956,6 +1957,7 @@ export interface DialectAdapter {
         filter: SqlFragment | undefined;
     }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
+    readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
@@ -1977,6 +1979,7 @@ export type DialectCapabilities = Readonly<{
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+    maxRecursiveBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
     transactionReadsShareOneSnapshot: boolean;
 }>;
@@ -4417,8 +4420,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly assertBaseSchemaCurrent: {
         readonly kind: "reasoned";
-        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.";
-        readonly accesses: 4;
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus recorded pruning and the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; lookup preserves the legacy no-gate contract, while pruning explicitly refuses a missing lifecycle assertion.";
+        readonly accesses: 5;
     };
     readonly ensureEdgeMatchIdentityStorage: {
         readonly kind: "reasoned";

@@ -241,3 +241,7 @@ export type {
   RebuildFulltextOptions,
   RebuildFulltextResult,
 } from "./fulltext-rebuild";
+export type {
+  PruneRecordedInstantsOptions,
+  PruneRecordedInstantsResult,
+} from "./recorded-anchor-log";

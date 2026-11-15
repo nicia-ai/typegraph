@@ -1,0 +1,1346 @@
+{
+  "server": [
+    {
+      "version": "PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit"
+    }
+  ],
+  "fixture": {
+    "nodes": 8,
+    "edges": 7,
+    "maxHops": 2
+  },
+  "measurements": [
+    {
+      "size": 25,
+      "mode": "unnamed",
+      "sqlBytes": 90305,
+      "binds": 450,
+      "prepared": [],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "67804 kB",
+            "VmRSS": "42828 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 607,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25267,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 170.779,
+          "executionMs": 20.582,
+          "executionBuffers": {
+            "Shared Hit Blocks": 122,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "69096 kB",
+            "VmRSS": "35420 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25266,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 42.576,
+          "executionMs": 7.579,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "69608 kB",
+            "VmRSS": "69608 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25266,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 44.388,
+          "executionMs": 6.447,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "70828 kB",
+            "VmRSS": "70828 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25266,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 45.205,
+          "executionMs": 5.456,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "71044 kB",
+            "VmRSS": "71044 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25266,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 46.928,
+          "executionMs": 4.275,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "71060 kB",
+            "VmRSS": "71060 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 25266,
+            "Memory Allocated": 32768
+          },
+          "planningMs": 48.783,
+          "executionMs": 11.488,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "size": 25,
+      "mode": "named",
+      "sqlBytes": 90305,
+      "binds": 450,
+      "prepared": [
+        {
+          "name": "recursive_batch",
+          "generic_plans": "7",
+          "custom_plans": "5"
+        }
+      ],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "65240 kB",
+            "VmRSS": "31612 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 27843,
+            "Memory Allocated": 33800
+          },
+          "planningMs": 37.122,
+          "executionMs": 6.967,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "65796 kB",
+            "VmRSS": "31768 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 27843,
+            "Memory Allocated": 33800
+          },
+          "planningMs": 40.808,
+          "executionMs": 7.607,
+          "executionBuffers": {
+            "Shared Hit Blocks": 116,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "66456 kB",
+            "VmRSS": "56520 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 27972,
+            "Memory Allocated": 33800
+          },
+          "planningMs": 60.035,
+          "executionMs": 9.846,
+          "executionBuffers": {
+            "Shared Hit Blocks": 75,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "66456 kB",
+            "VmRSS": "56756 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 664,
+            "Memory Allocated": 1160
+          },
+          "planningMs": 0.524,
+          "executionMs": 6.326,
+          "executionBuffers": {
+            "Shared Hit Blocks": 75,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "66456 kB",
+            "VmRSS": "56784 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 664,
+            "Memory Allocated": 1160
+          },
+          "planningMs": 0.287,
+          "executionMs": 4.246,
+          "executionBuffers": {
+            "Shared Hit Blocks": 75,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "66456 kB",
+            "VmRSS": "56788 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 664,
+            "Memory Allocated": 1160
+          },
+          "planningMs": 0.258,
+          "executionMs": 3.108,
+          "executionBuffers": {
+            "Shared Hit Blocks": 75,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "size": 100,
+      "mode": "unnamed",
+      "sqlBytes": 362381,
+      "binds": 1800,
+      "prepared": [],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "201756 kB",
+            "VmRSS": "83800 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 612,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 567.004,
+          "executionMs": 37.995,
+          "executionBuffers": {
+            "Shared Hit Blocks": 470,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "206892 kB",
+            "VmRSS": "69656 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 432.132,
+          "executionMs": 68.672,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "207220 kB",
+            "VmRSS": "69656 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 325.973,
+          "executionMs": 31.054,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "207220 kB",
+            "VmRSS": "69656 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 329.264,
+          "executionMs": 28.757,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "207220 kB",
+            "VmRSS": "69656 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 333.319,
+          "executionMs": 32.777,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "207220 kB",
+            "VmRSS": "69656 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 102374,
+            "Memory Allocated": 106513
+          },
+          "planningMs": 571.265,
+          "executionMs": 40.974,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "size": 100,
+      "mode": "named",
+      "sqlBytes": 362381,
+      "binds": 1800,
+      "prepared": [
+        {
+          "name": "recursive_batch",
+          "generic_plans": "7",
+          "custom_plans": "5"
+        }
+      ],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "199768 kB",
+            "VmRSS": "153792 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 112665,
+            "Memory Allocated": 118869
+          },
+          "planningMs": 483.572,
+          "executionMs": 43.639,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "200440 kB",
+            "VmRSS": "154100 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 112665,
+            "Memory Allocated": 118869
+          },
+          "planningMs": 399.717,
+          "executionMs": 48.6,
+          "executionBuffers": {
+            "Shared Hit Blocks": 464,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "204664 kB",
+            "VmRSS": "157592 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 113166,
+            "Memory Allocated": 118869
+          },
+          "planningMs": 409.974,
+          "executionMs": 37.484,
+          "executionBuffers": {
+            "Shared Hit Blocks": 300,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "204664 kB",
+            "VmRSS": "157608 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 2644,
+            "Memory Allocated": 4677
+          },
+          "planningMs": 1.867,
+          "executionMs": 20.429,
+          "executionBuffers": {
+            "Shared Hit Blocks": 300,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "204664 kB",
+            "VmRSS": "157608 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 2644,
+            "Memory Allocated": 4677
+          },
+          "planningMs": 1.818,
+          "executionMs": 44.346,
+          "executionBuffers": {
+            "Shared Hit Blocks": 300,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "204664 kB",
+            "VmRSS": "157608 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 2644,
+            "Memory Allocated": 4677
+          },
+          "planningMs": 1.958,
+          "executionMs": 31.271,
+          "executionBuffers": {
+            "Shared Hit Blocks": 300,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "size": 500,
+      "mode": "unnamed",
+      "sqlBytes": 1819181,
+      "binds": 9000,
+      "prepared": [],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "958816 kB",
+            "VmRSS": "837056 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 649,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 7776.824,
+          "executionMs": 599.585,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2320,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "989744 kB",
+            "VmRSS": "787780 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 6355.058,
+          "executionMs": 667.939,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "989812 kB",
+            "VmRSS": "787780 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 5587.22,
+          "executionMs": 275.111,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "989812 kB",
+            "VmRSS": "787780 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 5566.421,
+          "executionMs": 332.398,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "989812 kB",
+            "VmRSS": "787780 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 5803.802,
+          "executionMs": 205.408,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "989812 kB",
+            "VmRSS": "787780 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 543406,
+            "Memory Allocated": 548977
+          },
+          "planningMs": 8324.895,
+          "executionMs": 215.382,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "size": 500,
+      "mode": "named",
+      "sqlBytes": 1819181,
+      "binds": 9000,
+      "prepared": [
+        {
+          "name": "recursive_batch",
+          "generic_plans": "7",
+          "custom_plans": "5"
+        }
+      ],
+      "samples": [
+        {
+          "iteration": 1,
+          "rss": {
+            "VmHWM": "943656 kB",
+            "VmRSS": "709192 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 594937,
+            "Memory Allocated": 606726
+          },
+          "planningMs": 9366.055,
+          "executionMs": 341.424,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 2,
+          "rss": {
+            "VmHWM": "953752 kB",
+            "VmRSS": "709336 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 594937,
+            "Memory Allocated": 606726
+          },
+          "planningMs": 6630.408,
+          "executionMs": 363.03,
+          "executionBuffers": {
+            "Shared Hit Blocks": 2314,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 3,
+          "rss": {
+            "VmHWM": "976920 kB",
+            "VmRSS": "946532 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 597118,
+            "Memory Allocated": 606726
+          },
+          "planningMs": 10379.144,
+          "executionMs": 343.955,
+          "executionBuffers": {
+            "Shared Hit Blocks": 1500,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 4,
+          "rss": {
+            "VmHWM": "976920 kB",
+            "VmRSS": "966936 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 13302,
+            "Memory Allocated": 18837
+          },
+          "planningMs": 8.064,
+          "executionMs": 117.02,
+          "executionBuffers": {
+            "Shared Hit Blocks": 1500,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 5,
+          "rss": {
+            "VmHWM": "976920 kB",
+            "VmRSS": "966940 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 13302,
+            "Memory Allocated": 18837
+          },
+          "planningMs": 16.673,
+          "executionMs": 171.347,
+          "executionBuffers": {
+            "Shared Hit Blocks": 1500,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        },
+        {
+          "iteration": 6,
+          "rss": {
+            "VmHWM": "976920 kB",
+            "VmRSS": "966940 kB"
+          },
+          "planning": {
+            "Shared Hit Blocks": 0,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Memory Used": 13302,
+            "Memory Allocated": 18837
+          },
+          "planningMs": 53.787,
+          "executionMs": 462.466,
+          "executionBuffers": {
+            "Shared Hit Blocks": 1500,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        }
+      ]
+    }
+  ]
+}

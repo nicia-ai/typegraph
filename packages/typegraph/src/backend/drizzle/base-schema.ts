@@ -75,21 +75,41 @@ export const BASE_SCHEMA_RELEASES = [
   {
     version: 7,
     id: "recorded-anchor-log",
-    orderedShapeDigests: { postgres: "eb61608f4b1141bb848264da45be69d895b2e0048b16b8cfc797e23c0f7ad81b", sqlite: "f35830b0c0c4de107858bbc5a09b701548e866d0cddd7c3ed535f3bb3c04e621" },
+    orderedShapeDigests: {
+      postgres:
+        "eb61608f4b1141bb848264da45be69d895b2e0048b16b8cfc797e23c0f7ad81b",
+      sqlite:
+        "f35830b0c0c4de107858bbc5a09b701548e866d0cddd7c3ed535f3bb3c04e621",
+    },
   },
   {
     version: 8,
     id: "durable-store-operation-outcomes",
-    orderedShapeDigests: { postgres: "3f3ce0cc5077fc1b7c9e414494863e9d7fd036f0f15e63016cda3cf42f6bfd51", sqlite: "4af4a4e35c414a6022745c1178086b424bf9488bc73ca84b5f70c31bdf298b1c" },
+    orderedShapeDigests: {
+      postgres:
+        "3f3ce0cc5077fc1b7c9e414494863e9d7fd036f0f15e63016cda3cf42f6bfd51",
+      sqlite:
+        "4af4a4e35c414a6022745c1178086b424bf9488bc73ca84b5f70c31bdf298b1c",
+    },
   },
   {
     version: 9,
+    id: "recorded-anchor-retention-watermark",
+    orderedShapeDigests: {
+      postgres:
+        "473b1e867ce4b37ba343b076e881fe461f64bc619cb5fc32f1e3891985a7770c",
+      sqlite:
+        "175083c94394427c766bae0df5cc07357447bc8b9910fbfe6964a85a51b2cf99",
+    },
+  },
+  {
+    version: 10,
     id: "identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "1b3caa52175c0d09383cc01ac96c9695140569cd1893906a844c014c30a008d6",
+        "d4e733e6481d14ebee5f16720cec6869c2ceb3b1fd7dc583bfff0a239c5a5b2e",
       sqlite:
-        "606188336c70bb143b083c95f709c7c36f16b1236936e3a2cb5804d0fc8be1ff",
+        "6f348b73972697312da6742c0c34c84676d77926c1d1bf04cdaeeb51ddd45968",
     },
   },
 ] as const;
@@ -314,4 +334,13 @@ export function createBaseSchemaLifecycle(
     adoptAfterBootstrap,
     assertCurrent,
   };
+}
+
+/** Refuse future storage before a synchronous factory performs additive adoption. */
+export function assertBaseSchemaVersionNotNewer(
+  installedVersion: number | undefined,
+  currentVersion = CURRENT_BASE_SCHEMA_VERSION,
+): void {
+  if (classifyVersion(installedVersion, currentVersion) === "newer")
+    throw migrationError(installedVersion, currentVersion, "newer");
 }

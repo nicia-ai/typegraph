@@ -23,6 +23,7 @@ export function assertSchemaCurrent<G extends GraphDef>(backend: GraphBackend, g
 // @public
 type BackendCapabilities = Readonly<{
     recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
     durableStoreOperations?: boolean;
     execution: Readonly<{
         interactiveTransactions: boolean;

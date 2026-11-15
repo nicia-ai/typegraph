@@ -615,12 +615,12 @@ these keeps loading**, and reading `store.introspect()` on it still works:
 
 **Rolling deploys and rollback.** The upgrade is one-way at the database
 already: this release's first privileged open raises the base schema to
-version 9, and a release that knows only version 8 refuses a database stamped
-9 (see
-[Base-schema version 9](/backend-setup#base-schema-version-9-the-identity-transition-log)).
+version 10, and a release that knows only version 9 or lower refuses a database
+stamped 10 (see
+[Base-schema version 10](/backend-setup#base-schema-version-10-the-identity-transition-log)).
 The narrowed `SerializedMetaEdge` shape adds no constraint of its own,
 because a document is only rewritten into it on a database already stamped
-9, though an older release's `parseSerializedSchema` could not read it
+10, though an older release's `parseSerializedSchema` could not read it
 either: the pre-change `serializedSchemaZod` required
 `transitive`/`symmetric`/`reflexive`/`inference` on every `metaEdges` entry. In a mixed-version fleet, upgrade every
 application instance sharing a database before any of them opens it with this

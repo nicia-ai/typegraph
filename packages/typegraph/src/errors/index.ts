@@ -2122,6 +2122,28 @@ export class BaseSchemaMigrationError extends TypeGraphError {
   }
 }
 
+/** Deployment-wide additive adoption could not acquire its table lock within the wait budget. */
+export class BaseSchemaAdoptionTimeoutError extends TypeGraphError {
+  declare readonly details: Readonly<{
+    tableName: string;
+    waitBudgetMs: number;
+  }>;
+  constructor(tableName: string, waitBudgetMs: number, cause?: unknown) {
+    super(
+      `Timed out adopting base-schema table ${tableName}.`,
+      "BASE_SCHEMA_ADOPTION_TIMEOUT",
+      {
+        category: "system",
+        details: { tableName, waitBudgetMs },
+        suggestion:
+          "Retry privileged base-schema adoption after transactions using this table have completed.",
+        cause,
+      },
+    );
+    this.name = "BaseSchemaAdoptionTimeoutError";
+  }
+}
+
 /**
  * Details for EagerMaterializationError.
  */
@@ -2389,7 +2411,6 @@ export type SchemaFenceTimeoutErrorDetails = Readonly<{
 export class SchemaFenceTimeoutError extends TypeGraphError {
   /** The graph and lock acquisition that exceeded the caller's budget. */
   declare readonly details: SchemaFenceTimeoutErrorDetails;
-
   constructor(
     graphId: string,
     phase: SchemaFencePhase,

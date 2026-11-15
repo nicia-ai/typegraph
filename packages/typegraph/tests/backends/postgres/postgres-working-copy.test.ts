@@ -169,7 +169,17 @@ describe.runIf(process.env["POSTGRES_URL"])(
         await branch.store.nodes.Person.update(person.id, { name: "Copy" });
         const unchangedSource = await source.nodes.Person.getById(person.id);
         expect(unchangedSource?.name).toBe("Source");
+        const copiedAnchor = await branch.store.recordedNow();
         await branch.close();
+        // Simulate an allocation created by an earlier release. Reopen adopts
+        // the allocation's own base schema in place through the provisioning
+        // connection, restoring the retention column and the current marker.
+        await pool.query(
+          `ALTER TABLE "${names.recordedClock}" DROP COLUMN anchor_retention`,
+        );
+        await pool.query(
+          `UPDATE "${names.baseSchemaVersions}" SET version=8 WHERE installation=1`,
+        );
 
         const reopenedResult = await reopenDurableBranch(
           graph,
@@ -178,10 +188,34 @@ describe.runIf(process.env["POSTGRES_URL"])(
         );
         expect(isOk(reopenedResult)).toBe(true);
         const reopened = unwrap(reopenedResult);
+        expect(
+          await reopened.store.resolveRecordedInstant(
+            "2099-01-01T00:00:00.000Z",
+          ),
+        ).toBe(copiedAnchor);
+        const adoptedMarker = await pool.query<{ version: number }>(
+          `SELECT version FROM "${names.baseSchemaVersions}" WHERE installation=1`,
+        );
+        expect(adoptedMarker.rows[0]?.version).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        const retentionColumn = await pool.query(
+          "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = 'anchor_retention'",
+          [names.recordedClock],
+        );
+        expect(retentionColumn.rowCount).toBe(1);
         const reopenedPerson = await reopened.store.nodes.Person.getById(
           person.id,
         );
         expect(reopenedPerson?.name).toBe("Copy");
+        await reopened.store.nodes.Person.update(person.id, {
+          name: "Legacy allocation write",
+        });
+        expect(
+          await reopened.store.resolveRecordedInstant(
+            "2099-01-01T00:00:00.000Z",
+          ),
+        ).toBe(await reopened.store.recordedNow());
         await expect(
           reopened.store.evolve(
             defineGraphExtension({

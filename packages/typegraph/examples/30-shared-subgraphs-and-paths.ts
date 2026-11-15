@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     assert.ok(identityAda);
     assert.equal("biography" in identityAda, false);
 
-    // One statement retrieves both bounded neighborhoods. Shared hydration is
+    // One statement retrieves both bounded neighborhoods. Payload sharing is
     // useful here because they overlap and include substantial property data.
     // Measure your workload before opting in; disjoint roots can transfer more.
     const roots = [ada, bea];

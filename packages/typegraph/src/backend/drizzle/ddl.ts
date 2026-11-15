@@ -30,6 +30,11 @@ import {
   isGraphRelationKey,
 } from "../graph-relations";
 import {
+  RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT,
+  RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+} from "../recorded-storage";
+import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
   type TableContribution,
@@ -40,6 +45,7 @@ import {
   tables as postgresTables,
 } from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
+import type { SqliteColumnAdoptionPlan } from "./sqlite-column-adoption";
 
 // Narrow interfaces for Drizzle column internals not exposed in public types.
 // These are accessed only in DDL generation for migration scripts.
@@ -52,18 +58,6 @@ type CustomColumnType = Readonly<{
 
 const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
 const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
-
-/**
- * The columns {@link planSqliteEdgeMatchIdentityAdoption} can `ADD`, in the
- * order it adds them. Exported so the adoption call sites classify a
- * concurrent adopter's duplicate-column failure against this list instead of
- * re-spelling the column names beside their own `isSqliteDuplicateColumnError`
- * call.
- */
-export const EDGE_MATCH_IDENTITY_ADOPTION_COLUMNS: readonly string[] = [
-  EDGE_MATCH_IDENTITY_NAME_COLUMN,
-  EDGE_MATCH_IDENTITY_KEY_COLUMN,
-];
 
 export function quoteDdlIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
@@ -164,7 +158,7 @@ function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
  * inventory. Factories and backend lifecycle hooks share this owner so a
  * bootstrap retry cannot drift from privileged adoption.
  */
-export function planSqliteEdgeMatchIdentityAdoption(
+function planSqliteEdgeMatchIdentityAdoption(
   tableName: string,
   existingColumns: ReadonlySet<string>,
 ): readonly string[] {
@@ -840,4 +834,70 @@ export function generateVectorlessPostgresMigrationSQL(
   fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string {
   return generatePostgresInstallationSQL(tables, fulltextStrategy, false);
+}
+
+/** Version-9 nullable retention watermark on the existing owned clock row. */
+function recordedAnchorRetentionColumnDDL(
+  tableName: string,
+  ifNotExists = false,
+): string {
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${ifNotExists ? "IF NOT EXISTS " : ""}${quoteDdlIdentifier(RECORDED_ANCHOR_RETENTION_COLUMN)} TEXT;`;
+}
+
+/** Shared by synchronous managed SQLite bootstrap and asynchronous adoption. */
+function planRecordedAnchorRetentionAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  return (
+      existingColumns.size === 0 ||
+        existingColumns.has(RECORDED_ANCHOR_RETENTION_COLUMN)
+    ) ?
+      []
+    : [recordedAnchorRetentionColumnDDL(tableName)];
+}
+
+/** Queue the additive ALTER briefly, preserving any stricter caller timeout. */
+export function postgresRecordedAnchorRetentionAdoptionDDL(
+  tableName: string,
+): string {
+  const timeout = `${RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS}ms`;
+  const body = `DECLARE previous_timeout TEXT := current_setting('lock_timeout'); wait_budget_ms NUMERIC; BEGIN
+    IF previous_timeout::interval = INTERVAL '0' OR previous_timeout::interval > '${timeout}'::interval THEN
+      PERFORM set_config('lock_timeout', '${timeout}', true);
+    END IF;
+    wait_budget_ms := EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000;
+    BEGIN
+      ${recordedAnchorRetentionColumnDDL(tableName, true)}
+    EXCEPTION WHEN lock_not_available THEN
+      RAISE USING ERRCODE = SQLSTATE, MESSAGE = SQLERRM,
+        DETAIL = json_build_object('waitBudgetMs', wait_budget_ms)::TEXT,
+        HINT = '${RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT}';
+    END;
+    PERFORM set_config('lock_timeout', previous_timeout, true);
+  END`;
+  return `DO E'${body.replaceAll("\\", "\\\\").replaceAll("'", "''")}';`;
+}
+
+export function edgeMatchIdentityColumnAdoption(
+  tableName: string,
+): SqliteColumnAdoptionPlan {
+  return {
+    addedColumns: [
+      EDGE_MATCH_IDENTITY_NAME_COLUMN,
+      EDGE_MATCH_IDENTITY_KEY_COLUMN,
+    ],
+    statements: (columns) =>
+      planSqliteEdgeMatchIdentityAdoption(tableName, columns),
+  };
+}
+
+export function recordedAnchorRetentionColumnAdoption(
+  tableName: string,
+): SqliteColumnAdoptionPlan {
+  return {
+    addedColumns: [RECORDED_ANCHOR_RETENTION_COLUMN],
+    statements: (columns) =>
+      planRecordedAnchorRetentionAdoption(tableName, columns),
+  };
 }

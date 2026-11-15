@@ -4,7 +4,7 @@ import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
-import { asCompiledRowsSql } from "../sql-intent";
+import { asCompiledRowsSql, recursivePlanCount } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
 import type {
   EmbeddableOneStatementRead,
@@ -14,7 +14,7 @@ import type {
 
 /** Execution choices for a one-statement read batch. */
 export type BatchOnceOptions = Readonly<{
-  /** Share hydration among compatible subgraphs. Recommended for overlapping, payload-heavy roots. Defaults to false. */
+  /** Deduplicate entity payloads among compatible subgraphs. Recommended for overlapping, payload-heavy roots. Defaults to false. */
   shareSubgraphs?: boolean;
 }>;
 
@@ -141,6 +141,39 @@ export async function executeOneStatementBatch<
     items,
     options.shareSubgraphs === true,
   );
+  let subgraphPlans = 0;
+  let queryPlans = 0;
+  let largestReadPlans = 0;
+  for (const group of groups) {
+    if (group.kind === "subgraph") {
+      subgraphPlans++;
+    } else {
+      const readPlans = recursivePlanCount(group.item.query);
+      queryPlans += readPlans;
+      largestReadPlans = Math.max(largestReadPlans, readPlans);
+    }
+  }
+  const recursivePlans = subgraphPlans + queryPlans;
+  const maxRecursivePlans = dialect.capabilities.maxRecursiveBatchPlans;
+  if (maxRecursivePlans !== undefined && recursivePlans > maxRecursivePlans) {
+    throw new ConfigurationError(
+      "store.batchOnce() exceeds the backend's independent recursive-plan budget.",
+      {
+        operation: "batchOnce",
+        recursivePlans,
+        subgraphPlans,
+        queryPlans,
+        maxRecursivePlans,
+        backend: backend.dialect,
+      },
+      {
+        suggestion:
+          largestReadPlans > maxRecursivePlans ?
+            "A single read exceeds the budget. Simplify that read or run it directly with execute(); splitting the batch cannot reduce that read's plan count."
+          : "Split the reads into explicit batchOnce() calls, or use matching subgraph options to combine traversals. Fluent recursive stages and historical identity reconstructions each consume slots, including inside composed reads; shareSubgraphs does not combine fluent queries.",
+      },
+    );
+  }
   for (const [index, { item }] of groups.entries()) {
     const sourceName = `typegraph_batch_source_${index}`;
     const rowsName = `typegraph_batch_rows_${index}`;
@@ -149,6 +182,18 @@ export async function executeOneStatementBatch<
       sql`${sql.identifier(sourceName)} AS (${item.query})`,
       sql`${sql.identifier(rowsName)} AS (SELECT ${sql.identifier(sourceName)}.*, ROW_NUMBER() OVER (${ordinalOrder}) AS ${sql.identifier(ORDER_COLUMN)} FROM ${sql.identifier(sourceName)})`,
     );
+    if (item.payloadPartitionColumn !== undefined) {
+      const payloads = dialect.partitionedRowsJsonArrays(
+        rowsName,
+        [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
+        ORDER_COLUMN,
+        item.payloadPartitionColumn,
+      );
+      branches.push(
+        sql`SELECT ${index} AS batch_index, payload FROM (${payloads}) AS typegraph_batch_partitions`,
+      );
+      continue;
+    }
     const payload = dialect.orderedRowsJsonArray(
       rowsName,
       [...item.outputNames, ...(item.hiddenOutputNames ?? [])],
@@ -175,9 +220,12 @@ export async function executeOneStatementBatch<
     );
   }
   const envelopes = await backend.execute<BatchEnvelopeRow>(statement);
-  const payloads = new Map<number, readonly Record<string, unknown>[]>();
+  const payloads = new Map<number, Record<string, unknown>[]>();
   for (const envelope of envelopes) {
-    payloads.set(Number(envelope.batch_index), parsePayload(envelope.payload));
+    const index = Number(envelope.batch_index);
+    const rows = payloads.get(index) ?? [];
+    for (const row of parsePayload(envelope.payload)) rows.push(row);
+    payloads.set(index, rows);
   }
 
   const results: unknown[] = Array.from({ length: items.length });

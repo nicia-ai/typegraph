@@ -52,7 +52,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Reopening a durable working copy below the current base schema checks and
 // calls adoptBaseSchema (+2), and the tightening probe reads its acyclic and
 // composition relations through one table-name read (-1): 131 -> 132.
-const REASONED_FLOOR = 132;
+// Recorded pruning requires one backend-owned base-schema assertion: 132 -> 133.
+const REASONED_FLOOR = 133;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -80,15 +81,15 @@ const REASONED_FLOOR = 132;
 const DEFERRED_LIVE_TOTAL = 240;
 const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 386;
+const TOTAL_ROW_COUNT = 387;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
-  "store/recorded-capture/guards.ts:76#executeStatement",
-  "store/recorded-capture/guards.ts:93#executeStatement",
-  "store/recorded-capture/guards.ts:238#executeStatement",
+  "store/recorded-capture/guards.ts:78#executeStatement",
+  "store/recorded-capture/guards.ts:95#executeStatement",
+  "store/recorded-capture/guards.ts:240#executeStatement",
 ] as const;
 
 function rowKey(
@@ -227,7 +228,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 385)", () => {
+  it("the class partition covers every scanned row (total 387)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

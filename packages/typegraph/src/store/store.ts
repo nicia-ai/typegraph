@@ -84,6 +84,7 @@ import {
   type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
   type LineageDelta,
+  type OptionalTransactionExecution,
   runOptionallyInTransaction,
   type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
@@ -292,7 +293,8 @@ import {
   type InternalGraphAlgorithms,
 } from "./algorithms";
 import {
-  readGraphAllocationOwner,
+  type GraphAllocationOwnerRead,
+  readGraphAllocationOwnerSession,
   rotateGraphAllocationOwner,
 } from "./allocation-owner";
 import {
@@ -410,7 +412,13 @@ import {
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
-import { lookupRecordedAnchor } from "./recorded-anchor-log";
+import {
+  lookupRecordedAnchor,
+  pruneRecordedAnchors,
+  type PruneRecordedInstantsOptions,
+  type PruneRecordedInstantsResult,
+  type RecordedAnchorLogContext,
+} from "./recorded-anchor-log";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
   advanceRevisionClock,
@@ -967,6 +975,11 @@ type StoreCore<G extends GraphDef> = Readonly<{
     root: GraphNodeReferenceInput<G>,
     options: SubgraphOptions<G, EK, NK, P, C>,
   ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+  /** Explicit allocation-log retention; concrete Stores always provide it. */
+  pruneRecordedInstants?: (
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ) => Promise<PruneRecordedInstantsResult>;
   clear: (
     options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
   ) => Promise<void>;
@@ -1121,6 +1134,7 @@ type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
 /** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
 type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
   AddedStoreReads<G> &
+  Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> &
   Readonly<{
     rotateAllocationOwner: (
       expectedOwner: GraphAllocationOwner,
@@ -1646,9 +1660,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
-      revisionOrigin: async (target = this.#backend) => {
-        return this.#readRecordedReadOwner(target);
-      },
+      revisionOriginSession: (target, execution) =>
+        this.#readRecordedReadOwner(target, execution),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
@@ -3372,21 +3385,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async resolveRecordedInstant(
     wallTime: string,
   ): Promise<RecordedInstant | undefined> {
-    if (
-      !this.#captureEnabled ||
-      this.#recordedTimeOwnership !== "typegraph-relations"
-    )
-      throw new UnsupportedBackendCapabilityError(
-        "resolveRecordedInstant",
-        "recordedAnchorLookup",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
-      );
-    return lookupRecordedAnchor(
-      this.#backend,
-      this.#sqlSchema(),
-      this.graphId,
-      wallTime,
+    return lookupRecordedAnchor(this.#recordedAnchorLogContext(), wallTime);
+  }
+
+  /** Retire allocation coverage and delete at most one bounded batch per call. */
+  async pruneRecordedInstants(
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ): Promise<PruneRecordedInstantsResult> {
+    return pruneRecordedAnchors(
+      this.#recordedAnchorLogContext(),
+      before,
+      options,
     );
+  }
+
+  #recordedAnchorLogContext(): RecordedAnchorLogContext {
+    return {
+      backend: this.#baseBackend,
+      schema: this.#sqlSchema(),
+      graphId: this.graphId,
+      captureEnabled: this.#captureEnabled,
+    };
   }
 
   /**
@@ -3544,16 +3564,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   async #readRecordedReadOwner(
-    target: Pick<GraphBackend, "execute">,
-  ): Promise<GraphAllocationOwner | undefined> {
+    target: TransactionBackend,
+    execution?: OptionalTransactionExecution,
+  ): Promise<GraphAllocationOwnerRead> {
     const binding = this.#recordedReadBinding;
     if (binding?.kind === "external" && binding.owner !== undefined)
-      return binding.owner(target);
+      return { owner: await binding.owner(target), sharesSnapshot: false };
     return withRecordedRelationsPrecondition(
-      readGraphAllocationOwner(
+      readGraphAllocationOwnerSession(
         target,
         binding?.schema ?? this.#sqlSchema(),
         this.graphId,
+        execution ?? { mode: "sequential" },
       ),
       { dialect: this.#backend.dialect, surface: "allocation-owner" },
     );
@@ -3562,7 +3584,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** Captures the owner of recorded reads, including externally managed relations. */
   async recordedReadOwner(): Promise<GraphAllocationOwner> {
     if (this.#recordedReadBinding?.kind === "external") {
-      const owner = await this.#readRecordedReadOwner(this.#backend);
+      const { owner } = await this.#readRecordedReadOwner(this.#backend);
       if (owner === undefined)
         throw new ConfigurationError(
           "External recorded relations have no allocation owner.",

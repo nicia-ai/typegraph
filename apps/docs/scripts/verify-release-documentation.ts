@@ -55,9 +55,15 @@ function sourceLine(contents: string, index: number | undefined): number {
   return contents.slice(0, index ?? 0).split("\n").length;
 }
 
+const FILE_ROUTE_EXTENSIONS = [".txt", ".xml", ".md"] as const;
+
+function isFileRoute(route: string): boolean {
+  return FILE_ROUTE_EXTENSIONS.some((extension) => route.endsWith(extension));
+}
+
 function builtTargetForRoute(route: string): string {
   const decodedRoute = decodeURI(route);
-  if (decodedRoute.endsWith(".txt") || decodedRoute.endsWith(".xml")) {
+  if (isFileRoute(decodedRoute)) {
     return path.join(builtDocumentationDirectory, decodedRoute);
   }
   return path.join(builtDocumentationDirectory, decodedRoute, "index.html");
@@ -86,7 +92,7 @@ async function verifyInternalLinks(
         continue;
       }
 
-      if (targetUrl.hash === "" || builtTarget.endsWith(".txt")) continue;
+      if (targetUrl.hash === "" || isFileRoute(builtTarget)) continue;
       const targetContents = await readFile(builtTarget, "utf8");
       const anchor = decodeURIComponent(targetUrl.hash.slice(1));
       if (!targetContents.includes(`id="${anchor}"`)) {

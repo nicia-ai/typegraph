@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("42 reasoned entries sum to 132 accesses; 50 deferred entries sum to 245", () => {
+  it("42 reasoned entries sum to 133 accesses; 50 deferred entries sum to 245", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -175,7 +175,8 @@ describe("capability bundle totality (T9)", () => {
     // working copy below the current base schema checks and calls
     // adoptBaseSchema (+2), and the tightening probe reads its acyclic and
     // composition relations through one table-name read (-1): 131 -> 132.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(132);
+    // Recorded pruning adds one required base-schema assertion: 132 -> 133.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(133);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

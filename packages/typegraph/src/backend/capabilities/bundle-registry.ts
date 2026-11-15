@@ -903,8 +903,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   assertBaseSchemaCurrent: {
     kind: "reasoned",
     reason:
-      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.",
-    accesses: 4,
+      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus recorded pruning and the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; lookup preserves the legacy no-gate contract, while pruning explicitly refuses a missing lifecycle assertion.",
+    accesses: 5,
   },
   ensureEdgeMatchIdentityStorage: {
     kind: "reasoned",
@@ -947,6 +947,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     // connected backend's names to fence physical target bindings.
     accesses: 31,
   },
+  // The session expression is shared by inventory counts and recorded owner
+  // reads; both use the session snapshot predicate in backend/graph-storage.ts.
   fenceSql: {
     kind: "reasoned",
     reason:

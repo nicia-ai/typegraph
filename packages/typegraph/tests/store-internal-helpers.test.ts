@@ -436,8 +436,11 @@ describe("recorded read dispatch", () => {
     const backend = new ClosureRawBackend();
     const service = createRecordedReadService({
       graphId: "graph",
-      revisionOrigin: () =>
-        Promise.resolve({ origin: "origin", namespace: "0".repeat(32) }),
+      revisionOriginSession: () =>
+        Promise.resolve({
+          owner: { origin: "origin", namespace: "0".repeat(32) },
+          sharesSnapshot: false,
+        }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
@@ -613,8 +616,11 @@ describe("backend overlay wrappers", () => {
     const backend = new ClosureGraphBackend();
     const service = createRecordedReadService({
       graphId: "graph",
-      revisionOrigin: () =>
-        Promise.resolve({ origin: "origin", namespace: "0".repeat(32) }),
+      revisionOriginSession: () =>
+        Promise.resolve({
+          owner: { origin: "origin", namespace: "0".repeat(32) },
+          sharesSnapshot: false,
+        }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,

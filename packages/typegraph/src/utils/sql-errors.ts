@@ -614,30 +614,18 @@ export function isSqliteMissingEdgeMatchIdentityColumnError(
   return false;
 }
 
-/**
- * Whether a concurrent SQLite adopter already added one of the columns we
- * planned to `ADD`.
- *
- * `columnNames` is the adoption's own column list, so one predicate serves
- * every additive column rather than one hand-written predicate per column.
- * Deliberately narrow — an exact `duplicate column name: <column>` message on
- * a `SQLITE_ERROR` — because provisioning treats a match as "the post-state I
- * wanted is already there" and must not swallow any other DDL failure.
- */
+/** Precisely classifies a concurrent nullable-column adoption race. */
 export function isSqliteDuplicateColumnError(
   error: unknown,
-  columnNames: readonly string[],
+  column: string,
 ): boolean {
-  const duplicateMessages = new Set(
-    columnNames.map((column) => `duplicate column name: ${column}`),
-  );
   for (const link of errorChain(error)) {
-    if (!canReadProperty(link)) continue;
-    if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
-    const message = sqliteErrorMessage(link);
-    if (typeof message === "string" && duplicateMessages.has(message)) {
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === "SQLITE_ERROR" &&
+      sqliteErrorMessage(link) === `duplicate column name: ${column}`
+    )
       return true;
-    }
   }
   return false;
 }
@@ -1022,8 +1010,8 @@ const IDENTITY_TRANSITION_RELATIONS_MISSING_CODE =
  * restore — see `withIdentityTransitionLogRelations` in
  * `identity/transition-log.ts`, the one seam every such statement runs
  * through) into an error that names the transition-log relations and the
- * base-schema adoption that creates them. They are base-schema version 9
- * relations, so a database adopted only through version 8 lacks them while
+ * base-schema adoption that creates them. They are base-schema version 10
+ * relations, so a database adopted only through version 9 lacks them while
  * every recorded-time relation exists; the generic recorded-relations error
  * would send its reader after tables that are already there.
  */
@@ -1046,7 +1034,7 @@ export async function withIdentityTransitionRelationsPrecondition<T>(
       {
         cause: error,
         suggestion:
-          "They are base-schema version 9 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker reads or writes the transition log. Externally managed DDL applies the version-9 statements and advances the base-schema marker to 9.",
+          "They are base-schema version 10 relations: adopt it with backend.adoptBaseSchema(), or open the store once with createStoreWithSchema() / createAdapterStoreWithSchema() under a DDL-capable role, before any runtime worker reads or writes the transition log. Externally managed DDL applies the version-10 statements and advances the base-schema marker to 10.",
       },
     );
   }
@@ -1116,10 +1104,16 @@ export function parseDimensionMismatch(
   return undefined;
 }
 
+/** PostgreSQL's lock_not_available code shared by lock-failure classifiers. */
+export const POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03";
+
 /** Shared lock-not-available classification, including wrapped driver errors. */
 export function isPostgresLockTimeout(error: unknown): boolean {
   for (const link of errorChain(error))
-    if (canReadProperty(link) && Reflect.get(link, "code") === "55P03")
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE
+    )
       return true;
   return false;
 }

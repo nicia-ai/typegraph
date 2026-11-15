@@ -15,6 +15,7 @@ export {
 export { postgresDialect } from "./postgres";
 export { sqliteDialect } from "./sqlite";
 export type {
+  BuiltinDialectAdapter,
   DialectAdapter,
   DialectCapabilities,
   DialectRecursiveQueryStrategy,
@@ -32,12 +33,12 @@ export {
 
 import { postgresDialect } from "./postgres";
 import { sqliteDialect } from "./sqlite";
-import { type DialectAdapter, type SqlDialect } from "./types";
+import { type BuiltinDialectAdapter, type SqlDialect } from "./types";
 
 /**
  * Map of dialect names to their adapters.
  */
-const DIALECT_ADAPTERS: Record<SqlDialect, DialectAdapter> = {
+const DIALECT_ADAPTERS: Record<SqlDialect, BuiltinDialectAdapter> = {
   sqlite: sqliteDialect,
   postgres: postgresDialect,
 };
@@ -54,7 +55,7 @@ const DIALECT_ADAPTERS: Record<SqlDialect, DialectAdapter> = {
  * const sql = adapter.jsonExtract(column, "/name");
  * ```
  */
-export function getDialect(dialect: SqlDialect): DialectAdapter {
+export function getDialect(dialect: SqlDialect): BuiltinDialectAdapter {
   return DIALECT_ADAPTERS[dialect];
 }
 

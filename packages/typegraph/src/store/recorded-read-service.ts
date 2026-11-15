@@ -3,6 +3,7 @@ import {
   type EdgeRow,
   type GraphBackend,
   type NodeRow,
+  type OptionalTransactionExecution,
   type TransactionBackend,
   type TransactionOptions,
 } from "../backend/types";
@@ -35,6 +36,7 @@ import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import { type GraphAllocationOwnerRead } from "./allocation-owner";
 import { readRecordedAdjacency } from "./recorded-adjacency";
 import {
   assertRecordedAnchorOrigin,
@@ -59,9 +61,10 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
-  revisionOrigin: (
-    target?: Pick<GraphBackend, "execute">,
-  ) => Promise<RecordedAnchorOwner | undefined>;
+  revisionOriginSession: (
+    target: TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<GraphAllocationOwnerRead>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
 }>;
@@ -164,17 +167,17 @@ function withRelationsPrecondition<T>(
 function recordedReadExecutionMembers(
   backend: TransactionBackend,
   surface: string,
-  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+  assertOrigin?: (target: TransactionBackend) => Promise<void>,
 ): Pick<TransactionBackend, "execute" | "executeRaw"> {
   return {
     execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
-      await assertOrigin(backend);
+      await assertOrigin?.(backend);
       const rows = await withRelationsPrecondition(
         backend,
         backend.execute<T>(query),
         surface,
       );
-      await assertOrigin(backend);
+      await assertOrigin?.(backend);
       return rows;
     },
     ...(backend.executeRaw === undefined ?
@@ -184,13 +187,13 @@ function recordedReadExecutionMembers(
           text: string,
           params: readonly unknown[],
         ): Promise<readonly T[]> => {
-          await assertOrigin(backend);
+          await assertOrigin?.(backend);
           const rows = await withRelationsPrecondition(
             backend,
             requireDefined(backend.executeRaw)<T>(text, params),
             surface,
           );
-          await assertOrigin(backend);
+          await assertOrigin?.(backend);
           return rows;
         },
       }),
@@ -200,7 +203,8 @@ function recordedReadExecutionMembers(
 function createRecordedReadBackend(
   backend: GraphBackend,
   surface: string,
-  assertOrigin: (target: Pick<GraphBackend, "execute">) => Promise<void>,
+  assertOrigin: (target: TransactionBackend) => Promise<void>,
+  assertSnapshotOrigin: (target: TransactionBackend) => Promise<boolean>,
 ): GraphBackend {
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
@@ -211,10 +215,17 @@ function createRecordedReadBackend(
     ): Promise<T> => {
       await assertOrigin(backend);
       const result = await backend.transaction(async (target) => {
-        await assertOrigin(target);
+        // The owner read resolves snapshot evidence on THIS target. A confirmed
+        // snapshot covers every subsequent read until this callback ends;
+        // the root check below still rejects retirement outside that snapshot.
+        const pinned = await assertSnapshotOrigin(target);
         const guarded = deriveBackend(
           target,
-          recordedReadExecutionMembers(target, surface, assertOrigin),
+          recordedReadExecutionMembers(
+            target,
+            surface,
+            pinned ? undefined : assertOrigin,
+          ),
         );
         return fn(guarded);
       }, options);
@@ -407,17 +418,22 @@ export function createRecordedReadService(
     mapRecordedEdgeRow,
   } = params;
 
+  async function revisionOrigin(
+    target: TransactionBackend = backend,
+  ): Promise<RecordedAnchorOwner | undefined> {
+    const read = await params.revisionOriginSession(target, {
+      mode: "sequential",
+    });
+    return read.owner;
+  }
+
   async function assertOrigin(
     coordinate: ReadCoordinate,
-    target?: Pick<GraphBackend, "execute">,
+    target?: TransactionBackend,
   ): Promise<void> {
     const parts = requireRecordedRevision(coordinate);
     if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;
-    assertRecordedAnchorOrigin(
-      parts,
-      await params.revisionOrigin(target),
-      graphId,
-    );
+    assertRecordedAnchorOrigin(parts, await revisionOrigin(target), graphId);
   }
 
   /**
@@ -637,7 +653,7 @@ export function createRecordedReadService(
         graphId,
         backend,
         binding: recordedReadBinding,
-        origin: params.revisionOrigin,
+        origin: revisionOrigin,
         root,
         coordinate,
         edgeKinds,
@@ -650,8 +666,23 @@ export function createRecordedReadService(
     ): GraphBackend {
       if (coordinate.recorded === undefined) return backend;
       requireRecordedReadBinding(recordedReadBinding, surface);
-      return createRecordedReadBackend(backend, surface, (target) =>
-        assertOrigin(coordinate, target),
+      return createRecordedReadBackend(
+        backend,
+        surface,
+        (target) => assertOrigin(coordinate, target),
+        async (target) => {
+          const parts = requireRecordedRevision(coordinate);
+          if (requireRecordedAnchorOwner(parts, graphId) === undefined)
+            return false;
+          // This callback is entered by backend.transaction(), so the mode
+          // records that execution boundary. Snapshot reuse additionally needs
+          // the actual target's transaction port and snapshot evidence.
+          const read = await params.revisionOriginSession(target, {
+            mode: "interactive-transaction",
+          });
+          assertRecordedAnchorOrigin(parts, read.owner, graphId);
+          return read.sharesSnapshot;
+        },
       );
     },
 
