@@ -20,7 +20,7 @@
  * the write gate.
  */
 import { RestrictedDeleteError } from "../errors";
-import { nowIso } from "../utils/date";
+import { nowIso, validityWindowCovers } from "../utils/date";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import {
@@ -42,6 +42,7 @@ import {
   compareCodePoints,
   compositionWindowOverlapError,
   type CompositionWindowTransition,
+  type CompositionWindowWrites,
   createSqlSchema,
   edgeCardinalityClaimTarget,
   edgeInsertClaims,
@@ -51,6 +52,7 @@ import {
   type EdgeRow,
   getDialect,
   getEdgeRowsByIds,
+  type GraphBackend,
   type GraphDef,
   type InsertEdgeParams,
   judgeNodeDeleteBehavior,
@@ -110,7 +112,7 @@ export function statesValidityEnd(
  * One constrained edge upsert as the row it leaves: its final endpoints and
  * its window, beside the stored row it replaces.
  */
-type PlannedEdgeRow = ProposedRelationEdge &
+export type PlannedEdgeRow = ProposedRelationEdge &
   Readonly<{
     /**
      * The lower bound the row is left with. An in-place update never moves a
@@ -125,13 +127,11 @@ type PlannedEdgeRow = ProposedRelationEdge &
   }>;
 
 /**
- * What every structural check reads: the plan's normalized write view, its
- * constrained edge writes as the rows they leave, and the target's current
- * rows through one cached reader.
+ * The plan's constrained edge writes beside the stored rows they replace or
+ * delete — read once by the planner from the target, and again by the apply
+ * inside its transaction ({@link readPlannedEdgeRows}).
  */
-export type PlanStructure<G extends GraphDef> = Readonly<{
-  target: Store<G>;
-  writes: MergePlanWrites;
+export type PlannedEdgeRows = Readonly<{
   /**
    * Every edge upsert of a kind some structural rule constrains (an acyclic
    * relation or a claim), at its FINAL endpoints and with the window it
@@ -142,18 +142,29 @@ export type PlanStructure<G extends GraphDef> = Readonly<{
   edgeRows: readonly PlannedEdgeRow[];
   /** The stored rows the plan's edge deletes remove, for a constrained kind. */
   deletedEdgeRows: readonly EdgeRow[];
-  /** Edge ids whose stored state the plan removes or replaces. */
-  supersededEdgeIds: ReadonlySet<string>;
-  /**
-   * Nodes the apply deletes — the plan's deletions and the delete half of its
-   * recreations ({@link mergeNodeDeleteSequence}). A stored edge incident to
-   * one leaves with it: its delete removes the edge, or refuses, which
-   * {@link restrictedDeleteConflict} reports.
-   */
-  deletedNodes: ReadonlySet<MergeKey>;
-  /** The target's live edges incident to one node, read once per node. */
-  connectedEdges: (kind: string, id: string) => Promise<readonly EdgeRow[]>;
 }>;
+
+/**
+ * What every structural check reads: the plan's normalized write view, its
+ * constrained edge writes as the rows they leave, and the target's current
+ * rows through one cached reader.
+ */
+export type PlanStructure<G extends GraphDef> = PlannedEdgeRows &
+  Readonly<{
+    target: Store<G>;
+    writes: MergePlanWrites;
+    /** Edge ids whose stored state the plan removes or replaces. */
+    supersededEdgeIds: ReadonlySet<string>;
+    /**
+     * Nodes the apply deletes — the plan's deletions and the delete half of its
+     * recreations ({@link mergeNodeDeleteSequence}). A stored edge incident to
+     * one leaves with it: its delete removes the edge, or refuses, which
+     * {@link restrictedDeleteConflict} reports.
+     */
+    deletedNodes: ReadonlySet<MergeKey>;
+    /** The target's live edges incident to one node, read once per node. */
+    connectedEdges: (kind: string, id: string) => Promise<readonly EdgeRow[]>;
+  }>;
 
 /** One structural rule: the conflict the plan would meet at apply, if any. */
 export type PlanStructuralCheck = <G extends GraphDef>(
@@ -181,32 +192,11 @@ async function capturePlanStructure<G extends GraphDef>(
   writes: MergePlanWrites,
 ): Promise<PlanStructure<G>> {
   const backend = storeBackend(target);
-  const constrained = writes.edgeUpserts.filter((upsert) =>
-    edgeKindIsStructurallyConstrained(target, upsert.kind),
-  );
-  const constrainedDeletes = writes.edgeDeletes.filter((deletion) =>
-    edgeKindIsStructurallyConstrained(target, deletion.kind),
-  );
-  const storedRows = await getEdgeRowsByIds(
-    backend,
-    batchPointReadVerdict(backend),
-    target.graphId,
-    [
-      ...constrained.map((upsert) => upsert.id),
-      ...constrainedDeletes.map((deletion) => deletion.id),
-    ],
-  );
   const connected = new Map<MergeKey, readonly EdgeRow[]>();
   return {
     target,
     writes,
-    edgeRows: constrained.map((upsert) =>
-      plannedEdgeRow(upsert, storedRows.get(upsert.id)),
-    ),
-    deletedEdgeRows: constrainedDeletes.flatMap((deletion) => {
-      const stored = storedRows.get(deletion.id);
-      return stored === undefined ? [] : [stored];
-    }),
+    ...(await readPlannedEdgeRows(target, backend, writes)),
     supersededEdgeIds: new Set([
       ...writes.edgeDeletes.map((deletion) => deletion.id),
       ...writes.edgeUpserts.map((upsert) => upsert.id),
@@ -228,6 +218,43 @@ async function capturePlanStructure<G extends GraphDef>(
       connected.set(key, rows);
       return rows;
     },
+  };
+}
+
+/**
+ * The plan's constrained edge writes as the rows they leave, beside the rows
+ * `backend` stores for them now. THE one reader of that pairing: the planner
+ * reads it from the target, and the apply re-reads it inside its transaction,
+ * so both judge and order the same writes against the same kind of evidence.
+ */
+export async function readPlannedEdgeRows<G extends GraphDef>(
+  target: Store<G>,
+  reader: Readonly<Pick<GraphBackend, "getEdge" | "getEdges">>,
+  writes: MergePlanWrites,
+): Promise<PlannedEdgeRows> {
+  const constrained = writes.edgeUpserts.filter((upsert) =>
+    edgeKindIsStructurallyConstrained(target, upsert.kind),
+  );
+  const constrainedDeletes = writes.edgeDeletes.filter((deletion) =>
+    edgeKindIsStructurallyConstrained(target, deletion.kind),
+  );
+  const storedRows = await getEdgeRowsByIds(
+    reader,
+    batchPointReadVerdict(storeBackend(target)),
+    target.graphId,
+    [
+      ...constrained.map((upsert) => upsert.id),
+      ...constrainedDeletes.map((deletion) => deletion.id),
+    ],
+  );
+  return {
+    edgeRows: constrained.map((upsert) =>
+      plannedEdgeRow(upsert, storedRows.get(upsert.id)),
+    ),
+    deletedEdgeRows: constrainedDeletes.flatMap((deletion) => {
+      const stored = storedRows.get(deletion.id);
+      return stored === undefined ? [] : [stored];
+    }),
   };
 }
 
@@ -541,23 +568,42 @@ export async function restrictedDeleteConflict<G extends GraphDef>(
 }
 
 /**
- * Whether the plan leaves one part of a `population: "oneActive"` pair with
- * two composition windows that share an instant — history two sides
- * contributed, or a side's history overlapping the target's. The verdict is
- * the composition lane's own ({@link readCompositionWindowConflict}), given
- * every composition-row write of the plan in ONE call so it judges the state
- * the plan leaves: each upsert as an insert or a revision of its stored row,
- * each edge delete as a revision whose row is deleted. The refusal carries
- * the store's own `CompositionError` (`"windowOverlap"`) as its `cause`.
+ * Whether the write leaves its row holding no instant the stored row did not
+ * already hold: an end or a shortening of a live row's window, or a write
+ * that leaves the window as it is. Such a write only RELEASES what the row
+ * held — a claim, a slot, a membership window — so the apply lands it before
+ * every write that may take what it releases. An insert, a resurrection, a
+ * reopening or a widening brings the row instants it did not hold, and so is
+ * a claim, whether or not it states an end: a row inserted already ended
+ * still claims its window.
  */
-export async function compositionWindowConflict<G extends GraphDef>(
-  structure: PlanStructure<G>,
-): Promise<MergeError | undefined> {
-  const { target } = structure;
+export function plannedEdgeWriteOnlyReleases(row: PlannedEdgeRow): boolean {
+  const { stored } = row;
+  if (stored === undefined || stored.deleted_at !== undefined) return false;
+  return validityWindowCovers(
+    { validFrom: stored.valid_from, validTo: stored.valid_to },
+    { validFrom: row.validFrom ?? undefined, validTo: row.validTo },
+  );
+}
+
+/**
+ * Every composition-row write of the plan, as the composition window decision
+ * reads one frame's writes: each upsert as an insert or a revision of its
+ * stored row, each edge delete as a revision whose row is deleted (at
+ * `operationInstant`). THE one builder of the plan's composition write set:
+ * the planner judges it ({@link compositionWindowConflict}) and the apply
+ * decides it again, fenced, inside its transaction, so the two hand the
+ * decision the same writes.
+ */
+export function compositionWindowWriteSet<G extends GraphDef>(
+  target: Store<G>,
+  rows: PlannedEdgeRows,
+  operationInstant: string,
+): Required<CompositionWindowWrites> {
   const { registry } = target;
   const inserts: InsertEdgeParams[] = [];
   const revisions: CompositionWindowTransition[] = [];
-  for (const row of structure.edgeRows) {
+  for (const row of rows.edgeRows) {
     if (!registry.isCompositionEdge(row.edgeKind)) continue;
     if (row.stored === undefined) {
       inserts.push({
@@ -589,20 +635,40 @@ export async function compositionWindowConflict<G extends GraphDef>(
       },
     });
   }
-  const operationInstant = nowIso();
-  for (const stored of structure.deletedEdgeRows) {
+  for (const stored of rows.deletedEdgeRows) {
     if (!registry.isCompositionEdge(stored.kind)) continue;
     revisions.push({
       before: stored,
       after: { ...stored, deleted_at: stored.deleted_at ?? operationInstant },
     });
   }
-  if (inserts.length === 0 && revisions.length === 0) return undefined;
+  return { inserts, revisions };
+}
+
+/**
+ * Whether the plan leaves one part of a `population: "oneActive"` pair with
+ * two composition windows that share an instant — history two sides
+ * contributed, or a side's history overlapping the target's. The verdict is
+ * the composition lane's own ({@link readCompositionWindowConflict}), given
+ * the plan's whole composition write set ({@link compositionWindowWriteSet})
+ * in ONE call so it judges the state the plan leaves. The refusal carries
+ * the store's own `CompositionError` (`"windowOverlap"`) as its `cause`.
+ */
+export async function compositionWindowConflict<G extends GraphDef>(
+  structure: PlanStructure<G>,
+): Promise<MergeError | undefined> {
+  const { target } = structure;
+  const { registry } = target;
+  const operationInstant = nowIso();
+  const writes = compositionWindowWriteSet(target, structure, operationInstant);
+  if (writes.inserts.length === 0 && writes.revisions.length === 0) {
+    return undefined;
+  }
   const conflict = await readCompositionWindowConflict(
     registry,
     storeBackend(target),
     target.graphId,
-    { inserts, revisions },
+    writes,
     { operationInstant },
   );
   if (conflict === undefined) return undefined;

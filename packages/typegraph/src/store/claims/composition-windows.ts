@@ -34,14 +34,18 @@
  * - {@link assertCompositionWindowsDisjoint} — the fenced form every store
  *   write path calls before its first statement.
  */
-import { backendDerivationRoot } from "../../backend/derive-backend";
+import {
+  backendDerivationChain,
+  backendDerivationRoot,
+} from "../../backend/derive-backend";
 import {
   type EdgeRow,
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  type TransactionBackend,
 } from "../../backend/types";
-import { CompositionError } from "../../errors";
+import { CompositionError, ConfigurationError } from "../../errors";
 import { compositionPopulationMembership } from "../../registry/composition-relation";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
@@ -641,10 +645,11 @@ function verdictCoversWrites(
  * judged as the state it produces, not one row at a time.
  *
  * `decided` is the verdict of an enclosing frame that already judged these
- * writes together with the rest of its write set. When it covers every write
- * here, exactly as stated, on this graph and transaction, that decision is
- * the decision and nothing is judged again; otherwise these writes are judged
- * now.
+ * writes together with the rest of its write set — handed down by the frame,
+ * or open on `target` through {@link withDecidedCompositionWindows}. When one
+ * covers every write here, exactly as stated, on this graph and transaction,
+ * that decision is the decision and nothing is judged again; otherwise these
+ * writes are judged now.
  *
  * Read-free when the frame brings no part an instant it did not already hold
  * (see {@link planCompositionWindowDecision}); otherwise the read is a
@@ -666,11 +671,13 @@ export async function assertCompositionWindowsDisjoint(
   writes: CompositionWindowWrites,
   decided?: CompositionWindowVerdict,
 ): Promise<CompositionWindowVerdict> {
-  if (
-    decided !== undefined &&
-    verdictCoversWrites(decided, ctx.graphId, target, writes)
-  ) {
-    return decided;
+  for (const enclosing of [decided, openCompositionWindowVerdict(target)]) {
+    if (
+      enclosing !== undefined &&
+      verdictCoversWrites(enclosing, ctx.graphId, target, writes)
+    ) {
+      return enclosing;
+    }
   }
   const conflict = await readCompositionWindowConflict(
     ctx.registry,
@@ -693,6 +700,59 @@ export async function assertCompositionWindowsDisjoint(
     session: backendDerivationRoot(target),
     writes: compositionWriteIdentities(writes),
   } as CompositionWindowVerdict;
+}
+
+/** Verdicts a still-running write frame reached, keyed by its transaction target. */
+const openCompositionWindowVerdicts = new WeakMap<
+  object,
+  CompositionWindowVerdict
+>();
+
+/**
+ * Runs `write` with `verdict` open on `target`: every write frame `write`
+ * issues on that transaction consumes it, through
+ * {@link assertCompositionWindowsDisjoint}, when it covers the frame's
+ * composition writes exactly — as if the frame had been handed it.
+ *
+ * For a caller that decided a complete write set once, inside its
+ * transaction, and then lands it through several public write calls that take
+ * no verdict (a graph merge's apply, which writes one edge kind per
+ * `bulkUpsertById`). Each call is its own frame, judged against the rows the
+ * earlier calls left, so judging it alone could refuse the legal state the
+ * whole set leaves. Opening the verdict waives nothing: a frame writing a row
+ * the verdict did not decide, or stating a different window for it, is judged
+ * on its own.
+ *
+ * Bound to the transaction target, and it ends with `write`.
+ */
+export async function withDecidedCompositionWindows<Output>(
+  target: TransactionBackend,
+  verdict: CompositionWindowVerdict,
+  write: () => Promise<Output>,
+): Promise<Output> {
+  if (openCompositionWindowVerdicts.has(target)) {
+    throw new ConfigurationError(
+      "A composition window verdict is already open on this transaction.",
+      { code: "COMPOSITION_WINDOW_VERDICT_NESTED" },
+    );
+  }
+  openCompositionWindowVerdicts.set(target, verdict);
+  try {
+    return await write();
+  } finally {
+    openCompositionWindowVerdicts.delete(target);
+  }
+}
+
+/** The verdict open on `target` or on the transaction it was derived from. */
+function openCompositionWindowVerdict(
+  target: object,
+): CompositionWindowVerdict | undefined {
+  for (const link of backendDerivationChain(target)) {
+    const verdict = openCompositionWindowVerdicts.get(link);
+    if (verdict !== undefined) return verdict;
+  }
+  return undefined;
 }
 
 /**

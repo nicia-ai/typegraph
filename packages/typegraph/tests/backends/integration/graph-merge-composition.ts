@@ -239,6 +239,196 @@ async function historyTarget(
   return target;
 }
 
+const AltWhole = defineNode("GmcAltWhole", {
+  schema: z.object({ label: z.string() }),
+});
+const alphaHolds = defineEdge("gmcAlphaHolds", { schema: z.object({}) });
+const betaHolds = defineEdge("gmcBetaHolds", { schema: z.object({}) });
+
+/**
+ * One part realized by two composition edge kinds, each to its own whole
+ * kind. The merge applies its edge writes one edge kind at a time, and the
+ * kind names put `gmcAlphaHolds` first.
+ */
+function twoKindCompositionGraph() {
+  return defineGraph({
+    id: "graph_merge_composition_two_kinds",
+    nodes: {
+      GmcPart: { type: Part },
+      GmcWhole: { type: Whole },
+      GmcAltWhole: { type: AltWhole },
+    },
+    edges: {
+      gmcAlphaHolds: {
+        type: alphaHolds,
+        from: [Part],
+        to: [Whole],
+        cardinality: "oneActive",
+      },
+      gmcBetaHolds: {
+        type: betaHolds,
+        from: [Part],
+        to: [AltWhole],
+        cardinality: "oneActive",
+      },
+    },
+    ontology: [
+      partOf(Part, Whole, { via: alphaHolds, existence: "optional" }),
+      partOf(Part, AltWhole, { via: betaHolds, existence: "optional" }),
+    ],
+  });
+}
+
+type TwoKindGraph = ReturnType<typeof twoKindCompositionGraph>;
+type TwoKindStore = Store<TwoKindGraph>;
+type HoldsKind = "gmcAlphaHolds" | "gmcBetaHolds";
+
+const HOLDS_KINDS = ["gmcAlphaHolds", "gmcBetaHolds"] as const;
+/**
+ * The new attachment's window: open, or already ended. A composition window
+ * cannot end after the clock, so a bounded window that is still running has
+ * no composition case.
+ */
+const NEW_WINDOWS = [
+  { label: "open", window: { validFrom: Y2020 } },
+  { label: "ended", window: { validFrom: Y2020, validTo: Y2022 } },
+] as const;
+
+type NewWindow = Readonly<{ validFrom: string; validTo?: string }>;
+
+/** The whole a part first hangs from under `kind`, and the one it moves to. */
+const WHOLES: Readonly<Record<HoldsKind, readonly [string, string]>> = {
+  gmcAlphaHolds: ["w1", "w2"],
+  gmcBetaHolds: ["v1", "v2"],
+};
+
+async function attachThrough(
+  store: TwoKindStore,
+  kind: HoldsKind,
+  wholeId: string,
+  options: Readonly<{ id: string; validFrom: string; validTo?: string }>,
+): Promise<void> {
+  const part = { kind: "GmcPart", id: "p1" } as const;
+  await (kind === "gmcAlphaHolds" ?
+    store.edges.gmcAlphaHolds.create(
+      part,
+      { kind: "GmcWhole", id: wholeId },
+      {},
+      options,
+    )
+  : store.edges.gmcBetaHolds.create(
+      part,
+      { kind: "GmcAltWhole", id: wholeId },
+      {},
+      options,
+    ));
+}
+
+async function endAttachment(
+  store: TwoKindStore,
+  kind: HoldsKind,
+  id: string,
+  validTo: string,
+): Promise<void> {
+  await (kind === "gmcAlphaHolds" ?
+    store.edges.gmcAlphaHolds.update(
+      asEdgeId<typeof alphaHolds>(id),
+      {},
+      { validTo },
+    )
+  : store.edges.gmcBetaHolds.update(
+      asEdgeId<typeof betaHolds>(id),
+      {},
+      { validTo },
+    ));
+}
+
+/** p1 under the first whole of `kind` from 2019, as edge `e0`. */
+async function twoKindTarget(
+  context: IntegrationTestContext,
+  kind: HoldsKind,
+): Promise<TwoKindStore> {
+  const target = await context.createStore(twoKindCompositionGraph(), {
+    revisionTracking: true,
+  });
+  for (const id of WHOLES.gmcAlphaHolds) {
+    await target.nodes.GmcWhole.create(
+      { label: id },
+      { id, validFrom: NODE_SINCE },
+    );
+  }
+  for (const id of WHOLES.gmcBetaHolds) {
+    await target.nodes.GmcAltWhole.create(
+      { label: id },
+      { id, validFrom: NODE_SINCE },
+    );
+  }
+  await target.nodes.GmcPart.create(
+    { label: "p1" },
+    { id: "p1", validFrom: NODE_SINCE },
+  );
+  await attachThrough(target, kind, WHOLES[kind][0], {
+    id: "e0",
+    validFrom: Y2019,
+  });
+  return target;
+}
+
+async function forkTwoKind(
+  context: IntegrationTestContext,
+  target: TwoKindStore,
+  id: string,
+): Promise<GraphBranch<TwoKindGraph>> {
+  return unwrap(
+    await branch(target, () => context.createIsolatedBackend(), {
+      id: asBranchId(id),
+    }),
+  );
+}
+
+/** Every composition row of p1, ended rows included, across both edge kinds. */
+async function twoKindWindows(store: TwoKindStore): Promise<readonly string[]> {
+  const rows = [
+    ...(await store.edges.gmcAlphaHolds.find(
+      {},
+      { temporalMode: "includeEnded" },
+    )),
+    ...(await store.edges.gmcBetaHolds.find(
+      {},
+      { temporalMode: "includeEnded" },
+    )),
+  ];
+  return rows
+    .map(
+      (edge) =>
+        `${edge.kind}:${edge.id}:${edge.toId} [${edge.meta.validFrom ?? "-"},${edge.meta.validTo ?? "-"})`,
+    )
+    .toSorted();
+}
+
+/** The two edges a window refusal names, in either role, sorted. */
+function overlappingPair(details: unknown): readonly string[] {
+  const conflict = details as Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    incumbentEdgeKind: string;
+    incumbentEdgeId: string;
+  }>;
+  return [
+    `${conflict.edgeKind}:${conflict.edgeId}`,
+    `${conflict.incumbentEdgeKind}:${conflict.incumbentEdgeId}`,
+  ].toSorted();
+}
+
+function windowRow(
+  kind: HoldsKind,
+  id: string,
+  wholeId: string,
+  window: NewWindow,
+): string {
+  return `${kind}:${id}:${wholeId} [${window.validFrom},${window.validTo ?? "-"})`;
+}
+
 export function registerGraphMergeCompositionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -657,7 +847,7 @@ export function registerGraphMergeCompositionIntegrationTests(
       expect(await target.verifyConstraintFences()).toEqual([]);
     });
 
-    it("refuses at apply time, through the store's write path, a re-fenced plan whose window the target has since overlapped", async () => {
+    it("refuses at apply time, through the store's window decision, a re-fenced plan whose window the target has since overlapped", async () => {
       const target = await historyTarget(context);
       const source = await fork(context, target, "branch-a");
       await moveThroughHistory(source.store, "e1", "w2", {
@@ -685,6 +875,98 @@ export function registerGraphMergeCompositionIntegrationTests(
         partId: "p1",
       });
       expect(await windows(target)).toEqual(before);
+    });
+  });
+
+  // The apply writes one edge kind per frame, alpha first. Moving p1 from beta
+  // to an already-ended alpha window is refused at apply when the alpha insert
+  // is judged before beta's end lands — both when it is classified as a
+  // release because it states an end, and when each frame judges its window
+  // alone instead of consuming the apply's verdict over the whole set.
+  describe("moves replayed by graph merge one edge kind at a time", () => {
+    const MOVES = HOLDS_KINDS.flatMap((from) =>
+      HOLDS_KINDS.flatMap((to) =>
+        NEW_WINDOWS.map(({ label, window }) => ({ from, to, label, window })),
+      ),
+    );
+
+    it.each(MOVES)(
+      "applies every clean plan moving p1 from $from to $to ($label new window)",
+      async ({ from, to, window }) => {
+        const target = await twoKindTarget(context, from);
+        const source = await forkTwoKind(context, target, "branch-a");
+        const newWhole = from === to ? WHOLES[to][1] : WHOLES[to][0];
+        await endAttachment(source.store, from, "e0", Y2020);
+        await attachThrough(source.store, to, newWhole, {
+          id: "e1",
+          ...window,
+        });
+        const expected = [
+          windowRow(from, "e0", WHOLES[from][0], {
+            validFrom: Y2019,
+            validTo: Y2020,
+          }),
+          windowRow(to, "e1", newWhole, window),
+        ].toSorted();
+        expect(await twoKindWindows(source.store)).toEqual(expected);
+
+        const plan = unwrap(await planMerge(target, [source]));
+        const applied = await applyMergePlan(target, plan);
+        if (isErr(applied)) throw applied.error;
+
+        expect(await twoKindWindows(target)).toEqual(expected);
+        expect(await target.verifyConstraintFences()).toEqual([]);
+      },
+    );
+
+    it("refuses the same overlapping cross-kind write set at plan time and at apply", async () => {
+      const forkPoint = await twoKindTarget(context, "gmcBetaHolds");
+      const source = await forkTwoKind(context, forkPoint, "branch-a");
+      const { store: target } = await forkTwoKind(
+        context,
+        forkPoint,
+        "target-clone",
+      );
+      await endAttachment(source.store, "gmcBetaHolds", "e0", Y2020);
+      await attachThrough(source.store, "gmcAlphaHolds", "w1", {
+        id: "e1",
+        validFrom: Y2020,
+        validTo: Y2022,
+      });
+      const incremental = { forkPoint, target, branches: [source] };
+      const cleanPlan = unwrap(await planMergeIncremental(incremental));
+      await endAttachment(target, "gmcBetaHolds", "e0", Y2020);
+      await attachThrough(target, "gmcBetaHolds", "v2", {
+        id: "e2",
+        validFrom: Y2021,
+        validTo: Y2023,
+      });
+      const before = await twoKindWindows(target);
+      const overlap = {
+        constraintCode: "COMPOSITION_WINDOW_OVERLAP",
+        situation: "windowOverlap",
+        partId: "p1",
+      };
+      // The replanned set also writes the target's e2, so the planner may name
+      // either row as the incumbent; both refusals name the same pair.
+      const pair = ["gmcAlphaHolds:e1", "gmcBetaHolds:e2"];
+
+      const planned = await planMergeIncremental(incremental);
+      if (!isErr(planned)) throw new Error("expected a plan-time refusal");
+      expect(planned.error).toBeInstanceOf(CompositionWindowMergeConflictError);
+      expect(planned.error.details).toMatchObject(overlap);
+      expect(overlappingPair(planned.error.details)).toEqual(pair);
+
+      const applied = await applyMergePlan(
+        target,
+        await refenceMergePlan(target, cleanPlan),
+      );
+      if (!isErr(applied)) throw new Error("expected apply to be refused");
+      expect(applied.error).toBeInstanceOf(MergeConstraintConflictError);
+      expect(applied.error.cause).toBeInstanceOf(CompositionError);
+      expect(applied.error.details).toMatchObject(overlap);
+      expect(overlappingPair(applied.error.details)).toEqual(pair);
+      expect(await twoKindWindows(target)).toEqual(before);
     });
   });
 }
