@@ -9,6 +9,7 @@
 
 import { ConfigurationError, ValidationError } from "../errors";
 import { type FieldRef, type OrderSpec } from "./ast";
+import { selectableSystemFieldPath } from "./execution/result-mapper";
 import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -176,19 +177,23 @@ export function buildColumnId(spec: OrderSpec): string {
  * 1. Raw database row with flat column names
  * 2. Mapped result with alias-keyed nested data
  *
- * For mapped results, we navigate through the path and then jsonPointer.
+ * For mapped results, we navigate through the path and then jsonPointer. An
+ * ordered system column is read where a selectable node or edge holds it
+ * ({@link selectableSystemFieldPath}): `created_at` is `meta.createdAt` there,
+ * not a top-level key.
  */
 export function extractCursorValue(
   row: Record<string, unknown>,
   spec: OrderSpec,
 ): unknown {
-  const { alias, path, jsonPointer } = requireCursorField(spec.field);
+  const field = requireCursorField(spec.field);
+  const { alias, path, jsonPointer } = field;
 
   // Try alias-keyed format first (mapped results)
   let current: unknown = row[alias];
   if (current !== undefined) {
     // Follow path first (e.g., ["props"])
-    for (const segment of path) {
+    for (const segment of selectableFieldPath(field)) {
       if (current === null || current === undefined) return undefined;
       if (typeof current !== "object") return undefined;
 
@@ -216,6 +221,19 @@ export function extractCursorValue(
     current = (current as Record<string, unknown>)[segment];
   }
   return current;
+}
+
+/** The path of `field` on a selectable node or edge. */
+function selectableFieldPath(field: FieldRef): readonly string[] {
+  const [column] = field.path;
+  if (
+    field.jsonPointer === undefined &&
+    field.path.length === 1 &&
+    column !== undefined
+  ) {
+    return selectableSystemFieldPath(column) ?? field.path;
+  }
+  return field.path;
 }
 
 /**
