@@ -34,7 +34,12 @@ import {
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+  type GraphBackend,
+} from "../../../src";
 import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { branch } from "../../../src/graph-merge/branch";
@@ -376,6 +381,136 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
         await forkBranch.close();
         await swappablePool.current.end();
+      },
+      FORK_TEST_TIMEOUT_MS,
+    );
+
+    /**
+     * The documented application pattern (graph-merge.md, "Forked working
+     * copies") uses only semver-covered API: the fork handle owns the branch's
+     * pool, `connect` wraps it with `createPostgresBackend`, and the handle's
+     * `dispose` ends the pool before deleting the host branch. The strategy
+     * calls `dispose` on every path (a failed `connect`, a refused fork, a
+     * failed base check, and `close()`), so the pool can never outlive its fork.
+     */
+    it(
+      "ends a fork-owned pool through the fork handle on close and on a failed connect",
+      async () => {
+        const configuredUrl = process.env["POSTGRES_URL"];
+        if (configuredUrl === undefined) throw new Error("unreachable");
+        const isolatedDatabase = databaseNameFromUrl(TEST_DATABASE_URL);
+        const forkedDatabase = forkedDatabaseNameFor(isolatedDatabase);
+
+        async function withAdmin<T>(
+          fn: (admin: Pool) => Promise<T>,
+        ): Promise<T> {
+          const admin = new Pool({ connectionString: configuredUrl, max: 1 });
+          try {
+            return await fn(admin);
+          } finally {
+            await admin.end();
+          }
+        }
+        async function forkExists(): Promise<boolean> {
+          return withAdmin(async (admin) => {
+            const rows = await admin.query(
+              "SELECT 1 FROM pg_database WHERE datname = $1",
+              [forkedDatabase],
+            );
+            return rows.rowCount === 1;
+          });
+        }
+
+        const swappablePool = new SwappablePool(
+          new Pool({ connectionString: TEST_DATABASE_URL, max: 1 }),
+        );
+        const baseBackend = createPostgresBackend(
+          drizzle(swappablePool as unknown as Pool),
+        );
+        const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+        const widget = await baseStore.nodes.Widget.create({ name: "Base" });
+
+        type HostBranch = ForkHandle & Readonly<{ pool: Pool }>;
+        const forkPools: Pool[] = [];
+
+        function strategyWith(
+          connect: (fork: HostBranch) => Promise<GraphBackend>,
+        ) {
+          return forkedWorkingCopyStrategy<G, HostBranch>({
+            fork: async () => {
+              await swappablePool.current.end();
+              await withAdmin(async (admin) => {
+                await admin.query(
+                  `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
+                );
+                await waitForNoOtherSessions(admin, isolatedDatabase);
+                await admin.query(
+                  `CREATE DATABASE ${quoteIdentifier(forkedDatabase)} TEMPLATE ${quoteIdentifier(isolatedDatabase)}`,
+                );
+              });
+              swappablePool.current = new Pool({
+                connectionString: TEST_DATABASE_URL,
+                max: 1,
+              });
+              const pool = new Pool({
+                connectionString: urlForDatabase(
+                  TEST_DATABASE_URL,
+                  forkedDatabase,
+                ),
+                max: 1,
+              });
+              forkPools.push(pool);
+              return {
+                pool,
+                dispose: async () => {
+                  await pool.end();
+                  await withAdmin(async (admin) => {
+                    await admin.query(
+                      `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
+                    );
+                  });
+                },
+              };
+            },
+            connect,
+          });
+        }
+
+        try {
+          // Happy path: write on the fork, merge, close.
+          const forkBranch = unwrap(
+            await branch<G>(
+              baseStore,
+              rejectMakeBackend,
+              undefined,
+              strategyWith((fork) =>
+                Promise.resolve(createPostgresBackend(drizzle(fork.pool))),
+              ),
+            ),
+          );
+          await forkBranch.store.nodes.Widget.update(widget.id, {
+            name: "Forked",
+          });
+          expect(isOk(await merge<G>(baseStore, [forkBranch], {}))).toBe(true);
+          const merged = await baseStore.nodes.Widget.getById(widget.id);
+          expect(merged?.name).toBe("Forked");
+          await forkBranch.close();
+          expect(forkPools[0]?.ended).toBe(true);
+          expect(await forkExists()).toBe(false);
+
+          // A failed connect still releases the fork and ends its pool.
+          const failed = await branch<G>(
+            baseStore,
+            rejectMakeBackend,
+            undefined,
+            strategyWith(() => Promise.reject(new Error("connect refused"))),
+          ).catch((error: unknown) => error);
+          expect(isOk(failed as never)).toBe(false);
+          expect(forkPools[1]?.ended).toBe(true);
+          expect(await forkExists()).toBe(false);
+        } finally {
+          await swappablePool.current.end();
+        }
       },
       FORK_TEST_TIMEOUT_MS,
     );

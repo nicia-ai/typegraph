@@ -1377,7 +1377,8 @@ transaction interop.
 
 Custom insert builders must apply the same born-ended validity rule as the
 built-in adapters. Import its public owner instead of duplicating the bound
-comparison:
+comparison. This is the backend authoring surface, which is not covered by
+semver; see [Stability](/backend-authoring#stability).
 
 ```typescript
 import { resolveStampedValidityLowerBound } from "@nicia-ai/typegraph/backend";

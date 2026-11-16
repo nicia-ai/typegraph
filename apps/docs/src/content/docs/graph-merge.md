@@ -2100,39 +2100,31 @@ import {
   type ForkHandle,
 } from "@nicia-ai/typegraph/graph-merge";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
-import { decorateBackend } from "@nicia-ai/typegraph/backend";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
 // A host whose fork call returns a new connection string for the branch —
 // this is the shape of the copy-on-write branching APIs some Postgres hosts
 // offer (Neon and Supabase branches, for example), without either SDK.
-type HostBranch = ForkHandle & Readonly<{ connectionString: string }>;
+// The fork handle owns the branch's pool, so the pool's lifetime is the
+// fork's: `dispose` ends it, then deletes the host branch.
+type HostBranch = ForkHandle & Readonly<{ pool: Pool }>;
 
 const strategy = forkedWorkingCopyStrategy<G, HostBranch>({
   fork: async () => {
     const created = await hostBranchApi.createBranch(baseDatabaseId);
+    const pool = new Pool({ connectionString: created.connectionString });
     return {
-      connectionString: created.connectionString,
-      dispose: async () => hostBranchApi.deleteBranch(created.id),
+      pool,
+      dispose: async () => {
+        await pool.end();
+        await hostBranchApi.deleteBranch(created.id);
+      },
     };
   },
-  connect: async (fork) => {
-    // `createPostgresBackend` takes a Drizzle database, not a pool — open
-    // one here. Its `close()` deliberately does not end a caller-owned pool
-    // (Drizzle leaves connection lifecycle to the caller), so compose the
-    // pool's own shutdown into this fork's `close` through the public
-    // `decorateBackend` (never a spread) — `branch()`'s composed close then
-    // ends the pool along with releasing the fork.
-    const pool = new Pool({ connectionString: fork.connectionString });
-    const backend = createPostgresBackend(drizzle(pool));
-    return decorateBackend(backend, {
-      close: async () => {
-        await backend.close();
-        await pool.end();
-      },
-    });
-  },
+  // `createPostgresBackend` takes a Drizzle database and leaves the pool's
+  // lifecycle to its owner, here the fork handle above.
+  connect: async (fork) => createPostgresBackend(drizzle(fork.pool)),
 });
 
 // `makeBackend` is ignored once an explicit strategy is supplied — pass a

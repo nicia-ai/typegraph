@@ -32,6 +32,9 @@ const TSUP_CONFIG_PATH = fileURLToPath(
 const BUILD_PIPELINE_PATH = fileURLToPath(
   new URL("../scripts/build.ts", import.meta.url),
 );
+const PACKED_SMOKE_SCRIPT_PATH = fileURLToPath(
+  new URL("../scripts/smoke-packed-tarball.sh", import.meta.url),
+);
 
 function runGit(fixtureDirectory: string, args: readonly string[]): string {
   return execFileSync("git", args, {
@@ -150,9 +153,9 @@ describe("CI workflow contract", () => {
     }
   });
 
-  it("installs every optional peer required by the release export smoke test", () => {
-    const workflow = readFileSync(RELEASE_WORKFLOW_PATH, "utf8");
-    const optionalPeerNamesMatch = /const names = (\[[^;]+\]);/.exec(workflow);
+  it("installs every optional peer required by the packed-tarball export smoke", () => {
+    const script = readFileSync(PACKED_SMOKE_SCRIPT_PATH, "utf8");
+    const optionalPeerNamesMatch = /const names = (\[[^;]+\]);/.exec(script);
 
     expect(optionalPeerNamesMatch).not.toBeNull();
     expect(JSON.parse(optionalPeerNamesMatch?.[1] ?? "[]")).toEqual([
@@ -161,9 +164,21 @@ describe("CI workflow contract", () => {
       "@libsql/client",
       "@electric-sql/pglite",
     ]);
-    expect(workflow).toContain(
+    expect(script).toContain(
       'npm install "$TARBALL_PATH" $OPTIONAL_PEER_SPECS >/dev/null',
     );
+  });
+
+  it("runs the packed-tarball export smoke on pull requests and before release", () => {
+    const invocation =
+      "bash packages/typegraph/scripts/smoke-packed-tarball.sh";
+    // On pull requests it runs after the artifact build, which it packs.
+    expect(readFileSync(WORKFLOW_PATH, "utf8")).toMatch(
+      new RegExp(
+        String.raw`build-artifacts:[\s\S]*?pnpm turbo run build[\s\S]*?${invocation.replaceAll(".", String.raw`\.`)}`,
+      ),
+    );
+    expect(readFileSync(RELEASE_WORKFLOW_PATH, "utf8")).toContain(invocation);
   });
 
   it("detects metadata-only changes on pushes and pull requests", () => {
