@@ -9,15 +9,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import {
-  avg,
-  count,
-  ENTITY_ALREADY_EXISTS_CODE,
-  max,
-  min,
-  sum,
-  ValidationError,
-} from "../../../src";
+import { avg, count, max, min, sum, ValidationError } from "../../../src";
+import { ENTITY_ALREADY_EXISTS_CODE } from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 

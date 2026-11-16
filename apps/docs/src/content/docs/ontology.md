@@ -262,11 +262,13 @@ its result keeps the endpoint literals that keep aliases exact:
 ```typescript
 import {
   equivalentTo,
-  type EquivalentToCheck,
   type NodeType,
   subClassOf,
-  type SubClassOfCheck,
 } from "@nicia-ai/typegraph";
+import type {
+  EquivalentToCheck,
+  SubClassOfCheck,
+} from "@nicia-ai/typegraph/core";
 
 function declareSubclass<C extends NodeType, P extends NodeType>(
   child: C,

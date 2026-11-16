@@ -3,13 +3,13 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
-  createQueryBuilder,
   createStore,
   defineGraph,
   defineNode,
   expr,
-  UnsupportedPredicateError,
 } from "../src";
+import { UnsupportedPredicateError } from "../src/errors-entry";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 import { createTestBackend } from "./test-utils";
 

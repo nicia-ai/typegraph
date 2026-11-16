@@ -1,11 +1,11 @@
 import type { GraphBackend, Store } from "@nicia-ai/typegraph";
 import {
   asNodeId,
-  asRecordedInstant,
   createStoreWithSchema,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
+import { asRecordedInstant } from "@nicia-ai/typegraph/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 

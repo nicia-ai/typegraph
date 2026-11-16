@@ -6,8 +6,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  indexSubgraph,
 } from "@nicia-ai/typegraph";
+import { indexSubgraph } from "@nicia-ai/typegraph/store";
 import { z } from "zod";
 
 import { createExampleBackend } from "./_helpers";

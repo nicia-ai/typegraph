@@ -6,12 +6,12 @@ import {
   defineGraph,
   defineNode,
   EndpointNotFoundError,
-  EndpointPairError,
 } from "../../../src";
 import {
   EDGE_IDENTITY_MISMATCH_CODE,
   ValidationError,
 } from "../../../src/errors";
+import { EndpointPairError } from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { expectImmutableLowerBoundRefusal } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";

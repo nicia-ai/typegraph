@@ -25,9 +25,17 @@ through `createPostgresBackend`, and PGlite). A backend you build or derive
 yourself is yours to keep working across upgrades: pin the TypeGraph version
 it was written against and re-run its tests before taking a new release.
 
-The application API (`@nicia-ai/typegraph` and the other entrypoints) is
-covered by semver as usual. Using a first-party backend through it never
-depends on the authoring surface staying stable.
+The application API is covered by semver as usual. It is the package root,
+`@nicia-ai/typegraph`, and these subpaths: `/store`, `/query`, `/errors`,
+`/identity`, `/maintenance`, `/core`, `/schema`, `/indexes`,
+`/graph-extension`, `/graph-merge`, `/interchange`, `/profiler`,
+`/provenance`, `/sqlite/local`, `/postgres/pglite`, `/adapters/drizzle/sqlite`,
+`/adapters/drizzle/sqlite/local`, `/adapters/drizzle/sqlite/libsql`,
+`/adapters/drizzle/postgres`, `/adapters/drizzle/postgres/working-copy`,
+`/adapters/drizzle/postgres/pglite` and `/adapters/drizzle/indexes`. The
+authoring entrypoints, `/backend` and `/adapters/drizzle/engine`, are not part
+of it. Using a first-party backend through the application API never depends
+on the authoring surface staying stable.
 
 ## What a profile is
 
@@ -210,7 +218,7 @@ import {
 } from "@nicia-ai/typegraph/adapters/drizzle/engine";
 import { postgresFenceSql } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import type { FenceSql } from "@nicia-ai/typegraph/backend";
-import { sql, type SqlFragment } from "@nicia-ai/typegraph";
+import { sql, type SqlFragment } from "@nicia-ai/typegraph/backend";
 
 function customAdvisoryLockExpression(
   namespace: string,

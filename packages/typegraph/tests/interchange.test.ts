@@ -12,13 +12,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineGraphExtension,
-  defineNode,
-  StaleVersionError,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, StaleVersionError } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
@@ -27,6 +21,7 @@ import {
   UniquenessError,
   ValidationError,
 } from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
 import {
   exportGraph,
   exportGraphStream,

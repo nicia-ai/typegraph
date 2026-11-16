@@ -17,14 +17,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  BaseSchemaMigrationError,
   createAdapterStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import { BaseSchemaMigrationError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);

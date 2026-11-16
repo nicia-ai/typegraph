@@ -14,14 +14,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createAdapterStoreWithSchema,
-  defineGraph,
-  defineNode,
-  type IdentityReplayStep,
-  type RestoredIdentityTransition,
-  type TransitionPageCursor,
-} from "../src";
+import { createAdapterStoreWithSchema, defineGraph, defineNode } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   asRecordedInstant,
@@ -38,6 +31,11 @@ import {
   identityTransitionsOf,
 } from "../src/identity/replay";
 import { pruneIdentityTransitionsForContext } from "../src/identity/transition-log";
+import type {
+  IdentityReplayStep,
+  RestoredIdentityTransition,
+  TransitionPageCursor,
+} from "../src/identity-entry";
 import { exportGraph, importGraph } from "../src/interchange";
 import { storeRuntime } from "../src/store/runtime-port";
 import { nowIso } from "../src/utils/date";

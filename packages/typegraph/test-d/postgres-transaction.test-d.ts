@@ -2,13 +2,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { expectError, expectType } from "tsd";
 import { z } from "zod";
 
-import {
-  createAdapterStore,
-  defineGraph,
-  defineNode,
-  type AdapterStore,
-  type AdapterTransactionContext,
-} from "..";
+import { createAdapterStore, defineGraph, defineNode } from "..";
+import type {
+  AdapterStore,
+  AdapterTransactionContext,
+} from "../dist/store-entry";
 import {
   type AnyPgTransaction,
   createPostgresBackend,

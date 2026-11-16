@@ -15,28 +15,23 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AggregateResult,
   avg,
-  type BatchableQuery,
-  type CollectOptions,
   count,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   type EdgeId,
   expr,
   field,
-  fieldRef,
   max,
   min,
   type NodeId,
   param as parameter,
   type Store,
   sum,
-  type TypedEdgeCollection,
 } from "../src";
 import { ConfigurationError } from "../src/errors";
+import { createQueryBuilder } from "../src/query";
 import type { Traversal } from "../src/query/ast";
 import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
 import type { DialectAdapter } from "../src/query/dialect/types";
@@ -45,8 +40,15 @@ import type {
   CollectExpressionNode,
   DatabaseExpression,
 } from "../src/query/expressions";
+import {
+  type AggregateResult,
+  type BatchableQuery,
+  type CollectOptions,
+  fieldRef,
+} from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
+import type { TypedEdgeCollection } from "../src/store-entry";
 import { matchingObject } from "./test-utils";
 
 // ============================================================

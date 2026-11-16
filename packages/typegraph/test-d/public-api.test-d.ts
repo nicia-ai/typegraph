@@ -9,33 +9,64 @@ import { z } from "zod";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ResolvedSqlTableNames,
+  sql,
+  type SqlTableNames,
+  type TransactionReadBackend,
+} from "../dist/backend";
+import {
   type BatchableQuery,
-  type BulkFindEdgesFromResult,
+  type DynamicNodeKind,
+  type ExternalRecordedReadSource,
+  recordedRelation,
+  createSqlSchema,
+  type SqlSchema,
+} from "../dist/query-entry";
+import type {
+  BulkFindEdgesFromResult,
+  DynamicEdgeCollection,
+  DynamicNode,
+  DynamicNodeCollection,
+  DynamicNodeReference,
+  AdapterHistoryStore,
+  AdapterHistoryTransactionContext,
+  AdapterRecordedReadStore,
+  AdapterStore,
+  HistoryStore,
+  HistoryStoreBackend,
+  LiveStoreOptions,
+  MeasurableAdapterHistoryTransactionContext,
+  MeasurableHistoryTransactionContext,
+  RecordedReadStore,
+  ScopedMeasure,
+  StoreRef,
+  TransactionOutcome,
+  TransactionReceipt,
+} from "../dist/store-entry";
+import {
   createAdapterStore,
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedAdapterStore,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
-  type DynamicEdgeCollection,
-  type DynamicNode,
-  type DynamicNodeCollection,
-  type DynamicNodeKind,
-  type DynamicNodeReference,
   type Edge,
   type EdgeId,
-  type ExternalRecordedReadSource,
   type GraphBackend,
-  type GraphExtension,
-  type AdapterHistoryStore,
-  type AdapterHistoryTransactionContext,
-  type AdapterRecordedReadStore,
-  type AdapterStore,
-  type HistoryStore,
-  type HistoryStoreBackend,
+  type NodeId,
+  type NodeRef,
+  type Store,
+  type StoreOptions,
+  type TransactionContext,
+} from "..";
+import {
+  createVerifiedAdapterStore,
+  createVerifiedStore,
+  type SchemaValidationResult,
+} from "../dist/schema";
+import type { GraphExtension } from "../dist/graph-extension";
+import {
   type IdentityAssertion,
   type IdentityAssertionResult,
   IdentityEndpointValidityError,
@@ -44,33 +75,13 @@ import {
   type IdentityNodeReference,
   type IdentityValidityWindow,
   IdentityValidityWindowError,
-  type LiveStoreOptions,
-  type MeasurableAdapterHistoryTransactionContext,
-  type MeasurableHistoryTransactionContext,
-  createQueryBuilder,
+} from "../dist/identity-entry";
+import {
   getEdgeKinds,
   getNodeKinds,
   type KindAnnotations,
-  type NodeId,
-  type NodeRef,
   type RecordedInstant,
-  recordedRelation,
-  type RecordedReadStore,
-  type ResolvedSqlTableNames,
-  type ScopedMeasure,
-  type SchemaValidationResult,
-  createSqlSchema,
-  sql,
-  type SqlSchema,
-  type SqlTableNames,
-  type Store,
-  type StoreOptions,
-  type StoreRef,
-  type TransactionContext,
-  type TransactionOutcome,
-  type TransactionReceipt,
-  type TransactionReadBackend,
-} from "..";
+} from "../dist/core";
 import {
   captureStoreOperationTarget,
   getStoreOperation,
@@ -602,7 +613,6 @@ expectNotAssignable<StoreRef<Store<typeof graph>>>(adapterRef);
 expectNotAssignable<StoreRef<AdapterStore<typeof graph, NativeTransaction>>>(
   portableRef,
 );
-declare const registry: never;
 const multiKindQuery = store
   .query()
   .from(["Person", "Company"], "node")
@@ -641,11 +651,6 @@ expectError(
 );
 expectError(
   createStore(graph, backend, {
-    schema: structurallyCompatibleSchema,
-  }),
-);
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
     schema: structurallyCompatibleSchema,
   }),
 );
@@ -761,17 +766,6 @@ const liveRecordedOptions = {
   recordedRead: externalRecordedSource,
 } satisfies StoreOptions;
 void createStore(graph, backend, liveRecordedOptions);
-
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
-    recordedReadBinding: externalRecordedSource,
-  }),
-);
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
-    sealedCoordinate: { valid: { mode: "current" } },
-  }),
-);
 
 // Portable transaction contexts expose only TypeGraph-owned operations and a
 // read-only backend projection.
@@ -996,15 +990,6 @@ expectType<DynamicEdgeCollection | undefined>(store.getEdgeCollection(plainId));
 
 import {
   defineGraphExtension,
-  defineEdgeIndex,
-  defineNodeIndex,
-  type EdgeIndexDeclaration,
-  type IndexDeclaration,
-  type MaterializeIndexesEntry,
-  type MaterializeIndexesResult,
-  type NodeIndexDeclaration,
-  type NodeIndexKey,
-  type NodeSystemColumnName,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   type IncompatibleChange,
@@ -1016,10 +1001,22 @@ import {
   IncompatibleChangeError,
   KindCollisionError,
   KindHasReferentsError,
-  KindNotFoundError,
   RemoveCompileTimeKindError,
-  TypeGraphError,
-} from "..";
+} from "../dist/graph-extension";
+import {
+  defineEdgeIndex,
+  defineNodeIndex,
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type NodeIndexDeclaration,
+  type NodeIndexKey,
+  type NodeSystemColumnName,
+} from "../dist/indexes";
+import type {
+  MaterializeIndexesEntry,
+  MaterializeIndexesResult,
+} from "../dist/store-entry";
+import { KindNotFoundError, TypeGraphError } from "..";
 // Per-shape document types live behind the `graph-extension` subpath —
 // agent-prompt builders and codegen tools reach for them explicitly.
 import type {

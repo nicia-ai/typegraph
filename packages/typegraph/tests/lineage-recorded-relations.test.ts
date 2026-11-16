@@ -19,8 +19,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type EngineRevision,
 } from "../src";
+import type { EngineRevision } from "../src/backend";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";

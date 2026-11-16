@@ -18,8 +18,6 @@ import { z } from "zod";
 
 import {
   count,
-  countDistinctEdges,
-  countEdges,
   createStore,
   defineEdge,
   defineGraph,
@@ -27,6 +25,7 @@ import {
   field,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import { countDistinctEdges, countEdges } from "../src/query-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 

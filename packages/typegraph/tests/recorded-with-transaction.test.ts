@@ -21,22 +21,24 @@ import {
 import { z } from "zod";
 
 import {
-  type AdapterHistoryStore,
-  type AdapterStore,
   createAdapterStore,
   defineGraph,
   defineNode,
-  type MeasurableAdapterHistoryTransactionContext,
-  type MeasurableAdapterTransactionContext,
-  type MeasurableTransactionContext,
-  type RecordedInstant,
-  type ScopedMeasure,
   type TransactionContext,
-  type TransactionOutcome,
 } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
+import type { RecordedInstant } from "../src/core";
+import type {
+  AdapterHistoryStore,
+  AdapterStore,
+  MeasurableAdapterHistoryTransactionContext,
+  MeasurableAdapterTransactionContext,
+  MeasurableTransactionContext,
+  ScopedMeasure,
+  TransactionOutcome,
+} from "../src/store-entry";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),

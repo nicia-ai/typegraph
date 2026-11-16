@@ -32,6 +32,26 @@ export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 export function defineGraphExtension<const T extends GraphExtension>(input: T): T & GraphExtension;
 
 // @public
+const EDGE_TYPE_BRAND: "__edgeType";
+
+// @public
+type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
+    [EDGE_TYPE_BRAND]: true;
+    kind: K;
+    schema: S;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+    from: From;
+    to: To;
+}>;
+
+// @public
 type ErrorCategory = "user" | "constraint" | "system";
 
 // @public
@@ -440,6 +460,19 @@ export const LEGACY_GRAPH_EXTENSION_VERSION: 1;
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
+const NODE_TYPE_BRAND: "__nodeType";
+
+// @public
+type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
+    kind: K;
+    schema: S;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+}>;
+
+// @public
 type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
@@ -461,6 +494,39 @@ type Result<T, E = Error> = Readonly<{
     success: false;
     error: E;
 }>;
+
+// @public (undocumented)
+const RUNTIME_KIND_TOKEN_BRAND: unique symbol;
+
+// @public
+export type RuntimeEdgeKind<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    entity: "edge";
+    kind: K;
+    [RUNTIME_KIND_TOKEN_BRAND]: S;
+}>;
+
+// @public
+export type RuntimeEdgeTypeFor<T extends RuntimeEdgeKind> = T extends RuntimeEdgeKind<infer K, infer S> ? EdgeType<K, S, readonly NodeType[] | undefined, readonly NodeType[] | undefined> : never;
+
+// @public
+export class RuntimeKindTokenError extends TypeGraphError {
+    constructor(reason: RuntimeKindTokenFailure, entity: KindEntity, details?: Readonly<Record<string, unknown>>);
+    // (undocumented)
+    readonly reason: RuntimeKindTokenFailure;
+}
+
+// @public (undocumented)
+export type RuntimeKindTokenFailure = "invalid" | "wrong-entity" | "wrong-kind" | "wrong-store" | "stale" | "schema-mismatch" | "unreconciled";
+
+// @public
+export type RuntimeNodeKind<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    entity: "node";
+    kind: K;
+    [RUNTIME_KIND_TOKEN_BRAND]: S;
+}>;
+
+// @public
+export type RuntimeNodeTypeFor<T extends RuntimeNodeKind> = T extends RuntimeNodeKind<infer K, infer S> ? NodeType<K, S> : never;
 
 // @public
 type TargetCardinality = Exclude<Cardinality, "unique">;

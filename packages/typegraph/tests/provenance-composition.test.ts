@@ -15,12 +15,12 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type HistoryStore,
   partOf,
   subClassOf,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
 import { createRetractionCapability } from "../src/provenance";
+import type { HistoryStore } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 

@@ -15,7 +15,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  GraphAlgorithmConvergenceError,
   KindNotFoundError,
   type Store,
 } from "../../../src";
@@ -28,6 +27,7 @@ import type {
   TransactionBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
+import { GraphAlgorithmConvergenceError } from "../../../src/errors-entry";
 import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,

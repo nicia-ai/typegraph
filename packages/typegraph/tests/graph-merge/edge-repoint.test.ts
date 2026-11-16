@@ -1,4 +1,5 @@
-import type { EdgeId, JsonValue, NodeId, NodeType } from "@nicia-ai/typegraph";
+import type { EdgeId, NodeId, NodeType } from "@nicia-ai/typegraph";
+import type { JsonValue } from "@nicia-ai/typegraph/core";
 import { describe, expect, it } from "vitest";
 
 import type { ClusterResult } from "../../src/graph-merge/clustering";

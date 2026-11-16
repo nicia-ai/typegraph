@@ -1,15 +1,12 @@
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
-import {
-  defineGraph,
-  defineNode,
-  expr,
-  type RelationProjection,
-  type Store,
-  type TopPerPartitionOptions,
-  type TopPerPartitionOrder,
-} from "..";
+import { defineGraph, defineNode, expr, type Store } from "..";
+import type {
+  RelationProjection,
+  TopPerPartitionOptions,
+  TopPerPartitionOrder,
+} from "../dist/query-entry";
 
 const Document = defineNode("Document", {
   schema: z.object({

@@ -7,10 +7,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  recordedInstantRevision,
   type Store,
   type TransactionContext,
 } from "../../../src";
+import { recordedInstantRevision } from "../../../src/core";
 import {
   applyMergePlan,
   branch,

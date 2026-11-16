@@ -129,7 +129,8 @@ stopped being true before it started and no `asOf` coordinate could observe it.
 Branch on the code rather than on the message.
 
 ```typescript
-import { INVERTED_VALIDITY_WINDOW_CODE, ValidationError } from "@nicia-ai/typegraph";
+import { INVERTED_VALIDITY_WINDOW_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
 
 try {
   // The stored validFrom is later than this end.
@@ -164,7 +165,8 @@ and the one the row stores — so you can restate the stored bound without a
 second read.
 
 ```typescript
-import { IMMUTABLE_VALIDITY_LOWER_BOUND_CODE, ValidationError } from "@nicia-ai/typegraph";
+import { IMMUTABLE_VALIDITY_LOWER_BOUND_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
 
 try {
   // The row is live and started at some other instant.
@@ -214,7 +216,8 @@ A `ValidationError` whose issue carries the exported code
 `details.kind` names its kind.
 
 ```typescript
-import { ENTITY_ALREADY_EXISTS_CODE, ValidationError } from "@nicia-ai/typegraph";
+import { ENTITY_ALREADY_EXISTS_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
 
 try {
   await store.nodes.Person.create({ name: "Alice" }, { id: takenId });
@@ -314,7 +317,8 @@ Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
 explicit assertion window extends outside an endpoint node's own validity or
 deletion bounds. Future or inverted identity windows are user-category input
 errors. A second non-identical open window and an endpoint-window conflict are
-constraint-category errors. Both classes are package-root exports.
+constraint-category errors. Both classes are exported from
+`@nicia-ai/typegraph/identity`.
 
 ### `IdentityReplayError`
 
@@ -376,7 +380,7 @@ A range with more boundaries than the requested `limit` is not an error —
 result (see [Replay and identity history](/identity/#replay-and-identity-history)).
 
 ```typescript
-import { IdentityReplayError } from "@nicia-ai/typegraph";
+import { IdentityReplayError } from "@nicia-ai/typegraph/identity";
 
 try {
   await store.identity.replay(alice, { limit: 50 });
@@ -683,7 +687,7 @@ receives a source/target combination that matches no declared pair. It extends
 An invalid source kind continues to produce `EndpointError`.
 
 ```typescript
-import { EndpointPairError } from "@nicia-ai/typegraph";
+import { EndpointPairError } from "@nicia-ai/typegraph/errors";
 
 try {
   // Dynamic callers are checked at runtime, too.
@@ -2245,8 +2249,8 @@ import {
   isUserRecoverable,
   isConstraintError,
   isSystemError,
-  getErrorSuggestion,
 } from "@nicia-ai/typegraph";
+import { getErrorSuggestion } from "@nicia-ai/typegraph/errors";
 
 try {
   await store.nodes.Person.create(data);

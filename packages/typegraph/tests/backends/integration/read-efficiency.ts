@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { indexSubgraph } from "../../../src";
+import { indexSubgraph } from "../../../src/store-entry";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 

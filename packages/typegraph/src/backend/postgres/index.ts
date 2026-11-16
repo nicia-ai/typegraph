@@ -64,6 +64,13 @@ export {
   tables,
 } from "../drizzle/postgres";
 export { postgresFenceSql } from "../drizzle/postgres-fence-sql";
+
+// Fulltext and vector strategies for createPostgresBackend
+export { tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
+export {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "../../query/dialect/vector/pgvector-strategy";
 export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   BundledBackendCapabilityOverrides,

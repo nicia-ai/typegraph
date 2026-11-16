@@ -7,13 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineGraph,
-  defineNode,
-  embedding,
-  getEmbeddingDimensions,
-  isEmbeddingSchema,
-} from "../src";
+import { defineGraph, defineNode, embedding } from "../src";
+import { getEmbeddingDimensions, isEmbeddingSchema } from "../src/core";
 import { postgresDialect } from "../src/query/dialect/postgres";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";

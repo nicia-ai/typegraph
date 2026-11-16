@@ -13,11 +13,11 @@ import {
   createStore,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   MigrationError,
 } from "../../../src";
 import { projectBackendWithout } from "../../../src/backend/derive-backend";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   getActiveSchema,
   getSchemaChanges,

@@ -23,10 +23,10 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  IdentityContradictionError,
   type Store,
 } from "../../src";
 import { asIdentityAssertionId } from "../../src/identity/types";
+import { IdentityContradictionError } from "../../src/identity-entry";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { compareStrings } from "../../src/utils/compare";
 import { requireDefined } from "../../src/utils/presence";

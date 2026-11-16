@@ -13,21 +13,21 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   equivalentTo,
   type GraphDef,
   partOf,
   subClassOf,
-  type UniqueConstraint,
   UniquenessError,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import type { UniqueConstraint } from "../src/core";
 import {
   captureCandidateWriteSetTarget,
   isErr,
   planCandidateWriteSetReview,
   revalidateCandidateWriteSetReview,
 } from "../src/graph-merge";
+import { defineNodeIndex } from "../src/indexes";
 import {
   instantiateGraphTemplate,
   registerGraphTemplate,

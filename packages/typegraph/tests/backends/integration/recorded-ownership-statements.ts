@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  createStore,
-  createStoreWithSchema,
-  recordedRelation,
-} from "../../../src";
+import { createStore, createStoreWithSchema } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { countGraphStorage } from "../../../src/backend/graph-storage";
 import type {
@@ -18,6 +14,7 @@ import {
   asCompiledStatementSql,
   type CompiledRowsSql,
 } from "../../../src/query/sql-intent";
+import { recordedRelation } from "../../../src/query-entry";
 import { advanceRevisionClock } from "../../../src/store/recorded-capture";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";

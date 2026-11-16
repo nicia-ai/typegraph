@@ -8,8 +8,8 @@ import {
   defineGraph,
   defineNode,
   type Store,
-  type ValidityEndMutation,
 } from "../src";
+import type { ValidityEndMutation } from "../src/store-entry";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),

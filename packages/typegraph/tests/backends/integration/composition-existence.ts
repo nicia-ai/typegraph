@@ -22,9 +22,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
   EndpointNotFoundError,
-  ENTITY_ALREADY_EXISTS_CODE,
   hasPart,
   partOf,
   RestrictedDeleteError,
@@ -32,6 +30,10 @@ import {
   TypeGraphError,
   ValidationError,
 } from "../../../src";
+import {
+  EdgeAcyclicityError,
+  ENTITY_ALREADY_EXISTS_CODE,
+} from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 

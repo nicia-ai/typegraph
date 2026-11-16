@@ -14,11 +14,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  BaseSchemaMigrationError,
   ConfigurationError,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineGraph,
   defineNode,
   type GraphBackend,
@@ -29,6 +27,8 @@ import {
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
+import { BaseSchemaMigrationError } from "../src/errors-entry";
+import { createVerifiedStore } from "../src/schema";
 import { assertSchemaCurrent } from "../src/schema";
 import { disableTransactions } from "./test-utils";
 

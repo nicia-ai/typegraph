@@ -1,4 +1,4 @@
-import { generateId } from "@nicia-ai/typegraph";
+import { generateId } from "@nicia-ai/typegraph/core";
 import { describe, expect, it } from "vitest";
 
 import type { CandidateEdge } from "../../src/graph-merge/candidate-gen";

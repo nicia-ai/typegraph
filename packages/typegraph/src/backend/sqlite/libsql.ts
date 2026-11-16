@@ -222,3 +222,4 @@ export async function createLibsqlBackend(
   return { backend, db };
 }
 export type { GraphIdentityConfig } from "../../core/define-graph";
+export { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";

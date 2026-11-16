@@ -28,29 +28,33 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompositionCascadedPart,
   CompositionError,
   CompositionExistenceError,
   ConfigurationError,
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
   EndpointNotFoundError,
   type GraphBackend,
   hasPart,
-  type NodeDeletePlan,
-  NodeDeletePlanMismatchError,
   NodeNotFoundError,
-  type OperationHookContext,
   partOf,
   ValidationError,
 } from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
+import {
+  EdgeAcyclicityError,
+  NodeDeletePlanMismatchError,
+} from "../../src/errors-entry";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../src/store";
+import type {
+  CompositionCascadedPart,
+  NodeDeletePlan,
+  OperationHookContext,
+} from "../../src/store-entry";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 import { propertyRuns } from "./run-budget";

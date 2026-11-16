@@ -1,14 +1,9 @@
 import { expectTypeOf, test } from "vitest";
 import { z } from "zod";
 
-import {
-  createQueryBuilder,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  expr,
-  type QualifiedRecursivePath,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, expr } from "../src";
+import { createQueryBuilder } from "../src/query";
+import type { QualifiedRecursivePath } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 
 const Person = defineNode("Person", {

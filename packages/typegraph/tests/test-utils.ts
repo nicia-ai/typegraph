@@ -9,13 +9,10 @@ import { afterEach, expect } from "vitest";
 
 import type { GraphDef, Store } from "../src";
 import {
-  type AdapterStore,
   createAdapterStore,
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
-  INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
@@ -38,6 +35,11 @@ import {
   type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
+import {
+  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+  INVERTED_VALIDITY_WINDOW_CODE,
+} from "../src/errors-entry";
+import type { AdapterStore } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 
 const backendsToClose: GraphBackend[] = [];

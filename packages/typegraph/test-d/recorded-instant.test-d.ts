@@ -17,16 +17,9 @@ import {
 } from "tsd";
 import { z } from "zod";
 
-import {
-  asRecordedInstant,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  type RecordedInstant,
-  type RecordedStoreView,
-  type Store,
-  type StoreView,
-} from "..";
+import { asRecordedInstant, type RecordedInstant } from "../dist/core";
+import { defineEdge, defineGraph, defineNode, type Store } from "..";
+import type { RecordedStoreView, StoreView } from "../dist/store-entry";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),

@@ -24,7 +24,6 @@ import { z } from "zod";
 
 import {
   asNodeId,
-  type BackendCapabilities,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -32,6 +31,7 @@ import {
   searchable,
   TransactionConflictError,
 } from "../src";
+import type { BackendCapabilities } from "../src/backend";
 import { NODE_ROW_FENCE_NAMESPACE } from "../src/backend/capabilities/node-row-lock-plan";
 import {
   isOptimisticRetryTier,

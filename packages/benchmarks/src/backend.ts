@@ -6,11 +6,8 @@ import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
 import { Pool } from "pg";
 import postgres, { type Sql } from "postgres";
-import {
-  createStore,
-  type GraphBackend,
-  resolveGraphVectorSlots,
-} from "@nicia-ai/typegraph";
+import { createStore, type GraphBackend } from "@nicia-ai/typegraph";
+import { resolveGraphVectorSlots } from "@nicia-ai/typegraph/core";
 import {
   createPostgresBackend,
   createPostgresTables,

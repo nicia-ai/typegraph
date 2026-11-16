@@ -8,19 +8,21 @@ import {
   defineGraph,
   defineNode,
   type EdgeId,
-  EndpointPairError,
   KindNotFoundError,
   type NodeId,
-  type RecordedInstant,
-  recordedInstantRevision,
-  type TransactionReceipt,
   ValidationError,
 } from "../../../src";
+import {
+  type RecordedInstant,
+  recordedInstantRevision,
+} from "../../../src/core";
 import { RECORDED_MAX_REVISION } from "../../../src/core/temporal";
+import { EndpointPairError } from "../../../src/errors-entry";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import type { TransactionReceipt } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { recordedRevisionFromDriver } from "../../test-utils";
 import {

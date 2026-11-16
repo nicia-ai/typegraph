@@ -17,8 +17,9 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createQueryBuilder, defineGraph, defineNode } from "../src";
+import { defineGraph, defineNode } from "../src";
 import { type RecordedInstantParts } from "../src/core/temporal";
+import { createQueryBuilder } from "../src/query";
 import { compileQuery } from "../src/query/compiler";
 import {
   createRecordedReadBinding,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { countDistinct, expr, SchemaChangedError } from "../../../src";
+import { countDistinct, expr } from "../../../src";
+import { SchemaChangedError } from "../../../src/errors-entry";
 import type { IntegrationTestContext } from "./test-context";
 
 export function registerDatabaseExpressionQueryIntegrationTests(

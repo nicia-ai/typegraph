@@ -4,13 +4,13 @@ import { z } from "zod";
 import {
   ConfigurationError,
   count,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   field,
   ValidationError,
 } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });

@@ -6,7 +6,6 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   embedding,
   searchable,
@@ -30,6 +29,7 @@ import type {
   TransactionBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   branchDurable,
   computeBaseVersion,

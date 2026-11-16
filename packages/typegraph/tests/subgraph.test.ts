@@ -19,19 +19,21 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineSubgraphProject,
   type Edge,
-  type GraphNodeReferenceInput,
-  indexSubgraph,
-  MAX_EXPLICIT_RECURSIVE_DEPTH,
   type Node,
   partOf,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { NodeId } from "../src/core/types";
 import { KindNotFoundError, ValidationError } from "../src/errors";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../src/query-entry";
 import { createStore, type Store } from "../src/store";
 import { type SubgraphResult } from "../src/store/subgraph";
+import {
+  defineSubgraphProject,
+  type GraphNodeReferenceInput,
+  indexSubgraph,
+} from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 

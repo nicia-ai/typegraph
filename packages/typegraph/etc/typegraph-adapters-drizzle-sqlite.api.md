@@ -5239,6 +5239,9 @@ type FindRowsAcrossKindsParams = Readonly<{
     excludeDeleted?: boolean;
 }>;
 
+// @public (undocumented)
+export const fts5Strategy: FulltextStrategy;
+
 // @public
 type FulltextBatchRow = Readonly<{
     nodeId: string;
@@ -7554,6 +7557,9 @@ export type SqliteTables = ReturnType<typeof createSqliteTables>;
 
 // @public
 export type SqliteTransactionMode = "sql" | "drizzle" | "none" | "do-sqlite";
+
+// @public (undocumented)
+export const sqliteVecStrategy: VectorStrategy;
 
 // @public (undocumented)
 type SqlParameterChunk = Readonly<{

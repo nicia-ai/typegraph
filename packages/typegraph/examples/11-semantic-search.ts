@@ -22,9 +22,11 @@ import {
   defineGraph,
   defineNode,
   embedding,
+} from "@nicia-ai/typegraph";
+import {
   getEmbeddingDimensions,
   isEmbeddingSchema,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/core";
 import { z } from "zod";
 
 import {

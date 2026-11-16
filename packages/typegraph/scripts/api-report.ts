@@ -38,9 +38,11 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 };
 
 /**
- * Exact fingerprints of pre-existing forgotten-export debt. The new backend
- * authoring entrypoint is intentionally absent: new entrypoints default to
- * zero debt. A changed symbol set fails verification even when its count is
+ * Exact fingerprints of forgotten-export debt. The backend authoring
+ * entrypoint holds near-zero debt and a new entrypoint defaults to zero; the
+ * five root-export-diet entrypoints (`./store`, `./query`, `./errors`,
+ * `./identity`, `./maintenance`) are registered at their measured debt
+ * instead. A changed symbol set fails verification even when its count is
  * unchanged, while API report diffs continue to show the declaration change.
  *
  * `recursiveTraversal` batch (WS5 B1): the six member-bearing entrypoints
@@ -1070,6 +1072,33 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // PruneRecordedInstantsResult from the root. The seven Store-bearing secondary
 // entrypoints gain exactly these two transitive names (+2 each); subtracting
 // them reproduces every preceding fingerprint. Their narrower exports stay intact.
+// Root export diet: the root keeps the application surface (86 names) and the
+// rest moves to `./store`, `./query`, `./errors`, `./identity`,
+// `./maintenance` (new) and to
+// `./backend`, `./core`, `./schema`, `./indexes`, `./graph-extension` and the
+// Drizzle adapter entrypoints (existing); `etc/root-export-moves.json` maps
+// every moved or deleted name. A moved type that a root signature still
+// mentions becomes a forgotten export of `.`: +551 there. The root also loses
+// the 28 names reachable only through removed exports (`createQueryBuilder`'s
+// `CreateQueryBuilderOptions`, the JSON-pointer resolution helpers, the
+// collection method-name constants, the graph-extension issue and change
+// constants, the system-index declaration helpers, `Result`, ...): 559→1082.
+// `./backend` is unchanged: the operator tooling it gains nothing from lives
+// in `./maintenance`. `./core` gains the ten ontology relation
+// factories and their `META_EDGE_*` name constants through the `core`
+// meta-edge object, plus the structural-subtype wording helpers through
+// `StructuralSubtypeMismatch` and `IncompatibleKeys` / `LiteralKeysOf`, and
+// drops the five ontology types it now exports (+27 −5, 74→96).
+// `./graph-extension` gains `NodeType`, `EdgeType`, their brands and
+// `EdgeTargets` / `EdgeTargetMap` through the runtime kind tokens (+6).
+// `./schema` gains the `Store` type graph through `createVerifiedStore` and
+// `createVerifiedAdapterStore` and drops `ReconciledSchema`, which it now
+// exports (+683 −1). `./maintenance` renders the `Store` type graph through
+// `inspectGraphStorage(store)`. The five new entrypoints are registered at their
+// measured debt instead of defaulting to zero, by maintainer decision: each
+// re-exports public option and result types whose bodies name internals
+// (`KindRegistry`, `PredicateExpression`, the store runtime port, ...), and
+// exporting those internals to reach zero would publish them.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -1184,8 +1213,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // gain `ErrorCategory`, `TypeGraphError` and `TypeGraphErrorOptions`. Net +7
   // apiece (+4 at `./graph-merge`).
   ".": {
-    count: 559,
-    sha256: "bb47b309466b620b5eb1d40c013c45fd275ab7c6fdb376e28b4dd653b5bee6ca",
+    count: 1082,
+    sha256: "c47ec3a882de20c50e6f10b614c05a5e68b14e8ba9271189ddd95df213c408ea",
   },
   "./adapters/drizzle/engine": {
     count: 350,
@@ -1260,13 +1289,17 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "3d657aa71ed47e43904143825eb9a60e957194664a5e4d821f7256b822b350e9",
   },
   "./core": {
-    count: 74,
-    sha256: "735bff147c58e240841403d054dcc94e30e1b4d447664febcf56ba4ae7fe1326",
+    count: 96,
+    sha256: "e7b5372a2b3fffec03f3ae0a5e0a3cdda6f4f9fa8cb4fcf492e454afcb58e1a0",
+  },
+  "./errors": {
+    count: 64,
+    sha256: "a528a24c5ed5bba16efeeec31e446962b3304cf7068d02a38a4542d9ac807d12",
   },
   // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 22,
-    sha256: "275e9f2bdb2b75721e5be5275e18a8cf75209bf4207847cd1c403052286fab62",
+    count: 28,
+    sha256: "f0da2bb6b3bdc363689d3283a489c2e864bcd85b13e8419c4b0d8dd60319d9b8",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
   // named `IdentityTransitionHistory` instead of a bare array. The root
@@ -1288,6 +1321,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 979,
     sha256: "48753266c05201681b34886bdf9dfeca2e1ff87cc6f3427235440a2f11d79467",
   },
+  "./identity": {
+    count: 943,
+    sha256: "fbcf6152c3c21b92f251da7e0b0b8fa6f9b00cc30909a15702b554acb37b5cea",
+  },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
@@ -1295,6 +1332,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   "./interchange": {
     count: 969,
     sha256: "07356a24a425d2cdb4590558ed3ba26c1000f453366ca98edccb7995c7ea4e66",
+  },
+  "./maintenance": {
+    count: 977,
+    sha256: "dddf029f1134bc37518766dfb998bcb9978d6dad76e46fb33eb94b0899ef6bbf",
   },
   "./postgres/pglite": {
     count: 975,
@@ -1308,6 +1349,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 984,
     sha256: "2719ad133a8f6d35ea413a97070227ce9ca6d42e7be9bd76bdce3f7b58d5fdc0",
   },
+  "./query": {
+    count: 520,
+    sha256: "e658d6069c098aa647a4fcbd6210b3fd9cdafd31bbee2dc3253a021df4558b55",
+  },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
   // `EnsureSchemaPreloadedOptions` alias so `EnsureSchemaInternalOptions`
@@ -1318,12 +1363,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 306,
-    sha256: "4dee0d2995ca1fc5a67102edfb4eb32e5e895b86df0ca5203b2f985b849a376e",
+    count: 988,
+    sha256: "cbbba6057496e25383fae171c99a6c3ecd82e1ca1eaf4196d92dc760cfe7499d",
   },
   "./sqlite/local": {
     count: 975,
     sha256: "3342ee7cf0188e708c747c5ffc7ef1770c3d8921a488cbcc2bfc7843461b2206",
+  },
+  "./store": {
+    count: 803,
+    sha256: "c359aefb67a9c6805b4a1c04c14ad404899397256c772c0c15ee5b4747142453",
   },
 };
 

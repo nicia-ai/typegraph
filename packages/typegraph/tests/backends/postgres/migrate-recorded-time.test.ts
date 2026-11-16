@@ -3,17 +3,17 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  ConfigurationError,
-  migrateLegacyRecordedTime,
-  migrateRecordedAnchor,
-} from "../../../src";
+import { ConfigurationError } from "../../../src";
 import {
   createPostgresBackend,
   createPostgresTables,
 } from "../../../src/backend/postgres";
 import { type RecordedTableNames } from "../../../src/backend/types";
 import { createRecordedInstant } from "../../../src/core/temporal";
+import {
+  migrateLegacyRecordedTime,
+  migrateRecordedAnchor,
+} from "../../../src/maintenance";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
 import { ensureRevisionOriginRow } from "../../../src/store/recorded-capture/clock";

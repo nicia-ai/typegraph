@@ -7,8 +7,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  recordedInstantRevision,
 } from "../src";
+import { recordedInstantRevision } from "../src/core";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { readRecordedClock } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";

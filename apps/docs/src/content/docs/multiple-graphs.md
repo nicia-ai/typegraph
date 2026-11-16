@@ -358,7 +358,7 @@ database, and how many rows one graph holds.
 Lists the graph ids that hold data, one bounded page at a time:
 
 ```typescript
-import { listGraphIds } from "@nicia-ai/typegraph";
+import { listGraphIds } from "@nicia-ai/typegraph/maintenance";
 
 let after: string | undefined;
 for (;;) {
@@ -409,7 +409,7 @@ catalog probes to tell a table that was never provisioned from an empty one, and
 Counts one graph's rows in every relation that can hold them:
 
 ```typescript
-import { inspectGraphStorage } from "@nicia-ai/typegraph";
+import { inspectGraphStorage } from "@nicia-ai/typegraph/maintenance";
 
 await store.clear();
 const { graphId, relations, totalRows } = await inspectGraphStorage(store);
@@ -489,8 +489,8 @@ import {
   defineEdge,
   defineGraph,
   type Node,
-  type StoreProjection,
 } from "@nicia-ai/typegraph";
+import type { StoreProjection } from "@nicia-ai/typegraph/store";
 
 const Document = defineNode("Document", {
   schema: z.object({ title: z.string() }),

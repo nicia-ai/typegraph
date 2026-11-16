@@ -5,9 +5,9 @@ import {
   count,
   createStore,
   defineGraph,
-  SchemaChangedError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { SchemaChangedError } from "../../../src/errors-entry";
 import { serializeSchema } from "../../../src/schema/serializer";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";

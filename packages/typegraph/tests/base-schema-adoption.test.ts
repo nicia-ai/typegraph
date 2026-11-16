@@ -11,19 +11,15 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import type { CompiledRowsSql, GraphBackend, ReconciledSchema } from "../src";
+import type { GraphBackend } from "../src";
 import {
-  BaseSchemaMigrationError,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  instantiateGraphTemplate,
-  registerGraphTemplate,
 } from "../src";
+import type { CompiledRowsSql } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
 import {
@@ -41,7 +37,15 @@ import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { BaseSchemaMigrationError } from "../src/errors-entry";
+import { defineGraphExtension } from "../src/graph-extension";
 import { systemIndexName } from "../src/indexes/system";
+import type { ReconciledSchema } from "../src/schema";
+import {
+  createVerifiedStore,
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import { isSqliteMissingEdgeMatchIdentityColumnError } from "../src/utils/sql-errors";
 

@@ -35,9 +35,9 @@ import {
   defineGraph,
   defineNode,
   hasPart,
-  type NodeDeletePlan,
   partOf,
 } from "../../../src";
+import type { NodeDeletePlan } from "../../../src/store-entry";
 import { propertyRuns } from "../../property/run-budget";
 import {
   type InspectableStore,

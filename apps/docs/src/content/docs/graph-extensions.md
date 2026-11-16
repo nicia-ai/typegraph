@@ -56,8 +56,8 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineGraphExtension,
 } from "@nicia-ai/typegraph";
+import { defineGraphExtension } from "@nicia-ai/typegraph/graph-extension";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // 1. Boot with a compile-time kind.
@@ -202,7 +202,7 @@ The forward-compat policy:
 import {
   CURRENT_GRAPH_EXTENSION_VERSION,
   LEGACY_GRAPH_EXTENSION_VERSION,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/graph-extension";
 
 console.log(CURRENT_GRAPH_EXTENSION_VERSION); // 1 (today; bumps with breaking changes)
 console.log(LEGACY_GRAPH_EXTENSION_VERSION);  // 1 (always; the pre-versioning default)
@@ -872,7 +872,7 @@ The result describes only the supplied document; it has no graph ID, committed
 schema version, or schema hash.
 
 ```ts
-import { introspectGraphExtension } from "@nicia-ai/typegraph";
+import { introspectGraphExtension } from "@nicia-ai/typegraph/graph-extension";
 
 const declaration = introspectGraphExtension(extension);
 console.log(declaration.kinds[0]?.properties);

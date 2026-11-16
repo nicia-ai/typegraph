@@ -1,9 +1,10 @@
-import type { Node, UniqueIntrospection } from "@nicia-ai/typegraph";
+import type { Node } from "@nicia-ai/typegraph";
 import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
+import type { UniqueIntrospection } from "@nicia-ai/typegraph/store";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 

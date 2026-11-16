@@ -46,10 +46,10 @@ import {
   defineGraph,
   defineNode,
   hasPart,
-  type NodeDeletePlan,
   partOf,
 } from "../../../src";
 import { type RecordedInstant } from "../../../src/core/temporal";
+import type { NodeDeletePlan } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   type InspectableHistoryStore,

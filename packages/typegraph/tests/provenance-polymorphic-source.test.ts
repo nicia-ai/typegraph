@@ -20,11 +20,11 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type HistoryStore,
   type Node,
   subClassOf,
 } from "../src";
 import { createRetractionCapability } from "../src/provenance";
+import type { HistoryStore } from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 const sourceSchema = z.object({

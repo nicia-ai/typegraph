@@ -23,8 +23,8 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  type RecordedInstant,
 } from "@nicia-ai/typegraph";
+import type { RecordedInstant } from "@nicia-ai/typegraph/core";
 import { z } from "zod";
 
 import { createExampleBackend, requireRecordedNow } from "./_helpers";

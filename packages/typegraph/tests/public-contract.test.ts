@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_ALIAS_EXPANSION_AXIS, SEARCH_EXPANSION_DEFAULT } from "../src";
+import {
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  SEARCH_EXPANSION_DEFAULT,
+} from "../src/query";
 
 describe("public contract seams", () => {
   it("search and query expansion defaults are different constants", () => {

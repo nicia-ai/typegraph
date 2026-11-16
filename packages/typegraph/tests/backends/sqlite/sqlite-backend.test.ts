@@ -21,13 +21,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  BackendDisposedError,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  subClassOf,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode, subClassOf } from "../../../src";
+import { BackendDisposedError } from "../../../src/errors-entry";
 import { sql as portableSql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";

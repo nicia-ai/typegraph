@@ -1,14 +1,15 @@
 import { z } from "zod";
 
-import type { GraphBackend, HistoryStore, Store } from "../../../src";
+import type { GraphBackend, Store } from "../../../src";
 import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   embedding,
   searchable,
 } from "../../../src";
+import { defineNodeIndex } from "../../../src/indexes";
+import type { HistoryStore } from "../../../src/store-entry";
 
 /**
  * Test graph definition used across all backend integration tests.

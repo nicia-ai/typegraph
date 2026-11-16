@@ -5,7 +5,6 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   embedding,
   type Store,
 } from "../../src";
@@ -24,6 +23,7 @@ import {
   forkGraphNamespace,
   prepareNamespaceForkTarget,
 } from "../../src/graph-merge/namespace-fork";
+import { defineNodeIndex } from "../../src/indexes";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { sha256Hex } from "../../src/utils/hash";

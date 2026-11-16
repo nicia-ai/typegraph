@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  EdgeMatchIdentityConflictError,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode } from "../../../src";
+import { EdgeMatchIdentityConflictError } from "../../../src/errors-entry";
 import { type IntegrationTestContext } from "./test-context";
 
 const Person = defineNode("Person", {

@@ -52,13 +52,13 @@ import {
   defineNode,
   DisjointError,
   disjointWith,
-  EdgeAcyclicityError,
   hasPart,
   NodeNotFoundError,
   partOf,
   UniquenessError,
   ValidationError,
 } from "../../../src";
+import { EdgeAcyclicityError } from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import { withBindBudget } from "./bind-budget";

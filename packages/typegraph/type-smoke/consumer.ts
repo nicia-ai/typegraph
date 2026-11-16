@@ -3,16 +3,17 @@ import {
   defineGraph,
   defineNode,
   type EdgeId,
-  getEdgeKinds,
-  getNodeKinds,
   type NodeId,
-  type NodeIdentifier,
   type NodeRef,
-  type PathNode,
-  type ReachableNode,
   type Store,
-  type TemporalAlgorithmOptions,
 } from "@nicia-ai/typegraph";
+import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph/core";
+import type {
+  NodeIdentifier,
+  PathNode,
+  ReachableNode,
+  TemporalAlgorithmOptions,
+} from "@nicia-ai/typegraph/store";
 import type {
   CandidateDiagnostics,
   EntityResolution,

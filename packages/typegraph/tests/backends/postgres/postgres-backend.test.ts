@@ -32,7 +32,6 @@ import {
   defineNode,
   embedding,
   MigrationError,
-  NodeConstraintNotFoundError,
   StaleVersionError,
   subClassOf,
   ValidationError,
@@ -49,6 +48,7 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
+import { NodeConstraintNotFoundError } from "../../../src/errors-entry";
 import { sql as portableSql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,

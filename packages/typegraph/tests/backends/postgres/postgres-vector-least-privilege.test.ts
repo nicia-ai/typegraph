@@ -34,19 +34,19 @@ import {
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineGraph,
   defineNode,
   embedding,
-  pgvectorStrategy,
   StoreNotInitializedError,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
+import { pgvectorStrategy } from "../../../src/backend/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { sql as portableSql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { createVerifiedStore } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { errorChain } from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";

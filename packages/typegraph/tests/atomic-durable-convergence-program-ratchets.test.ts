@@ -9,7 +9,7 @@ import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, type Mock, vi } from "vitest";
 import { z } from "zod";
 
-import { CompilerInvariantError, StaleVersionError } from "../src";
+import { StaleVersionError } from "../src";
 import {
   type AtomicEdgeConvergenceEntry,
   resolveBundledRootAtomicMutationPrograms,
@@ -21,6 +21,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { D1_MAX_BIND_PARAMETERS } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { CompilerInvariantError } from "../src/errors-entry";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";

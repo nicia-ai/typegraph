@@ -31,15 +31,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  ContributionRebuildUnsupportedError,
-  ContributionUnavailableError,
-  defineGraph,
-  defineNode,
-  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-  resolveGraphVectorSlots,
-  searchable,
-} from "../../../src";
+import { defineGraph, defineNode, searchable } from "../../../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../../../src/backend";
 import type { StrategyTableContribution } from "../../../src/backend/table-contribution";
 import type {
   AdapterBackend,
@@ -50,6 +43,11 @@ import type {
   ContributionProbeResult,
   GraphBackend,
 } from "../../../src/backend/types";
+import { resolveGraphVectorSlots } from "../../../src/core";
+import {
+  ContributionRebuildUnsupportedError,
+  ContributionUnavailableError,
+} from "../../../src/errors-entry";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";

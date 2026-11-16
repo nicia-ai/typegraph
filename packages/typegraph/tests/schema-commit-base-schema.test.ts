@@ -22,7 +22,6 @@ import {
   createStore,
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
 } from "../src";
 import {
@@ -30,6 +29,7 @@ import {
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
 import { BaseSchemaMigrationError } from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 

@@ -17,10 +17,10 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
-  type OntologyRelation,
   subClassOf,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import type { OntologyRelation } from "../../src/core";
 import { propertyRuns } from "./run-budget";
 
 const KIND_NAMES = ["PeK0", "PeK1", "PeK2", "PeK3", "PeK4", "PeK5"] as const;

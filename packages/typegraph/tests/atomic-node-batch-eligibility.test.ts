@@ -6,7 +6,7 @@ import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { DatabaseOperationError, StaleVersionError } from "../src";
+import { StaleVersionError } from "../src";
 import {
   type AtomicNodeBatchInput,
   type AtomicNodeDeleteBatchInput,
@@ -25,6 +25,7 @@ import {
   embedding,
   searchable,
 } from "../src/core";
+import { DatabaseOperationError } from "../src/errors-entry";
 import { disjointWith, partOf, subClassOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";

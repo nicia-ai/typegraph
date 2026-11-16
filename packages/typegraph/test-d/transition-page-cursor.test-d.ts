@@ -5,13 +5,9 @@
 import { expectError, expectNotAssignable } from "tsd";
 import { z } from "zod";
 
-import {
-  type RecordedInstant,
-  type Store,
-  type TransitionPageCursor,
-  defineGraph,
-  defineNode,
-} from "..";
+import type { RecordedInstant } from "../dist/core";
+import { type Store, defineGraph, defineNode } from "..";
+import type { TransitionPageCursor } from "../dist/identity-entry";
 
 const graph = defineGraph({
   id: "cursor",

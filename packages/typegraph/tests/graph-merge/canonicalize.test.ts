@@ -1,5 +1,6 @@
-import type { JsonValue, NodeId, NodeType } from "@nicia-ai/typegraph";
-import { generateId } from "@nicia-ai/typegraph";
+import type { NodeId, NodeType } from "@nicia-ai/typegraph";
+import type { JsonValue } from "@nicia-ai/typegraph/core";
+import { generateId } from "@nicia-ai/typegraph/core";
 import { describe, expect, it } from "vitest";
 
 import type { ClusterMember } from "../../src/graph-merge/canonicalize";

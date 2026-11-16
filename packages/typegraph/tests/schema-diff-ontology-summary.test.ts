@@ -10,13 +10,13 @@ import { z } from "zod";
 
 import {
   createStoreWithSchema,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
 } from "../src";
 import { MigrationError } from "../src/errors";
+import { createVerifiedStore } from "../src/schema";
 import { getSchemaChanges } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";

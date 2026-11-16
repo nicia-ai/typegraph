@@ -18,16 +18,12 @@ import {
   avg,
   count,
   countDistinct,
-  countDistinctEdges,
-  countEdges,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
   exists,
   field,
-  fieldRef,
   havingGt,
   havingGte,
   inSubquery,
@@ -40,6 +36,7 @@ import {
   sum,
   ValidationError,
 } from "../src";
+import { createQueryBuilder } from "../src/query";
 import {
   compileQuery,
   compileSetOperation,
@@ -48,6 +45,7 @@ import {
 import { buildLateMaterializedOuterOrderBy } from "../src/query/compiler/emitter/standard-builders";
 import { compileOrderTerm } from "../src/query/order";
 import { sql as querySql } from "../src/query/sql-fragment";
+import { countDistinctEdges, countEdges, fieldRef } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";

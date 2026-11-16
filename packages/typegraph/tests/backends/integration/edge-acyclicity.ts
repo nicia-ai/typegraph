@@ -10,7 +10,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { createStore, EdgeAcyclicityError } from "../../../src";
+import { createStore } from "../../../src";
+import { EdgeAcyclicityError } from "../../../src/errors-entry";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../../src/query/compiler/recursive";
 import { edgeWriteNeedsConstraintFence } from "../../../src/store/constraints";
 import { compareStrings } from "../../../src/utils/compare";

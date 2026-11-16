@@ -845,7 +845,8 @@ edge keys. Use this to type reusable helpers that work with any store containing
 subgraph.
 
 ```typescript
-import type { Node, StoreProjection } from "@nicia-ai/typegraph";
+import type { Node } from "@nicia-ai/typegraph";
+import type { StoreProjection } from "@nicia-ai/typegraph/store";
 
 type CoreStore = StoreProjection<
   typeof myGraph,
@@ -2976,7 +2977,7 @@ The result is plain data, so it survives `structuredClone`, `postMessage`, React
 props, and JSON serialization. For lookups, index it once with `indexSubgraph()`:
 
 ```typescript
-import { indexSubgraph } from "@nicia-ai/typegraph";
+import { indexSubgraph } from "@nicia-ai/typegraph/store";
 
 const { node, outgoing, incoming } = indexSubgraph(sg);
 ```
@@ -2999,7 +3000,7 @@ multiple paths) are deduplicated.
 **Example:**
 
 ```typescript
-import { indexSubgraph } from "@nicia-ai/typegraph";
+import { indexSubgraph } from "@nicia-ai/typegraph/store";
 
 const sg = await store.subgraph(run, {
   edges: ["has_task", "runs_agent", "uses_skill"],
@@ -3200,7 +3201,7 @@ When storing a projection config in a variable, TypeScript widens field arrays t
 defeating compile-time narrowing. Use `defineSubgraphProject()` to preserve literal types:
 
 ```typescript
-import { defineSubgraphProject } from "@nicia-ai/typegraph";
+import { defineSubgraphProject } from "@nicia-ai/typegraph/store";
 
 const agentProjection = defineSubgraphProject(graph)({
   nodes: {
@@ -3338,7 +3339,7 @@ Returns the [`DynamicNodeCollection`](/types#dynamicnodecollection) for the give
 `undefined` if the kind is not registered in this graph.
 
 ```typescript
-import { getNodeKinds } from "@nicia-ai/typegraph";
+import { getNodeKinds } from "@nicia-ai/typegraph/core";
 
 // Count every node kind
 const counts: Record<string, number> = {};
@@ -3393,7 +3394,7 @@ Returns the [`DynamicEdgeCollection`](/types#dynamicedgecollection) for the give
 `undefined` if the kind is not registered in this graph.
 
 ```typescript
-import { getEdgeKinds } from "@nicia-ai/typegraph";
+import { getEdgeKinds } from "@nicia-ai/typegraph/core";
 
 // Snapshot all edges
 for (const kind of getEdgeKinds(graph)) {
@@ -3734,7 +3735,7 @@ import type {
   QueryHookContext,
   OperationHookContext,
   StoreHooks,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
 ```
 
 ```typescript
@@ -3798,7 +3799,8 @@ verdict; TypeGraph never guesses from a successful return alone.
 **Example:**
 
 ```typescript
-import { createStore, type StoreHooks } from "@nicia-ai/typegraph";
+import { createStore } from "@nicia-ai/typegraph";
+import type { StoreHooks } from "@nicia-ai/typegraph/store";
 
 const hooks: StoreHooks = {
   onQueryStart: (ctx) => {

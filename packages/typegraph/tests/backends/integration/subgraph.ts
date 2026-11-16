@@ -7,13 +7,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  indexSubgraph,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode } from "../../../src";
 import { KindNotFoundError, ValidationError } from "../../../src/errors";
+import { indexSubgraph } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 

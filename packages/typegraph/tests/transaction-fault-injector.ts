@@ -44,7 +44,8 @@ import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 
-import { type BackendCapabilities, type GraphBackend } from "../src";
+import type { GraphBackend } from "../src";
+import type { BackendCapabilities } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   generateSqliteMigrationSQL,

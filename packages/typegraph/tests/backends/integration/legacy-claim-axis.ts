@@ -27,7 +27,6 @@ import type { GraphBackend } from "../../../src";
 import {
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   subClassOf,
 } from "../../../src";
@@ -36,6 +35,7 @@ import {
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
 import { computeUniqueKey } from "../../../src/constraints";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   FORMAT_VERSION,
   type GraphData,

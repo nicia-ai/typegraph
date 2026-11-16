@@ -7,9 +7,7 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  isRecordedCaptureGuardError,
   type NodeId,
-  type RecordedInstant,
   type Store,
 } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
@@ -18,6 +16,8 @@ import {
   createPostgresWorkingCopyManager,
   type PostgresWorkingCopyManager,
 } from "../../../src/backend/postgres/working-copy";
+import type { RecordedInstant } from "../../../src/core";
+import { isRecordedCaptureGuardError } from "../../../src/errors-entry";
 import {
   branch,
   branchDurable,

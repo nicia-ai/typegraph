@@ -19,7 +19,6 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type GraphDef,
 } from "../src";
@@ -44,6 +43,7 @@ import type {
 } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { searchable } from "../src/core/searchable";
+import { defineGraphExtension } from "../src/graph-extension";
 import {
   canFuseSchemaFenceInFirstWrite,
   type EdgeAutocommitSingleStatementCandidate,

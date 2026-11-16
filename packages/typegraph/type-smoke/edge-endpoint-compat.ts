@@ -3,11 +3,13 @@ import type {
   EdgeKinds,
   GraphDef,
   TransactionContext,
-  StoreView,
   Store,
+} from "@nicia-ai/typegraph";
+import type {
+  StoreView,
   DynamicEdgeCollection,
   DynamicStoreViewEdgeCollection,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
 
 export async function verifyGenericEdgeDispatch<
   G extends GraphDef,
@@ -50,12 +52,11 @@ import {
   defineNode,
   type EdgeCollection,
   type EdgeId,
-  type EdgeRegistration,
   type NodeRef,
   type NodeType,
-  type AnyEdgeType,
-  type TypedEdgeCollection,
 } from "@nicia-ai/typegraph";
+import type { EdgeRegistration, AnyEdgeType } from "@nicia-ai/typegraph/core";
+import type { TypedEdgeCollection } from "@nicia-ai/typegraph/store";
 import { z as schema } from "zod";
 
 const Employee = defineNode("Employee", { schema: schema.object({}) });

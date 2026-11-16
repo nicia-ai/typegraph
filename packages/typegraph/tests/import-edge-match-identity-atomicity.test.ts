@@ -8,7 +8,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeMatchIdentityConflictError,
 } from "../src";
 import {
   deriveBackend,
@@ -18,6 +17,7 @@ import {
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
+import { EdgeMatchIdentityConflictError } from "../src/errors-entry";
 import { type GraphData, importGraph } from "../src/interchange";
 import { createStoreWithSchema } from "../src/store";
 import { disableTransactions } from "./test-utils";

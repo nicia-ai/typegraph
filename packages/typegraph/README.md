@@ -65,7 +65,13 @@ search-strategy authors can import the complete Drizzle-free contract vocabulary
 from `@nicia-ai/typegraph/backend`. That authoring surface, and
 `@nicia-ai/typegraph/adapters/drizzle/engine`, is not covered by semver and may
 change in any release; the bundled SQLite and PostgreSQL backends are the
-supported ones.
+supported ones. Every other entrypoint is application API and is covered by
+semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
+`/maintenance`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
+`/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
+`/postgres/pglite` and `/adapters/drizzle/...` subpaths other than
+`/adapters/drizzle/engine`. See
+[Stability](https://typegraph.dev/backend-authoring#stability).
 
 ## Optional Peer: drizzle-orm
 

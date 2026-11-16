@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { type DatabaseExpression, expr } from "../../../src";
+import { expr } from "../../../src";
+import type { DatabaseExpression } from "../../../src/query-entry";
 import type { IntegrationTestContext } from "./test-context";
 
 export function registerMatchResultFilteringIntegrationTests(

@@ -55,13 +55,13 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  ENTITY_ALREADY_EXISTS_CODE,
   UniquenessError,
   ValidationError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { ENTITY_ALREADY_EXISTS_CODE } from "../../../src/errors-entry";
 import { createGate, type Gate } from "../../concurrency-utils";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";

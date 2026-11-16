@@ -41,9 +41,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type OperationHookContext,
   partOf,
 } from "@nicia-ai/typegraph";
+import type { OperationHookContext } from "@nicia-ai/typegraph/store";
 import { z } from "zod";
 
 import { requireDefined } from "../src/utils/presence";

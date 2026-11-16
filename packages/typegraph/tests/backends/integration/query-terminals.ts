@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import {
-  count,
-  havingGt,
-  havingLt,
-  param as parameter,
-  SchemaChangedError,
-} from "../../../src";
+import { count, havingGt, havingLt, param as parameter } from "../../../src";
+import { SchemaChangedError } from "../../../src/errors-entry";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 

@@ -62,12 +62,14 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
-  EdgeAcyclicityIndeterminateError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  EdgeAcyclicityError,
+  EdgeAcyclicityIndeterminateError,
+} from "../../../src/errors-entry";
 import {
   renderPostgres,
   sql as graphSql,

@@ -19,9 +19,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type MaterializeIndexesResult,
   subClassOf,
 } from "@nicia-ai/typegraph";
+import type { MaterializeIndexesResult } from "@nicia-ai/typegraph/store";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
 

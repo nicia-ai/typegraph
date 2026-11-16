@@ -21,16 +21,20 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompositionCascadedPart,
   defineEdge,
   defineGraph,
   defineNode,
-  type NodeDeletePlan,
-  NodeDeletePlanMismatchError,
   partOf,
   RestrictedDeleteError,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
+import {
+  NodeDeletePlanMismatchError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
+import type {
+  CompositionCascadedPart,
+  NodeDeletePlan,
+} from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";

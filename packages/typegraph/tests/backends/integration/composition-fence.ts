@@ -32,10 +32,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
   hasPart,
   partOf,
 } from "../../../src";
+import { EdgeAcyclicityError } from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 

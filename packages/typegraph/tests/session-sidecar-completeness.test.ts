@@ -46,7 +46,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  CompilerInvariantError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -73,6 +72,7 @@ import {
 } from "../src/backend/types";
 import { embedding } from "../src/core/embedding";
 import { searchable } from "../src/core/searchable";
+import { CompilerInvariantError } from "../src/errors-entry";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";

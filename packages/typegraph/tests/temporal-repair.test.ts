@@ -42,7 +42,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  repairInvertedValidityWindows,
 } from "../src";
 import {
   deriveBackend,
@@ -56,6 +55,7 @@ import {
   type TransactionOptions,
 } from "../src/backend/types";
 import { asNodeId } from "../src/core";
+import { repairInvertedValidityWindows } from "../src/maintenance";
 import { renderSql, sql } from "../src/query/sql-fragment";
 import {
   asCompiledRowsSql,

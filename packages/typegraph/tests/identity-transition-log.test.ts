@@ -17,7 +17,6 @@ import {
   createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type GraphDef,
 } from "../src";
@@ -30,6 +29,7 @@ import {
   type RecordedInstant,
   recordedInstantRevision,
 } from "../src/core/temporal";
+import { defineGraphExtension } from "../src/graph-extension";
 import { identityReferenceKey } from "../src/identity/reference";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";

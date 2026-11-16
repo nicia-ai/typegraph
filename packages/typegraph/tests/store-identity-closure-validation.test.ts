@@ -16,15 +16,15 @@ import { z } from "zod";
 import {
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineGraph,
   defineNode,
-  rebuildIdentityClosure,
 } from "../src";
 import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../src/backend/sqlite/local";
+import { rebuildIdentityClosure } from "../src/identity-entry";
+import { createVerifiedStore } from "../src/schema";
 import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", {

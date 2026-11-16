@@ -22,7 +22,6 @@ import { z } from "zod";
 
 import {
   CardinalityError,
-  DatabaseOperationError,
   defineEdge,
   defineGraph,
   defineNode,
@@ -39,6 +38,7 @@ import {
   type FindEdgesByKindParams,
   type GraphBackend,
 } from "../src/backend/types";
+import { DatabaseOperationError } from "../src/errors-entry";
 import { createStore } from "../src/store";
 import { type OperationHookContext } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";

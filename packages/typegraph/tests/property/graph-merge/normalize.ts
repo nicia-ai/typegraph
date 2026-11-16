@@ -30,7 +30,7 @@
  */
 
 import type { GraphDef, Store } from "@nicia-ai/typegraph";
-import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph";
+import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph/core";
 
 import { rowPropsToObject } from "../../../src/backend/types";
 import { canonicalizeProps } from "../../../src/graph-merge/canonical-props";

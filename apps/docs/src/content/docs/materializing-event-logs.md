@@ -461,7 +461,7 @@ plain string — re-brand it with `asRecordedInstant` on the way back before
 passing it to `asOfRecorded`:
 
 ```typescript
-import { asRecordedInstant } from "@nicia-ai/typegraph";
+import { asRecordedInstant } from "@nicia-ai/typegraph/core";
 
 const stored = await offsetAnchors.anchorFor(offset); // plain string from storage
 const anchor = asRecordedInstant(stored); // validates + re-brands

@@ -23,13 +23,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  ContributionRebuildUnsupportedError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { generateSqliteDDL } from "../../../src/backend/drizzle/ddl";
 import {
@@ -39,6 +36,11 @@ import {
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import { createLocalSqliteStore } from "../../../src/backend/sqlite/local-store";
 import { searchable } from "../../../src/core/searchable";
+import {
+  ContributionRebuildUnsupportedError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createAdapterStoreWithSchema } from "../../../src/store";

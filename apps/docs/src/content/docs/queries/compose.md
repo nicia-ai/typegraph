@@ -53,7 +53,7 @@ const results = await store
 For full type safety, use the `createFragment()` factory:
 
 ```typescript
-import { createFragment } from "@nicia-ai/typegraph";
+import { createFragment } from "@nicia-ai/typegraph/query";
 
 // Create a typed fragment factory for your graph
 const fragment = createFragment<typeof graph>();
@@ -87,7 +87,7 @@ const results = await store
 Use `composeFragments()` to combine multiple fragments into one:
 
 ```typescript
-import { composeFragments, limitFragment, orderByFragment } from "@nicia-ai/typegraph";
+import { composeFragments, limitFragment, orderByFragment } from "@nicia-ai/typegraph/query";
 
 // Compose multiple fragments into one
 const paginatedActiveUsers = composeFragments(
@@ -114,8 +114,8 @@ import {
   limitFragment,
   offsetFragment,
   orderByFragment,
-  composeFragments
-} from "@nicia-ai/typegraph";
+  composeFragments,
+} from "@nicia-ai/typegraph/query";
 
 // Pre-built fragments
 const paginated = composeFragments(
@@ -292,8 +292,8 @@ For advanced use cases, TypeGraph exports fragment type definitions:
 import type {
   QueryFragment,
   FlexibleQueryFragment,
-  TraversalFragment
-} from "@nicia-ai/typegraph";
+  TraversalFragment,
+} from "@nicia-ai/typegraph/query";
 ```
 
 - **`QueryFragment<G, InAliases, OutAliases, InEdgeAliases, OutEdgeAliases>`** - A typed fragment transformation

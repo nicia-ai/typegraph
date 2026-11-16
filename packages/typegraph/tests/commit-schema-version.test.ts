@@ -28,10 +28,10 @@ import {
   defineNode,
   type GraphBackend,
   MigrationError,
-  SchemaContentConflictError,
   StaleVersionError,
 } from "../src";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import { SchemaContentConflictError } from "../src/errors-entry";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "./test-utils";

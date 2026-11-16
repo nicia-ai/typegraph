@@ -396,7 +396,7 @@ themselves, and restored ones in their source's order among themselves. An
 audit timeline that mixes them places each restored transition by
 `restored.at`, the destination's wall clock when the restore inserted it, and
 each native one by its recorded wall time (`recordedInstantWallTime`, exported
-from the package root):
+from `@nicia-ai/typegraph/core`):
 
 ```typescript
 const timeline = page.transitions.map((transition) => ({
@@ -653,7 +653,7 @@ restored transition's `recorded` are refused before anything is deleted, by
 the same ownership check `store.asOfRecorded` applies.
 
 ```typescript
-import { pruneIdentityTransitions } from "@nicia-ai/typegraph";
+import { pruneIdentityTransitions } from "@nicia-ai/typegraph/identity";
 
 await pruneIdentityTransitions(store, { beforeRecorded: someEarlierInstant });
 ```

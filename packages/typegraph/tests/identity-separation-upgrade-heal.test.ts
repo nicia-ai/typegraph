@@ -25,14 +25,12 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompiledStatementSql,
   createStoreWithSchema,
   defineGraph,
   defineNode,
   type GraphBackend,
-  IdentityContradictionError,
-  IdentitySeparationViolationError,
 } from "../src";
+import type { CompiledStatementSql } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
@@ -42,6 +40,10 @@ import { type SchemaCommitPreflightBackend } from "../src/backend/types";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { separationRebuildRequired } from "../src/identity/separation";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
+import {
+  IdentityContradictionError,
+  IdentitySeparationViolationError,
+} from "../src/identity-entry";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry/builders";
 import { getActiveSchema, migrateSchema } from "../src/schema";

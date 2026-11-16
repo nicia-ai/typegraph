@@ -6,7 +6,6 @@ import {
   defineNode,
   DisjointError,
   disjointWith,
-  ENTITY_ALREADY_EXISTS_CODE,
   searchable,
   subClassOf,
   UniquenessError,
@@ -20,6 +19,7 @@ import type {
   GraphCommand,
   TransactionBackend,
 } from "../src/backend/types";
+import { ENTITY_ALREADY_EXISTS_CODE } from "../src/errors-entry";
 import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import {

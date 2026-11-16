@@ -1,0 +1,4952 @@
+[
+  {
+    "symbol": "AdapterBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "AdapterBackendTransactions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "AdapterHistoryStore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AdapterHistoryTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AdapterRecordedReadStore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AdapterStore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AdapterTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AdoptedSchemaWriteTransaction",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "AggregateResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "AlgorithmCyclePolicy",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AliasExpansionAxis",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "AliasExpansionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "AliasMap",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "AliasOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "AllEdgeTypes",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "AllNodeTypes",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "andWhere",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "AnyEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "AnyEdgeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "AnyNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "asIdentityAssertionId",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "asRecordedInstant",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "AssignableNodeKinds",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "BackendCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BackendDisposedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "BackendExecutionCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BackendIdentity",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BackendLifecycle",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BackendMaintenance",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BackendTransactions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BaseSchemaAdoptionTimeoutError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "BaseSchemaMigrationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "BaseSchemaMigrationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "BaseStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BaseTraversalOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BatchableQuery",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "BatchOnceOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "BatchReadBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BatchResults",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "buildVectorCapabilities",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "BulkEdgeSourceGroup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindEdgesFromParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindEdgesFromResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindEdgesToParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindEdgesToResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindRuntimeEdgesFromParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkFindRuntimeEdgesFromResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "BulkOperationHookContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "Cardinality",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CardinalityErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CheckedReadScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ClaimOwner",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ClaimTarget",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "Collation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CollectedRecord",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CollectOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CollectOrder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CollectRecordFields",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CollectRecordOperand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CommitSchemaVersionExpected",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CommitSchemaVersionIfKindsEmptyResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CommitSchemaVersionParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CommonPropertyKeys",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CompareAndSetAbsent",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "compareAndSetAbsent",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompareAndSetExpected",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompareAndSetNodeParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "compareRecordedInstants",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CompiledOneStatementRead",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CompiledRowsSql",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CompiledSelectSql",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CompiledStatementSql",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CompilerInvariantError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "composeFragments",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CompositionAttachment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionAttachmentProps",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionCascadedPart",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionClaimScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "CompositionConfigurationCode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionConfigurationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionCycleError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionCycleErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionExistence",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CompositionExistenceErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "CompositionHeldEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionNavigationOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CompositionNodeRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CompositionPartSide",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CompositionViaRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "CompositionWholeInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "CompositionWholeKinds",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CompositionWholeReference",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "computeTransitiveClosure",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "ConstraintFenceViolation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ConstraintNames",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ContributionCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionDiagnostic",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionDiagnosticState",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionMaterializationBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionProbeContribution",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionProbeEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionProbeResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionProbeState",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionRebuildRefusal",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ContributionRebuildResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionRebuildScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionRebuildUnsupportedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ContributionRepairEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionRepairResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionRepopulationStats",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ContributionUnavailableError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ContributionUnavailableErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "core",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "countDistinctEdges",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "countEdges",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CreateEdgeInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "createFragment",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "CreateNodeInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "createPgvectorStrategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/postgres"
+  },
+  {
+    "symbol": "createQueryBuilder",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "createSqlSchema",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "createVerifiedAdapterStore",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "createVerifiedStore",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "CURRENT_GRAPH_EXTENSION_VERSION",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "DatabaseExpression",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DatabaseOperationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "DatabaseOperationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "DatabaseProjection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DEFAULT_ALIAS_EXPANSION_AXIS",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "DEFAULT_SEARCHABLE_LANGUAGE",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "DEFAULT_SQL_SCHEMA",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DefaultAliasExpansionAxis",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "defineEdgeIndex",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "DefineEdgeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "defineGraphExtension",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "defineNodeIndex",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "DefineNodeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "defineSubgraphProject",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DegreeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DeleteBehavior",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "DeleteFulltextBatchParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "deleteLegacyRecordedAnchorMap",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "DeleteLegacyRecordedAnchorMapOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "DEPLOYMENT_CONTRIBUTION_GRAPH_ID",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "DisjointErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "DurableEdgeBatchMembers",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "DynamicEdgeAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DynamicEdgeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicFieldBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DynamicNodeAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicNodeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DynamicNodeKind",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicNodeReference",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "DynamicNodeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicSelectableEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicSelectableNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "DynamicStoreViewEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EagerMaterializationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EagerMaterializationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EDGE_IDENTITY_MISMATCH_CODE",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EdgeAcyclicityError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeAcyclicityErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeAcyclicityIndeterminateError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeAcyclicityIndeterminateErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeBatchReads",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeBulkFindEndpointOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeBulkFindOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeCardinalityAxisRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeCardinalityDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeCardinalityDirection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeCollectionLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeConvergeCreateCommand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeConvergeCreateCommandResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeConvergenceMatch",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeCreateCommand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeCreateCommandResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeCycleWitness",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeEndpointAllowance",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeEndpointRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeEntityReadBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeEntityWriteBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EdgeFindByEndpointsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeGetOrCreateByEndpointsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeGetOrCreateByEndpointsResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeIndexConfig",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "EdgeIndexDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "EdgeIndexDirection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "EdgeIndexWhereBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "EdgeInGraph",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeMatchIdentity",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EdgeMatchIdentityConflictError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EdgeOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EdgeReadWindow",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeRegistration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EdgeTargetMap",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EdgeTargets",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EdgeTemporalReads",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EdgeTypeWithEndpoints",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EdgeWrites",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EmbeddableOneStatementRead",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EmbeddingBrand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EmbeddingDimensionChangedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EmbeddingDimensionChangedErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EmbeddingSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EmbeddingValue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EmptyAliasMap",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EmptyEdgeAliasMap",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EmptyRecursiveAliasMap",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "EndpointErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EndpointExistence",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EndpointNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EndpointPair",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EndpointPairError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EndpointPairErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EngineRevision",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ENTITY_ALREADY_EXISTS_CODE",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "EntityKey",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "EquivalentToCheck",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "EvolutionPlan",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "EvolutionRequirement",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "EvolutionRequirements",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "EvolvedTransactionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "EvolvedTransactionOutcome",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ExecutableAggregateQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExecutableOneStatementRead",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExecutableProjectionQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExecutableQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExecutableRelationQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExpansionAliasNodeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExportStreamCancelledError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ExportStreamIdleTimeoutError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ExpressionAliasContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExpressionValue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExternalRecordedReadSource",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ExternalRefSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "ExternalRefValue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "FieldAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "FieldRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "fieldRef",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "FilteredApproximateSearch",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FilteredApproximateSearchMode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FindEdgesByHeterogeneousEndpointSetParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FlexibleQueryFragment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ForwardedExpansionAxes",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "fts5Strategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/sqlite"
+  },
+  {
+    "symbol": "FulltextBatchRow",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextOperationBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextQueryMode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextSearchHit",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "FulltextSearchOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "FulltextSearchParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextSearchResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "FulltextStrategy",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "generateId",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "getActiveSchema",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "getCommittedSchemaVersion",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "getEdgeKinds",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GetEdgeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "getEmbeddingDimensions",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "getErrorSuggestion",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "getExternalRefTable",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "getNodeKinds",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GetNodeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GetOrCreateAction",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "getSearchableMetadata",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GraphAlgorithmConvergenceError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "GraphAlgorithms",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphAllocationMismatchError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "GraphAllocationOwner",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GraphAnalyticsCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphAnnotations",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GraphAnnotationsChange",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "GraphCommand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandCoordination",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandExecutionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandIsolation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandPort",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphCommandSession",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphDefaults",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GraphEdgeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphEdgeForKinds",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphEntityReadBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphEntityWriteBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphExtension",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionEdgeIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionIssue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionIssueCode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionKindIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionUnresolvedEndpointError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionUnresolvedOntologyEndpointError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionValidationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionVersion",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphExtensionVersionUnsupportedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "GraphIdentityConfig",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "GraphLifecycleBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "GraphNodeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphNodeForKinds",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphNodeReference",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphNodeReferenceInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "GraphOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "GraphStorageConsistency",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "GraphStorageInspection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "GraphStorageRelation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "GraphTemplate",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "GraphWriteFenceAcquisition",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "HardDeleteUniquesByConcreteKindParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "HardDeleteUniquesByNodeIdsParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "HeterogeneousNodeUpsertInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HeterogeneousNodeUpsertResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HistoryStore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HistoryStoreBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HistoryStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HistoryTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HookContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HybridFulltextOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HybridFusionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HybridSearchHit",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HybridSearchOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "HybridVectorOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "IdConfig",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "IDENTITY_REPLAY_DEFAULT_LIMIT",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IDENTITY_REPLAY_MAX_LIMIT",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityAssertion",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityAssertionId",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityAssertionResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityAssertionWriteFacade",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityChange",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "IdentityClass",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityClassPage",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityClassPageOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityContradictionError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityContradictionErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityDecisionProvenance",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityEndpointValidityError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityEndpointValidityErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityFacade",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityHistoryCompleteness",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityHistoryIncompleteReason",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityNodeReference",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityNodeRefInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityPair",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReadFacade",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityRelation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReplay",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReplayError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReplayErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReplayOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityReplayStep",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentitySamePathStep",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentitySeparationViolationError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentitySeparationViolationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransition",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionCause",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionCursor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionCut",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionHistory",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionLogOperation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionPruneResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionRetention",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTransitionTransfer",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityTraversalOption",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "IdentityValidityWindow",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityValidityWindowError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityValidityWindowErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdentityWriteSummary",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "IdGenerator",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "IfExistsMode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "IMMUTABLE_VALIDITY_LOWER_BOUND_CODE",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "IncompatibleChange",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "IncompatibleChangeError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "IndexDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "IndexMaterializationBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "IndexOrigin",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "IndexScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "indexSubgraph",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "IndexWhereExpression",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "IndexWhereFieldBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "IndexWhereInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "InitialQueryBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "inspectGraphStorage",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "instantiateGraph",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "instantiateGraphTemplate",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "InstantiateGraphTemplateResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "IntentSql",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "introspectGraphExtension",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "InvalidEdgeWeightError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "InvalidEdgeWeightErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "InvalidEdgeWeightReason",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "invertClosure",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "INVERTED_VALIDITY_WINDOW_CODE",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "isEdgeTargetMap",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isEdgeType",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isEdgeTypeWithEndpoints",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isEmbeddingSchema",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isExternalRefSchema",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isGraphDef",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isMetaEdge",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isNodeType",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isParameterRef",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "isReachable",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "isRecordedCaptureGuardError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "isSchemaInitialized",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "isSearchableSchema",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "isSqlFragment",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "joinJsonPointers",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "JsonPointer",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "jsonPointer",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonPointerFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonPointerInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonPointerSegment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonPointerSegments",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonPointerSegmentsFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "JsonScalar",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "JsonValue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "KindAnnotations",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "KindCollisionError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "KindHasReferentsError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "KindIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "KindNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "KindPopulationStatistics",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "KindReferent",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "LabelPropagationMembership",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "LabelPropagationOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "LEGACY_GRAPH_EXTENSION_VERSION",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "LegacyEmbeddingSlotConfig",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "libsqlVectorStrategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql"
+  },
+  {
+    "symbol": "limitFragment",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "LineageDelta",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "listGraphIds",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "ListGraphIdsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "LiveStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "LockSchemaVersionForWriteParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ManagedEdgeCreatePlan",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ManagedNodeCreateMode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ManagedNodeCreatePlan",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "MaterializeIndexesEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeIndexesOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeIndexesResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeRemovalsEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeRemovalsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeRemovalsResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MaterializeSystemIndexesOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MAX_EXPLICIT_RECURSIVE_DEPTH",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "MAX_JSON_POINTER_DEPTH",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "MAX_RECURSIVE_DEPTH",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "MeasurableAdapterHistoryTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MeasurableAdapterTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MeasurableHistoryTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MeasurableTransactionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "MetaEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "MetaEdgeProperties",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "migrateLegacyEmbeddings",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MigrateLegacyEmbeddingsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MigrateLegacyEmbeddingsResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "migrateLegacyRecordedTime",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MigrateLegacyRecordedTimeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MigrateLegacyRecordedTimeResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "migrateRecordedAnchor",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MigrateRecordedAnchorOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "MIGRATION_FAILURE_REASONS",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "MigrationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "MigrationFailureReason",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "MisassignedEdgeEndpointRow",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NeighborNodeOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NeighborOrder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NeighborOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NeighborReadOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NeighborResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NeighborsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NODE_SYSTEM_COLUMN_NAMES",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodeAlias",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodeBulkFindByIndexOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeBulkGetOrCreateByConstraintItem",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeBulkGetOrCreateByConstraintOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeCandidateQuery",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodeCandidateSelection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodeCollectionLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeConstraintNotFoundError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeConstraintNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeCreateCommand",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeCreateCommandResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeCreateOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeCurrentReads",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeDeleteOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeDeletePlan",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeDeletePlanMismatchError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeDeletePlanMismatchErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeEntityReadBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeEntityWriteBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeGetOrCreateByConstraintOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeGetOrCreateByConstraintResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeIdentifier",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeIndexConfig",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeIndexDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeIndexKey",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeIndexKeyInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeIndexNotFoundError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeIndexNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeIndexWhereBuilder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeInsertClaim",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeInsertClaimVerdict",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeInsertProjection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodeNotFoundErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "NodeOrderField",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodePropertyExpectation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "NodePropsFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "NodeReferenceLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeRegistration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "NodeReparentOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeReparentResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeSystemColumnName",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "NodeTemporalReads",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NodeWrites",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "NoRecordedCoordinate",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "normalizeJsonPointer",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "notWhere",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "offsetFragment",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "OneStatementBatchableQuery",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "OneStatementBatchResults",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "OntologyIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "OntologyRelation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "OperationHookContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "orderByFragment",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "OrderSpec",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "orWhere",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "PageRankOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PageRankScore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PaginateOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ParameterRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "parseJsonPointer",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "PathNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PersonalizedPageRankOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PersonalizedPageRankSeed",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "pgvectorStrategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/postgres"
+  },
+  {
+    "symbol": "Placeholder",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "PlanEvolutionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PolymorphicNodeReference",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PolymorphicNodeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "PopulatedSchemaKind",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "PreparedBindings",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "PreparedParameterDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "PreparedQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "ProjectionResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "PropertyPopulationStatistics",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PropsAccessor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "pruneIdentityTransitions",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "PruneRecordedInstantsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "PruneRecordedInstantsResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "QualifiedRecursivePath",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QualifiedRecursivePathEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QualifiedRecursivePathElement",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QualifiedRecursivePathNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QualifiedRecursivePathOption",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QueryBuilder",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QueryCoordinateState",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QueryExecutionBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "QueryExpressionContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QueryFragment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "QueryHookContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "QueryOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RawQueryExecutionBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "RawStatementExecutionBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ReachableNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ReachableOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RebuildContributionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RebuildFulltextOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RebuildFulltextResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "rebuildIdentityClosure",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "ReclaimedVectorFieldEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ReconciledSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "RECORDED_CAPTURE_GUARD_CODES",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "RecordedAdjacencyEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedAdjacencyOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedAdjacencyPage",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedCaptureGuardCode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "RecordedCaptureGuardError",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "RecordedHeterogeneousNodeWriteBatch",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedIdentityTransition",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "RecordedInstant",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "recordedInstant",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "recordedInstantOwner",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "recordedInstantRevision",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "recordedInstantWallTime",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "RecordedReadSource",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RecordedReadStore",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedReadStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "recordedRelation",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RecordedRelationOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RecordedRevisionRequest",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedScanOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedScanPage",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedSourceTable",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "RecordedStoreView",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedStoreViewEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedStoreViewEdgeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedStoreViewNodeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecordedStoreViewNodeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RecursiveTraversalCapability",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "RecursiveTraversalOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RecursiveTraversalVerdict",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ReembedFunction",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ReembedVectorFieldOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ReembedVectorFieldResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RefreshSchemaOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "registerGraphTemplate",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "RelationColumnContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RelationProjection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RelationProjectionResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "RemovalMaterializationBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "RemoveCompileTimeKindError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RenderedSql",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "renderPostgres",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "renderSql",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "renderSqlInline",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "renderSqlite",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "repairInvertedValidityWindows",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "RepairInvertedWindowsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "RepairInvertedWindowsReport",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "RepairRelation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "RepairRelationScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/maintenance"
+  },
+  {
+    "symbol": "RequiredEdgeCollectionLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RequiredNodeCollectionLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ResolvedNodeUpdateBatchEntry",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ResolvedNodeUpdateBatchParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ResolvedSqlTableNames",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "resolveGraphVectorSlots",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "ResolveJsonPointer",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "ResolveJsonPointerSegments",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "RestoredIdentityTransition",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "RestoredRecordedInstant",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "RestrictedDeleteErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "RowProps",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "rowPropsToJsonText",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "rowPropsToObject",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "RuntimeBulkEdgeSourceGroup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RuntimeEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RuntimeEdgeFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RuntimeEdgeKind",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RuntimeEdgeTypeFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RuntimeKindTokenError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RuntimeKindTokenFailure",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RuntimeNodeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RuntimeNodeKind",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "RuntimeNodeReferenceFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "RuntimeNodeTypeFor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "SchemaChangedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaChangedErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaCommitBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SchemaContentConflictError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaContentConflictErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaFencePhase",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaFenceTimeoutError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaFenceTimeoutErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaHash",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "SchemaIdentity",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "SchemaIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SchemaKindEmptinessProbe",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SchemaManagerOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "SchemaMismatchErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaProvisioning",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SchemaReadBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SchemaTighteningRefusalDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "SchemaValidationResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "SchemaVersionRow",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SchemaWriteFenceBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ScopedMeasure",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SEARCH_EXPANSION_DEFAULT",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "SearchableMetadata",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "SearchableOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "SearchableSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "SearchScopeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SelectableEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "SelectableNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "SelectContext",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "SerializedSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "SetActiveVersionParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "ShortestPathOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ShortestPathResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SortDirection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "sql",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlAvailability",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SqlChunk",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlDialect",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlFragment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlIdentifierChunk",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlIntent",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "sqliteVecStrategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/sqlite"
+  },
+  {
+    "symbol": "SqlParameterChunk",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlPlaceholderChunk",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlSchema",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "SqlTableNames",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlTag",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SqlTextChunk",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "StaleVersionErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "StoreAnalysisCursorStaleError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "StoreAnalysisCursorStaleErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "StoreAnalysisSchemaCoordinate",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreDescription",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreEvolution",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreHooks",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreNotInitializedErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "StoreNotInitializedReason",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "StorePopulationStatistics",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreProjection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreRef",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreSearch",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreTransactionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreValidationFailure",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreValidationPage",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreView",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewCanReachOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewCoordinate",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewDegreeOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewEdgeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewGraphAlgorithms",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewLabelPropagationOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewNeighborsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewNodeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewNodeCollections",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewPageRankOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewPersonalizedPageRankOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewReachableOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewShortestPathOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewSubgraphOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewWeaklyConnectedComponentsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StoreViewWeightedShortestPathOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "StrategyTableContribution",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "StreamOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "StructuralSubtypeMismatch",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "SubClassOfCheck",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "SubgraphCompositionSelection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphEdgeKey",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphEdgeLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphEdgeResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphIndex",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphKindSelection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphNodeKey",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphNodeLookup",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphNodeResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubgraphResultEdgeKinds",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubsetEdge",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubsetNode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "SubsumedNodeType",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "supportsInteractiveTransactions",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "supportsRootAtomicBatch",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "SYSTEM_INDEX_DECLARATIONS",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "SystemIndexDeclaration",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "SystemIndexTable",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/indexes"
+  },
+  {
+    "symbol": "TableContribution",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "TargetCardinality",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "TemporalAlgorithmOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TemporalMode",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "TopPerPartitionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "TopPerPartitionOrder",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "TransactionBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "TransactionClosedError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "TransactionConflictErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "TransactionOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "TransactionOutcome",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TransactionReadBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "TransactionReceipt",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TransitionPageCursor",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/identity"
+  },
+  {
+    "symbol": "TraversalDirection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TraversalExpansion",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "TraversalFragment",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "TrustedImportError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "TrustedImportErrorReason",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "TrustedImportOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "TrustedImportSession",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "tsvectorStrategy",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/adapters/drizzle/postgres"
+  },
+  {
+    "symbol": "TypedEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TypedOntologyRelation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "TypedRecordedStoreViewEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TypedStoreViewEdgeCollection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "TypeGraphErrorOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "UnboundLiveStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "UnionableQuery",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/query"
+  },
+  {
+    "symbol": "UniqueConstraint",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "UniqueConstraintBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "UniqueIntrospection",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "UniquenessClaimGate",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/schema"
+  },
+  {
+    "symbol": "UniquenessErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "UniquenessScope",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/core"
+  },
+  {
+    "symbol": "UnsupportedBackendCapabilityError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "UnsupportedPredicateError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "UpdateEdgeInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "UpdateNodeInput",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "UpdateNodeSetParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "UpdateNodeSetResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "UpsertFulltextBatchParams",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "validateGraphExtension",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/graph-extension"
+  },
+  {
+    "symbol": "ValidateStoreOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "ValidationErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ValidationIssue",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/errors"
+  },
+  {
+    "symbol": "ValidityEndMutation",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "VectorCapabilities",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "VectorOperationBackend",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "VectorSearchFrontierTuning",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "VectorSearchHit",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "VectorSearchOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "VectorSlot",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "VectorStrategy",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/backend"
+  },
+  {
+    "symbol": "VersionConflictError",
+    "kind": "value",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "VersionConflictErrorDetails",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": null
+  },
+  {
+    "symbol": "WeaklyConnectedComponentMembership",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "WeaklyConnectedComponentsOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "WeightedShortestPathOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "WeightedShortestPathResult",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  },
+  {
+    "symbol": "WorkingCopyOptions",
+    "kind": "type",
+    "from": "@nicia-ai/typegraph",
+    "to": "@nicia-ai/typegraph/store"
+  }
+]

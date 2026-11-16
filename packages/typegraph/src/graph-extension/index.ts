@@ -75,3 +75,12 @@ export {
 
 // Result-returning validator (for callers that prefer Result-style)
 export { validateGraphExtension } from "./validation";
+
+// Kind tokens for runtime-declared (extension) kinds
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
+export { RuntimeKindTokenError, type RuntimeKindTokenFailure } from "../errors";

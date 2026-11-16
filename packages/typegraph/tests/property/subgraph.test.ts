@@ -15,12 +15,12 @@ import {
   defineGraph,
   defineNode,
   hasPart,
-  indexSubgraph,
   partOf,
-  type TemporalMode,
 } from "../../src";
 import type { GraphBackend } from "../../src/backend/types";
+import type { TemporalMode } from "../../src/core";
 import { createStore, type Store } from "../../src/store";
+import { indexSubgraph } from "../../src/store-entry";
 import { compareStrings } from "../../src/utils/compare";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";

@@ -11,9 +11,9 @@ import {
   defineNode,
   embedding,
   searchable,
-  UnsupportedPredicateError,
   ValidationError,
 } from "../src";
+import { UnsupportedPredicateError } from "../src/errors-entry";
 import { createQueryBuilder } from "../src/query/builder";
 import { validateHybridFusionOptions } from "../src/query/builder/validation";
 import { compileQuery, type CompileQueryOptions } from "../src/query/compiler";

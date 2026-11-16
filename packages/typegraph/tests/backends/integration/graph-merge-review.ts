@@ -8,7 +8,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   disjointWith,
   partOf,
   type Store,
@@ -36,6 +35,7 @@ import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical"
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { candidatePlanningScope } from "../../../src/graph-merge/sparse-candidate-branch";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { defineNodeIndex } from "../../../src/indexes";
 import { importGraph } from "../../../src/interchange";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { storeBackend } from "../../../src/store/runtime-port";

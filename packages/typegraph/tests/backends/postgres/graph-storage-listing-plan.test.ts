@@ -17,12 +17,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineGraph,
-  defineNode,
-  listGraphIds,
-} from "../../../src";
+import { createStore, defineGraph, defineNode } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import {
@@ -32,6 +27,7 @@ import {
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { GraphBackend } from "../../../src/backend/types";
 import { graphIdOrderIndexName } from "../../../src/indexes/system";
+import { listGraphIds } from "../../../src/maintenance";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import {

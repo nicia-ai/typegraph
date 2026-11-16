@@ -27,10 +27,10 @@ import {
   hasPart,
   narrower,
   type NodeType,
-  type OntologyRelation,
   partOf,
   subClassOf,
 } from "../src";
+import type { OntologyRelation } from "../src/core";
 import { ALL_META_EDGE_NAMES } from "../src/ontology/constants";
 import { metaEdgesByName } from "../src/ontology/core-meta-edges";
 import { buildKindRegistry } from "../src/registry";

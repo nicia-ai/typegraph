@@ -30,10 +30,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type RecordedInstant,
-  recordedRelation,
 } from "../../src";
 import { type GraphBackend } from "../../src/backend/types";
+import type { RecordedInstant } from "../../src/core";
 import { RECORDED_MAX_REVISION } from "../../src/core/temporal";
 import {
   createSqlSchema,
@@ -41,6 +40,7 @@ import {
 } from "../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
+import { recordedRelation } from "../../src/query-entry";
 import { recordedAnchorOwner } from "../../src/store/recorded-anchor-origin";
 import { readRevisionOrigin } from "../../src/store/recorded-capture";
 import { requireDefined } from "../../src/utils/presence";

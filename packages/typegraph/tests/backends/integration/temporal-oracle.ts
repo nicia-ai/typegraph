@@ -72,9 +72,9 @@ import {
   defineGraph,
   defineNode,
   type Node,
-  type RecordedInstant,
 } from "../../../src";
 import type { GraphBackend } from "../../../src/backend/types";
+import type { RecordedInstant } from "../../../src/core";
 import {
   recordedInstantRevision,
   recordedInstantWallTime,

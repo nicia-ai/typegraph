@@ -3,13 +3,13 @@ import { z } from "zod";
 
 import {
   createStore,
-  type AdapterHistoryStore,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
   type Store,
 } from "..";
+import type { AdapterHistoryStore } from "../dist/store-entry";
 import {
   createRetractionCapability,
   type ProvenanceFactRef,

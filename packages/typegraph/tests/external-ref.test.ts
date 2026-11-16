@@ -13,9 +13,8 @@ import {
   defineGraph,
   defineNode,
   externalRef,
-  getExternalRefTable,
-  isExternalRefSchema,
 } from "../src";
+import { getExternalRefTable, isExternalRefSchema } from "../src/core";
 
 describe("externalRef()", () => {
   it("creates a schema for external references", () => {

@@ -335,7 +335,7 @@ dynamic path typically receives IDs from edge metadata, snapshots, or external
 input where the brand is not available.
 
 ```typescript
-import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
+import type { DynamicNodeCollection } from "@nicia-ai/typegraph/store";
 
 // Derived from NodeCollection<DynamicNodeType, string> with ID parameters widened to string
 ```
@@ -352,9 +352,9 @@ inputs.
 ```typescript
 import type {
   DynamicNode,
-  DynamicNodeKind,
   DynamicNodeReference,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
+import type { DynamicNodeKind } from "@nicia-ai/typegraph/query";
 ```
 
 Identity reads return `IdentityNodeReference<G>`, the union of the graph's
@@ -433,7 +433,7 @@ Discriminated union of all runtime node types in a graph. Each member carries it
 own `kind` literal, so `switch (node.kind)` narrows the type automatically.
 
 ```typescript
-import type { AnyNode } from "@nicia-ai/typegraph";
+import type { AnyNode } from "@nicia-ai/typegraph/store";
 
 type MyNode = AnyNode<typeof graph>;
 // = Node<typeof Person> | Node<typeof Company> | ...
@@ -444,7 +444,7 @@ type MyNode = AnyNode<typeof graph>;
 Discriminated union of all runtime edge types in a graph.
 
 ```typescript
-import type { AnyEdge } from "@nicia-ai/typegraph";
+import type { AnyEdge } from "@nicia-ai/typegraph/store";
 
 type MyEdge = AnyEdge<typeof graph>;
 // = Edge<typeof worksAt> | Edge<typeof knows> | ...
@@ -456,7 +456,7 @@ Narrows `AnyNode<G>` to a subset of node kinds. Useful when `store.subgraph()`
 is called with `includeKinds`.
 
 ```typescript
-import type { SubsetNode } from "@nicia-ai/typegraph";
+import type { SubsetNode } from "@nicia-ai/typegraph/store";
 
 type TaskOrAgent = SubsetNode<typeof graph, "Task" | "Agent">;
 // = Node<typeof Task> | Node<typeof Agent>
@@ -467,7 +467,7 @@ type TaskOrAgent = SubsetNode<typeof graph, "Task" | "Agent">;
 Narrows `AnyEdge<G>` to a subset of edge kinds.
 
 ```typescript
-import type { SubsetEdge } from "@nicia-ai/typegraph";
+import type { SubsetEdge } from "@nicia-ai/typegraph/store";
 
 type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
 ```
@@ -649,7 +649,7 @@ type StreamOptions = Readonly<{
 Generates a unique ID using nanoid.
 
 ```typescript
-import { generateId } from "@nicia-ai/typegraph";
+import { generateId } from "@nicia-ai/typegraph/core";
 
 // generateId(): string
 const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
@@ -662,7 +662,7 @@ const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 Maximum depth for unbounded recursive traversals (10).
 
 ```typescript
-import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph/query";
 
 // MAX_RECURSIVE_DEPTH = 10
 ```
@@ -677,7 +677,7 @@ To allow revisits for maximum performance, use `cyclePolicy: "allow"`.
 Maximum allowed value for the `maxHops` option in recursive traversals (1000).
 
 ```typescript
-import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "@nicia-ai/typegraph/query";
 
 // MAX_EXPLICIT_RECURSIVE_DEPTH = 1000
 ```

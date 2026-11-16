@@ -27,12 +27,10 @@ import {
   defineNode,
   disjointWith,
   type GraphBackend,
-  IdentityContradictionError,
   MigrationError,
-  rebuildIdentityClosure,
   StaleVersionError,
-  type TransactionBackend,
 } from "../src";
+import type { TransactionBackend } from "../src/backend";
 import { projectBackendWithout } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
@@ -40,6 +38,10 @@ import {
 } from "../src/backend/sqlite/local";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
+import {
+  IdentityContradictionError,
+  rebuildIdentityClosure,
+} from "../src/identity-entry";
 import { createSqlSchema, type SqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry/builders";
 import {

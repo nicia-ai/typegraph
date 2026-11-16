@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { createStore, type DatabaseExpression, expr } from "../../../src";
+import { createStore, expr } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type {
   BackendCapabilities,
   GraphBackend,
 } from "../../../src/backend/types";
+import type { DatabaseExpression } from "../../../src/query-entry";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 

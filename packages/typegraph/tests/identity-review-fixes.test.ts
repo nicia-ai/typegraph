@@ -2,15 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  type AdapterStore,
   asNodeId,
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
-  type TransactionBackend,
 } from "../src";
+import type { TransactionBackend } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { IdentityContradictionError, ValidationError } from "../src/errors";
@@ -32,6 +31,7 @@ import {
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
 import { storeRuntime } from "../src/store/runtime-port";
+import type { AdapterStore } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,

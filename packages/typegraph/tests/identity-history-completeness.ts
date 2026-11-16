@@ -1,11 +1,10 @@
-import {
-  type GraphDef,
-  type IdentityHistoryCompleteness,
-  type IdentityHistoryIncompleteReason,
-  type IdentityTransition,
-  type RecordedInstant,
-  type RestoredRecordedInstant,
-} from "../src";
+import type { GraphDef } from "../src";
+import type { RecordedInstant, RestoredRecordedInstant } from "../src/core";
+import type {
+  IdentityHistoryCompleteness,
+  IdentityHistoryIncompleteReason,
+  IdentityTransition,
+} from "../src/identity-entry";
 
 type HistoryPage = Readonly<{ completeness: IdentityHistoryCompleteness }>;
 

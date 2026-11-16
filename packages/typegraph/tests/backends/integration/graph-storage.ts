@@ -22,19 +22,21 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  defineNodeIndex,
   embedding,
   type GraphBackend,
   type GraphDef,
-  type GraphStorageInspection,
-  inspectGraphStorage,
-  listGraphIds,
   searchable,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_RELATIONS } from "../../../src/backend/graph-relations";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import { defineNodeIndex } from "../../../src/indexes";
+import { listGraphIds } from "../../../src/maintenance";
+import {
+  type GraphStorageInspection,
+  inspectGraphStorage,
+} from "../../../src/maintenance";
 import { sql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,

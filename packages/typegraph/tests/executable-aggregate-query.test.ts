@@ -11,12 +11,12 @@ import {
   avg,
   count,
   countDistinct,
-  createQueryBuilder,
   defineGraph,
   defineNode,
   field,
   sum,
 } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
 import { toSqlString } from "./sql-test-utils";

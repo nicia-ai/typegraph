@@ -9,17 +9,13 @@ import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  BaseSchemaMigrationError,
-  createStoreWithSchema,
-  defineGraph,
-  defineNode,
-} from "../../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { CURRENT_BASE_SCHEMA_VERSION } from "../../../src/backend/drizzle/base-schema";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import { allocationNames } from "../../../src/backend/drizzle/postgres-working-copy-names";
 import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
+import { BaseSchemaMigrationError } from "../../../src/errors-entry";
 import { branchDurable, reopenDurableBranch } from "../../../src/graph-merge";
 import { isOk, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId } from "../../../src/graph-merge/types";

@@ -17,7 +17,6 @@ import {
   field,
   havingGt,
   inSubquery,
-  jsonPointer,
   subClassOf,
 } from "../src";
 import { extractPropertyAccesses } from "../src/profiler/ast-extractor";
@@ -34,6 +33,7 @@ import {
 import { type DeclaredIndex } from "../src/profiler/types";
 import type { QueryAst } from "../src/query/ast";
 import { fieldRef, stringField } from "../src/query/predicates";
+import { jsonPointer } from "../src/query-entry";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";

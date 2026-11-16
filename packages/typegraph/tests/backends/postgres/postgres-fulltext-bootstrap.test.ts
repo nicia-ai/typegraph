@@ -33,15 +33,15 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
   searchable,
   StoreNotInitializedError,
-  tsvectorStrategy,
 } from "../../../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../../../src/backend";
 import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
 } from "../../../src/backend/drizzle/ddl";
+import { tsvectorStrategy } from "../../../src/backend/postgres";
 import {
   createPostgresBackend,
   tables as defaultTables,

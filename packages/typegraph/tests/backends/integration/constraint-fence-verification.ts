@@ -21,13 +21,13 @@ import {
   asNodeId,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   disjointWith,
   partOf,
   subClassOf,
 } from "../../../src";
 import { computeUniqueKey } from "../../../src/constraints";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { buildKindRegistry } from "../../../src/registry";
 import {
   DISJOINT_CONSTRAINT_NAME,

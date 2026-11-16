@@ -66,7 +66,6 @@ import {
   defineGraph,
   defineNode,
   disjointWith,
-  rebuildIdentityClosure,
   subClassOf,
 } from "../src";
 import {
@@ -84,6 +83,7 @@ import {
   type TransactionBackend,
 } from "../src/backend/types";
 import { lockIdentityGraph } from "../src/identity/service-read";
+import { rebuildIdentityClosure } from "../src/identity-entry";
 import {
   type GraphData,
   importGraph,

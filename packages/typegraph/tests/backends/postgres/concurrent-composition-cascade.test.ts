@@ -28,7 +28,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  NodeDeletePlanMismatchError,
   type NodeId,
   NodeNotFoundError,
   partOf,
@@ -37,6 +36,7 @@ import {
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { NodeDeletePlanMismatchError } from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";

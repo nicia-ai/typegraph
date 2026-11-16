@@ -9,15 +9,17 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type EdgeRegistration,
   EndpointError,
-  EndpointPairError,
   implies,
   inverseOf,
-  isEdgeTargetMap,
-  isEdgeTypeWithEndpoints,
   subClassOf,
 } from "../src";
+import {
+  type EdgeRegistration,
+  isEdgeTargetMap,
+  isEdgeTypeWithEndpoints,
+} from "../src/core";
+import { EndpointPairError } from "../src/errors-entry";
 import { defineGraphExtension } from "../src/graph-extension";
 import { importGraph } from "../src/interchange/import";
 import { buildKindRegistry } from "../src/registry";

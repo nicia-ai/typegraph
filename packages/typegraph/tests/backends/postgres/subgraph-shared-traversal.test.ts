@@ -31,12 +31,12 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  indexSubgraph,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { GraphBackend } from "../../../src/backend/types";
+import { indexSubgraph } from "../../../src/store-entry";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);

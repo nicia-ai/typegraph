@@ -8,8 +8,6 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  ContributionUnavailableError,
-  DatabaseOperationError,
   DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
@@ -33,6 +31,10 @@ import {
   embedding,
   searchable,
 } from "../src/core";
+import {
+  ContributionUnavailableError,
+  DatabaseOperationError,
+} from "../src/errors-entry";
 import { disjointWith, subClassOf } from "../src/ontology";
 import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strategy";
 import { migrateSchema } from "../src/schema";

@@ -227,7 +227,7 @@ store
 The unbounded-traversal limit is defined as `MAX_RECURSIVE_DEPTH`:
 
 ```typescript
-import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph/query";
 // MAX_RECURSIVE_DEPTH = 10
 ```
 

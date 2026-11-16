@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AdapterStore,
   ConfigurationError,
   createAdapterStoreWithSchema,
   defineGraph,
@@ -10,11 +9,6 @@ import {
   embedding,
   type GraphDef,
   MigrationError,
-  type MigrationErrorDetails,
-  resolveGraphVectorSlots,
-  SchemaContentConflictError,
-  TransactionClosedError,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type {
@@ -22,6 +16,13 @@ import type {
   GraphBackend,
   IdentityTableNames,
 } from "../../../src/backend/types";
+import { resolveGraphVectorSlots } from "../../../src/core";
+import {
+  type MigrationErrorDetails,
+  SchemaContentConflictError,
+  TransactionClosedError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
 import {
   defineGraphExtension,
   type GraphExtension,
@@ -31,6 +32,7 @@ import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import type { EvolutionPlan } from "../../../src/schema";
 import type { EvolvedTransactionOptions } from "../../../src/store/evolution";
+import type { AdapterStore } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 

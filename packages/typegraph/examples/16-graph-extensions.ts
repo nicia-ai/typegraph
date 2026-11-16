@@ -44,13 +44,15 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+} from "@nicia-ai/typegraph";
+// Imported directly (not via ./_helpers) to show the public subpath.
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import {
   type GraphExtension,
   GraphExtensionValidationError,
   IncompatibleChangeError,
   validateGraphExtension,
-} from "@nicia-ai/typegraph";
-// Imported directly (not via ./_helpers) to show the public subpath.
-import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+} from "@nicia-ai/typegraph/graph-extension";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
 

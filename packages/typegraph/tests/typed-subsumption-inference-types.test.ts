@@ -13,29 +13,33 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AliasExpansionAxis,
-  type AliasExpansionOptions,
-  type AssignableNodeKinds,
-  type CompositionWholeKinds,
   defineEdge,
   defineGraph,
   defineNode,
   disjointWith,
   embedding,
   equivalentTo,
-  type EquivalentToCheck,
-  type ExpansionAliasNodeType,
-  type ForwardedExpansionAxes,
   type Node,
   type NodeType,
-  type OntologyRelation,
-  type PolymorphicNodeType,
   type Store,
-  type StructuralSubtypeMismatch,
   subClassOf,
-  type SubClassOfCheck,
 } from "../src";
+import type {
+  EquivalentToCheck,
+  OntologyRelation,
+  PolymorphicNodeType,
+  StructuralSubtypeMismatch,
+  SubClassOfCheck,
+} from "../src/core";
 import { searchable } from "../src/core/searchable";
+import type {
+  AliasExpansionAxis,
+  AliasExpansionOptions,
+  AssignableNodeKinds,
+  CompositionWholeKinds,
+  ExpansionAliasNodeType,
+  ForwardedExpansionAxes,
+} from "../src/query-entry";
 
 // ============================================================
 // Fixtures

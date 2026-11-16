@@ -25,22 +25,24 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompositionWholeReference,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  type EdgeBatchReads,
   type EdgeId,
-  type EdgeTemporalReads,
-  type EdgeWrites,
   type NodeCollection,
-  type NodeWrites,
   partOf,
   type Store,
   subClassOf,
 } from "../src";
+import { defineGraphExtension } from "../src/graph-extension";
+import type {
+  CompositionWholeReference,
+  EdgeBatchReads,
+  EdgeTemporalReads,
+  EdgeWrites,
+  NodeWrites,
+} from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 const Container = defineNode("Container", {
