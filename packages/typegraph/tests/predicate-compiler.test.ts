@@ -567,7 +567,10 @@ describe("string predicates", () => {
       pattern: "test%value",
     };
     const result = compilePredicateExpression(expr, ctx);
-    expect(toSqlString(result)).toContain("LIKE");
+    // SQLite's LIKE ignores ASCII case, so a case-sensitive like compiles to
+    // GLOB over the translated pattern.
+    expect(toSqlString(result)).toContain("GLOB");
+    expect(toSqlString(result)).not.toContain(" LIKE ");
   });
 
   it("compiles ilike operator with case insensitivity", () => {

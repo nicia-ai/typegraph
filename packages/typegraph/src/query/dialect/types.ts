@@ -605,7 +605,23 @@ export interface DialectAdapter {
   // ============================================================
 
   /**
-   * Case-insensitive LIKE comparison.
+   * Case-sensitive LIKE comparison, with backslash as the escape character.
+   *
+   * @example
+   * SQLite: column GLOB <pattern translated to GLOB> (SQLite's LIKE ignores
+   * ASCII case)
+   * PostgreSQL: column LIKE pattern ESCAPE '\'
+   */
+  readonly like: (
+    this: void,
+    column: SqlFragment,
+    pattern: SqlFragment,
+  ) => SqlFragment;
+
+  /**
+   * Case-insensitive LIKE comparison. Case folding is the engine's: SQLite's
+   * built-in `LOWER()` folds ASCII only (unless the ICU extension is loaded),
+   * and PostgreSQL folds per the database's `LC_CTYPE`.
    *
    * @example
    * SQLite: LOWER(column) LIKE LOWER(pattern)

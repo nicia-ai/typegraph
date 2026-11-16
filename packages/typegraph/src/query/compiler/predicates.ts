@@ -31,7 +31,7 @@ import {
 } from "../ast";
 import {
   LIKE_ESCAPE_CHARACTER,
-  likeEscapeClause,
+  nullIfTrailingLikeEscape,
 } from "../dialect/like-escape";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
@@ -463,7 +463,7 @@ function compileParameterizedStringPattern(
     }
     case "like":
     case "ilike": {
-      return parameter;
+      return nullIfTrailingLikeEscape(parameter);
     }
     default: {
       return escapeLikePatternParameter(parameter);
@@ -660,13 +660,13 @@ export function compilePredicateExpression(
         ) {
           return dialect.ilike(field, pattern);
         }
-        return sql`${field} LIKE ${pattern} ${likeEscapeClause}`;
+        return dialect.like(field, pattern);
       }
 
-      const pattern = compileStringPattern(expr.op, expr.pattern);
-      // Use case-insensitive matching for contains, startsWith, endsWith, and ilike
-      // This ensures consistent behavior across PostgreSQL (case-sensitive LIKE)
-      // and SQLite (case-insensitive LIKE for ASCII)
+      const pattern = sql`${compileStringPattern(expr.op, expr.pattern)}`;
+      // contains, startsWith, endsWith and ilike are case-insensitive; like is
+      // case-sensitive. Both go through the dialect, because SQLite's own LIKE
+      // ignores ASCII case and PostgreSQL's does not.
       if (
         expr.op === "ilike" ||
         expr.op === "contains" ||
@@ -675,11 +675,7 @@ export function compilePredicateExpression(
       ) {
         return dialect.ilike(field, pattern);
       }
-      // Use case-sensitive LIKE only for explicit 'like' operator. The ESCAPE
-      // clause must match the parameterized path (above) and dialect.ilike so a
-      // raw '\%' / '\_' in a user pattern is a literal on SQLite too, not just
-      // on Postgres (whose default LIKE escape is already backslash).
-      return sql`${field} LIKE ${pattern} ${likeEscapeClause}`;
+      return dialect.like(field, pattern);
     }
 
     case "null_check": {

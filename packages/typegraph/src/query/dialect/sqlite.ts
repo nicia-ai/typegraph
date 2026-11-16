@@ -12,7 +12,7 @@ import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
 import { fts5Strategy } from "./fulltext-strategy";
-import { likeEscapeClause } from "./like-escape";
+import { likeEscapeClause, sqliteGlobFromLikePattern } from "./like-escape";
 import {
   DOUBLE_OVERFLOW_BOUNDARY,
   MAXIMUM_FINITE_DOUBLE_INTEGER,
@@ -426,11 +426,18 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   // String Operations
   // ============================================================
 
+  like(column, pattern) {
+    // SQLite's LIKE ignores ASCII case; GLOB is case-sensitive, so the same
+    // pattern, translated to GLOB syntax, gives PostgreSQL's LIKE semantics.
+    return sql`${column} GLOB ${sqliteGlobFromLikePattern(pattern)}`;
+  },
+
   ilike(column, pattern) {
-    // SQLite LIKE is case-insensitive for ASCII by default, but we use
-    // LOWER() for consistency with non-ASCII characters. SQLite has no default
-    // LIKE escape character, so declare backslash explicitly to honor the
-    // escaping the compiler applies to the pattern (parity with Postgres).
+    // LOWER() on both sides makes the match case-insensitive. SQLite's
+    // built-in LOWER() folds ASCII only (unless the ICU extension is loaded);
+    // that limit is documented, not emulated. SQLite has no default LIKE
+    // escape character, so declare backslash explicitly to honor the escaping
+    // the compiler applies to the pattern (parity with Postgres).
     return sql`LOWER(${column}) LIKE LOWER(${pattern}) ${likeEscapeClause}`;
   },
 

@@ -8,6 +8,7 @@ import {
   seedPeopleForComplexPredicates,
   seedPeopleForStringPredicates,
 } from "./seed-helpers";
+import { registerStringPredicateParityTests } from "./string-predicate-parity";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -678,6 +679,8 @@ export function registerPredicateIntegrationTests(
       ]);
     });
   });
+
+  registerStringPredicateParityTests(context);
 
   describe("String Predicates", () => {
     beforeEach(async () => {

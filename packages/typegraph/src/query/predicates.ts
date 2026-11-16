@@ -30,6 +30,7 @@ import {
   type VectorSimilarityPredicate,
 } from "./ast";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "./compiler/temporal";
+import { likePatternHasTrailingEscape } from "./dialect/like-escape";
 import { resolveFieldTypeInfoAtJsonPointer } from "./field-type-info";
 import {
   joinJsonPointers,
@@ -654,6 +655,19 @@ function stringOp(
   field: FieldRef,
   pattern: string | ParameterRef,
 ): Predicate {
+  if (
+    (op === "like" || op === "ilike") &&
+    typeof pattern === "string" &&
+    likePatternHasTrailingEscape(pattern)
+  ) {
+    throw new ConfigurationError(
+      `${op}() pattern ${JSON.stringify(pattern)} ends with an escape character that escapes nothing.`,
+      { code: "LIKE_PATTERN_TRAILING_ESCAPE", operator: op, pattern },
+      {
+        suggestion: String.raw`Remove the trailing "\", or double it to match a literal backslash.`,
+      },
+    );
+  }
   if (isParameterRef(pattern)) {
     const expr: StringPredicate = {
       __type: "string_op",
