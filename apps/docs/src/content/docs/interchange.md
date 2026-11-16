@@ -499,7 +499,39 @@ error entry you see in `result.errors`.
 | `onConflict` | `"skip" \| "update" \| "error"` | required | How to handle existing entities |
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
-| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. |
+| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips and the order of create refusals in `result.errors`, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
+
+### Evaluation order and `batchSize`
+
+An import applies its edge rows in one order, the same at every `batchSize`:
+every row whose id names an existing edge is applied first — skipped,
+refused or updated, per `onConflict` — then every composition move the
+document states (see below), then every new edge is created. Within each
+phase rows apply in document order, and a later row repeating an id applies
+after the row it repeats, so it observes that row's outcome.
+
+The order matters because rows depend on each other. An update that ends a
+`oneActive` window frees the slot a create in the same document takes, so the
+create sees the end wherever either row sits in the document. Import only ever
+ends or tightens a window — it never resurrects a row or clears an end — so
+applying existing rows first can only make room for a create. The same
+document therefore commits the same rows at `batchSize: 1` and
+`batchSize: 100000`.
+
+`result.errors` lists refusals in that phase order rather than document order:
+validation refusals first, then refusals of existing rows, then of moves, then
+of creates. Within the create phase the order also depends on `batchSize`:
+each slice reports the refusals of the rows it writes as a batch before those
+of the rows it must write one at a time (rows checked for cycles), so at
+`batchSize: 1` create refusals follow document order and at larger sizes they
+need not. Match an error to its row by `kind` and `id`, not by position.
+
+`importGraph` classifies the whole document before it writes an edge, so it
+holds every edge row of the document, and for each row that names an existing
+edge the stored row it read, until the edge phase ends. A re-import that
+updates most of its edges therefore needs roughly twice the edge memory of the
+document itself. Use `importGraphStream` for a document too large to hold
+twice: it holds one chunk at a time.
 
 ### Trusted initial import
 
@@ -723,7 +755,9 @@ every count this import had added it to.
 With `onConflict: "update"`, a document whose `validTo` would end the open
 window of a live required part's composition edge is refused as a per-row
 error (`error` starts with `COMPOSITION_DETACH_REFUSED`), as the same update
-is through `store.edges.<kind>.update(...)`.
+is through `store.edges.<kind>.update(...)` — unless the same document attaches
+the part again, which makes the two rows one move (see
+[A composition part that moved](#a-composition-part-that-moved)).
 
 ```typescript
 const result = await importGraph(store, data, { onConflict: "error" });
@@ -744,6 +778,60 @@ is therefore refused before any chunk is read, with a `ConfigurationError`
 whose `details.code` is `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`. Use
 `importGraph` for such a graph. `branch()` and the other working-copy clones
 switch to a materialized `importGraph` for these graphs on their own.
+
+#### A composition part that moved
+
+A source whose part moved to another whole re-imports with `onConflict:
+"update"` as a move, whatever order its rows arrive in:
+
+- **`oneActive` pair.** The move exports as two rows: the old attachment with
+  the `validTo` that ended it, and a new attachment. When the document holds
+  exactly one row ending a part's current attachment and exactly one row
+  creating an attachment for it, import applies the two as **one move**: both
+  land or neither does. A required part moves this way too: the end is not
+  refused as a detach, because the same move attaches the part again.
+- **`one` pair.** A `one` move deletes the old row, so its export carries the
+  new attachment alone, and the target still holds the old one. The new row
+  would give the part a second whole, so it is refused per row as
+  `COMPOSITION_WHOLE_OCCUPIED`, like any other, and the part stays where it
+  was. To replay such a move, `reparent` the part on the target. The same
+  refusal applies on a `oneActive` pair whose document omits the ended row.
+
+Every move a document states is applied together, as `bulkReparent` applies
+its moves: every old attachment is ended before any new one is written. So moves that depend on each other land
+whatever order the document lists them in: two parts exchanging a slot a
+whole-side `targetCardinality` bounds, or a hierarchy that inverts (a part
+moves under another that the same document moves out from under it).
+
+Each move is still applied whole or not at all. A move that cannot land — one
+of its rows refused (a window that overlaps the part's history, a cycle), or a
+moved part left without the whole the move gave it once the rest of the import
+is written (a whole this import creates and then removes as a required part it
+could not attach, or one that is not live under `validateReferences: false`)
+— is taken out of the set and the rest is applied again without it: its
+refused row reports its own error, and its other rows a per-row error prefixed
+`INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`. The part keeps its current whole.
+That holds when the attach is refused before anything is written, too — an
+invalid property, or a whole that does not exist or whose own row this import
+refuses: the row ending the part's attachment is then refused with the same
+prefix rather than written alone.
+A refused row costs one more pass over the moves (not over the rest of the
+import) when its move had already written its other half; a moved part found
+without its whole costs one more pass over everything written after the moves.
+Failures that depend on each other — a chain of moves, each into the slot the
+one before it frees, whose first link is refused — are found one link per pass,
+so such a chain costs passes in proportion to its length and move writes in
+proportion to its length squared. Every pass runs inside the import's
+transaction, which holds the per-graph write lock throughout: on SQLite a chain
+of 200 such failures took about 10 seconds, so one of 2,000 would hold the
+write lock for more than 15 minutes.
+
+`importGraphStream` commits each chunk on its own, and the "document" every
+rule above speaks of is the chunk: the two halves of a `oneActive` move that
+land in different chunks are not paired, and an earlier chunk stays committed
+when a later one is refused. Chunk boundaries are yours to choose, so keep a
+move's rows in one chunk (or import with `importGraph`) when the move must be
+atomic.
 
 #### An edge that would close a cycle
 
