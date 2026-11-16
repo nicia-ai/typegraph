@@ -92,7 +92,6 @@ export type SystemIndexDeclaration =
 
 export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   // ---------------------------------------------------------- nodes
-  { table: "nodes", suffix: "kind_idx", columns: ["graph_id", "kind"] },
   // Listing shape: kind partition ordered by creation with the
   // soft-delete column ahead of it so `deleted_at IS NULL` list queries
   // stay index-served.
@@ -121,7 +120,6 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   { table: "nodes", suffix: "id_idx", columns: ["graph_id", "id"] },
 
   // ---------------------------------------------------------- edges
-  { table: "edges", suffix: "kind_idx", columns: ["graph_id", "kind"] },
   // Directional traversal index (outgoing): supports endpoint lookups
   // and extra filtering by edge kind / target kind. Includes every
   // system column the compiled query's soft-delete/temporal-validity

@@ -21,7 +21,7 @@
  * The plan-level assertions are the genuine backstop against the
  * complexity-class regression the fix exists to remove: a per-recursion-round
  * scan of the WHOLE relevant edge-kind partition (a `Bitmap Heap Scan`
- * driven only by `typegraph_edges_kind_idx`, or a `Seq Scan`) instead of a
+ * driven only by a `(graph_id, kind)`-leading index, or a `Seq Scan`) instead of a
  * seek CORRELATED to the current frontier node (an `Index Cond` that
  * references the worktable alias, e.g. `from_id = a_1.node_id`). At the
  * small fixture size this suite used to run at (60 nodes, a few hundred
@@ -209,7 +209,7 @@ async function seedNoiseEdges(
  * output) so the planner actually prefers a per-frontier-node correlated
  * index seek over scanning the whole `dependsOn`/`blockedBy` partition.
  * Below this scale the partition is cheap enough that a `Bitmap Heap Scan`
- * driven only by `typegraph_edges_kind_idx` wins on cost — which is the
+ * driven only by a `(graph_id, kind)`-leading index wins on cost — which is the
  * right call by the planner, but useless as a regression backstop for the
  * O(relation) shape this suite exists to catch.
  */
