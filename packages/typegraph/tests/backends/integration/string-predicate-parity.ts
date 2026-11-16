@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, param as parameter_ } from "../../../src";
+import { defineGraph, defineNode, param as parameter } from "../../../src";
+import { ConfigurationError } from "../../../src/errors";
 import {
   type InspectableStore,
   type IntegrationTestContext,
@@ -57,14 +58,14 @@ async function likeMatches(
     .whereNode("w", (word) => word.text.like(pattern))
     .select((ctx) => ctx.w.text)
     .execute();
-  const parameter = await store
+  const bound = await store
     .query()
     .from("PredicateWord", "w")
-    .whereNode("w", (word) => word.text.like(parameter_("pattern")))
+    .whereNode("w", (word) => word.text.like(parameter("pattern")))
     .select((ctx) => ctx.w.text)
     .prepare()
     .execute({ pattern });
-  return { literal: literal.toSorted(), parameter: parameter.toSorted() };
+  return { literal: literal.toSorted(), parameter: bound.toSorted() };
 }
 
 export function registerStringPredicateParityTests(
@@ -100,6 +101,7 @@ export function registerStringPredicateParityTests(
       [String.raw`a\\c`, [String.raw`a\c`]],
       [String.raw`a\*c`, ["a*c"]],
       ["%[%", ["a[c"]],
+      [String.raw`a\\%`, [String.raw`a\c`]],
     ] as const)(
       "like(%j) is case-sensitive and matches GLOB metacharacters literally",
       async (pattern, expected) => {
@@ -110,6 +112,46 @@ export function registerStringPredicateParityTests(
           literal: sorted,
           parameter: sorted,
         });
+      },
+    );
+
+    it.each(["like", "ilike"] as const)(
+      "refuses a literal %s pattern ending with an unpaired escape",
+      (operator) => {
+        const query = context.getStore().query().from("Person", "p");
+        let refusal: unknown;
+        try {
+          query.whereNode("p", (person) => person.name[operator]("abc\\"));
+        } catch (error) {
+          refusal = error;
+        }
+        expect(refusal).toBeInstanceOf(ConfigurationError);
+        expect((refusal as ConfigurationError).details).toMatchObject({
+          code: "LIKE_PATTERN_TRAILING_ESCAPE",
+          operator,
+        });
+        // A doubled escape is a literal backslash, not a trailing escape.
+        expect(() =>
+          query.whereNode("p", (person) =>
+            person.name[operator](String.raw`abc\\`),
+          ),
+        ).not.toThrow();
+      },
+    );
+
+    it.each(["like", "ilike"] as const)(
+      "matches nothing for a bound %s pattern ending with an unpaired escape",
+      async (operator) => {
+        const store = await context.createStore(wordGraph);
+        await seedWords(store);
+        const rows = await store
+          .query()
+          .from("PredicateWord", "w")
+          .whereNode("w", (word) => word.text[operator](parameter("pattern")))
+          .select((ctx) => ctx.w.text)
+          .prepare()
+          .execute({ pattern: "a\\" });
+        expect(rows).toEqual([]);
       },
     );
 

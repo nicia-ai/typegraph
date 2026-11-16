@@ -23,6 +23,35 @@ import { sql, type SqlFragment } from "../sql-fragment";
 export const LIKE_ESCAPE_CHARACTER = "\\";
 
 /**
+ * Whether `pattern` ends with an escape character that escapes nothing: an
+ * odd-length run of {@link LIKE_ESCAPE_CHARACTER} at its end. Such a pattern
+ * is malformed, and the engines disagree on it: PostgreSQL raises "LIKE
+ * pattern must not end with escape character" when its matcher reaches the
+ * dangling escape (so whether a query fails depends on the rows), while
+ * SQLite matches nothing. A literal pattern is refused when the predicate is
+ * built; {@link nullIfTrailingLikeEscape} is the same decision in SQL, for a
+ * bound pattern.
+ */
+export function likePatternHasTrailingEscape(pattern: string): boolean {
+  let trailingEscapes = 0;
+  for (let index = pattern.length - 1; index >= 0; index--) {
+    if (pattern[index] !== LIKE_ESCAPE_CHARACTER) break;
+    trailingEscapes++;
+  }
+  return trailingEscapes % 2 === 1;
+}
+
+/**
+ * A bound LIKE pattern, or NULL when it ends with an unpaired escape (see
+ * {@link likePatternHasTrailingEscape}), so the predicate matches nothing on
+ * every backend instead of raising on PostgreSQL for some rows only.
+ * `length`, `rtrim` and `%` mean the same on SQLite and PostgreSQL.
+ */
+export function nullIfTrailingLikeEscape(pattern: SqlFragment): SqlFragment {
+  return sql`CASE WHEN (length(${pattern}) - length(rtrim(${pattern}, ${LIKE_ESCAPE_CHARACTER}))) % 2 = 1 THEN NULL ELSE ${pattern} END`;
+}
+
+/**
  * `ESCAPE '\'` clause appended to every compiled `LIKE` / `ILIKE` predicate,
  * declaring {@link LIKE_ESCAPE_CHARACTER} as the escape character. The single
  * backslash inside the quotes is a literal in both PostgreSQL (with
@@ -32,9 +61,8 @@ export const likeEscapeClause: SqlFragment = sql`ESCAPE '\\'`;
 
 /**
  * Placeholders for the three escape sequences while the other characters are
- * rewritten. They are Unicode noncharacters (U+FDD0..U+FDD2), which are
- * reserved never to appear in interchanged text, so no user pattern contains
- * them.
+ * rewritten. They are Unicode noncharacters (U+FDD0..U+FDD2), which are not
+ * expected in text; a pattern that does contain one is mistranslated.
  */
 const ESCAPED_ESCAPE_PLACEHOLDER = 0xfd_d0;
 const ESCAPED_PERCENT_PLACEHOLDER = 0xfd_d1;

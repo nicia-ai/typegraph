@@ -29,7 +29,10 @@ import {
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
-import { LIKE_ESCAPE_CHARACTER } from "../dialect/like-escape";
+import {
+  LIKE_ESCAPE_CHARACTER,
+  nullIfTrailingLikeEscape,
+} from "../dialect/like-escape";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import type { DatabaseExpression } from "../expressions";
@@ -460,7 +463,7 @@ function compileParameterizedStringPattern(
     }
     case "like":
     case "ilike": {
-      return parameter;
+      return nullIfTrailingLikeEscape(parameter);
     }
     default: {
       return escapeLikePatternParameter(parameter);

@@ -183,6 +183,10 @@ p.email.isNotNull()
 > extension is loaded. PostgreSQL follows the database's `LC_CTYPE`: a UTF-8 locale folds `É` to `é`,
 > while the `C` locale folds ASCII only. Characters other than `%`, `_`, and `\` have no special
 > meaning in a `like` pattern on either backend.
+>
+> **Trailing escape:** a `like` or `ilike` pattern that ends with a single `\` escapes nothing. A
+> literal pattern like that throws `ConfigurationError` (`LIKE_PATTERN_TRAILING_ESCAPE`) when the
+> predicate is built; a `param()` pattern like that matches nothing. Write `\\` for a literal backslash.
 
 ---
 
