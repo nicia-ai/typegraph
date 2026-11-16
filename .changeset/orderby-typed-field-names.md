@@ -25,4 +25,5 @@ The snake_case system names are removed, with no alias. A caller the type checke
 - Changed: an `orderBy(alias, field)` name that is neither a declared property nor a system field throws `ConfigurationError` (`details.code: "ORDER_FIELD_UNKNOWN"`) instead of sorting by NULL. An alias that is not part of the query throws `ConfigurationError` (`details.code: "ORDER_ALIAS_UNKNOWN"`).
 - Changed: a property declared under a removed snake_case name, such as `created_at`, is now always ordered as that property. Order by the system column with its `meta.` name.
 - Changed: `orderByFragment`'s `field` parameter is typed as `GraphOrderField<G>` instead of `string`.
-- Unchanged: the expression form `orderBy((ctx) => ...)`, aggregate `orderBy(key)`, and `neighbors()`' `orderBy`.
+- Unchanged: the expression form `orderBy((ctx) => ...)` and aggregate `orderBy(key)`.
+- Known inconsistency: `store.neighbors()`' `orderBy: { field }` still takes the bare edge metadata names (`"createdAt"`, `"validFrom"`, …), not the `meta.` names. It will move to the `meta.` names in a later release; this release leaves it unchanged.
