@@ -435,6 +435,13 @@ Edge entries can be:
 - **`EdgeType` with `from`/`to`** — uses built-in constraints
 - **`EdgeType` without `from`/`to`** — unconstrained, connects any node to any node
 
+Every node kind an edge names in `from` or `to` (including the values of a
+source-to-target map and an `EdgeType`'s own endpoints) must be registered in
+`nodes`. `defineGraph` refuses an edge that names an unregistered kind with a
+`ConfigurationError` whose `details` carry `code:
+"EDGE_ENDPOINT_KIND_NOT_REGISTERED"`, the `edge`, the `endpoint` (`"from"` or
+`"to"`), and the `kind`.
+
 **Example:**
 
 ```typescript
