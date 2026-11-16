@@ -154,8 +154,8 @@ the endpoints of the first write stand.
 
 Item order settles which value each id ends up with, but the writes themselves
 are grouped: every create in the batch runs before every update. A batch where
-one item **releases** a `unique` constraint value and a later item **claims** it
-therefore fails, even though the same operations applied one at a time succeed:
+one item **releases** a `unique` constraint value and a later item **creates a new
+row that claims** it therefore fails, even though the same operations applied one at a time succeed:
 
 ```typescript
 // "alice@example.com" is currently held by person_a.
@@ -224,8 +224,15 @@ Deletes multiple nodes by ID. Silently ignores IDs that don't exist:
 ```typescript
 // Remove nodes that no longer exist in source
 const deletedIds = await findDeletedRecords();
-await store.nodes.Document.bulkDelete(deletedIds);
+await store.nodes.Document.bulkDelete(
+  deletedIds.map((id) => asNodeId<typeof Document>(id))
+);
 ```
+
+Ids passed to `delete` and `bulkDelete` are branded `NodeId` values. Use the `id`
+of a node you hold, or brand an external string with `asNodeId` as above.
+(`upsertById` and `bulkUpsertById` take plain string ids because they may create
+the node.)
 
 ### getOrCreate APIs
 
@@ -464,7 +471,9 @@ async function incrementalSync(store: Store, state: SyncState): Promise<SyncStat
     .where(and(gt(documents.deletedAt, since), isNotNull(documents.deletedAt)));
 
   if (deleted.length > 0) {
-    await store.nodes.Document.bulkDelete(deleted.map((d) => d.id));
+    await store.nodes.Document.bulkDelete(
+      deleted.map((d) => asNodeId<typeof Document>(d.id))
+    );
     console.log(`Removed ${deleted.length} deleted documents`);
   }
 
@@ -546,7 +555,7 @@ const syncWorker = new Worker<SyncJob>(
     const { type, entityType, entityId } = job.data;
 
     if (type === "delete") {
-      await store.nodes[entityType].delete(entityId);
+      await store.nodes[entityType].delete(asNodeId(entityId));
       return;
     }
 
@@ -554,7 +563,7 @@ const syncWorker = new Worker<SyncJob>(
     const record = await fetchEntity(entityType, entityId);
     if (!record) {
       // Record was deleted between enqueue and processing
-      await store.nodes[entityType].delete(entityId);
+      await store.nodes[entityType].delete(asNodeId(entityId));
       return;
     }
 
@@ -604,7 +613,7 @@ app.post("/webhooks/documents", async (c) => {
     }
 
     case "deleted": {
-      await store.nodes.Document.delete(event.data.id);
+      await store.nodes.Document.delete(asNodeId<typeof Document>(event.data.id));
       break;
     }
   }
@@ -632,7 +641,7 @@ listener.on("notification", async (msg) => {
   const { operation, id } = payload;
 
   if (operation === "DELETE") {
-    await store.nodes.Document.delete(id);
+    await store.nodes.Document.delete(asNodeId<typeof Document>(id));
     return;
   }
 

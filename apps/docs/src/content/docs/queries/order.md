@@ -239,11 +239,19 @@ const stream = store
   .stream();
 ```
 
+`paginate()`, `page()`, and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()`, or `wholes()`) by throwing `ConfigurationError` with `details.code`
+`RECURSIVE_PAGINATION_UNSUPPORTED`, because a cursor cannot position itself inside the rows one
+start node fans out into. Read such a walk with `execute()` and an explicit `limit()` or
+`recursive({ maxHops })`.
+
 ### Stable Ordering
 
 Cursor pagination and streaming automatically append missing start-node identity keys: `id ASC`
 for a single kind, or `kind ASC` and `id ASC` for a multi-kind source. Existing caller-specified
-identity ordering is preserved. Offset pagination needs an explicit total ordering.
+identity ordering is preserved. A traversal query also gets the matched edge `id` of each traversal,
+so parallel edges between one pair of nodes page as separate rows. Offset pagination needs an
+explicit total ordering.
 
 For deterministic offset pagination of one kind, include `id` in your ordering:
 

@@ -106,11 +106,12 @@ const User = defineNode("User", {
 
 TypeGraph automatically provides `id`, `kind`, and `meta` on all nodes.
 
-### "Edge type already has constraints defined"
+### `ConfigurationError`: edge registration outside the edge type's endpoints
 
-**Cause:** Defining `from`/`to` constraints on both the edge type and graph registration.
+**Cause:** The edge type declares `from`/`to` itself, and the graph registration names a kind outside them. A
+registration can only narrow the edge type's built-in endpoints, never widen them.
 
-**Solution:** Define constraints in one place only:
+**Solution:** Register only kinds the edge type already allows, or declare the endpoints in one place:
 
 ```typescript
 // Option 1: On the edge type (reusable across graphs)
@@ -120,6 +121,8 @@ const worksAt = defineEdge("worksAt", {
 });
 
 const graph = defineGraph({
+  id: "work",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: {
     worksAt: { type: worksAt }, // No from/to here
   },
@@ -129,11 +132,20 @@ const graph = defineGraph({
 const worksAt = defineEdge("worksAt");
 
 const graph = defineGraph({
+  id: "work",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: {
     worksAt: { type: worksAt, from: [Person], to: [Company] },
   },
 });
 ```
+
+### `ConfigurationError`: `EDGE_ENDPOINT_KIND_NOT_REGISTERED`
+
+**Cause:** An edge's `from` or `to` names a node kind that is not registered in the graph's `nodes`. `details.code`
+is `EDGE_ENDPOINT_KIND_NOT_REGISTERED`, with `edge`, `endpoint`, `kind` and `availableKinds`.
+
+**Solution:** Register the kind in `nodes`, or remove it from the edge's `from` / `to`.
 
 ## Runtime Errors
 

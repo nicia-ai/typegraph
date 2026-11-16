@@ -66,6 +66,15 @@ Three node kinds and four edges model the citation graph plus a topic
 hierarchy that supports query expansion:
 
 ```typescript
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+} from "@nicia-ai/typegraph";
+import { z } from "zod";
+
 const Paper = defineNode("Paper", {
   schema: z.object({
     // Title + abstract are `searchable()` so BM25 ranks papers by

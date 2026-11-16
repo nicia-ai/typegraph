@@ -8,7 +8,9 @@ with a clean, conventional database schema that works with any SQL tooling.
 
 ## What You're Left With
 
-When you eject TypeGraph, your database contains two well-structured tables:
+When you eject TypeGraph, your graph data sits in two well-structured tables
+(TypeGraph's bookkeeping tables, such as `typegraph_schema_versions` and the uniqueness and
+edge-claim sidecars, can be dropped or kept for reference):
 
 ```sql
 -- Your nodes
@@ -67,7 +69,8 @@ WHERE p.kind = 'Person'
 SELECT *
 FROM typegraph_nodes
 WHERE kind = 'Article'
-  AND valid_from <= '2024-06-01'
+  AND deleted_at IS NULL
+  AND (valid_from IS NULL OR valid_from <= '2024-06-01')
   AND (valid_to IS NULL OR valid_to > '2024-06-01');
 ```
 
@@ -84,6 +87,7 @@ The schema works with everything in the SQL ecosystem:
 ### Example: Drizzle ORM
 
 ```typescript
+import { eq } from "drizzle-orm";
 import { pgTable, text, jsonb, timestamp } from "drizzle-orm/pg-core";
 
 const nodes = pgTable("typegraph_nodes", {
@@ -164,13 +168,16 @@ WHERE kind = 'Person'
 
 ## What About the Ontology?
 
-The ontology (type hierarchies, edge constraints) exists only in your TypeScript
-code. The database stores raw data without semantic constraints.
+TypeGraph enforces the ontology (type hierarchies, edge constraints) in its own
+runtime. The database keeps a serialized copy of the schema in
+`typegraph_schema_versions`, but no database constraint enforces it, and the
+uniqueness and cardinality bookkeeping rows are only maintained while TypeGraph
+performs the writes.
 
 After ejecting:
 
 - You lose automatic subclass queries (the `expansion` option)
-- You lose edge validation (ensuring valid from/to kinds)
+- You lose edge validation (ensuring valid from/to kinds), and the uniqueness and cardinality constraints TypeGraph enforces
 - You keep all your data exactly as stored
 
 If you need these features, you'll implement them in application code—which is what any alternative would require anyway.
@@ -181,7 +188,7 @@ TypeGraph adds a type-safe API layer over a conventional SQL schema. Remove the 
 
 - Standard SQL tables
 - JSON properties (supported natively by SQLite and PostgreSQL)
-- Full temporal history
+- Validity windows (`valid_from` / `valid_to`) and, if you enabled `history: true`, the recorded-history tables
 - Soft deletes
 - No proprietary formats
 - No data migration required

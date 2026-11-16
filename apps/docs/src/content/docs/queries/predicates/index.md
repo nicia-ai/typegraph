@@ -167,7 +167,7 @@ p.email.isNotNull()
 | `contains(str)` | `string \| param()` | Substring match | `ILIKE '%str%'` | insensitive |
 | `startsWith(str)` | `string \| param()` | Prefix match | `ILIKE 'str%'` | insensitive |
 | `endsWith(str)` | `string \| param()` | Suffix match | `ILIKE '%str'` | insensitive |
-| `like(pattern)` | `string \| param()` | SQL LIKE pattern | `LIKE` | sensitive |
+| `like(pattern)` | `string \| param()` | SQL LIKE pattern | `LIKE` (`GLOB` on SQLite) | sensitive |
 | `ilike(pattern)` | `string \| param()` | Case-insensitive LIKE | `ILIKE` | insensitive |
 | `in(values[])` | `string[]` | In array | `IN (...)` | sensitive |
 | `notIn(values[])` | `string[]` | Not in array | `NOT IN (...)` | sensitive |

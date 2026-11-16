@@ -500,6 +500,16 @@ error entry you see in `result.errors`.
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
 | `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips and the order of create refusals in `result.errors`, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
+| `refreshStatistics` | `boolean` | `true` | Refresh planner statistics (`ANALYZE`) after an import that created or updated rows |
+| `onStreamChunkError` | `"abort" \| "continue"` | `"abort"` | `importGraphStream` only: whether a chunk that reports entity-level errors stops the stream. Earlier chunks are already committed either way |
+
+An option key an entry point does not declare is refused rather than dropped:
+`importGraph`, `importGraphStream`, `exportGraph` and `exportGraphStream` throw a
+`ConfigurationError` with `details.code` `INTERCHANGE_OPTION_UNKNOWN`
+(`details.option` names the first unknown key) before reading or writing
+anything, so a misspelled `validateReference: false` cannot silently leave
+validation on. `batchSize` and `idleTimeoutMs` are `exportGraphStream` options;
+`exportGraph` refuses them.
 
 ### Evaluation order and `batchSize`
 

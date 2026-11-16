@@ -563,8 +563,10 @@ The same loop drives `replay`: pass `page.nextCursor` back as `cursor`
 until it comes back `undefined`, choosing `limit` per page as the consumer
 needs (the loop above takes the default).
 
-Both `replay` and `transitionsOf` throw `IDENTITY_REPLAY_REQUIRES_HISTORY` on
-a store opened without `history: true` — there is nothing for them to
+Refusals the transition log cannot answer are `IdentityReplayError`s
+(`import { IdentityReplayError } from "@nicia-ai/typegraph/identity"`;
+`details.code` carries the code). Both `replay` and `transitionsOf` throw
+`IDENTITY_REPLAY_REQUIRES_HISTORY` on a store opened without `history: true` — there is nothing for them to
 annotate. On a backend that owns recorded time itself (engine-native), they
 throw `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` even with `history: true`:
 TypeGraph captures no recorded history there, so it keeps no transition log.

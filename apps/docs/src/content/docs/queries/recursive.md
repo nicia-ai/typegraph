@@ -254,6 +254,8 @@ This preserves upstream multiplicity while avoiding repeated expansion of the sa
 source within a stage.
 
 ```typescript
+import { expr } from "@nicia-ai/typegraph";
+
 const routes = await store
   .query()
   .from("Person", "root")
@@ -263,7 +265,7 @@ const routes = await store
   .traverse("worksAt", "employment", { from: "manager" })
   .recursive({ maxHops: 2, path: "organizationPath" })
   .to("Organization", "organization")
-  .where((expr) => expr.organization.active.eq(true))
+  .where((fields) => expr.eq(fields.organization.active, expr.literal(true)))
   .orderBy("organization", "name")
   .limit(20)
   .select((ctx) => ({
@@ -748,8 +750,10 @@ const allReports = await store
     level: ctx.level,
     department: ctx.report.department,
   }))
-  .orderBy("level", "asc")
   .execute();
+
+// `orderBy()` names an alias and a field, so it cannot sort by a depth value; sort the rows.
+const byLevel = [...allReports].sort((a, b) => a.level - b.level);
 ```
 
 ### Dependency Graph
@@ -771,8 +775,9 @@ const dependencies = await store
     depth: ctx.depth,
     chain: ctx.chain,
   }))
-  .orderBy("depth", "asc")
   .execute();
+
+const nearestFirst = [...dependencies].sort((a, b) => a.depth - b.depth);
 ```
 
 ### Social Network — Friends of Friends
@@ -808,8 +813,9 @@ const breadcrumbs = await store
     slug: ctx.ancestor.slug,
     depth: ctx.depth,
   }))
-  .orderBy("depth", "desc")
   .execute();
+
+const deepestFirst = [...breadcrumbs].sort((a, b) => b.depth - a.depth);
 
 // Returns: [{ name: "Root", depth: 3 }, { name: "Electronics", depth: 2 }, { name: "Phones", depth: 1 }]
 ```

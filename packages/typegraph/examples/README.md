@@ -134,6 +134,9 @@ Requires a running PostgreSQL instance. Example 10 uses `node-postgres`; for oth
 (postgres-js, neon-serverless, neon-http), see the [backend setup docs](https://typegraph.dev/backend-setup#choosing-a-postgresql-driver).
 
 ```bash
+# node-postgres driver
+npm install pg
+
 # Using Docker
 docker run -d --name typegraph-pg \
   -e POSTGRES_PASSWORD=postgres \

@@ -126,7 +126,7 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 The key graph RAG capability: linking chunks to disambiguated entities.
 
 ```typescript
-import type { Node } from "@nicia-ai/typegraph";
+import type { Node, NodeId } from "@nicia-ai/typegraph";
 
 interface ChunkData {
   text: string;
@@ -257,7 +257,7 @@ async function findRelatedEntities(entityName: string, maxHops = 2) {
 Get surrounding chunks for a match:
 
 ```typescript
-async function getChunkWithContext(chunkId: string, windowSize = 1) {
+async function getChunkWithContext(chunkId: NodeId<typeof Chunk>, windowSize = 1) {
   const [before, after] = await Promise.all([
     store
       .query()

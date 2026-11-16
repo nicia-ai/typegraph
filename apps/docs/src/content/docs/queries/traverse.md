@@ -429,7 +429,7 @@ const friends = await store
   .select((ctx) => ({
     id: ctx.friend.id,
     name: ctx.friend.name,
-    followedAt: ctx.e.createdAt,
+    followedAt: ctx.e.meta.createdAt,
   }))
   .orderBy("e", "meta.createdAt", "desc")
   .limit(50)

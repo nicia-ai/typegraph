@@ -278,6 +278,7 @@ allow all node types:
 
 ```typescript
 const graph = defineGraph({
+  id: "my_graph",
   nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: {
     worksAt,  // Constrained - uses built-in from/to
@@ -301,6 +302,12 @@ const graph = defineGraph({
   },
 });
 ```
+
+An edge whose `from` or `to` names a node kind that is not registered in `nodes`
+also throws a `ConfigurationError` at `defineGraph` time
+(`details.code: "EDGE_ENDPOINT_KIND_NOT_REGISTERED"`), as does an unknown
+`cardinality`, `targetCardinality` or `acyclic` value from untyped code
+(`EDGE_INTEGRITY_OPTION_INVALID`).
 
 Attempting to widen beyond the edge's built-in constraints throws a `ConfigurationError`:
 
@@ -802,7 +809,8 @@ with `scope: "kind"`, the same constraint on each kind is uniqueness per kind.
 TypeScript requires both `scope` and `collation`. An untyped caller that omits
 `scope` gets `"kindWithSubClasses"`, and one that omits `collation` gets
 `"binary"`. A [graph extension](/graph-extensions) that omits `scope` gets
-`"kind"`.
+`"kind"`. A `scope` or `collation` outside the values listed here is refused at
+`defineGraph` with `ConfigurationError` (`UNIQUE_CONSTRAINT_OPTION_INVALID`).
 
 ### Collation Options
 
@@ -829,7 +837,7 @@ const Person = defineNode("Person", {
 
 // For functions that work with full nodes (id, kind, metadata, props):
 type PersonNode = Node<typeof Person>;
-// { id: NodeId<Person>; kind: "Person"; name: string; email?: string; version: number; createdAt: Date; ... }
+// { id: NodeId<Person>; kind: "Person"; name: string; email?: string; meta: NodeMeta }
 
 // For functions that only need the property data:
 type PersonProps = NodeProps<typeof Person>;

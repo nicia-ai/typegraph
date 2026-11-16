@@ -43,6 +43,8 @@ The agent takes a read surface, not a concrete store. A live `StoreView` and a
 recorded `RecordedStoreView` both satisfy the parts it needs:
 
 ```typescript
+import type { RecordedStoreView } from "@nicia-ai/typegraph/store";
+
 type EvidenceView = Pick<
   RecordedStoreView<typeof graph>,
   "query" | "degree" | "nodes"

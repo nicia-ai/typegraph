@@ -46,10 +46,11 @@ early, on the same row, with `oneActive` edges rechecked because reopening can
 create a second active edge.
 
 ```typescript
-await store.nodes.Employment.updateById(employmentId, {
-  patch: { department: "Research" },
-  clearValidTo: true,
-});
+await store.nodes.Employment.update(
+  employmentId,
+  { department: "Research" },
+  { clearValidTo: true },
+);
 ```
 
 ### Upgrading doesn't repair old rows, on purpose

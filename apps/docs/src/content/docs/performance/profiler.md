@@ -177,7 +177,8 @@ Use `assertIndexCoverage()` to fail tests when queries filter on unindexed prope
 
 ```typescript
 import { describe, it, beforeAll, afterAll } from "vitest";
-import { QueryProfiler } from "@nicia-ai/typegraph/profiler";
+import { toDeclaredIndexes } from "@nicia-ai/typegraph/indexes";
+import { type ProfiledStore, QueryProfiler } from "@nicia-ai/typegraph/profiler";
 
 describe("Query Performance", () => {
   let profiler: QueryProfiler;

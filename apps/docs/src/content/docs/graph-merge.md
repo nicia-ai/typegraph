@@ -655,7 +655,7 @@ conflicts, and any write between revalidation and apply causes
 edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
 the result changes. This includes an `acyclic: true` edge kind: canonicalization
 and repointing can close a cycle out of edges that were individually fine in
-every branch. Every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`,
+every branch. Every entry point (`merge()`, `planMerge()`,
 `planMergeIncremental()`, `mergeIncremental()`) checks the resolved plan's
 projected edge writes for such a cycle at PLAN time, before anything is
 written — including a cycle formed entirely from edges the plan itself
@@ -1142,7 +1142,7 @@ A plan is fenced by the target's revision: `applyMergePlan()` refuses it with
 plan's own writes produce against the target's current rows is therefore
 never a race the apply might win. The unchanged target refuses it, and the
 only target write that could resolve it makes the plan stale. Every planning
-entry point (`merge()`, `mergeAgainstBase()`, `mergeIncremental()`,
+entry point (`merge()`, `mergeIncremental()`,
 `planMerge()`, `planMergeIncremental()` and the candidate and mutation
 planners built on them) therefore refuses such a conflict while the plan is
 built, so a plan they return is never one that cannot be applied:
@@ -1587,14 +1587,6 @@ with a NUL character, are refused with a `BaseVersionMismatchError` whose
 current target. Earlier `engine:` anchors and untracked content tokens without
 the active schema version also require re-branching; they cannot match the
 current target's token.
-
-The token is printable text, so it can be stored anywhere an application
-keeps descriptors, plans, and fork points, including PostgreSQL `text` and
-`jsonb` columns. Treat it as opaque: compare it whole and never parse it.
-Tokens minted by releases before this format, which separated components
-with a NUL character, are refused with a `BaseVersionMismatchError` whose
-`details.reason` is `"legacy-token-format"`. Re-branch or re-plan from the
-current target.
 
 **`merge()` is a snapshot merge.** Every branch must have forked from the
 target's *current* `base@V`. If the target advanced since the branch was taken,
@@ -2065,7 +2057,7 @@ Because the graph is unknown when the backend is allocated:
   fixed-length and never truncated, so it cannot match another allocation's
   tables. `connect` always receives the allocation vector strategy for
   `makeBackend`; bind it with
-  `createPostgresBackend({ vector: allocation.vectorStrategy })`. A connection
+  `createPostgresBackend(db, { vector: allocation.vectorStrategy })`. A connection
   that binds any other vector strategy is refused with a `BranchError`, because
   it could create tables the allocation does not own. Pass `vector: false` to
   opt out of vector support.
@@ -3206,7 +3198,7 @@ before branching, then end that inherited row on one or more branches.
 
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
 one: a row whose *only* change is its window loses to a concurrent deletion even
-under `"prefer-modify"`, since there is no modification to prefer. A row with a
+under `"modifyWins"`, since there is no modification to prefer. A row with a
 properties edit *and* an ending keeps the usual delete/modify behavior on the
 properties, and its ending rides along only if that modification survives.
 
@@ -3354,7 +3346,7 @@ caller-owned transaction callback rejects by default:
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
 | `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, opposing relations, and retract/reassert races — see [Identity conflicts](#identity-conflicts) and the [identity guide](/identity/#interchange-and-branch-merge). One related code on the same error class names a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a definitional match or a transitive cluster crosses a class-lifted `different` assertion — see [Identity separation veto](#identity-separation-veto)). |
-| `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `mergeAgainstBase()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge. |
+| `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge, and `details.witness` gives one return path (see [`AcyclicityMergeConflictError`](/errors#acyclicitymergeconflicterror)). |
 | `CardinalityMergeConflictError` | Code `GRAPH_MERGE_CARDINALITY_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave two live edges holding one part's whole or one declared `cardinality` / `targetCardinality` slot — two branches reparenting one part to different wholes, or a branch and the incremental target each adding an edge to a `targetCardinality: "one"` endpoint. Its `cause` is the `CompositionError` or `CardinalityError` apply would raise and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |
 | `CompositionWindowMergeConflictError` | Code `GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave one part of a `oneActive` composition pair with two composition windows that share an instant. Its `cause` is the `CompositionError` (`situation: "windowOverlap"`) apply would raise; `details` copies the part, both edges, both wholes and both windows, and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |
 | `RestrictedDeleteMergeConflictError` | Code `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`. Returned at plan time when the plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete, such as one the incremental target added after the fork. Its `cause` is the `RestrictedDeleteError` apply would raise. |

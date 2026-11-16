@@ -177,7 +177,7 @@ unowned account:
 
 ```typescript
 const claim = (ownerId: string) =>
-  store.nodes.Account.compareAndSet("acct_1", {
+  store.nodes.Account.compareAndSet(asNodeId("acct_1"), {
     expected: { ownerId: compareAndSetAbsent },
     patch: { ownerId },
   });

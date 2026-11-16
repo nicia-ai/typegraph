@@ -139,6 +139,8 @@ const store = createAdapterStore(tenantGraph, runtimeBackend, {
 });
 ```
 
+Registering a template id that already exists with different schema content
+throws `ConfigurationError` (`GRAPH_TEMPLATE_CONTENT_CONFLICT`).
 Instantiation is idempotent for the same template and target. A target already
 initialized with a different schema is refused. On PostgreSQL the clone
 statement takes the same graph advisory-lock key as schema commits; SQLite's
@@ -242,7 +244,10 @@ Pass `unique: [{ name, fields, ... }]` per kind. The `name` is required
 (used as the diffing identity key) and must be unique within the kind.
 Supports `scope`, `collation`, and a restricted `where` clause limited
 to `isNull` / `isNotNull` (the only operations round-trippable through
-the persisted form).
+the persisted form). An omitted `scope` is `"kind"` and an omitted `collation`
+is `"binary"`. Adding or reshaping a constraint on a kind that already holds
+rows is refused with `IncompatibleChangeError` (`ADD_UNIQUE_ON_POPULATED`),
+because no existing row holds a claim for it.
 
 ### Relational indexes
 
@@ -1063,8 +1068,8 @@ const Manual = defineNode("Manual", {
 ```
 
 Embeddings live in per-`(graphId, nodeKind, fieldPath)` typed tables
-named `tg_vec_<graphId>_<kind>_<field>` (each carrying the field's
-fixed dimension) — there is no single shared embeddings table. The
+named `tg_vec_<graphId>_<kind>_<field>_<hash>` (lowercased and sanitized,
+truncated to 63 characters, each carrying the field's fixed dimension) — there is no single shared embeddings table. The
 privileged migrator provisions each table plus a durable marker: at boot
 via `createStoreWithSchema`, and for a field a runtime `evolve()`
 introduces, by that `evolve()` call. The runtime hot path then asserts

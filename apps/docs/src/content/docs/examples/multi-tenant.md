@@ -27,7 +27,16 @@ All tenants share the same database tables, filtered by `tenantId`.
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, searchable } from "@nicia-ai/typegraph";
+import {
+  defineNode,
+  defineEdge,
+  defineGraph,
+  searchable,
+  type Node,
+  type NodeId,
+  type NodeProps,
+  type Store,
+} from "@nicia-ai/typegraph";
 
 // Tenant metadata
 const Tenant = defineNode("Tenant", {
@@ -125,21 +134,22 @@ Create a wrapper that automatically filters by tenant:
 
 ```typescript
 interface TenantContext {
-  tenantId: string;
+  tenantId: NodeId<typeof Tenant>;
   userId: string;
   role: "owner" | "admin" | "member" | "guest";
 }
 
-function createTenantStore(store: Store, ctx: TenantContext) {
+function createTenantStore(store: Store<typeof graph>, ctx: TenantContext) {
   const projects = {
-    async list(options: { status?: string } = {}) {
+    async list(options: { status?: NodeProps<typeof Project>["status"] } = {}) {
       let query = store
         .query()
         .from("Project", "p")
         .whereNode("p", (p) => p.tenantId.eq(ctx.tenantId));
 
-      if (options.status) {
-        query = query.whereNode("p", (p) => p.status.eq(options.status));
+      const { status } = options;
+      if (status) {
+        query = query.whereNode("p", (p) => p.status.eq(status));
       }
 
       return query.select((q) => q.p).execute();
@@ -158,7 +168,7 @@ function createTenantStore(store: Store, ctx: TenantContext) {
       return project;
     },
 
-    async get(projectId: string) {
+    async get(projectId: NodeId<typeof Project>) {
       const project = await store.nodes.Project.getById(projectId);
       if (!project || project.tenantId !== ctx.tenantId) {
         throw new Error("Not found");
@@ -166,19 +176,19 @@ function createTenantStore(store: Store, ctx: TenantContext) {
       return project;
     },
 
-    async update(projectId: string, updates: Partial<ProjectProps>) {
+    async update(projectId: NodeId<typeof Project>, updates: Partial<NodeProps<typeof Project>>) {
       await projects.get(projectId); // Verify access
       return store.nodes.Project.update(projectId, updates);
     },
 
-    async delete(projectId: string) {
+    async delete(projectId: NodeId<typeof Project>) {
       await projects.get(projectId); // Verify access
       await store.nodes.Project.delete(projectId);
     },
   };
 
   const tasks = {
-    async list(projectId: string) {
+    async list(projectId: NodeId<typeof Project>) {
       await projects.get(projectId); // Verify access
 
       return store
@@ -191,7 +201,7 @@ function createTenantStore(store: Store, ctx: TenantContext) {
         .execute();
     },
 
-    async create(projectId: string, data: { title: string; priority?: string }) {
+    async create(projectId: NodeId<typeof Project>, data: { title: string; priority?: NodeProps<typeof Task>["priority"] }) {
       const project = await projects.get(projectId); // Verify access
 
       const task = await store.nodes.Task.create({
@@ -214,7 +224,7 @@ function createTenantStore(store: Store, ctx: TenantContext) {
         .execute();
     },
 
-    async invite(email: string, name: string, role: string) {
+    async invite(email: string, name: string, role: NodeProps<typeof User>["role"]) {
       if (ctx.role !== "owner" && ctx.role !== "admin") {
         throw new Error("Insufficient permissions");
       }
@@ -300,6 +310,7 @@ Each tenant gets their own PostgreSQL schema within the same database.
 ### Setup
 
 ```typescript
+import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
@@ -319,7 +330,7 @@ async function createTenantSchema(tenantId: string): Promise<void> {
   await pool.query(`SET search_path TO public`);
 }
 
-async function getTenantStore(tenantId: string): Promise<Store> {
+async function getTenantStore(tenantId: string): Promise<Store<typeof graph>> {
   const schemaName = `tenant_${tenantId}`;
 
   // Create connection with schema
@@ -341,10 +352,10 @@ async function getTenantStore(tenantId: string): Promise<Store> {
 
 ```typescript
 class TenantStoreManager {
-  private stores = new Map<string, { store: Store; lastUsed: Date }>();
+  private stores = new Map<string, { store: Store<typeof graph>; lastUsed: Date }>();
   private maxCached = 100;
 
-  async getStore(tenantId: string): Promise<Store> {
+  async getStore(tenantId: string): Promise<Store<typeof graph>> {
     const cached = this.stores.get(tenantId);
 
     if (cached) {
@@ -399,6 +410,7 @@ async function provisionTenantWithSchema(
 
   // Create initial data
   await tenantStore.nodes.User.create({
+    tenantId,
     email: ownerEmail,
     name: name,
     role: "owner",
@@ -432,10 +444,10 @@ interface TenantConfig {
 }
 
 class TenantDatabaseManager {
-  private connections = new Map<string, { pool: Pool; store: Store }>();
+  private connections = new Map<string, { pool: Pool; store: Store<typeof graph> }>();
   private maxConnections = 50;
 
-  async getStore(tenantId: string): Promise<Store> {
+  async getStore(tenantId: string): Promise<Store<typeof graph>> {
     const cached = this.connections.get(tenantId);
     if (cached) return cached.store;
 
@@ -526,6 +538,7 @@ async function provisionTenantDatabase(
   const [store] = await createStoreWithSchema(graph, backend);
 
   await store.nodes.User.create({
+    tenantId,
     email: ownerEmail,
     name: name,
     role: "owner",
@@ -629,7 +642,7 @@ B's results because each store wraps a different database:
 async function searchAcrossTenants(
   query: string,
   tenantIds: string[]
-): Promise<Array<{ tenantId: string; results: Array<ProjectProps & { score: number; snippet?: string }> }>> {
+): Promise<Array<{ tenantId: string; results: Array<NodeProps<typeof Project> & { score: number; snippet?: string }> }>> {
   const results = await Promise.all(
     tenantIds.map(async (tenantId) => {
       try {
@@ -693,7 +706,7 @@ the caller forgets to verify.
 ### Suspend Tenant
 
 ```typescript
-async function suspendTenant(tenantId: string, reason: string): Promise<void> {
+async function suspendTenant(tenantId: NodeId<typeof Tenant>, reason: string): Promise<void> {
   const current = await store.nodes.Tenant.getById(tenantId);
   if (!current) throw new Error(`Tenant not found: ${tenantId}`);
 
@@ -711,7 +724,7 @@ async function suspendTenant(tenantId: string, reason: string): Promise<void> {
 ### Delete Tenant (Shared Tables)
 
 ```typescript
-async function deleteTenant(tenantId: string): Promise<void> {
+async function deleteTenant(tenantId: NodeId<typeof Tenant>): Promise<void> {
   await store.transaction(async (tx) => {
     // Delete all tasks
     const tasks = await tx
@@ -782,7 +795,7 @@ async function deleteTenantDatabase(tenantId: string): Promise<void> {
 Move tenant between isolation strategies:
 
 ```typescript
-async function migrateTenantToSeparateDatabase(tenantId: string): Promise<string> {
+async function migrateTenantToSeparateDatabase(tenantId: NodeId<typeof Tenant>): Promise<string> {
   // 1. Create new database
   const { databaseUrl } = await provisionTenantDatabase(
     `migrated_${tenantId}`,

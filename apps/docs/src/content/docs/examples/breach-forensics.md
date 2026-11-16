@@ -73,6 +73,8 @@ The example wraps this in a small helper that accepts either a live view or a
 recorded view:
 
 ```typescript
+import type { RecordedStoreView } from "@nicia-ai/typegraph/store";
+
 type AccessView = Pick<
   RecordedStoreView<typeof graph>,
   "reachable" | "nodes"

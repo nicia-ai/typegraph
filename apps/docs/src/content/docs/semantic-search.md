@@ -329,7 +329,7 @@ per-field tables (new deployments need no action):
 import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/maintenance";
 
 const result = await migrateLegacyEmbeddings({ backend });
-// → { migrated, perField, skippedDimensionMismatch, legacyTablePresent }
+// → { migrated, perField, skippedDimensionMismatch, skippedDecodeError, legacyTablePresent }
 ```
 
 ## Schema Design
