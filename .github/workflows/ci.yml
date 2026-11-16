@@ -532,6 +532,12 @@ jobs:
         env:
           TYPEGRAPH_REQUIRE_DIST_GRAIN: "1"
 
+      # The release workflow runs the same smoke before publishing; running it
+      # here makes a packaging break (a missing subpath, a moved export, a split
+      # class across entrypoints) fail the pull request instead of the release.
+      - name: Smoke test the packed tarball (every subpath, ESM and CJS)
+        run: bash packages/typegraph/scripts/smoke-packed-tarball.sh
+
   build:
     name: Build
     runs-on: latchkey-large
