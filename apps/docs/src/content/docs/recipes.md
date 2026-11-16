@@ -254,8 +254,8 @@ const history = await store
   .orderBy("a", "meta.validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.validFrom,
-    validTo: ctx.a.validTo,
+    validFrom: ctx.a.meta.validFrom,
+    validTo: ctx.a.meta.validTo,
   }))
   .execute();
 ```
@@ -555,16 +555,18 @@ await store.nodes.Document.upsertById(documentId, {
 ### Find Deleted Nodes
 
 ```typescript
-// Use temporal queries to see deleted nodes
+import { expr } from "@nicia-ai/typegraph";
+
+// Soft-deleted nodes are tombstones: include them, then keep only those
 const deletedDocs = await store
   .query()
   .from("Document", "d")
-  .temporal("includeEnded")
-  .whereNode("d", (d) => d.deletedAt.isNotNull())
+  .temporal("includeTombstones")
+  .where((ctx) => expr.isNotNull(ctx.d.$meta.deletedAt))
   .select((ctx) => ({
     id: ctx.d.id,
     title: ctx.d.title,
-    deletedAt: ctx.d.deletedAt,
+    deletedAt: ctx.d.meta.deletedAt,
   }))
   .execute();
 ```

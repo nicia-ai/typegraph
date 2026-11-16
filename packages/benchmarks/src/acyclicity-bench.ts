@@ -350,7 +350,7 @@ async function benchForest(
  * prefers `typegraph_edges_cardinality_idx`, which leads with the same three
  * columns plus `kind` and is the tighter match for a single-kind relation.
  * Either is the per-hop seek the probe's cost model assumes; what must NOT
- * appear is a whole-partition scan (`typegraph_edges_kind_idx`, a heap scan,
+ * appear is a whole-partition scan (an index led by `(graph_id, kind)` alone, a heap scan,
  * or SQLite's `MATERIALIZE candidates`).
  */
 const EXPECTED_ACYCLICITY_INDEXES = [

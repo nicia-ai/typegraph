@@ -77,9 +77,9 @@ Include system metadata fields:
 .select((ctx) => ({
   id: ctx.p.id,
   kind: ctx.p.kind,           // "Person"
-  version: ctx.p.version,     // Optimistic concurrency version
-  createdAt: ctx.p.createdAt,
-  updatedAt: ctx.p.updatedAt,
+  version: ctx.p.meta.version,     // Optimistic concurrency version
+  createdAt: ctx.p.meta.createdAt,
+  updatedAt: ctx.p.meta.updatedAt,
 }))
 ```
 
@@ -228,9 +228,9 @@ const history = await store
   .temporal("includeEnded")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.validFrom,   // When this version became valid
-    validTo: ctx.a.validTo,       // When superseded (undefined if current)
-    version: ctx.a.version,       // Version number
+    validFrom: ctx.a.meta.validFrom,   // When this version became valid
+    validTo: ctx.a.meta.validTo,       // When superseded (undefined if current)
+    version: ctx.a.meta.version,       // Version number
   }))
   .execute();
 ```

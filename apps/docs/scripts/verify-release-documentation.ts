@@ -144,6 +144,7 @@ async function verifyDocumentedImports(
     path.join(typegraphPackageDirectory, "examples/README.md"),
   ];
   const virtualSources = new Map<string, string>();
+  const completeSnippetCandidates = new Map<string, string>();
   const origins = new Map<string, string>();
   const fencePattern = /```(?:typescript|ts)\s*\n([\s\S]*?)```/g;
   let snippetIndex = 0;
@@ -163,9 +164,21 @@ async function verifyDocumentedImports(
       );
       snippetIndex += 1;
       virtualSources.set(virtualFilename, imports);
+      completeSnippetCandidates.set(
+        virtualFilename.replace(
+          "__documented_import_",
+          "__documented_snippet_",
+        ),
+        fencedSource,
+      );
+      const origin = `${path.relative(repositoryDirectory, markdownFile)}:${sourceLine(contents, match.index) + 1}`;
+      origins.set(virtualFilename, origin);
       origins.set(
-        virtualFilename,
-        `${path.relative(repositoryDirectory, markdownFile)}:${sourceLine(contents, match.index) + 1}`,
+        virtualFilename.replace(
+          "__documented_import_",
+          "__documented_snippet_",
+        ),
+        origin,
       );
     }
   }
@@ -246,6 +259,124 @@ async function verifyDocumentedImports(
   }
   process.stdout.write(
     `Verified TypeGraph exports in ${virtualSources.size} documentation snippets.\n`,
+  );
+  verifyCompleteSnippets(completeSnippetCandidates, origins);
+}
+
+/**
+ * Diagnostics meaning a snippet continues from context defined elsewhere on
+ * its page (a graph, a store, a fixture, a local module). Such a snippet is a
+ * fragment: only its imports are checked. Any other diagnostic in a snippet
+ * without one of these is a real error in the documented API usage.
+ */
+const FRAGMENT_DIAGNOSTIC_CODES = new Set([
+  2304, // Cannot find name
+  2503, // Cannot find namespace
+  2552, // Cannot find name; did you mean
+  2582, // Cannot find name of a test global (describe/it)
+  2593, // Cannot find name of a test global (describe/it)
+  2834, // Relative import (a local module of the example)
+  2835, // Relative import (a local module of the example)
+  18_004, // Shorthand property with no value in scope
+]);
+
+/**
+ * Type-checks every snippet that imports TypeGraph and is self-contained: it
+ * defines everything it uses. Self-contained snippets are compiled in full
+ * against the built package, so a documented call that no longer matches the
+ * API (a removed option, a wrong argument, a renamed field) fails the build.
+ * Fragments are left to the import check above.
+ */
+function verifyCompleteSnippets(
+  candidates: ReadonlyMap<string, string>,
+  origins: ReadonlyMap<string, string>,
+): void {
+  const sources = new Map(
+    [...candidates].map(([filename, source]) => [
+      filename,
+      `${source}\nexport {};\n`,
+    ]),
+  );
+  const compilerOptions: ts.CompilerOptions = {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    noEmit: true,
+    skipLibCheck: true,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+    // No DOM: a page-context name such as `Document` or `Node` must read as
+    // missing context, not resolve to a browser global.
+    lib: ["lib.es2023.d.ts"],
+    types: ["node"],
+  };
+  const baseHost = ts.createCompilerHost(compilerOptions);
+  const compilerHost: ts.CompilerHost = {
+    ...baseHost,
+    fileExists: (filename) =>
+      sources.has(filename) || baseHost.fileExists(filename),
+    getCurrentDirectory: () => repositoryDirectory,
+    getSourceFile: (
+      filename,
+      languageVersion,
+      onError,
+      shouldCreateNewSourceFile,
+    ) => {
+      const source = sources.get(filename);
+      if (source !== undefined) {
+        return ts.createSourceFile(filename, source, languageVersion, true);
+      }
+      return baseHost.getSourceFile(
+        filename,
+        languageVersion,
+        onError,
+        shouldCreateNewSourceFile,
+      );
+    },
+    readFile: (filename) =>
+      sources.get(filename) ?? baseHost.readFile(filename),
+  };
+  const program = ts.createProgram(
+    [...sources.keys()],
+    compilerOptions,
+    compilerHost,
+  );
+  const diagnosticsBySnippet = new Map<string, ts.Diagnostic[]>();
+  for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
+    const fileName = diagnostic.file?.fileName;
+    if (fileName === undefined || !sources.has(fileName)) continue;
+    const existing = diagnosticsBySnippet.get(fileName) ?? [];
+    existing.push(diagnostic);
+    diagnosticsBySnippet.set(fileName, existing);
+  }
+
+  const failures: string[] = [];
+  let fragments = 0;
+  for (const [fileName, diagnostics] of diagnosticsBySnippet) {
+    if (
+      diagnostics.some((diagnostic) =>
+        FRAGMENT_DIAGNOSTIC_CODES.has(diagnostic.code),
+      )
+    ) {
+      fragments += 1;
+      continue;
+    }
+    for (const diagnostic of diagnostics) {
+      const position = diagnostic.file?.getLineAndCharacterOfPosition(
+        diagnostic.start ?? 0,
+      );
+      failures.push(
+        `${origins.get(fileName) ?? fileName} (snippet line ${(position?.line ?? 0) + 1}): TS${diagnostic.code} ${ts.flattenDiagnosticMessageText(diagnostic.messageText, " ")}`,
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Self-contained documentation snippets that do not type-check:\n${failures.join("\n")}`,
+    );
+  }
+  process.stdout.write(
+    `Type-checked ${sources.size - fragments} self-contained documentation snippets (${fragments} page fragments checked for imports only).\n`,
   );
 }
 

@@ -1047,7 +1047,9 @@ Thrown when a referenced node does not exist.
 
 ```typescript
 try {
-  await store.nodes.Person.update("nonexistent-id", { name: "New Name" });
+  await store.nodes.Person.update(asNodeId<typeof Person>("nonexistent-id"), {
+    name: "New Name",
+  });
 } catch (error) {
   if (error instanceof NodeNotFoundError) {
     console.log(error.category); // "user"
@@ -2353,6 +2355,7 @@ try {
 For library authors or advanced use cases, validation utilities are available from the schema sub-export:
 
 ```typescript
+import { z } from "zod";
 import {
   validateNodeProps,
   validateEdgeProps,
@@ -2369,8 +2372,9 @@ const validated = validateNodeProps(PersonSchema, inputData, {
 // Wrap a Zod error with TypeGraph context
 try {
   schema.parse(data);
-} catch (zodError) {
-  throw wrapZodError(zodError, {
+} catch (error) {
+  if (!(error instanceof z.ZodError)) throw error;
+  throw wrapZodError(error, {
     entityType: "node",
     kind: "Person",
     operation: "update",

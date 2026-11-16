@@ -63,18 +63,18 @@ const activeUsers = fragment((q) =>
   q.whereNode("u", ({ status }) => status.eq("active"))
 );
 
-const withRecentPosts = fragment((q) =>
-  q.traverse("authored", "a")
-   .to("Post", "p")
-   .whereNode("p", ({ createdAt }) => createdAt.gte("2024-01-01"))
-);
-
-// Compose into queries
+// Compose into queries. A step that adds an alias (a traversal) is written
+// inline, where `q` is typed by the query it extends.
 const results = await store
   .query()
   .from("User", "u")
   .pipe(activeUsers)
-  .pipe(withRecentPosts)
+  .pipe((q) =>
+    q
+      .traverse("authored", "a")
+      .to("Post", "p")
+      .whereNode("p", ({ createdAt }) => createdAt.gte("2024-01-01")),
+  )
   .select((ctx) => ({
     user: ctx.u,
     post: ctx.p,

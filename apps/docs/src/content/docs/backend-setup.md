@@ -352,7 +352,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
-const sql = postgres(process.env.DATABASE_URL, {
+const sql = postgres(process.env.DATABASE_URL!, {
   max: 10,
   idle_timeout: 30,
 });
@@ -1481,10 +1481,10 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 Import from the entrypoint matching your database:
 
 ```typescript
-import { createSqliteBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createSqliteBackend, tables as sqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createPostgresBackend, tables as postgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 ```
 

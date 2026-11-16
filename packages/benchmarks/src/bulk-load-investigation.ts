@@ -287,7 +287,6 @@ async function runScenario(
   name: string,
   options: Readonly<{
     deferIndexes: boolean;
-    dropRedundantKindIndexes?: boolean;
     mode:
       | "store"
       | "store-generated-edge-ids"
@@ -311,12 +310,6 @@ async function runScenario(
   const store = createStore(graph, backend, { autoRefreshStatistics: false });
   const indexes = secondaryIndexDefinitions(sqlite);
   if (options.deferIndexes) dropSecondaryIndexes(sqlite, indexes);
-  if (options.dropRedundantKindIndexes) {
-    dropSecondaryIndexes(
-      sqlite,
-      indexes.filter((index) => index.name.endsWith("_kind_idx")),
-    );
-  }
 
   try {
     const loadStart = performance.now();
@@ -436,14 +429,6 @@ const scenarios = [
     options: {
       deferIndexes: false,
       mode: "store-generated-edge-ids",
-    } as const,
-  },
-  {
-    name: "store-without-redundant-kind-indexes",
-    options: {
-      deferIndexes: false,
-      dropRedundantKindIndexes: true,
-      mode: "store",
     } as const,
   },
   {

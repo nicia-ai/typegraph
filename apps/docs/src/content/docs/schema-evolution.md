@@ -920,16 +920,16 @@ it("migrates name to fullName", async () => {
   expect(result.status).toBe("migrated");
 
   // Run backfill
-  const people = await storeV2.query(PersonV2WithBothFields).execute();
+  const people = await storeV2.nodes.Person.find();
   for (const person of people) {
     await storeV2.nodes.Person.update(person.id, {
-      fullName: person.properties.name,
+      fullName: person.name,
     });
   }
 
   // Verify
-  const updated = await storeV2.query(PersonV2WithBothFields).execute();
-  expect(updated[0].properties.fullName).toBe("Alice");
+  const updated = await storeV2.nodes.Person.find();
+  expect(updated[0]?.fullName).toBe("Alice");
 });
 ```
 

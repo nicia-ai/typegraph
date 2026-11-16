@@ -120,7 +120,7 @@ want to choose how the Store is created.
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // In-memory database (data lost on restart)
-const { backend } = createLocalSqliteBackend();
+const inMemory = createLocalSqliteBackend();
 
 // File-based database (persistent)
 const { backend, db } = createLocalSqliteBackend({ path: "./my-app.db" });
