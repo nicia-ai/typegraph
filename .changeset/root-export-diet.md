@@ -80,6 +80,6 @@ The 17 removed names had no supported use. `VersionConflictError` and `VersionCo
 
 ### Upgrade notes
 
-- Rewrite each import of a name listed above to the entrypoint it is listed under. `etc/root-export-moves.json` in the published repository lists every name with its new specifier, so the rewrite can be scripted.
+- Rewrite each import of a name listed above to the entrypoint it is listed under. `etc/root-export-moves.json` lists every name with its new specifier, so the rewrite can be scripted. It ships in the package (`node_modules/@nicia-ai/typegraph/etc/root-export-moves.json`) and is in the repository.
 - Remove `VersionConflictError` checks; TypeGraph never threw it. A transaction that exhausts its retries throws `TransactionConflictError`, and a stale schema version throws `StaleVersionError`.
 - Replace `createQueryBuilder(...)` with `store.query()`.

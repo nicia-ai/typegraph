@@ -18,4 +18,4 @@ DROP INDEX IF EXISTS "typegraph_edges_kind_idx";
 
 If you manage the schema with drizzle-kit, the next `drizzle-kit generate` produces a migration with two plain `DROP INDEX` statements for these indexes. On PostgreSQL they take an `ACCESS EXCLUSIVE` lock inside the migration transaction, which queues behind long-running reads and blocks every query queued after it. Either delete the two statements from the generated migration (harmless: the indexes are redundant), or delete them and run the concurrent form above separately.
 
-This changes the shape of base schema version 9, which no release has shipped yet, so there is no new base-schema version and no adoption step. See [Redundant kind indexes on upgraded databases](https://typegraph.dev/performance/indexes#redundant-kind-indexes-on-upgraded-databases).
+This is part of base schema version 9, introduced in this release, so it adds no base-schema version of its own and no adoption step beyond the one version 9 already requires. See [Redundant kind indexes on upgraded databases](https://typegraph.dev/performance/indexes#redundant-kind-indexes-on-upgraded-databases).
