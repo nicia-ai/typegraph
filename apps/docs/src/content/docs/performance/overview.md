@@ -520,7 +520,7 @@ const [activeUsers, recentOrders] = await store.batchOnce(() => [
     .query()
     .from("Order", "o")
     .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
-    .orderBy("o", "createdAt", "desc")
+    .orderBy("o", "meta.createdAt", "desc")
     .limit(20),
 ]);
 ```

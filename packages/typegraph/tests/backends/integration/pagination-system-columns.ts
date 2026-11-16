@@ -9,20 +9,17 @@ const PAGE_SIZE = 10;
 /** More pages than any correct walk needs, so a cursor that never advances fails instead of looping. */
 const MAX_PAGES = Math.ceil(ROW_COUNT / PAGE_SIZE) + 2;
 
-const NODE_SYSTEM_COLUMNS = [
+const SHARED_SYSTEM_FIELDS = [
   "id",
   "kind",
-  "valid_from",
-  "valid_to",
-  "created_at",
-  "updated_at",
-  "deleted_at",
+  "meta.validFrom",
+  "meta.validTo",
+  "meta.createdAt",
+  "meta.updatedAt",
+  "meta.deletedAt",
 ] as const;
-const EDGE_SYSTEM_COLUMNS = [
-  ...NODE_SYSTEM_COLUMNS,
-  "from_id",
-  "to_id",
-] as const;
+const NODE_SYSTEM_FIELDS = [...SHARED_SYSTEM_FIELDS, "meta.version"] as const;
+const EDGE_SYSTEM_FIELDS = [...SHARED_SYSTEM_FIELDS, "fromId", "toId"] as const;
 const DIRECTIONS = ["asc", "desc"] as const;
 const SELECTIONS = ["full", "projection"] as const;
 
@@ -180,7 +177,7 @@ export function registerPaginationSystemColumnIntegrationTests(
 
     describe.each(SELECTIONS)("%s select", (selection: Selection) => {
       describe.each(DIRECTIONS)("%s", (direction: Direction) => {
-        it.each(NODE_SYSTEM_COLUMNS)(
+        it.each(NODE_SYSTEM_FIELDS)(
           "pages a node alias ordered by %s",
           async (column) => {
             const ordered = context
@@ -201,7 +198,7 @@ export function registerPaginationSystemColumnIntegrationTests(
           },
         );
 
-        it.each(EDGE_SYSTEM_COLUMNS)(
+        it.each(EDGE_SYSTEM_FIELDS)(
           "pages an edge alias ordered by %s",
           async (column) => {
             const ordered = context

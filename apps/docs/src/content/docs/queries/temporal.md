@@ -722,7 +722,7 @@ async function getAuditTrail(nodeId: string) {
       validTo: ctx.d.validTo,
       updatedAt: ctx.d.updatedAt,
     }))
-    .orderBy("d", "version", "asc")
+    .orderBy("d", "meta.version", "asc")
     .execute();
 }
 ```
@@ -915,7 +915,7 @@ async function getPreviousVersion(nodeId: string) {
     .temporal("includeEnded")
     .whereNode("d", (d) => d.id.eq(nodeId))
     .select((ctx) => ctx.d)
-    .orderBy("d", "version", "desc")
+    .orderBy("d", "meta.version", "desc")
     .limit(2)
     .execute();
 

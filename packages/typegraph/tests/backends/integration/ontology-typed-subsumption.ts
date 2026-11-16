@@ -1046,6 +1046,7 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         store
           .query()
           .from("TsOptionalMedia", "m")
+          // @ts-expect-error Only the subclass declares `rssUrl`.
           .orderBy("m", "rssUrl", "asc"),
       ).toThrow(ConfigurationError);
     });

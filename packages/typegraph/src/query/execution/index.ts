@@ -10,7 +10,6 @@ export {
   buildSelectableNode,
   buildSelectContext,
   mapResults,
-  selectableSystemFieldPath,
   transformPathColumns,
 } from "./result-mapper";
 

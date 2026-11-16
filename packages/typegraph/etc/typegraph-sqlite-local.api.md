@@ -122,6 +122,9 @@ type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
 // @public
 type AliasNodeType<G extends GraphDef, K extends string> = SubsumedNodeType<G, G["nodes"][K]["type"]>;
 
+// @public
+type AliasOrderField<Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, A extends string> = A extends keyof EdgeAliases ? EdgeOrderField<EdgeAliases[A]["type"]> : A extends keyof Aliases ? NodeOrderField<Aliases[A]["type"]> : never;
+
 // @public (undocumented)
 type AliasSchemaValue<Aliases extends AggregateAliasMap, Alias extends string> = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
 
@@ -1964,6 +1967,9 @@ type EdgeMatchIdentityStorage = Readonly<{
 // @public
 type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
 
+// @public
+type EdgeOrderField<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? string : "id" | "kind" | "fromId" | "toId" | `meta.${keyof SelectableEdgeMeta}` | (keyof z.infer<E["schema"]> & string);
+
 // @public (undocumented)
 type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<keyof Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId" | "meta"> & string;
 
@@ -2339,7 +2345,7 @@ class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases 
         graphId: string;
         executionTarget: object | undefined;
     }>;
-    orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: string, direction?: SortDirection): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
+    orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: AliasOrderField<Aliases, EdgeAliases, A>, direction?: SortDirection): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>;
     page(options: PaginateOptions): CompiledOneStatementRead<PaginatedResult<R>> & Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">>;
     paginate(options: PaginateOptions): Promise<PaginatedResult<R>>;
     pipe<NewR = R>(fragment: (query: ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R>) => ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR>): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, NewR>;
@@ -4872,6 +4878,9 @@ type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> & Readonly<{
 }>;
 
 // @public
+type NodeOrderField<N extends NodeType> = IsDynamicNodeType<N> extends true ? string : "id" | "kind" | `meta.${keyof SelectableNodeMeta}` | (keyof z.infer<N["schema"]> & string);
+
+// @public
 type NodePredicate = Readonly<{
     targetAlias: string;
     targetType?: KindEntity;
@@ -5521,7 +5530,7 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     } & IdentityTraversalOption<G>): TraversalBuilder<G, Aliases, EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, true>>, string, EA, TraversalDirection, true, false, false, RecursiveAliases, CoordinateState, DynamicEdgeTypeFor<T>>;
     orderBy(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>, direction?: SortDirection): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     // (undocumented)
-    orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: string, direction?: SortDirection): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+    orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(alias: A, field: AliasOrderField<Aliases, EdgeAliases, A>, direction?: SortDirection): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     parts<NA extends string, const O extends CompositionNavigationOptions<Aliases> = Record<string, never>>(nodeAlias: UniqueAlias<NA, Aliases>, options?: O): CompositionNavigationResult<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState, NA, O>;
     pipe<OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap = EdgeAliases, OutRecAliases extends RecursiveAliasMap = RecursiveAliases>(fragment: (builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>): QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecAliases, CoordinateState>;
     project<const Fields extends Readonly<Record<string, DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>>>>(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Fields): ExecutableProjectionQuery<Fields, QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>>;

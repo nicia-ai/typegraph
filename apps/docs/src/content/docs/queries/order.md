@@ -22,24 +22,27 @@ const sorted = await store
 ### Parameters
 
 ```typescript
-.orderBy(fieldSelector, direction?)
+.orderBy(expression, direction?)
 .orderBy(alias, field, direction?)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `fieldSelector` | `(ctx) => field` | Function that selects the field to sort by |
-| `alias` | `string` | Node/edge alias (alternative syntax) |
-| `field` | `string` | Field name (alternative syntax) |
+| `expression` | `(ctx) => expression` | Builds the value to sort by from the query's aliases |
+| `alias` | `string` | Node or edge alias (alias form) |
+| `field` | typed field name | A declared property or a system field of `alias` (alias form) |
 | `direction` | `"asc" \| "desc"` | Sort direction (default: `"asc"`) |
+
+The alias form is the one [cursor pagination](/queries/execute#cursor-pagination)
+and streaming accept; they refuse expression ordering.
 
 ### Single Field
 
 ```typescript
-// Function syntax
+// Expression form
 .orderBy((ctx) => ctx.p.name, "asc")
 
-// Alias syntax
+// Alias form
 .orderBy("p", "name", "asc")
 ```
 
@@ -52,56 +55,49 @@ const sorted = await store
   .query()
   .from("Task", "t")
   .select((ctx) => ctx.t)
-  .orderBy("t", "priority", "desc")    // Primary sort
-  .orderBy("t", "createdAt", "asc")    // Secondary sort
+  .orderBy("t", "priority", "desc")        // Primary sort
+  .orderBy("t", "meta.createdAt", "asc")   // Secondary sort
   .execute();
 ```
 
-Or use the array syntax:
+### Field Names
 
-```typescript
-.orderBy((ctx) => [
-  { field: ctx.t.priority, direction: "desc" },
-  { field: ctx.t.createdAt, direction: "asc" },
-])
-```
+In the alias form, `field` is typed from the alias's kind. It accepts:
 
-### Temporal System Columns
+- a property the kind declares, by name (`"name"`, `"priority"`);
+- `"id"` and `"kind"`;
+- a metadata field by its path in a selected row: `"meta.validFrom"`,
+  `"meta.validTo"`, `"meta.createdAt"`, `"meta.updatedAt"`,
+  `"meta.deletedAt"`, and on a node alias `"meta.version"`;
+- on an edge alias, `"fromId"` and `"toId"`.
 
-The alias form can order directly by TypeGraph's physical temporal metadata:
-`valid_from`, `valid_to`, `created_at`, `updated_at`, and `deleted_at`. When the
-queried node or edge kinds do not declare a property with that name, it resolves
-to the physical system column:
+The name is the path the value has in a selected row, so
+`orderBy("t", "meta.createdAt")` sorts by the same value a full select returns
+as `row.meta.createdAt`:
 
 ```typescript
 const oldestFirst = await store
   .query()
   .from("Task", "t")
-  .orderBy("t", "valid_from", "asc")
+  .orderBy("t", "meta.validFrom", "asc")
   .select((ctx) => ctx.t)
   .execute();
 ```
 
-The same classification applies whether `orderBy()` appears before or after
-`select()`.
+Because metadata lives under `meta.`, it never collides with a property: a
+kind that declares its own `createdAt` property is ordered by it with
+`orderBy("t", "createdAt")`, and by TypeGraph's creation timestamp with
+`orderBy("t", "meta.createdAt")`.
 
-A declared property takes precedence over same-named temporal metadata. For
-example, if `Task` declares its own `created_at` property,
-`whereNode("t", (field) => field.created_at...)` and
-`orderBy("t", "created_at")` both address `props.created_at`. Rename the
-property when a query must order by TypeGraph's physical `created_at` column.
+Any other name is a compile error, and a `ConfigurationError` at runtime for
+callers the type checker does not reach. The names are the same whether
+`orderBy()` appears before or after `select()`.
 
 ### Null Handling
 
-Control where null values appear:
-
-```typescript
-.orderBy((ctx) => ({
-  field: ctx.p.email,
-  direction: "asc",
-  nulls: "last",  // or "first"
-}))
-```
+Nulls sort last in ascending order and first in descending order, on both
+backends. Nullable system fields (`meta.validFrom`, `meta.validTo`,
+`meta.deletedAt`) and optional properties follow the same rule.
 
 ### Ordering by Edge Properties
 
@@ -233,7 +229,7 @@ const stream = store
   .query()
   .from("Event", "e")
   .select((ctx) => ctx.e)
-  .orderBy("e", "createdAt", "desc")  // Required
+  .orderBy("e", "meta.createdAt", "desc")  // Required
   .stream();
 ```
 
@@ -275,7 +271,7 @@ const feed = await store
   .from("Activity", "a")
   .whereNode("a", (a) => a.userId.eq(currentUserId))
   .select((ctx) => ctx.a)
-  .orderBy("a", "createdAt", "desc")
+  .orderBy("a", "meta.createdAt", "desc")
   .limit(50)
   .execute();
 ```

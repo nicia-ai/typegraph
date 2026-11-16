@@ -185,40 +185,6 @@ function parseQualifiedPathJson(value: string, alias: string): unknown {
   }
 }
 
-/**
- * Where each orderable system column lives on a node or edge built by
- * {@link buildSelectableNode} / `buildSelectableEdge`: `id` and `kind` (and an
- * edge's endpoints) at the top level, the temporal and audit columns under
- * `meta`. A cursor reads an ordered system column's value from this location,
- * and the selective cursor context writes it there, so both selection shapes
- * share one lookup.
- */
-const SELECTABLE_SYSTEM_FIELD_PATHS: Readonly<
-  Record<string, readonly [string] | readonly ["meta", string]>
-> = {
-  id: ["id"],
-  kind: ["kind"],
-  from_id: ["fromId"],
-  to_id: ["toId"],
-  valid_from: ["meta", "validFrom"],
-  valid_to: ["meta", "validTo"],
-  created_at: ["meta", "createdAt"],
-  updated_at: ["meta", "updatedAt"],
-  deleted_at: ["meta", "deletedAt"],
-};
-
-/**
- * The location of system column `column` on a selectable node or edge, or
- * `undefined` when `column` is not a system column.
- */
-export function selectableSystemFieldPath(
-  column: string,
-): readonly string[] | undefined {
-  return Object.hasOwn(SELECTABLE_SYSTEM_FIELD_PATHS, column) ?
-      SELECTABLE_SYSTEM_FIELD_PATHS[column]
-    : undefined;
-}
-
 // Reserved keys that cannot be overwritten by user props
 const RESERVED_NODE_KEYS: ReadonlySet<string> = new Set(["id", "kind", "meta"]);
 const RESERVED_EDGE_KEYS: ReadonlySet<string> = new Set([

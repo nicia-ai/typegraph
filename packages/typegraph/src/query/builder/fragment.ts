@@ -26,9 +26,11 @@ import { type TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
   type EdgeAliasMap,
+  type EdgeOrderField,
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type NodeOrderField,
   type QueryCoordinateState,
   type RecursiveAliasMap,
 } from "./types";
@@ -354,19 +356,35 @@ export function composeFragments(...fragments: readonly unknown[]): unknown {
 // ============================================================
 
 /**
+ * Every name `orderBy(alias, field)` accepts for some node or edge kind of
+ * `G`. A fragment does not know which kind its alias will be bound to, so it
+ * is typed against the whole graph; the builder refuses a name the bound
+ * alias does not declare when the fragment is applied.
+ */
+export type GraphOrderField<G extends GraphDef> =
+  | {
+      [K in keyof G["nodes"]]: NodeOrderField<G["nodes"][K]["type"]>;
+    }[keyof G["nodes"]]
+  | {
+      [K in keyof G["edges"]]: EdgeOrderField<G["edges"][K]["type"]>;
+    }[keyof G["edges"]];
+
+/**
  * Creates a fragment that adds ordering.
  *
  * @example
  * ```typescript
- * const byCreatedAt = orderByFragment<MyGraph, "u">("u", "createdAt", "desc");
+ * const newestFirst = orderByFragment<MyGraph, "u">("u", "meta.createdAt", "desc");
  * ```
  */
 export function orderByFragment<G extends GraphDef, A extends string>(
   alias: A,
-  field: string,
+  field: GraphOrderField<G>,
   direction: "asc" | "desc" = "asc",
 ): FlexibleQueryFragment<G> {
-  return (builder) => builder.orderBy(alias, field, direction);
+  // The bound alias's kind is unknown here; `orderBy` checks `field` against
+  // it at runtime and refuses a name that alias does not accept.
+  return (builder) => builder.orderBy(alias, field as never, direction);
 }
 
 /**

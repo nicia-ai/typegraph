@@ -431,7 +431,7 @@ const friends = await store
     name: ctx.friend.name,
     followedAt: ctx.e.createdAt,
   }))
-  .orderBy("e", "createdAt", "desc")
+  .orderBy("e", "meta.createdAt", "desc")
   .limit(50)
   .execute();
 ```

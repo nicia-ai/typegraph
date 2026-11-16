@@ -15,7 +15,7 @@ const results = await store
   .query()
   .from("User", "u")
   .pipe((q) => q.whereNode("u", ({ status }) => status.eq("active")))
-  .pipe((q) => q.orderBy("u", "createdAt", "desc"))
+  .pipe((q) => q.orderBy("u", "meta.createdAt", "desc"))
   .select((ctx) => ctx.u)
   .execute();
 ```
@@ -32,7 +32,7 @@ const activeOnly = (q) =>
   q.whereNode("u", ({ status }) => status.eq("active"));
 
 const recentFirst = (q) =>
-  q.orderBy("u", "createdAt", "desc");
+  q.orderBy("u", "meta.createdAt", "desc");
 
 const first10 = (q) =>
   q.limit(10);
@@ -92,7 +92,7 @@ import { composeFragments, limitFragment, orderByFragment } from "@nicia-ai/type
 // Compose multiple fragments into one
 const paginatedActiveUsers = composeFragments(
   (q) => q.whereNode("u", ({ status }) => status.eq("active")),
-  (q) => q.orderBy("u", "createdAt", "desc"),
+  (q) => q.orderBy("u", "meta.createdAt", "desc"),
   (q) => q.limit(20)
 );
 
@@ -119,7 +119,7 @@ import {
 
 // Pre-built fragments
 const paginated = composeFragments(
-  orderByFragment("u", "createdAt", "desc"),
+  orderByFragment("u", "meta.createdAt", "desc"),
   limitFragment(20),
   offsetFragment(40)
 );

@@ -805,7 +805,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       .whereNode("i", (i) => i.id.eq(instanceId))
       .traverse("currentState", "e")
       .to("State", "s")
-      .orderBy("e", "validFrom", "asc")
+      .orderBy("e", "meta.validFrom", "asc")
       .select((ctx) => ({
         stateName: ctx.s.name,
         timestamp: ctx.e.validFrom,

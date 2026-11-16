@@ -49,6 +49,7 @@ export type {
 // Builder types users need
 export type {
   AliasMap,
+  AliasOrderField,
   AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
@@ -65,6 +66,7 @@ export type {
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EdgeOrderField,
   EmbeddableOneStatementRead,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
@@ -79,6 +81,7 @@ export type {
   NodeAlias,
   NodeCandidateQuery,
   NodeCandidateSelection,
+  NodeOrderField,
   NodePropsFor,
   OneStatementBatchableQuery,
   OneStatementBatchResults,
@@ -180,6 +183,7 @@ export {
   composeFragments,
   createFragment,
   type FlexibleQueryFragment,
+  type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
