@@ -30,6 +30,8 @@
  */
 import { z } from "zod";
 
+import { objectSchemaShape } from "./kind-schema";
+
 export const SEARCHABLE_FIELD_KEY = "_searchableField" as const;
 
 export const DEFAULT_SEARCHABLE_LANGUAGE = "english" as const;
@@ -207,11 +209,8 @@ export function getSearchableFields(
 function computeSearchableFields(
   schema: z.ZodType,
 ): readonly SearchableFieldInfo[] {
-  if (schema.type !== "object") return [];
-
-  const def = schema.def as { shape?: Record<string, z.ZodType> };
-  const shape = def.shape;
-  if (!shape) return [];
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) return [];
 
   const fields: SearchableFieldInfo[] = [];
   for (const [fieldPath, fieldSchema] of Object.entries(shape)) {

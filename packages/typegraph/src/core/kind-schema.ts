@@ -1,3 +1,5 @@
+import { type z } from "zod";
+
 import { ConfigurationError } from "../errors";
 
 /** The kind entity a property schema is declared for. */
@@ -21,16 +23,24 @@ function receivedSchemaType(schema: unknown): string {
 }
 
 /**
- * Whether `schema` is a Zod object with a readable shape: what every kind's
- * properties are stored, validated and introspected as. Objects wrapped by
+ * The shape of `schema` when it is a Zod object with a readable shape, else
+ * `undefined`: the single owner of "is this a Zod object?". A kind's
+ * properties are stored, validated and introspected as such an object, so
+ * `defineNode` / `defineEdge` refuse anything else, and the schema
+ * introspector reads kind and nested-field shapes through this same answer
+ * (treating `undefined` as an unreadable shape). Objects wrapped by
  * `.refine()` / `.superRefine()` and built with `.extend()` stay objects; a
  * union, intersection, record, a `.transform()` / `.pipe()`, or an object
  * wrapped by `.optional()` / `.readonly()` / `z.lazy()` and similar is not.
  */
-function isObjectSchema(schema: unknown): boolean {
-  if (receivedSchemaType(schema) !== "object") return false;
+export function objectSchemaShape(
+  schema: unknown,
+): Readonly<Record<string, z.ZodType>> | undefined {
+  if (receivedSchemaType(schema) !== "object") return undefined;
   const { def } = schema as Readonly<{ def?: Readonly<{ shape?: unknown }> }>;
-  return typeof def?.shape === "object" && def.shape !== null;
+  return typeof def?.shape === "object" && def.shape !== null ?
+      (def.shape as Readonly<Record<string, z.ZodType>>)
+    : undefined;
 }
 
 /**
@@ -43,7 +53,7 @@ export function assertKindSchemaIsObject(
   name: string,
   schema: unknown,
 ): void {
-  if (isObjectSchema(schema)) return;
+  if (objectSchemaShape(schema) !== undefined) return;
   const schemaType = receivedSchemaType(schema);
   throw new ConfigurationError(
     `${entity} "${name}" schema must be a Zod object (z.object({...})); received a ${schemaType} schema.`,

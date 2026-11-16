@@ -1,6 +1,7 @@
 import { type z } from "zod";
 
 import { getEmbeddingDimensions } from "../core/embedding";
+import { objectSchemaShape } from "../core/kind-schema";
 import {
   getSearchableMetadata,
   type SearchableMetadata,
@@ -361,12 +362,8 @@ export function createSchemaIntrospector(
     }
 
     const schema = kind.schema;
-    if (schema.type !== "object") {
-      return undefined;
-    }
-
-    const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-    if (!shape) {
+    const shape = objectSchemaShape(schema);
+    if (shape === undefined) {
       return undefined;
     }
 
@@ -396,12 +393,8 @@ export function createSchemaIntrospector(
     }
 
     const schema = kind.schema;
-    if (schema.type !== "object") {
-      return undefined;
-    }
-
-    const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-    if (!shape) {
+    const shape = objectSchemaShape(schema);
+    if (shape === undefined) {
       return undefined;
     }
 
@@ -527,15 +520,11 @@ export function createSchemaIntrospector(
  * type for `z.looseObject`, `.passthrough()` and `.catchall()`.
  */
 function isClosedObjectSchema(schema: z.ZodType | undefined): boolean {
-  if (schema?.type !== "object") return false;
-  const def = schema.def as Readonly<{
-    shape?: Record<string, z.ZodType>;
-    catchall?: z.ZodType;
-  }>;
-  return (
-    def.shape !== undefined &&
-    (def.catchall === undefined || def.catchall.type === "never")
-  );
+  if (schema === undefined || objectSchemaShape(schema) === undefined) {
+    return false;
+  }
+  const { catchall } = schema.def as Readonly<{ catchall?: z.ZodType }>;
+  return catchall === undefined || catchall.type === "never";
 }
 
 const registryIntrospectors = new WeakMap<KindRegistry, SchemaIntrospector>();
@@ -692,9 +681,8 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
     };
   }
   if (schemaType === "object") {
-    const shape = (unwrapped.def as { shape?: Record<string, z.ZodType> })
-      .shape;
-    if (!shape) {
+    const shape = objectSchemaShape(unwrapped);
+    if (shape === undefined) {
       return { valueType: "object" };
     }
     const entries = Object.entries(shape).map(
