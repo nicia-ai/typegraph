@@ -111,7 +111,7 @@ extension and pass the strategy explicitly:
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
-import { sqliteVecStrategy } from "@nicia-ai/typegraph";
+import { sqliteVecStrategy } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 const sqlite = new Database("app.db");
 
@@ -1369,10 +1369,11 @@ TypeGraph keeps its public core and backend contracts independent of Drizzle:
   `@nicia-ai/typegraph/postgres/pglite` create managed Stores without exposing
   adapter-native handles.
 
-Application code can continue importing the complete portable Store API from
-`@nicia-ai/typegraph`. Use the `/adapters/drizzle/...` entrypoints only when the
-application deliberately owns a Drizzle connection or needs native transaction
-interop.
+Application code imports the Store factories and everyday types from
+`@nicia-ai/typegraph`, and the Store's option and result types from
+`@nicia-ai/typegraph/store`. Use the `/adapters/drizzle/...` entrypoints only
+when the application deliberately owns a Drizzle connection or needs native
+transaction interop.
 
 Custom insert builders must apply the same born-ended validity rule as the
 built-in adapters. Import its public owner instead of duplicating the bound
@@ -1432,7 +1433,7 @@ path supports the same hooks, history/revision tracking, custom SQL schema,
 query defaults, and migration policy as `createStoreWithSchema`:
 
 ```typescript
-import { createSqlSchema } from "@nicia-ai/typegraph";
+import { createSqlSchema } from "@nicia-ai/typegraph/query";
 
 const store = await createLocalSqliteStore(graph, {
   path: "./graph.db",

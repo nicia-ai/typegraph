@@ -1,6 +1,17 @@
 /**
  * TypeGraph: Type-Driven Embedded Knowledge Graph for TypeScript
  *
+ * The package root is the application surface: the graph and ontology DSL,
+ * the store factories, the everyday query helpers, and the errors an
+ * application catches. Everything else is reachable from a subpath:
+ *
+ * - `@nicia-ai/typegraph/store`: store option, result and surface types
+ * - `@nicia-ai/typegraph/query`: query-builder, fragment and relation types
+ * - `@nicia-ai/typegraph/errors`: the complete error catalogue
+ * - `@nicia-ai/typegraph/identity`: the identity-ledger surface
+ * - `@nicia-ai/typegraph/core`: graph-definition and ontology declaration types
+ * - `@nicia-ai/typegraph/schema`, `/indexes`, `/graph-extension`, ...
+ *
  * @example
  * ```typescript
  * import * as tg from "@nicia-ai/typegraph";
@@ -39,378 +50,47 @@
  *       to: [Company],
  *     },
  *   },
- *   ontology: [
- *     tg.core.disjointWith(Person, Company),
- *   ],
+ *   ontology: [tg.disjointWith(Person, Company)],
  * });
  * ```
  */
 
 // ============================================================
-// Core DSL
+// Graph DSL
 // ============================================================
 
 export {
-  // Type utilities
-  type AllEdgeTypes,
-  type AllNodeTypes,
   asEdgeId,
   asNodeId,
-  // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
-  asRecordedInstant,
-  compareRecordedInstants,
-  // External reference type for hybrid overlay patterns
   createExternalRef,
-  DEFAULT_SEARCHABLE_LANGUAGE,
   defineEdge,
   defineGraph,
   defineNode,
+  type EdgeId,
   type EdgeKinds,
-  // Embedding type for vector search
+  type EdgeProps,
+  type EdgeType,
   embedding,
-  type EmbeddingBrand,
-  type EmbeddingSchema,
-  type EmbeddingValue,
   externalRef,
-  type ExternalRefSchema,
-  type ExternalRefValue,
-  getEdgeKinds,
-  type GetEdgeType,
-  getEmbeddingDimensions,
-  getExternalRefTable,
-  getNodeKinds,
-  type GetNodeType,
-  getSearchableMetadata,
   type GraphDef,
-  type GraphIdentityConfig,
-  // Type guards
-  isEdgeTargetMap,
-  isEdgeType,
-  isEdgeTypeWithEndpoints,
-  isEmbeddingSchema,
-  isExternalRefSchema,
-  isGraphDef,
-  isNodeType,
-  isSearchableSchema,
+  type NodeId,
   type NodeKinds,
-  type RecordedInstant,
-  recordedInstant,
-  recordedInstantOwner,
-  recordedInstantRevision,
-  recordedInstantWallTime,
-  // Vector-slot enumeration for manual provisioning (the boot step
-  // createStoreWithSchema performs via backend.ensureVectorSlotContribution)
-  resolveGraphVectorSlots,
-  type RestoredRecordedInstant,
-  // Searchable type for fulltext search
+  type NodeProps,
+  type NodeType,
   searchable,
-  type SearchableMetadata,
-  type SearchableOptions,
-  type SearchableSchema,
 } from "./core";
 
 // ============================================================
-// Operational Identity
+// Ontology DSL
 // ============================================================
 
 export {
-  asIdentityAssertionId,
-  IDENTITY_REPLAY_DEFAULT_LIMIT,
-  IDENTITY_REPLAY_MAX_LIMIT,
-  type IdentityAssertion,
-  type IdentityAssertionId,
-  // The governing decision a merge attaches to the identity transitions it
-  // causes — named on `StoreRuntime.applyIdentityMergeAtTarget`, so a backend
-  // or store author implementing the port needs it by name.
-  type IdentityAssertionResult,
-  type IdentityAssertionWriteFacade,
-  type IdentityClass,
-  type IdentityClassPage,
-  type IdentityClassPageOptions,
-  type IdentityDecisionProvenance,
-  type IdentityFacade,
-  type IdentityHistoryCompleteness,
-  type IdentityHistoryIncompleteReason,
-  type IdentityNode,
-  type IdentityNodeReference,
-  type IdentityNodeRefInput,
-  type IdentityPair,
-  type IdentityReadFacade,
-  type IdentityRelation,
-  type IdentityReplay,
-  type IdentityReplayOptions,
-  type IdentityReplayStep,
-  type IdentitySamePathStep,
-  type IdentityTransition,
-  type IdentityTransitionCause,
-  type IdentityTransitionCursor,
-  type IdentityTransitionCut,
-  type IdentityTransitionHistory,
-  type IdentityTransitionPruneResult,
-  type IdentityTransitionRetention,
-  type IdentityTransitionTransfer,
-  type IdentityValidityWindow,
-  type IdentityWriteSummary,
-  pruneIdentityTransitions,
-  rebuildIdentityClosure,
-  type RecordedIdentityTransition,
-  type RestoredIdentityTransition,
-  type TransitionPageCursor,
-} from "./identity";
-
-// ============================================================
-// Backend Types
-// ============================================================
-
-export type { RecursiveTraversalVerdict } from "./backend/capabilities/recursive-traversal";
-export type {
-  ContributionScope,
-  StrategyTableContribution,
-  TableContribution,
-} from "./backend/table-contribution";
-export { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "./backend/table-contribution";
-export type {
-  AdapterBackend,
-  AdapterBackendTransactions,
-  AdoptedSchemaWriteTransaction,
-  BackendCapabilities,
-  BackendExecutionCapabilities,
-  BackendIdentity,
-  BackendLifecycle,
-  BackendMaintenance,
-  BackendTransactions,
-  CommitSchemaVersionExpected,
-  CommitSchemaVersionIfKindsEmptyResult,
-  CommitSchemaVersionParams,
-  CompareAndSetNodeParams,
-  ContributionCapabilities,
-  ContributionDiagnostic,
-  ContributionDiagnosticState,
-  ContributionMaterializationBackend,
-  ContributionProbeContribution,
-  ContributionProbeEntry,
-  ContributionProbeResult,
-  ContributionProbeState,
-  ContributionRebuildResult,
-  ContributionRebuildScope,
-  ContributionRepairEntry,
-  ContributionRepairResult,
-  ContributionRepopulationStats,
-  DeleteFulltextBatchParams,
-  DurableEdgeBatchMembers,
-  EdgeConvergeCreateCommand,
-  EdgeConvergeCreateCommandResult,
-  EdgeConvergenceMatch,
-  EdgeCreateCommand,
-  EdgeCreateCommandResult,
-  EdgeEndpointAllowance,
-  EdgeEntityReadBackend,
-  EdgeEntityWriteBackend,
-  FilteredApproximateSearch,
-  FilteredApproximateSearchMode,
-  FindEdgesByHeterogeneousEndpointSetParams,
-  FulltextBatchRow,
-  FulltextCapabilities,
-  FulltextOperationBackend,
-  FulltextQueryMode,
-  FulltextSearchParams,
-  FulltextSearchResult,
-  GraphAnalyticsCapabilities,
-  GraphBackend,
-  GraphCommand,
-  GraphCommandCoordination,
-  GraphCommandExecutionContext,
-  GraphCommandIsolation,
-  GraphCommandPort,
-  GraphCommandResult,
-  GraphCommandSession,
-  GraphEntityReadBackend,
-  GraphEntityWriteBackend,
-  GraphLifecycleBackend,
-  GraphWriteFenceAcquisition,
-  HardDeleteUniquesByConcreteKindParams,
-  HardDeleteUniquesByNodeIdsParams,
-  IndexMaterializationBackend,
-  LockSchemaVersionForWriteParams,
-  ManagedEdgeCreatePlan,
-  ManagedNodeCreateMode,
-  ManagedNodeCreatePlan,
-  MisassignedEdgeEndpointRow,
-  NodeCreateCommand,
-  NodeCreateCommandResult,
-  NodeEntityReadBackend,
-  NodeEntityWriteBackend,
-  NodeInsertClaim,
-  NodeInsertClaimVerdict,
-  NodeInsertProjection,
-  NodePropertyExpectation,
-  PopulatedSchemaKind,
-  QueryExecutionBackend,
-  RawQueryExecutionBackend,
-  RawStatementExecutionBackend,
-  RecursiveTraversalCapability,
-  RemovalMaterializationBackend,
-  ResolvedNodeUpdateBatchEntry,
-  ResolvedNodeUpdateBatchParams,
-  SchemaCommitBackend,
-  SchemaKindEmptinessProbe,
-  SchemaProvisioning,
-  SchemaReadBackend,
-  SchemaVersionRow,
-  SchemaWriteFenceBackend,
-  SetActiveVersionParams,
-  TransactionBackend,
-  TransactionOptions,
-  TransactionReadBackend,
-  TrustedImportOptions,
-  TrustedImportSession,
-  UniqueConstraintBackend,
-  UpdateNodeSetParams,
-  UpdateNodeSetResult,
-  UpsertFulltextBatchParams,
-  VectorCapabilities,
-  VectorOperationBackend,
-  VectorSearchFrontierTuning,
-} from "./backend/types";
-export {
-  type RowProps,
-  rowPropsToJsonText,
-  rowPropsToObject,
-  supportsInteractiveTransactions,
-  supportsRootAtomicBatch,
-} from "./backend/types";
-export type { FulltextStrategy } from "./query/dialect/fulltext-strategy";
-export {
-  fts5Strategy,
-  tsvectorStrategy,
-} from "./query/dialect/fulltext-strategy";
-
-// ============================================================
-// Vector Strategy (pluggable per-(kind, field) vector storage)
-// ============================================================
-
-export { libsqlVectorStrategy } from "./query/dialect/vector/libsql-strategy";
-export {
-  createPgvectorStrategy,
-  pgvectorStrategy,
-} from "./query/dialect/vector/pgvector-strategy";
-export { sqliteVecStrategy } from "./query/dialect/vector/sqlite-vec-strategy";
-export {
-  buildVectorCapabilities,
-  type VectorSlot,
-  type VectorStrategy,
-} from "./query/dialect/vector-strategy";
-
-// ============================================================
-// Graph Storage Inventory (which graphs a database holds, and what each holds)
-// ============================================================
-
-export {
-  type GraphStorageConsistency,
-  type GraphStorageInspection,
-  type GraphStorageRelation,
-  listGraphIds,
-  type ListGraphIdsOptions,
-} from "./backend/graph-storage";
-export { inspectGraphStorage } from "./store/inspect-graph-storage";
-
-// ============================================================
-// Vector Storage Migration (one-time shared-table → per-field cutover)
-// ============================================================
-
-export {
-  deleteLegacyRecordedAnchorMap,
-  type DeleteLegacyRecordedAnchorMapOptions,
-  migrateLegacyRecordedTime,
-  type MigrateLegacyRecordedTimeOptions,
-  type MigrateLegacyRecordedTimeResult,
-  migrateRecordedAnchor,
-  type MigrateRecordedAnchorOptions,
-} from "./backend/migrate-recorded-time";
-export {
-  type LegacyEmbeddingSlotConfig,
-  migrateLegacyEmbeddings,
-  type MigrateLegacyEmbeddingsOptions,
-  type MigrateLegacyEmbeddingsResult,
-} from "./backend/migrate-vectors";
-export {
-  repairInvertedValidityWindows,
-  type RepairInvertedWindowsOptions,
-  type RepairInvertedWindowsReport,
-  type RepairRelation,
-  type RepairRelationScope,
-} from "./backend/repair-validity-windows";
-
-// ============================================================
-// Core Types
-// ============================================================
-
-export type {
-  AnyEdgeType,
-  Cardinality,
-  Collation,
-  DefineEdgeOptions,
-  DefineNodeOptions,
-  DeleteBehavior,
-  EdgeId,
-  EdgeMatchIdentity,
-  EdgeProps,
-  EdgeRegistration,
-  EdgeTargetMap,
-  EdgeTargets,
-  EdgeType,
-  EdgeTypeWithEndpoints,
-  EndpointExistence,
-  EndpointPair,
-  GraphAnnotations,
-  GraphDefaults,
-  JsonScalar,
-  JsonValue,
-  KindAnnotations,
-  NodeId,
-  NodeProps,
-  NodeRegistration,
-  NodeType,
-  TargetCardinality,
-  TemporalMode,
-  UniqueConstraint,
-  UniquenessScope,
-} from "./core";
-
-// ============================================================
-// Ontology
-// ============================================================
-
-export type {
-  CompositionExistence,
-  CompositionOptions,
-  CompositionPartSide,
-  CompositionViaRef,
-  EquivalentToCheck,
-  MetaEdge,
-  MetaEdgeProperties,
-  OntologyRelation,
-  PolymorphicNodeType,
-  StructuralSubtypeMismatch,
-  SubClassOfCheck,
-  TypedOntologyRelation,
-} from "./ontology";
-export {
-  // Individual relation factories (for convenience)
   broader,
-  // Transitive-closure utilities (reason over subClassOf/equivalentTo hierarchies)
-  computeTransitiveClosure,
-  // Core ontology module
-  core,
   disjointWith,
   equivalentTo,
   hasPart,
   implies,
   inverseOf,
-  invertClosure,
-  // Type guards
-  isMetaEdge,
-  isReachable,
   narrower,
   partOf,
   relatedTo,
@@ -418,575 +98,37 @@ export {
 } from "./ontology";
 
 // ============================================================
-// Errors
-// ============================================================
-
-export type {
-  BaseSchemaMigrationErrorDetails,
-  CardinalityErrorDetails,
-  CompositionConfigurationCode,
-  CompositionCycleErrorDetails,
-  CompositionErrorDetails,
-  CompositionExistenceErrorDetails,
-  ContributionRebuildRefusal,
-  ContributionUnavailableErrorDetails,
-  DatabaseOperationErrorDetails,
-  DisjointErrorDetails,
-  EagerMaterializationErrorDetails,
-  EdgeAcyclicityErrorDetails,
-  EdgeAcyclicityIndeterminateErrorDetails,
-  EdgeCycleWitness,
-  EdgeNotFoundErrorDetails,
-  EmbeddingDimensionChangedErrorDetails,
-  EndpointErrorDetails,
-  EndpointNotFoundErrorDetails,
-  EndpointPairErrorDetails,
-  ErrorCategory,
-  IdentityContradictionErrorDetails,
-  IdentityEndpointValidityErrorDetails,
-  IdentityReplayErrorDetails,
-  IdentitySeparationViolationErrorDetails,
-  IdentityTransitionLogOperation,
-  IdentityValidityWindowErrorDetails,
-  InvalidEdgeWeightErrorDetails,
-  InvalidEdgeWeightReason,
-  KindNotFoundErrorDetails,
-  MigrationErrorDetails,
-  MigrationFailureReason,
-  NodeConstraintNotFoundErrorDetails,
-  NodeDeletePlanMismatchErrorDetails,
-  NodeIndexNotFoundErrorDetails,
-  NodeNotFoundErrorDetails,
-  RecordedCaptureGuardCode,
-  RecordedCaptureGuardError,
-  RestrictedDeleteErrorDetails,
-  RuntimeKindTokenFailure,
-  SchemaContentConflictErrorDetails,
-  SchemaMismatchErrorDetails,
-  SchemaTighteningRefusalDetails,
-  StaleVersionErrorDetails,
-  StoreNotInitializedErrorDetails,
-  StoreNotInitializedReason,
-  TransactionConflictErrorDetails,
-  TrustedImportErrorReason,
-  TypeGraphErrorOptions,
-  UniquenessErrorDetails,
-  ValidationErrorDetails,
-  ValidationIssue,
-  VersionConflictErrorDetails,
-} from "./errors";
-export {
-  // Error classes
-  BackendDisposedError,
-  BaseSchemaAdoptionTimeoutError,
-  BaseSchemaMigrationError,
-  CardinalityError,
-  CompilerInvariantError,
-  CompositionConfigurationError,
-  CompositionCycleError,
-  CompositionError,
-  CompositionExistenceError,
-  ConfigurationError,
-  ContributionRebuildUnsupportedError,
-  ContributionUnavailableError,
-  DatabaseOperationError,
-  DisjointError,
-  EagerMaterializationError,
-  EDGE_IDENTITY_MISMATCH_CODE,
-  EdgeAcyclicityError,
-  EdgeAcyclicityIndeterminateError,
-  EdgeMatchIdentityConflictError,
-  EdgeNotFoundError,
-  EmbeddingDimensionChangedError,
-  EndpointError,
-  EndpointNotFoundError,
-  EndpointPairError,
-  ENTITY_ALREADY_EXISTS_CODE,
-  ExportStreamCancelledError,
-  ExportStreamIdleTimeoutError,
-  // Error utility functions
-  getErrorSuggestion,
-  GraphAlgorithmConvergenceError,
-  GraphAllocationMismatchError,
-  IdentityContradictionError,
-  IdentityEndpointValidityError,
-  IdentityReplayError,
-  IdentitySeparationViolationError,
-  IdentityValidityWindowError,
-  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
-  InvalidEdgeWeightError,
-  INVERTED_VALIDITY_WINDOW_CODE,
-  isConstraintError,
-  isRecordedCaptureGuardError,
-  isSystemError,
-  isTypeGraphError,
-  isUserRecoverable,
-  KindNotFoundError,
-  MIGRATION_FAILURE_REASONS,
-  MigrationError,
-  NodeConstraintNotFoundError,
-  NodeDeletePlanMismatchError,
-  NodeIndexNotFoundError,
-  NodeNotFoundError,
-  RECORDED_CAPTURE_GUARD_CODES,
-  RestrictedDeleteError,
-  RuntimeKindTokenError,
-  SchemaChangedError,
-  type SchemaChangedErrorDetails,
-  SchemaContentConflictError,
-  type SchemaFencePhase,
-  SchemaFenceTimeoutError,
-  type SchemaFenceTimeoutErrorDetails,
-  SchemaMismatchError,
-  StaleVersionError,
-  StoreNotInitializedError,
-  TransactionClosedError,
-  TransactionConflictError,
-  TrustedImportError,
-  TypeGraphError,
-  UniquenessError,
-  UnsupportedBackendCapabilityError,
-  UnsupportedPredicateError,
-  ValidationError,
-  VersionConflictError,
-} from "./errors";
-
-// ============================================================
 // Store
 // ============================================================
 
-export type {
-  RuntimeEdgeKind,
-  RuntimeEdgeTypeFor,
-  RuntimeNodeKind,
-  RuntimeNodeTypeFor,
-} from "./core/runtime-kind";
-export {
-  type ExternalRecordedReadSource,
-  type RecordedReadSource,
-  recordedRelation,
-  type RecordedRelationOptions,
-  type RecordedSourceTable,
-} from "./query/compiler/schema";
-export type {
-  AdapterHistoryStore,
-  AdapterHistoryTransactionContext,
-  AdapterRecordedReadStore,
-  AdapterStore,
-  BatchReadBuilder,
-  BulkEdgeSourceGroup,
-  BulkFindEdgesFromParams,
-  BulkFindEdgesFromResult,
-  BulkFindEdgesToParams,
-  BulkFindEdgesToResult,
-  BulkFindRuntimeEdgesFromParams,
-  BulkFindRuntimeEdgesFromResult,
-  CheckedReadScope,
-  ClaimOwner,
-  ClaimTarget,
-  ConstraintFenceViolation,
-  EdgeIntrospection,
-  EdgeReadWindow,
-  EvolvedTransactionOptions,
-  EvolvedTransactionOutcome,
-  FulltextSearchHit,
-  FulltextSearchOptions,
-  GraphEdgeForKinds,
-  GraphNodeReference,
-  HistoryStore,
-  HistoryStoreBackend,
-  HybridFulltextOptions,
-  HybridFusionOptions,
-  HybridSearchHit,
-  HybridSearchOptions,
-  HybridVectorOptions,
-  KindIntrospection,
-  KindPopulationStatistics,
-  MaterializeIndexesEntry,
-  MaterializeIndexesOptions,
-  MaterializeIndexesResult,
-  MaterializeRemovalsEntry,
-  MaterializeRemovalsOptions,
-  MaterializeRemovalsResult,
-  MaterializeSystemIndexesOptions,
-  MeasurableAdapterHistoryTransactionContext,
-  NeighborNodeOrderField,
-  NeighborOrder,
-  NeighborOrderField,
-  NeighborReadOptions,
-  NeighborResult,
-  OntologyIntrospection,
-  PlanEvolutionOptions,
-  PropertyPopulationStatistics,
-  RebuildContributionOptions,
-  RebuildFulltextOptions,
-  RebuildFulltextResult,
-  ReclaimedVectorFieldEntry,
-  ReconciledSchema,
-  RecordedAdjacencyEntry,
-  RecordedAdjacencyOptions,
-  RecordedAdjacencyPage,
-  RecordedReadStore,
-  RecordedScanOptions,
-  RecordedScanPage,
-  ReembedFunction,
-  ReembedVectorFieldOptions,
-  ReembedVectorFieldResult,
-  RefreshSchemaOptions,
-  SchemaIntrospection,
-  SchemaManagerOptions,
-  SchemaValidationResult,
-  SearchScopeOptions,
-  Store,
-  StoreAnalysisCursorStaleErrorDetails,
-  StoreAnalysisSchemaCoordinate,
-  StoreDescription,
-  StoreEvolution,
-  StorePopulationStatistics,
-  StoreTransactionOptions,
-  StoreValidationFailure,
-  StoreValidationPage,
-  UniqueIntrospection,
-  ValidateStoreOptions,
-  VectorSearchHit,
-  VectorSearchOptions,
-} from "./store";
-export type {
-  EdgeBatchReads,
-  EdgeCollectionLookup,
-  EdgeTemporalReads,
-  EdgeWrites,
-  EngineRevision,
-  EntityKey,
-  LineageDelta,
-  NodeCollectionLookup,
-  NodeCurrentReads,
-  NodeTemporalReads,
-  NodeWrites,
-  RecordedStoreViewEdgeCollection,
-  RecordedStoreViewEdgeCollections,
-  RecordedStoreViewNodeCollection,
-  RecordedStoreViewNodeCollections,
-  RequiredEdgeCollectionLookup,
-  RequiredNodeCollectionLookup,
-  StoreViewCanReachOptions,
-  StoreViewCoordinate,
-  StoreViewDegreeOptions,
-  StoreViewEdgeCollection,
-  StoreViewEdgeCollections,
-  StoreViewGraphAlgorithms,
-  StoreViewLabelPropagationOptions,
-  StoreViewNeighborsOptions,
-  StoreViewNodeCollection,
-  StoreViewNodeCollections,
-  StoreViewPageRankOptions,
-  StoreViewPersonalizedPageRankOptions,
-  StoreViewReachableOptions,
-  StoreViewShortestPathOptions,
-  StoreViewSubgraphOptions,
-  StoreViewWeaklyConnectedComponentsOptions,
-  StoreViewWeightedShortestPathOptions,
-  TypedRecordedStoreViewEdgeCollection,
-  TypedStoreViewEdgeCollection,
-} from "./store";
+export type { GraphBackend } from "./backend/types";
 export {
   createAdapterStore,
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedAdapterStore,
-  createVerifiedStore,
-  RecordedStoreView,
-  StoreAnalysisCursorStaleError,
-  StoreSearch,
-  StoreView,
+  type Store,
 } from "./store";
-// Reads of the committed schema: the document, its version, and whether one
-// exists at all. Also available from the "./schema" subpath alongside the
-// migration machinery.
 export type {
-  EvolutionPlan,
-  EvolutionRequirement,
-  EvolutionRequirements,
-  GraphAnnotationsChange,
-  IdentityChange,
-  SchemaHash,
-  SchemaIdentity,
-  SerializedSchema,
-} from "./schema";
-export type { GraphTemplate, InstantiateGraphTemplateResult } from "./schema";
-export {
-  getActiveSchema,
-  getCommittedSchemaVersion,
-  instantiateGraph,
-  instantiateGraphTemplate,
-  isSchemaInitialized,
-  registerGraphTemplate,
-} from "./schema";
-// The constraints a schema commit refuses to strand, for a consumer
-// narrowing `MigrationErrorDetails` on
-// `reason: "unique-constraint-requires-empty-kind"`. Also available from the
-// "./schema" subpath.
-export type { UniquenessClaimGate } from "./schema";
-// The axes a schema commit's edge-cardinality tightening owes, for a
-// consumer narrowing `MigrationErrorDetails` on
-// `reason: "edge-cardinality-tightening-violated"` or
-// `"ontology-tightening-violated"`. Also available from the "./backend"
-// subpath.
-// `CompositionClaimScope` is exported alongside it: it is `EdgeCardinalityDeclaration.scope`'s
-// only non-`undefined` member, so a consumer narrowing that field needs it
-// too, without reaching into `./backend/types` directly.
-export type {
-  CompositionClaimScope,
-  EdgeCardinalityDeclaration,
-} from "./backend/types";
-// `EdgeCardinalityDeclaration` and `CardinalityErrorDetails.direction` are
-// both built from these two: a consumer narrowing either one needs to name
-// the intersection member (`EdgeCardinalityAxisRef`) or the bare direction
-// discriminant (`EdgeCardinalityDirection`) without reaching into
-// `store/claims/edge-claims` directly.
-export type {
-  AlgorithmCyclePolicy,
-  BaseTraversalOptions,
-  DegreeOptions,
-  GraphAlgorithms,
-  LabelPropagationMembership,
-  LabelPropagationOptions,
-  NeighborsOptions,
-  NodeIdentifier,
-  PageRankOptions,
-  PageRankScore,
-  PathNode,
-  PersonalizedPageRankOptions,
-  PersonalizedPageRankSeed,
-  ReachableNode,
-  ReachableOptions,
-  ShortestPathOptions,
-  ShortestPathResult,
-  TemporalAlgorithmOptions,
-  TraversalDirection,
-  WeaklyConnectedComponentMembership,
-  WeaklyConnectedComponentsOptions,
-  WeightedShortestPathOptions,
-  WeightedShortestPathResult,
-} from "./store/algorithms";
-export type {
-  EdgeCardinalityAxisRef,
-  EdgeCardinalityDirection,
-} from "./store/claims/edge-claims";
-export type {
-  AnyEdge,
-  AnyNode,
-  SubgraphCompositionSelection,
-  SubgraphEdgeKey,
-  SubgraphEdgeLookup,
-  SubgraphEdgeResult,
-  SubgraphIndex,
-  SubgraphKindSelection,
-  SubgraphNodeKey,
-  SubgraphNodeLookup,
-  SubgraphNodeResult,
-  SubgraphOptions,
-  SubgraphResult,
-  SubgraphResultEdgeKinds,
-  SubsetEdge,
-  SubsetNode,
-} from "./store/subgraph";
-export { defineSubgraphProject, indexSubgraph } from "./store/subgraph";
-export type {
-  AdapterTransactionContext,
-  BaseStoreOptions,
-  BulkOperationHookContext,
-  CompareAndSetAbsent,
-  CompareAndSetExpected,
-  CompositionAttachment,
-  CompositionAttachmentProps,
-  CompositionCascadedPart,
-  CompositionHeldEdge,
-  CompositionNodeRef,
-  CompositionWholeInput,
-  CompositionWholeReference,
-  ConstraintNames,
-  CreateEdgeInput,
-  CreateNodeInput,
-  DynamicEdgeCollection,
-  DynamicNode,
-  DynamicNodeCollection,
-  DynamicNodeReference,
-  DynamicStoreViewEdgeCollection,
   Edge,
-  EdgeBulkFindEndpointOptions,
-  EdgeBulkFindOptions,
   EdgeCollection,
-  EdgeEndpointRef,
-  EdgeFindByEndpointsOptions,
-  EdgeGetOrCreateByEndpointsOptions,
-  EdgeGetOrCreateByEndpointsResult,
-  EdgeInGraph,
-  GetOrCreateAction,
-  GraphEdgeCollections,
-  GraphNodeCollections,
-  GraphNodeForKinds,
-  GraphNodeReferenceInput,
-  HeterogeneousNodeUpsertInput,
-  HeterogeneousNodeUpsertResult,
-  HistoryStoreOptions,
-  HistoryTransactionContext,
-  HookContext,
-  IfExistsMode,
-  LiveStoreOptions,
-  MeasurableAdapterTransactionContext,
-  MeasurableHistoryTransactionContext,
-  MeasurableTransactionContext,
   Node,
-  NodeBulkFindByIndexOptions,
-  NodeBulkGetOrCreateByConstraintItem,
-  NodeBulkGetOrCreateByConstraintOptions,
   NodeCollection,
-  NodeCreateOptions,
-  NodeDeleteOptions,
-  NodeDeletePlan,
-  NodeGetOrCreateByConstraintOptions,
-  NodeGetOrCreateByConstraintResult,
   NodeRef,
-  NodeReferenceLookup,
-  NodeReparentOptions,
-  NodeReparentResult,
-  NoRecordedCoordinate,
-  OperationHookContext,
-  PolymorphicNodeReference,
-  QueryHookContext,
-  QueryOptions,
-  RecordedHeterogeneousNodeWriteBatch,
-  RecordedReadStoreOptions,
-  RecordedRevisionRequest,
-  RuntimeBulkEdgeSourceGroup,
-  RuntimeEdgeCollection,
-  RuntimeEdgeFor,
-  RuntimeNodeCollection,
-  RuntimeNodeReferenceFor,
-  ScopedMeasure,
-  SqlAvailability,
-  StoreHooks,
   StoreOptions,
-  StoreProjection,
-  StoreRef,
   TransactionContext,
-  TransactionOutcome,
-  TransactionReceipt,
-  TypedEdgeCollection,
-  UnboundLiveStoreOptions,
-  UpdateEdgeInput,
-  UpdateNodeInput,
-  ValidityEndMutation,
-  WorkingCopyOptions,
 } from "./store/types";
-export { compareAndSetAbsent } from "./store/types";
 
 // ============================================================
 // Query
 // ============================================================
 
-// Types
-export type {
-  AggregateResult,
-  AliasMap,
-  AliasOrderField,
-  AssignableNodeKinds,
-  BatchableQuery,
-  BatchResults,
-  CommonPropertyKeys,
-  CompiledOneStatementRead,
-  CompiledRowsSql,
-  CompiledSelectSql,
-  CompiledStatementSql,
-  CompositionNavigationOptions,
-  CompositionWholeKinds,
-  DynamicEdgeAccessor,
-  DynamicEdgeType,
-  DynamicFieldBuilder,
-  DynamicNodeAccessor,
-  DynamicNodeKind,
-  DynamicNodeType,
-  DynamicSelectableEdge,
-  DynamicSelectableNode,
-  EdgeAccessor,
-  EdgeOrderField,
-  EmbeddableOneStatementRead,
-  EmptyAliasMap,
-  EmptyEdgeAliasMap,
-  EmptyRecursiveAliasMap,
-  ExecutableOneStatementRead,
-  FieldAccessor,
-  FieldRef,
-  IdentityTraversalOption,
-  InitialQueryBuilder,
-  IntentSql,
-  JsonPointer,
-  JsonPointerFor,
-  JsonPointerInput,
-  JsonPointerSegment,
-  JsonPointerSegments,
-  JsonPointerSegmentsFor,
-  NodeAccessor,
-  NodeAlias,
-  NodeCandidateQuery,
-  NodeCandidateSelection,
-  NodeOrderField,
-  NodePropsFor,
-  OneStatementBatchableQuery,
-  OneStatementBatchResults,
-  OrderSpec,
-  PaginatedResult,
-  PaginateOptions,
-  Predicate,
-  PropsAccessor,
-  QualifiedRecursivePath,
-  QualifiedRecursivePathEdge,
-  QualifiedRecursivePathElement,
-  QualifiedRecursivePathNode,
-  QualifiedRecursivePathOption,
-  QueryCoordinateState,
-  RecursiveTraversalOptions,
-  ResolvedSqlTableNames,
-  ResolveJsonPointer,
-  ResolveJsonPointerSegments,
-  SelectableEdge,
-  SelectableNode,
-  SelectContext,
-  SortDirection,
-  SqlDialect,
-  SqlIntent,
-  SqlSchema,
-  SqlTableNames,
-  StreamOptions,
-  SubsumedNodeType,
-  TraversalExpansion,
-} from "./query";
-export type { ParameterRef } from "./query/ast";
-
-// Functions and classes
 export {
-  // Aggregate functions
   avg,
-  // Fragment composition
-  composeFragments,
   count,
   countDistinct,
-  countDistinctEdges,
-  countEdges,
-  createFragment,
-  createQueryBuilder,
-  // SQL schema configuration
-  createSqlSchema,
-  DEFAULT_SQL_SCHEMA,
-  ExecutableAggregateQuery,
-  ExecutableQuery,
-  // Subquery predicates
   exists,
   field,
-  fieldRef,
-  // HAVING helpers
   having,
   havingEq,
   havingGt,
@@ -994,188 +136,44 @@ export {
   havingLt,
   havingLte,
   inSubquery,
-  isParameterRef,
-  joinJsonPointers,
-  jsonPointer,
-  limitFragment,
   max,
-  MAX_EXPLICIT_RECURSIVE_DEPTH,
-  MAX_JSON_POINTER_DEPTH,
-  MAX_RECURSIVE_DEPTH,
   min,
-  normalizeJsonPointer,
   notExists,
   notInSubquery,
-  offsetFragment,
-  orderByFragment,
-  // Parameterized queries
+  type PaginatedResult,
   param,
-  parseJsonPointer,
-  PreparedQuery,
-  QueryBuilder,
+  type Predicate,
   sum,
-  UnionableQuery,
 } from "./query";
-
-// The one expansion axis a `from`/`to` alias, a store-wide default, and
-// `search()` state (the default and search forms exclude `"narrower"`), the
-// options bag a `from`/`to` wrapper forwards, and the alias type a forwarded
-// bag resolves to.
-export type {
-  AliasExpansionAxis,
-  AliasExpansionOptions,
-  DefaultAliasExpansionAxis,
-  ExpansionAliasNodeType,
-  ForwardedExpansionAxes,
-} from "./query";
-export {
-  DEFAULT_ALIAS_EXPANSION_AXIS,
-  SEARCH_EXPANSION_DEFAULT,
-} from "./query";
-
-// Fragment composition types
-export type {
-  FlexibleQueryFragment,
-  GraphOrderField,
-  QueryFragment,
-  TraversalFragment,
-} from "./query";
-export {
-  isSqlFragment,
-  Placeholder,
-  type RenderedSql,
-  renderPostgres,
-  renderSql,
-  renderSqlInline,
-  renderSqlite,
-  sql,
-  type SqlChunk,
-  type SqlFragment,
-  type SqlIdentifierChunk,
-  type SqlParameterChunk,
-  type SqlPlaceholderChunk,
-  type SqlTag,
-  type SqlTextChunk,
-} from "./query";
+export { expr } from "./query/expressions";
 
 // ============================================================
-// Indexes
+// Errors
 // ============================================================
 
 export {
-  andWhere,
-  defineEdgeIndex,
-  defineNodeIndex,
-  type EdgeIndexConfig,
-  type EdgeIndexDeclaration,
-  type EdgeIndexDirection,
-  type EdgeIndexWhereBuilder,
-  type IndexDeclaration,
-  type IndexOrigin,
-  type IndexScope,
-  type IndexWhereExpression,
-  type IndexWhereFieldBuilder,
-  type IndexWhereInput,
-  NODE_SYSTEM_COLUMN_NAMES,
-  type NodeIndexConfig,
-  type NodeIndexDeclaration,
-  type NodeIndexKey,
-  type NodeIndexKeyInput,
-  type NodeIndexWhereBuilder,
-  type NodeSystemColumnName,
-  notWhere,
-  orWhere,
-  SYSTEM_INDEX_DECLARATIONS,
-  type SystemIndexDeclaration,
-  type SystemIndexTable,
-} from "./indexes";
-
-// ============================================================
-// Graph Extension
-// ============================================================
-//
-// The root surface intentionally keeps only the entry points, the
-// top-level document type, version constants, error classes, and the
-// types you need to inspect a validation/incompatibility error. The
-// per-property / per-shape document types
-// (`Extension*Property`, `ExtensionNodeDef`, `ExtensionEdgeDef`,
-// `Extension*Index`, etc.) live behind
-// `@nicia-ai/typegraph/graph-extension` — agent-prompt builders and
-// codegen tools reach for them explicitly so the root surface stays
-// small. Adding to this list later is a non-breaking change; removing
-// from it is not.
-
-export type {
-  GraphExtension,
-  GraphExtensionEdgeIntrospection,
-  GraphExtensionIssue,
-  GraphExtensionIssueCode,
-  GraphExtensionKindIntrospection,
-  GraphExtensionVersion,
-  IncompatibleChange,
-  KindReferent,
-} from "./graph-extension";
-export {
-  CURRENT_GRAPH_EXTENSION_VERSION,
-  defineGraphExtension,
-  GraphExtensionError,
-  GraphExtensionUnresolvedEndpointError,
-  GraphExtensionUnresolvedOntologyEndpointError,
-  GraphExtensionValidationError,
-  GraphExtensionVersionUnsupportedError,
-  IncompatibleChangeError,
-  introspectGraphExtension,
-  KindCollisionError,
-  KindHasReferentsError,
-  LEGACY_GRAPH_EXTENSION_VERSION,
-  RemoveCompileTimeKindError,
-  validateGraphExtension,
-} from "./graph-extension";
-
-// ============================================================
-// Utilities
-// ============================================================
-
-export type { GraphAllocationOwner } from "./core/allocation-owner";
-export {
-  type DatabaseProjection,
-  ExecutableProjectionQuery,
-  type ProjectionResult,
-} from "./query/builder/executable-projection-query";
-export type {
-  ExpressionAliasContext,
-  ExpressionValue,
-  QueryExpressionContext,
-} from "./query/builder/expression-context";
-export type { BatchOnceOptions } from "./query/builder/one-statement-batch";
-export type {
-  PreparedBindings,
-  PreparedParameterDeclaration,
-} from "./query/builder/prepared-bindings";
-export {
-  ExecutableRelationQuery,
-  type RelationColumnContext,
-  type RelationProjection,
-  type RelationProjectionResult,
-  type TopPerPartitionOptions,
-  type TopPerPartitionOrder,
-} from "./query/builder/relation";
-export {
-  type CollectedRecord,
-  type CollectOptions,
-  type CollectOrder,
-  type CollectRecordFields,
-  type CollectRecordOperand,
-  type DatabaseExpression,
-  expr,
-} from "./query/expressions";
-export type {
-  PruneRecordedInstantsOptions,
-  PruneRecordedInstantsResult,
-} from "./store/recorded-anchor-log";
-export {
-  // ID utilities
-  generateId,
-  type IdConfig,
-  type IdGenerator,
-} from "./utils";
+  CardinalityError,
+  CompositionError,
+  CompositionExistenceError,
+  ConfigurationError,
+  DisjointError,
+  EdgeNotFoundError,
+  EndpointError,
+  EndpointNotFoundError,
+  type ErrorCategory,
+  isConstraintError,
+  isSystemError,
+  isTypeGraphError,
+  isUserRecoverable,
+  KindNotFoundError,
+  MigrationError,
+  NodeNotFoundError,
+  RestrictedDeleteError,
+  SchemaMismatchError,
+  StaleVersionError,
+  StoreNotInitializedError,
+  TransactionConflictError,
+  TypeGraphError,
+  UniquenessError,
+  ValidationError,
+} from "./errors";

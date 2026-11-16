@@ -7,15 +7,11 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  type CompiledRowsSql,
-  createStore,
-  defineGraph,
-  defineNode,
-  recordedInstantRevision,
-} from "../../../src";
+import { createStore, defineGraph, defineNode } from "../../../src";
+import type { CompiledRowsSql } from "../../../src/backend";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createSqliteBackend } from "../../../src/backend/drizzle/sqlite";
+import { recordedInstantRevision } from "../../../src/core";
 import { requireDefined } from "../../../src/utils/presence";
 import { isSqliteWriterSlotBusy } from "../../../src/utils/sql-errors";
 import { createGate } from "../../concurrency-utils";

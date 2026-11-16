@@ -8,18 +8,18 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   embedding,
   hasPart,
   partOf,
   searchable,
   StaleVersionError,
-  TrustedImportError,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend, TrustedImportOptions } from "../src/backend/types";
+import { TrustedImportError } from "../src/errors-entry";
+import { defineGraphExtension } from "../src/graph-extension";
 import {
   exportGraph,
   exportGraphStream,

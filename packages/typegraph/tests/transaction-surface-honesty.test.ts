@@ -15,10 +15,6 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AdapterBackend,
-  type AdapterHistoryStore,
-  type AdapterStore,
-  type AdapterTransactionContext,
   ConfigurationError,
   createAdapterStore,
   createAdapterStoreWithSchema,
@@ -26,23 +22,33 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
-  isRecordedCaptureGuardError,
-  RECORDED_CAPTURE_GUARD_CODES,
-  type RecordedCaptureGuardCode,
-  type SqlAvailability,
   type Store,
-  type TransactionBackend,
   type TransactionContext,
-  type TransactionReadBackend,
-  UnsupportedBackendCapabilityError,
 } from "../src";
+import type {
+  AdapterBackend,
+  TransactionBackend,
+  TransactionReadBackend,
+} from "../src/backend";
 import { projectGraphBackend } from "../src/backend/derive-backend";
 import {
   POSTGRES_CAPABILITIES,
   SQLITE_CAPABILITIES,
 } from "../src/backend/types";
+import {
+  isRecordedCaptureGuardError,
+  RECORDED_CAPTURE_GUARD_CODES,
+  type RecordedCaptureGuardCode,
+  UnsupportedBackendCapabilityError,
+} from "../src/errors-entry";
 import { STORE_RUNTIME } from "../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../src/store/types";
+import type {
+  AdapterHistoryStore,
+  AdapterStore,
+  AdapterTransactionContext,
+  SqlAvailability,
+} from "../src/store-entry";
 import {
   createInitializedStore,
   createTestBackend,

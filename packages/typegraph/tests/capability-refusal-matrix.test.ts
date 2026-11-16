@@ -18,13 +18,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  repairInvertedValidityWindows,
-} from "../src";
+import { createStore, defineEdge, defineGraph, defineNode } from "../src";
+import { repairInvertedValidityWindows } from "../src/backend";
 import {
   CAPABILITY_BUNDLES,
   RECORDED_REVISION_ORIGINS,

@@ -7,6 +7,8 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph/core";
 import {
+  type AdapterBackend,
+  type BackendCapabilities,
   type FulltextStrategy,
   fts5Strategy,
   type InsertNodeParams,
@@ -24,29 +26,29 @@ import {
   type EdgeId as RootEdgeId,
   type GraphDef as RootGraphDef,
   type NodeId as RootNodeId,
+  type GraphBackend,
+  type Store,
+  type StoreOptions,
+  createAdapterStore,
+  createStore,
+} from "@nicia-ai/typegraph";
+import {
   type AdapterStore,
-  type AdapterBackend,
   type AdapterHistoryStore,
   type AdapterRecordedReadStore,
-  type BackendCapabilities,
-  type GraphBackend,
-  type GraphExtension,
   type HistoryStore,
   type LiveStoreOptions,
   type RecordedReadStore,
-  type Store,
-  type StoreOptions,
   type StoreRef,
-  type TransactionOptions,
   StoreView,
-  createAdapterStore,
-  createStore,
-  createSqlSchema,
-  recordedRelation,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
+import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph/query";
 import { createLocalPgliteStore } from "@nicia-ai/typegraph/postgres/pglite";
 import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
-import { defineGraphExtension } from "@nicia-ai/typegraph/graph-extension";
+import {
+  defineGraphExtension,
+  type GraphExtension,
+} from "@nicia-ai/typegraph/graph-extension";
 import { branch } from "@nicia-ai/typegraph/graph-merge";
 import { exportGraph } from "@nicia-ai/typegraph/interchange";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
@@ -93,7 +95,6 @@ const backendResolvedLowerBound = resolveStampedValidityLowerBound(
   "2026-01-01T00:00:01.000Z",
   "2026-01-01T00:00:00.000Z",
 );
-const rootTransactionOptions: TransactionOptions = publicTransactionOptions;
 if (false) {
   const privilegedOptions: BackendTransactionOptions = {
     // @ts-expect-error Internal temporary-write capabilities are not public transaction options.
@@ -105,7 +106,6 @@ void backendNodeParams;
 void backendNodeRow;
 void backendResolvedLowerBound;
 void backendSqlTag;
-void rootTransactionOptions;
 void builtInStrategy;
 void chunkVocabulary;
 void publicTransactionOptions;

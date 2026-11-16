@@ -27,10 +27,12 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
+} from "@nicia-ai/typegraph";
+import {
   type IdentityTransition,
   pruneIdentityTransitions,
   type TransitionPageCursor,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/identity";
 import { exportGraph, importGraph } from "@nicia-ai/typegraph/interchange";
 import { z } from "zod";
 

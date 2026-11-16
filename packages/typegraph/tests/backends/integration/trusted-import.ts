@@ -7,8 +7,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  TrustedImportError,
 } from "../../../src";
+import { TrustedImportError } from "../../../src/errors-entry";
 import {
   FORMAT_VERSION,
   type GraphData,

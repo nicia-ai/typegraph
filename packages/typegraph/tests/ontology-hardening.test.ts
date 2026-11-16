@@ -4,7 +4,6 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   disjointWith,
   equivalentTo,
@@ -13,6 +12,7 @@ import {
   relatedTo,
   subClassOf,
 } from "../src";
+import { defineGraphExtension } from "../src/graph-extension";
 import { GraphExtensionUnresolvedOntologyEndpointError } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { validateOntologyRelations } from "../src/ontology/validation";

@@ -11,7 +11,8 @@ exist, or if values appear in another query's results.
 Check if related records exist:
 
 ```typescript
-import { exists, fieldRef } from "@nicia-ai/typegraph";
+import { exists } from "@nicia-ai/typegraph";
+import { fieldRef } from "@nicia-ai/typegraph/query";
 
 // Find people who have authored at least one PR
 const authors = await store
@@ -38,7 +39,8 @@ const authors = await store
 Find records without related records:
 
 ```typescript
-import { notExists, fieldRef } from "@nicia-ai/typegraph";
+import { notExists } from "@nicia-ai/typegraph";
+import { fieldRef } from "@nicia-ai/typegraph/query";
 
 // Find people with no pull requests
 const nonContributors = await store
@@ -65,7 +67,8 @@ const nonContributors = await store
 Check if a value is in a subquery result set:
 
 ```typescript
-import { inSubquery, fieldRef } from "@nicia-ai/typegraph";
+import { inSubquery } from "@nicia-ai/typegraph";
+import { fieldRef } from "@nicia-ai/typegraph/query";
 
 // Find people who work at tech companies
 const techWorkers = await store
@@ -93,7 +96,8 @@ const techWorkers = await store
 Exclude values that appear in a subquery:
 
 ```typescript
-import { notInSubquery, fieldRef } from "@nicia-ai/typegraph";
+import { notInSubquery } from "@nicia-ai/typegraph";
+import { fieldRef } from "@nicia-ai/typegraph/query";
 
 // Find people not in the blocklist
 const allowedUsers = await store
@@ -120,7 +124,7 @@ const allowedUsers = await store
 The `fieldRef()` function creates a reference to a field in the outer query for use in subquery predicates:
 
 ```typescript
-import { fieldRef } from "@nicia-ai/typegraph";
+import { fieldRef } from "@nicia-ai/typegraph/query";
 
 fieldRef("alias", ["field"])      // Reference a single field
 fieldRef("alias", ["nested", "path"])  // Reference a nested field

@@ -15,7 +15,6 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   embedding,
   field,
@@ -28,6 +27,7 @@ import {
   KindNotFoundError,
   UnsupportedPredicateError,
 } from "../../../src/errors";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 

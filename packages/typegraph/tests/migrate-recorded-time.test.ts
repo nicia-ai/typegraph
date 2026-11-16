@@ -9,12 +9,12 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+} from "../src";
+import {
   deleteLegacyRecordedAnchorMap,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
-  recordedInstantRevision,
-  UnsupportedBackendCapabilityError,
-} from "../src";
+} from "../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -25,7 +25,9 @@ import {
   type AdapterBackend,
   type RecordedTableNames,
 } from "../src/backend/types";
+import { recordedInstantRevision } from "../src/core";
 import { createRecordedInstant } from "../src/core/temporal";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import {

@@ -1,8 +1,8 @@
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
+import type { AdapterHistoryStore } from "../dist/store-entry";
 import {
-  type AdapterHistoryStore,
   type GraphBackend,
   defineGraph,
   defineEdge,

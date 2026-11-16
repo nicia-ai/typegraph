@@ -9,24 +9,26 @@ import { z } from "zod";
 
 import {
   asNodeId,
-  asRecordedInstant,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
   type Edge,
   type Node,
-  type RecordedAdjacencyEntry,
-  type RecordedAdjacencyPage,
-  recordedRelation,
-  type RecordedScanPage,
-  RecordedStoreView,
-  sql,
 } from "../src";
+import { sql } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
+import { asRecordedInstant } from "../src/core";
 import { createEngineRecordedInstant } from "../src/core/temporal";
 import { createSqlSchema } from "../src/query/compiler/schema";
+import { recordedRelation } from "../src/query-entry";
 import { storeRuntime } from "../src/store/runtime-port";
+import {
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyPage,
+  type RecordedScanPage,
+  RecordedStoreView,
+} from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {

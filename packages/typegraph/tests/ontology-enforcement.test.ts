@@ -12,10 +12,8 @@ import { z } from "zod";
 
 import {
   asNodeId,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   disjointWith,
   implies,
@@ -27,6 +25,8 @@ import {
   DisjointError,
   RestrictedDeleteError,
 } from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry/builders";
 import { deserializeSchema, serializeSchema } from "../src/schema";
 import { createStore, createStoreWithSchema } from "../src/store/store";

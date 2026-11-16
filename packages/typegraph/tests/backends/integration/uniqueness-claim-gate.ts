@@ -15,17 +15,21 @@ import {
   ConfigurationError,
   createAdapterStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  IncompatibleChangeError,
   MigrationError,
-  type MigrationErrorDetails,
   subClassOf,
-  type UniquenessClaimGate,
   UniquenessError,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { projectBackendWithout } from "../../../src/backend/derive-backend";
+import {
+  type MigrationErrorDetails,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
+import {
+  defineGraphExtension,
+  IncompatibleChangeError,
+} from "../../../src/graph-extension";
+import type { UniquenessClaimGate } from "../../../src/schema";
 import {
   getActiveSchema,
   migrateSchema,

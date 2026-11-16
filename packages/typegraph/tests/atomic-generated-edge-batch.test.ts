@@ -8,8 +8,6 @@ import { z } from "zod";
 
 import {
   CardinalityError,
-  DatabaseOperationError,
-  EdgeMatchIdentityConflictError,
   partOf,
   StaleVersionError,
   ValidationError,
@@ -30,6 +28,10 @@ import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
+import {
+  DatabaseOperationError,
+  EdgeMatchIdentityConflictError,
+} from "../src/errors-entry";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import type { Store } from "../src/store";

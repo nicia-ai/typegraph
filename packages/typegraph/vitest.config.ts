@@ -98,6 +98,13 @@ export default defineConfig({
         __dirname,
         "src/provenance/index.ts",
       ),
+      "@nicia-ai/typegraph/store": resolve(__dirname, "src/store-entry.ts"),
+      "@nicia-ai/typegraph/query": resolve(__dirname, "src/query-entry.ts"),
+      "@nicia-ai/typegraph/errors": resolve(__dirname, "src/errors-entry.ts"),
+      "@nicia-ai/typegraph/identity": resolve(
+        __dirname,
+        "src/identity-entry.ts",
+      ),
       "@nicia-ai/typegraph/adapters/drizzle/indexes": resolve(
         __dirname,
         "src/backend/drizzle/indexes.ts",

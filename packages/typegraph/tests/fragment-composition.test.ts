@@ -7,21 +7,19 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { defineEdge, defineGraph, defineNode } from "../src";
+import { createQueryBuilder } from "../src/query";
+import { compileQuery } from "../src/query/compiler";
 import {
   composeFragments,
   createFragment,
-  createQueryBuilder,
-  defineEdge,
-  defineGraph,
-  defineNode,
   type EmptyEdgeAliasMap,
   limitFragment,
   type NodeAlias,
   offsetFragment,
   orderByFragment,
   type QueryFragment,
-} from "../src";
-import { compileQuery } from "../src/query/compiler";
+} from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlWithParams } from "./sql-test-utils";
 

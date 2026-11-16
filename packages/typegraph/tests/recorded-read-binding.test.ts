@@ -2,16 +2,14 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createQueryBuilder,
   createStore,
   defineGraph,
   defineNode,
-  type ExternalRecordedReadSource,
-  recordedRelation,
   type StoreOptions,
 } from "../src";
 import { type RecordedInstantParts } from "../src/core/temporal";
 import { ConfigurationError } from "../src/errors";
+import { createQueryBuilder } from "../src/query";
 import { compileQuery } from "../src/query/compiler";
 import {
   createRecordedReadBinding,
@@ -19,6 +17,10 @@ import {
   recordedReadSqlSchema,
   type SqlSchema,
 } from "../src/query/compiler/schema";
+import {
+  type ExternalRecordedReadSource,
+  recordedRelation,
+} from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend } from "./test-utils";

@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import {
   CardinalityError,
-  CompilerInvariantError,
   ConfigurationError,
   defineEdge,
   defineGraph,
@@ -19,6 +18,7 @@ import {
   type InsertEdgeParams,
   type TransactionBackend,
 } from "../src/backend/types";
+import { CompilerInvariantError } from "../src/errors-entry";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";

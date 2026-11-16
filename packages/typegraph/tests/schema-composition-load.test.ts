@@ -17,14 +17,9 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineGraphExtension,
-  defineNode,
-  partOf,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, partOf } from "../src";
 import { type AnyEdgeType } from "../src/core/types";
+import { defineGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { buildKindRegistry } from "../src/registry";
 import { deserializeSchema } from "../src/schema/deserializer";

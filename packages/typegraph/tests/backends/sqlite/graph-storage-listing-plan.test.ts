@@ -10,12 +10,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineGraph,
-  defineNode,
-  listGraphIds,
-} from "../../../src";
+import { createStore, defineGraph, defineNode } from "../../../src";
+import { listGraphIds } from "../../../src/backend";
 import {
   GRAPH_PRESENCE_ANCHOR_KEYS,
   resolveGraphRelationNames,

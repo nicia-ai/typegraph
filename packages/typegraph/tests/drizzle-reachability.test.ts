@@ -44,7 +44,7 @@ const REPOSITORY_SCAN_TIMEOUT_MS = 30_000;
 /**
  * Recorded at HEAD by `node --import tsx
  * scripts/drizzle-reachability-scan.ts --grain=source` — every published
- * entrypoint, classified. Ten portable, eight eagerly-dirty `adapter-static`
+ * entrypoint, classified. Fourteen portable, eight eagerly-dirty `adapter-static`
  * entrypoints, and two "batteries included" `adapter-dynamic-only`
  * entrypoints.
  */
@@ -61,6 +61,10 @@ const RECORDED_CLASSIFICATIONS: Readonly<
   "./graph-extension": "portable",
   "./graph-merge": "portable",
   "./provenance": "portable",
+  "./store": "portable",
+  "./query": "portable",
+  "./errors": "portable",
+  "./identity": "portable",
   "./sqlite/local": "adapter-dynamic-only",
   "./postgres/pglite": "adapter-dynamic-only",
   "./adapters/drizzle/sqlite": "adapter-static",
@@ -89,7 +93,7 @@ const RECORDED_PORTABLE_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
 );
 
 /**
- * Recorded at HEAD by `--grain=source` (`16 / 38 dirty`), as a per-mode
+ * Recorded at HEAD by `--grain=source` (`18 / 48 dirty`), as a per-mode
  * verdict TUPLE — mirroring {@link RECORDED_DIST_VERDICTS}'s shape — rather
  * than a single collapsed verdict, since not every entrypoint agrees across
  * modes: `./sqlite/local` and `./postgres/pglite`'s factories construct
@@ -121,6 +125,10 @@ const RECORDED_SOURCE_VERDICTS: Readonly<
   "./graph-extension": { load: "clean", deferred: "clean" },
   "./graph-merge": { load: "clean", deferred: "clean" },
   "./provenance": { load: "clean", deferred: "clean" },
+  "./store": { load: "clean", deferred: "clean" },
+  "./query": { load: "clean", deferred: "clean" },
+  "./errors": { load: "clean", deferred: "clean" },
+  "./identity": { load: "clean", deferred: "clean" },
   // "Batteries included" entrypoints: re-classified `adapter-dynamic-only`
   // in THIS batch (B4b) — their connection construction moved behind a
   // dynamic import, so `load` is clean and `deferred` stays dirty.
@@ -214,7 +222,7 @@ const RECORDED_DYNAMIC_ONLY_ENTRYPOINTS = [
 ].toSorted();
 
 /**
- * Recorded at HEAD by `--grain=source --stage=<name>`, filtered to the ten
+ * Recorded at HEAD by `--grain=source --stage=<name>`, filtered to the fourteen
  * portable entrypoints at `load` mode. R-axis, R-removals and (as of this
  * batch) R-migrate are now REALLY severed (not simulated), so every stage —
  * including `baseline`, no simulated severance at all — reports zero dirty
@@ -279,9 +287,9 @@ const RECORDED_ABSENT_ROUTES = {
 /**
  * Recorded at HEAD by `rm -rf dist && NODE_OPTIONS=--max-old-space-size=8192
  * pnpm build`, then `node --import tsx scripts/drizzle-reachability-scan.ts
- * --grain=dist` (a fresh build; the emitted `32 / 76 dirty`, not a
+ * --grain=dist` (a fresh build; the emitted `36 / 96 dirty`, not a
  * prediction) — I3's per-mode verdict TUPLE, not a single `load` verdict.
- * All ten portable entrypoints are clean at both `load` and `deferred`, in
+ * All fourteen portable entrypoints are clean at both `load` and `deferred`, in
  * both artifact formats. The eight true `adapter-static` `./adapters/drizzle/*`
  * entrypoints — `./adapters/drizzle/engine` included — are dirty at both
  * modes, in both formats. The two "batteries included" entrypoints
@@ -313,6 +321,10 @@ const RECORDED_DIST_VERDICTS: Readonly<
   "./graph-extension": { load: "clean", deferred: "clean" },
   "./graph-merge": { load: "clean", deferred: "clean" },
   "./provenance": { load: "clean", deferred: "clean" },
+  "./store": { load: "clean", deferred: "clean" },
+  "./query": { load: "clean", deferred: "clean" },
+  "./errors": { load: "clean", deferred: "clean" },
+  "./identity": { load: "clean", deferred: "clean" },
   "./sqlite/local": { load: "clean", deferred: "dirty" },
   "./postgres/pglite": { load: "clean", deferred: "dirty" },
   "./adapters/drizzle/sqlite": { load: "dirty", deferred: "dirty" },
@@ -421,11 +433,11 @@ describe("drizzle reachability — source grain", () => {
   });
 
   it(
-    "records today's source verdicts for all 20 entrypoints in both modes (2 of 12 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)",
+    "records today's source verdicts for all 24 entrypoints in both modes (2 of 16 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)",
     { timeout: REPOSITORY_SCAN_TIMEOUT_MS },
     () => {
       expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(8);
-      expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
+      expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(16);
 
       // Both-directions set equality against the CLASSIFICATION table, not a
       // one-directional `.every`: a stray flip either into or out of the
@@ -553,8 +565,8 @@ describe("drizzle reachability — source grain", () => {
     },
   );
 
-  it("reproduces the staged-severance projection 0/10 -> 0/10 -> 0/10", () => {
-    expect(RECORDED_PORTABLE_ENTRYPOINTS.length).toBe(10);
+  it("reproduces the staged-severance projection 0/14 -> 0/14 -> 0/14", () => {
+    expect(RECORDED_PORTABLE_ENTRYPOINTS.length).toBe(14);
 
     for (const stage of SIMULATED_SEVERANCE_STAGES) {
       const dirtyCount = dirtyPortableEntrypointsAtStage(stage).length;
@@ -718,7 +730,7 @@ describe("drizzle reachability — dist grain", () => {
       process.env["TYPEGRAPH_REQUIRE_DIST_GRAIN"],
     ),
   )("shipped artifacts", () => {
-    it("covers both artifact formats of all 20 entrypoints", () => {
+    it("covers both artifact formats of all 24 entrypoints", () => {
       const findings = scanDistributionReachability();
       expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2 * 2);
 
@@ -775,12 +787,12 @@ describe("drizzle reachability — dist grain", () => {
       }
     });
 
-    it("records the load and deferred dist verdicts for all 20 entrypoints in both formats (0 of 10 portable dirty at either mode; 2 of 10 adapter entrypoints adapter-dynamic-only: load clean, deferred dirty)", () => {
+    it("records the load and deferred dist verdicts for all 24 entrypoints in both formats (0 of 14 portable dirty at either mode; 2 of 10 adapter entrypoints adapter-dynamic-only: load clean, deferred dirty)", () => {
       expect(Object.keys(RECORDED_DIST_VERDICTS).length).toBe(
         RECORDED_ENTRYPOINTS.length,
       );
 
-      // Both directions on the ten truly portable entrypoints: none is
+      // Both directions on the fourteen truly portable entrypoints: none is
       // recorded dirty at either mode.
       const dirtyPortableAtEitherMode = RECORDED_PORTABLE_ENTRYPOINTS.filter(
         (entrypoint) =>

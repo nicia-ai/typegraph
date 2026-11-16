@@ -16,9 +16,9 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  pruneIdentityTransitions,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
+import { pruneIdentityTransitions } from "../src/identity-entry";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", { schema: z.object({}) });

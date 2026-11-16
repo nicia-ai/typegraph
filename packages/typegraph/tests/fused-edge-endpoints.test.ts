@@ -10,19 +10,14 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  CompilerInvariantError,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  ValidationError,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, ValidationError } from "../src";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { EdgeCreateCommand, GraphBackend } from "../src/backend/types";
+import { CompilerInvariantError } from "../src/errors-entry";
 import { createStore } from "../src/store";
 import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore, disableTransactions } from "./test-utils";

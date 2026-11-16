@@ -511,7 +511,7 @@ the graph structure.
 import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/query";
 
 .recursive()                  // Implicitly capped at 10
 .recursive({ maxHops: 50 })   // Honored (≤ 1000)

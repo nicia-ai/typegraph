@@ -7,10 +7,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type HistoryStore,
   type Node,
 } from "../../src";
 import { createRetractionCapability } from "../../src/provenance";
+import type { HistoryStore } from "../../src/store-entry";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";
 

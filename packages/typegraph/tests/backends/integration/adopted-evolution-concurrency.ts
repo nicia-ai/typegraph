@@ -5,9 +5,9 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
-  SchemaFenceTimeoutError,
 } from "../../../src";
 import { StaleVersionError } from "../../../src/errors";
+import { SchemaFenceTimeoutError } from "../../../src/errors-entry";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   createGate,

@@ -115,3 +115,24 @@ export {
   type UniqueConstraint,
   type UniquenessScope,
 } from "./types";
+
+// Ontology declaration and custom meta-edge vocabulary
+export {
+  type CompositionExistence,
+  type CompositionOptions,
+  type CompositionPartSide,
+  type CompositionViaRef,
+  core,
+  type EquivalentToCheck,
+  isMetaEdge,
+  type MetaEdge,
+  type MetaEdgeProperties,
+  type OntologyRelation,
+  type PolymorphicNodeType,
+  type StructuralSubtypeMismatch,
+  type SubClassOfCheck,
+  type TypedOntologyRelation,
+} from "../ontology";
+
+// ID generation
+export { generateId } from "../utils/id";

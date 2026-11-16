@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineNode, type JsonPointer } from "../src";
+import { defineEdge, defineNode } from "../src";
+import type { JsonPointer } from "../src/backend";
 import {
   generatePostgresDDL,
   generateSqliteDDL,

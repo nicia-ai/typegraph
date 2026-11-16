@@ -47,9 +47,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "@nicia-ai/typegraph";
+import { INVERTED_VALIDITY_WINDOW_CODE } from "@nicia-ai/typegraph/errors";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 

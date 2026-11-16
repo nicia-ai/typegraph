@@ -12,13 +12,13 @@ import { z } from "zod";
 import {
   createAdapterStore,
   createAdapterStoreWithSchema,
-  createVerifiedAdapterStore,
   defineGraph,
   defineNode,
 } from "../src";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraphExtension } from "../src/graph-extension";
+import { createVerifiedAdapterStore } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import { spyGetActiveSchema } from "./test-utils";
 

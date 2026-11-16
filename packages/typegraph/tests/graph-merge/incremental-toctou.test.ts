@@ -25,8 +25,8 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineNodeIndex,
 } from "@nicia-ai/typegraph";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 

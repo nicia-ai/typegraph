@@ -40,15 +40,15 @@ import { z } from "zod";
 
 import {
   asEdgeId,
-  ContributionUnavailableError,
   createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   searchable,
 } from "../../src";
+import { ContributionUnavailableError } from "../../src/errors-entry";
+import { defineGraphExtension } from "../../src/graph-extension";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
 import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";

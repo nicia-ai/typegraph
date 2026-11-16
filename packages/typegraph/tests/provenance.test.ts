@@ -2,19 +2,18 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createSqlSchema,
   createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
-  type HistoryStore,
-  recordedRelation,
   searchable,
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { createRetractionCapability } from "../src/provenance";
+import { createSqlSchema, recordedRelation } from "../src/query-entry";
+import type { HistoryStore } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 import {

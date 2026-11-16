@@ -9,18 +9,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import { renderPostgres, sql } from "../src/backend";
+import { type GraphBackend } from "../src/backend/types";
 import {
   compareRecordedInstants,
-  createStoreWithSchema,
-  defineGraph,
-  defineNode,
   type RecordedInstant,
   recordedInstantRevision,
   recordedInstantWallTime,
-  renderPostgres,
-  sql,
-} from "../src";
-import { type GraphBackend } from "../src/backend/types";
+} from "../src/core";
 import {
   createRecordedInstant,
   parseRecordedInstant,

@@ -1,18 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  type GraphBackend,
-  UnsupportedBackendCapabilityError,
-} from "../src";
+import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import { createTransactionReceiptRecorder } from "../src/store/transaction-receipt";
 import {
   createInitializedStore,

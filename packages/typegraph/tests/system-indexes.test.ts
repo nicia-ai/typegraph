@@ -19,8 +19,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
-  SYSTEM_INDEX_DECLARATIONS,
 } from "../src";
 import {
   createPostgresTables,
@@ -29,6 +27,7 @@ import {
 import { createSqliteTables, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
+import { defineNodeIndex, SYSTEM_INDEX_DECLARATIONS } from "../src/indexes";
 import {
   generateGraphIdOrderIndexDDL,
   generateSystemIndexDDL,

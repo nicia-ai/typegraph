@@ -28,14 +28,14 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-  fts5Strategy,
   MigrationError,
   searchable,
   StoreNotInitializedError,
 } from "../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../src/backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import { fts5Strategy } from "../src/backend/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
 import { requireDefined } from "../src/utils/presence";
 

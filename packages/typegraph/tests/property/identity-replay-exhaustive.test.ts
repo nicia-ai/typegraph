@@ -50,12 +50,8 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
-  IdentityContradictionError,
-  IdentityEndpointValidityError,
-  IdentityValidityWindowError,
   NodeNotFoundError,
   type Store,
-  type TransitionPageCursor,
   ValidationError,
 } from "../../src";
 import {
@@ -68,6 +64,12 @@ import {
   identityReplay,
   identityTransitionsOf,
 } from "../../src/identity/replay";
+import {
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+  IdentityValidityWindowError,
+  type TransitionPageCursor,
+} from "../../src/identity-entry";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { nowIso } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";

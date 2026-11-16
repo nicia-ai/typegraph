@@ -5,15 +5,12 @@ import {
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type GraphBackend,
-  rebuildIdentityClosure,
-  type TransactionBackend,
 } from "../src";
+import type { TransactionBackend } from "../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -27,6 +24,8 @@ import {
   IdentityContradictionError,
   IdentityEndpointValidityError,
 } from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
+import { rebuildIdentityClosure } from "../src/identity-entry";
 import { exportGraph, importGraph } from "../src/interchange";
 import { disjointWith } from "../src/ontology";
 import { createSqlSchema } from "../src/query/compiler/schema";
@@ -35,6 +34,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../src/query/sql-intent";
+import { createVerifiedStore } from "../src/schema";
 import { migrateSchema, rollbackSchema } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import {

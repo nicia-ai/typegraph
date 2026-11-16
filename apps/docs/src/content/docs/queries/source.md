@@ -319,7 +319,7 @@ untyped, as `"narrower"` itself is. Type the parameter with the exported
 `AliasExpansionOptions`, or narrower:
 
 ```typescript
-import { type AliasExpansionOptions } from "@nicia-ai/typegraph";
+import type { AliasExpansionOptions } from "@nicia-ai/typegraph/query";
 
 function people(options?: { expansion?: "exact" | "subclasses" }) {
   // p keeps Person's properties; its kind is string and its id the widened brand

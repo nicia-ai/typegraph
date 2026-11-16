@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompositionCascadedPart,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -16,6 +15,7 @@ import {
   type Node,
   partOf,
 } from "../src";
+import type { CompositionCascadedPart } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 

@@ -14,7 +14,6 @@ import {
   defineGraph,
   defineNode,
   exists,
-  fieldRef,
   inSubquery,
   inverseOf,
   param as parameter,
@@ -24,6 +23,7 @@ import { projectBackendWithout } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import { createQueryBuilder } from "../src/query/builder";
+import { fieldRef } from "../src/query-entry";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestDatabase } from "./test-utils";

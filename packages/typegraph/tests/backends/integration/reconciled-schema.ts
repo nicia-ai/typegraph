@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { createAdapterStore } from "../../../src";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
-  createAdapterStore,
   createVerifiedAdapterStore,
   getActiveSchema,
   getCommittedSchemaVersion,
   isSchemaInitialized,
   type SerializedSchema,
-} from "../../../src";
-import { defineGraphExtension } from "../../../src/graph-extension";
+} from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { spyGetActiveSchema } from "../../test-utils";
 import { integrationTestGraph } from "./fixtures";

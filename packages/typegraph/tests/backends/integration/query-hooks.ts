@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  indexSubgraph,
-  partOf,
-  type QueryHookContext,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode, partOf } from "../../../src";
 import { getDialect } from "../../../src/query/dialect";
+import { indexSubgraph, type QueryHookContext } from "../../../src/store-entry";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 

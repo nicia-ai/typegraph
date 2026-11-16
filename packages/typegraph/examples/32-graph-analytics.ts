@@ -28,8 +28,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  GraphAlgorithmConvergenceError,
 } from "@nicia-ai/typegraph";
+import { GraphAlgorithmConvergenceError } from "@nicia-ai/typegraph/errors";
 import { z } from "zod";
 
 import { requireDefined } from "../src/utils/presence";

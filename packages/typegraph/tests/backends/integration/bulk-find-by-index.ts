@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  ConfigurationError,
-  NodeIndexNotFoundError,
-  ValidationError,
-} from "../../../src";
+import { ConfigurationError, ValidationError } from "../../../src";
+import { NodeIndexNotFoundError } from "../../../src/errors-entry";
 import { type IntegrationTestContext } from "./test-context";
 
 /**

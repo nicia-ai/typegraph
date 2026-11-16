@@ -1,4 +1,4 @@
-import type { GraphBackend, GraphDef, HistoryStoreBackend } from "../../../src";
+import type { GraphBackend, GraphDef } from "../../../src";
 import type {
   AdapterBackend,
   BundledBackendCapabilityOverrides,
@@ -8,6 +8,7 @@ import type {
   HistoryStoreOptions,
   LiveStoreOptions,
 } from "../../../src/store/types";
+import type { HistoryStoreBackend } from "../../../src/store-entry";
 import { type IntegrationStore } from "./fixtures";
 
 export type InspectableStore<G extends GraphDef> = Store<G> &

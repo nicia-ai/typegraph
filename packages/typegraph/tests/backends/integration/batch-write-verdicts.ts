@@ -43,12 +43,14 @@ import {
   defineNode,
   DisjointError,
   disjointWith,
-  IdentityContradictionError,
-  IdentityEndpointValidityError,
   partOf,
   UniquenessError,
   ValidationError,
 } from "../../../src";
+import {
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+} from "../../../src/identity-entry";
 import { FORMAT_VERSION, importGraph } from "../../../src/interchange";
 import { transactionReviveNode } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";

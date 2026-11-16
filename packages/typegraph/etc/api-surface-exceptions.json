@@ -7654,5 +7654,3029 @@
     "kind": "member-removed",
     "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
     "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BaseSchemaMigrationError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`BaseSchemaMigrationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BaseSchemaMigrationErrorDetails",
+    "member": "installedVersion",
+    "kind": "member-removed",
+    "reason": "`BaseSchemaMigrationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BaseSchemaMigrationErrorDetails",
+    "member": "requiredVersion",
+    "kind": "member-removed",
+    "reason": "`BaseSchemaMigrationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BaseSchemaMigrationErrorDetails",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`BaseSchemaMigrationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionRebuildUnsupportedError",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`ContributionRebuildUnsupportedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableErrorDetails",
+    "member": "logicalName",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableErrorDetails",
+    "member": "physicalName",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableErrorDetails",
+    "member": "state",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "fromKind",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "fromId",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "toKind",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "toId",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "props",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "validFrom",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateEdgeInput",
+    "member": "validTo",
+    "kind": "member-removed",
+    "reason": "`CreateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateNodeInput",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`CreateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateNodeInput",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`CreateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateNodeInput",
+    "member": "props",
+    "kind": "member-removed",
+    "reason": "`CreateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateNodeInput",
+    "member": "validFrom",
+    "kind": "member-removed",
+    "reason": "`CreateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateNodeInput",
+    "member": "validTo",
+    "kind": "member-removed",
+    "reason": "`CreateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "dialect",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "schema",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "defaultTraversalExpansion",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "identityEnabled",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CreateQueryBuilderOptions",
+    "member": "identitySameIdAcrossKinds",
+    "kind": "member-removed",
+    "reason": "`CreateQueryBuilderOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationErrorDetails",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationErrorDetails",
+    "member": "entity",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationErrorDetails",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationErrorDetails",
+    "member": "attempted",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DeleteLegacyRecordedAnchorMapOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DeleteLegacyRecordedAnchorMapOptions",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DeleteLegacyRecordedAnchorMapOptions",
+    "member": "tableNames",
+    "kind": "member-removed",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DeleteLegacyRecordedAnchorMapOptions",
+    "member": "mappingTableName",
+    "kind": "member-removed",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DeleteLegacyRecordedAnchorMapOptions",
+    "member": "dropWhenEmpty",
+    "kind": "member-removed",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EagerMaterializationError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`EagerMaterializationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EagerMaterializationError",
+    "member": "failedIndexNames",
+    "kind": "member-removed",
+    "reason": "`EagerMaterializationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EagerMaterializationError",
+    "member": "materialization",
+    "kind": "member-removed",
+    "reason": "`EagerMaterializationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EagerMaterializationErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`EagerMaterializationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EagerMaterializationErrorDetails",
+    "member": "failedIndexNames",
+    "kind": "member-removed",
+    "reason": "`EagerMaterializationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "fields",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "coveringFields",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "unique",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "name",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "scope",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "direction",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "where",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexConfig",
+    "member": "method",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "fromKind",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "fromId",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "toKind",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "toId",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "deletedAt",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "validFrom",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "validTo",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "createdAt",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "updatedAt",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIndexWhereBuilder",
+    "member": "[index]",
+    "kind": "member-removed",
+    "reason": "`EdgeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedErrorDetails",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedErrorDetails",
+    "member": "fieldPath",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedErrorDetails",
+    "member": "declaredDimensions",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedErrorDetails",
+    "member": "storedDimensions",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPair",
+    "member": "from",
+    "kind": "member-removed",
+    "reason": "`EndpointPair` is no longer exported from the package root; import it from `@nicia-ai/typegraph/core`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPair",
+    "member": "to",
+    "kind": "member-removed",
+    "reason": "`EndpointPair` is no longer exported from the package root; import it from `@nicia-ai/typegraph/core`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairErrorDetails",
+    "member": "edgeKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairErrorDetails",
+    "member": "endpoint",
+    "kind": "member-removed",
+    "reason": "`EndpointPairErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairErrorDetails",
+    "member": "fromKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairErrorDetails",
+    "member": "toKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairErrorDetails",
+    "member": "allowedPairs",
+    "kind": "member-removed",
+    "reason": "`EndpointPairErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "FieldRefOptions",
+    "member": "jsonPointer",
+    "kind": "member-removed",
+    "reason": "`FieldRefOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "FieldRefOptions",
+    "member": "valueType",
+    "kind": "member-removed",
+    "reason": "`FieldRefOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "FieldRefOptions",
+    "member": "elementType",
+    "kind": "member-removed",
+    "reason": "`FieldRefOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "FieldRefOptions",
+    "member": "nullable",
+    "kind": "member-removed",
+    "reason": "`FieldRefOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphAllocationMismatchError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphAllocationMismatchError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "name",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "description",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "from",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "to",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "properties",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionEdgeIntrospection",
+    "member": "annotations",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionEdgeIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionIssue",
+    "member": "path",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionIssue` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionIssue",
+    "member": "message",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionIssue` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionIssue",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionIssue` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionKindIntrospection",
+    "member": "name",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionKindIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionKindIntrospection",
+    "member": "description",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionKindIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionKindIntrospection",
+    "member": "annotations",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionKindIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionKindIntrospection",
+    "member": "properties",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionKindIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionKindIntrospection",
+    "member": "unique",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionKindIntrospection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedEndpointError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedEndpointError",
+    "member": "edgeKind",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedEndpointError",
+    "member": "endpoint",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedEndpointError",
+    "member": "side",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedOntologyEndpointError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedOntologyEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedOntologyEndpointError",
+    "member": "endpoint",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedOntologyEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionUnresolvedOntologyEndpointError",
+    "member": "metaEdge",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionUnresolvedOntologyEndpointError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionValidationError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionValidationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionValidationError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionValidationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionValidationError",
+    "member": "details.issues",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionValidationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionValidationError",
+    "member": "issues",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionValidationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionVersionUnsupportedError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionVersionUnsupportedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionVersionUnsupportedError",
+    "member": "currentVersion",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionVersionUnsupportedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionVersionUnsupportedError",
+    "member": "persistedVersion",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionVersionUnsupportedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageInspection",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageInspection",
+    "member": "relations",
+    "kind": "member-removed",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageInspection",
+    "member": "totalRows",
+    "kind": "member-removed",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageInspection",
+    "member": "consistency",
+    "kind": "member-removed",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageRelation",
+    "member": "relation",
+    "kind": "member-removed",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageRelation",
+    "member": "table",
+    "kind": "member-removed",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphStorageRelation",
+    "member": "rows",
+    "kind": "member-removed",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphTemplate",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`GraphTemplate` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphTemplate",
+    "member": "reconciled",
+    "kind": "member-removed",
+    "reason": "`GraphTemplate` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphTemplate",
+    "member": "schemaHash",
+    "kind": "member-removed",
+    "reason": "`GraphTemplate` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdConfig",
+    "member": "nodeIdGenerator",
+    "kind": "member-removed",
+    "reason": "`IdConfig` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdConfig",
+    "member": "edgeIdGenerator",
+    "kind": "member-removed",
+    "reason": "`IdConfig` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "a",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "a.kind",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "a.id",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "b",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "b.kind",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "b.id",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "conflictingAssertionId",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionErrorDetails",
+    "member": "conflictingKinds",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpoint",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpoint.kind",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpoint.id",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "assertionWindow",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "assertionWindow.validFrom",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "assertionWindow.validTo",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpointWindow",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpointWindow.validFrom",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpointWindow.validTo",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityEndpointValidityErrorDetails",
+    "member": "endpointWindow.deletedAt",
+    "kind": "member-removed",
+    "reason": "`IdentityEndpointValidityErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "enforcedBy",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "classKey",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "assertionId",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "a",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "a.kind",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "a.id",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "b",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "b.kind",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationErrorDetails",
+    "member": "b.id",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityValidityWindowError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`IdentityValidityWindowError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityValidityWindowErrorDetails",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`IdentityValidityWindowErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityValidityWindowErrorDetails",
+    "member": "validFrom",
+    "kind": "member-removed",
+    "reason": "`IdentityValidityWindowErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityValidityWindowErrorDetails",
+    "member": "validTo",
+    "kind": "member-removed",
+    "reason": "`IdentityValidityWindowErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityValidityWindowErrorDetails",
+    "member": "operationInstant",
+    "kind": "member-removed",
+    "reason": "`IdentityValidityWindowErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/identity`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChange",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChange` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChange",
+    "member": "field",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChange` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChange",
+    "member": "type",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChange` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChange",
+    "member": "detail",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChange` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChangeError",
+    "member": "changes",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChangeError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IncompatibleChangeError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`IncompatibleChangeError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "eq",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "neq",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "gt",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "gte",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "lt",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "lte",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "in",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "notIn",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "isNull",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IndexWhereFieldBuilder",
+    "member": "isNotNull",
+    "kind": "member-removed",
+    "reason": "`IndexWhereFieldBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InstantiateGraphTemplateResult",
+    "member": "status",
+    "kind": "member-removed",
+    "reason": "`InstantiateGraphTemplateResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InstantiateGraphTemplateResult",
+    "member": "reconciled",
+    "kind": "member-removed",
+    "reason": "`InstantiateGraphTemplateResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InstantiateGraphTemplateResult",
+    "member": "schema",
+    "kind": "member-removed",
+    "reason": "`InstantiateGraphTemplateResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/schema`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightErrorDetails",
+    "member": "edgeId",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightErrorDetails",
+    "member": "edgeKind",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightErrorDetails",
+    "member": "property",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightErrorDetails",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "InvalidEdgeWeightErrorDetails",
+    "member": "value",
+    "kind": "member-removed",
+    "reason": "`InvalidEdgeWeightErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindCollisionError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`KindCollisionError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindCollisionError",
+    "member": "entity",
+    "kind": "member-removed",
+    "reason": "`KindCollisionError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindCollisionError",
+    "member": "kindName",
+    "kind": "member-removed",
+    "reason": "`KindCollisionError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindHasReferentsError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`KindHasReferentsError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindHasReferentsError",
+    "member": "kindName",
+    "kind": "member-removed",
+    "reason": "`KindHasReferentsError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindHasReferentsError",
+    "member": "referents",
+    "kind": "member-removed",
+    "reason": "`KindHasReferentsError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindReferent",
+    "member": "type",
+    "kind": "member-removed",
+    "reason": "`KindReferent` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "KindReferent",
+    "member": "name",
+    "kind": "member-removed",
+    "reason": "`KindReferent` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "LegacyEmbeddingSlotConfig",
+    "member": "metric",
+    "kind": "member-removed",
+    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "LegacyEmbeddingSlotConfig",
+    "member": "indexType",
+    "kind": "member-removed",
+    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ListGraphIdsOptions",
+    "member": "prefix",
+    "kind": "member-removed",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ListGraphIdsOptions",
+    "member": "after",
+    "kind": "member-removed",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ListGraphIdsOptions",
+    "member": "limit",
+    "kind": "member-removed",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsOptions",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsOptions",
+    "member": "resolveSlotConfig",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsOptions",
+    "member": "batchSize",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsOptions",
+    "member": "legacyTableName",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsResult",
+    "member": "migrated",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsResult",
+    "member": "perField",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsResult",
+    "member": "skippedDimensionMismatch",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsResult",
+    "member": "skippedDecodeError",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyEmbeddingsResult",
+    "member": "legacyTablePresent",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeOptions",
+    "member": "tableNames",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeOptions",
+    "member": "mappingTableName",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeResult",
+    "member": "migrated",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeResult",
+    "member": "graphs",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeResult",
+    "member": "anchors",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateLegacyRecordedTimeResult",
+    "member": "mappingTableName",
+    "kind": "member-removed",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "anchor",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "origin",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "tableNames",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "MigrateRecordedAnchorOptions",
+    "member": "mappingTableName",
+    "kind": "member-removed",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeConstraintNotFoundError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`NodeConstraintNotFoundError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeConstraintNotFoundErrorDetails",
+    "member": "constraintName",
+    "kind": "member-removed",
+    "reason": "`NodeConstraintNotFoundErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeConstraintNotFoundErrorDetails",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`NodeConstraintNotFoundErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "coveringFields",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "name",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "scope",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "where",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "keys",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "fields",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "keySystemColumns",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "unique",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexConfig",
+    "member": "method",
+    "kind": "member-removed",
+    "reason": "`NodeIndexConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexKeyInput",
+    "member": "field",
+    "kind": "member-removed",
+    "reason": "`NodeIndexKeyInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexKeyInput",
+    "member": "system",
+    "kind": "member-removed",
+    "reason": "`NodeIndexKeyInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexKeyInput",
+    "member": "direction",
+    "kind": "member-removed",
+    "reason": "`NodeIndexKeyInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexNotFoundError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`NodeIndexNotFoundError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexNotFoundErrorDetails",
+    "member": "indexName",
+    "kind": "member-removed",
+    "reason": "`NodeIndexNotFoundErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexNotFoundErrorDetails",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`NodeIndexNotFoundErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "deletedAt",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "validFrom",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "validTo",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "createdAt",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "updatedAt",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "version",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexWhereBuilder",
+    "member": "[index]",
+    "kind": "member-removed",
+    "reason": "`NodeIndexWhereBuilder` is no longer exported from the package root; import it from `@nicia-ai/typegraph/indexes`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedCaptureGuardError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`RecordedCaptureGuardError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedCaptureGuardError",
+    "member": "details.code",
+    "kind": "member-removed",
+    "reason": "`RecordedCaptureGuardError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedRelationOptions",
+    "member": "schema",
+    "kind": "member-removed",
+    "reason": "`RecordedRelationOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/query`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RecordedRelationOptions",
+    "member": "owner",
+    "kind": "member-removed",
+    "reason": "`RecordedRelationOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/query`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RemoveCompileTimeKindError",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`RemoveCompileTimeKindError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RemoveCompileTimeKindError",
+    "member": "entity",
+    "kind": "member-removed",
+    "reason": "`RemoveCompileTimeKindError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RemoveCompileTimeKindError",
+    "member": "kindName",
+    "kind": "member-removed",
+    "reason": "`RemoveCompileTimeKindError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RenderedSql",
+    "member": "sql",
+    "kind": "member-removed",
+    "reason": "`RenderedSql` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RenderedSql",
+    "member": "params",
+    "kind": "member-removed",
+    "reason": "`RenderedSql` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsOptions",
+    "member": "backend",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsOptions",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsOptions",
+    "member": "relations",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsOptions",
+    "member": "mode",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsOptions",
+    "member": "tableNames",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsReport",
+    "member": "relations",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsReport",
+    "member": "counts",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsReport",
+    "member": "nonCanonical",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RepairInvertedWindowsReport",
+    "member": "atomic",
+    "kind": "member-removed",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "Result",
+    "member": "success",
+    "kind": "member-removed",
+    "reason": "`Result` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "Result",
+    "member": "data",
+    "kind": "member-removed",
+    "reason": "`Result` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "Result",
+    "member": "error",
+    "kind": "member-removed",
+    "reason": "`Result` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeKindTokenError",
+    "member": "reason",
+    "kind": "member-removed",
+    "reason": "`RuntimeKindTokenError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/graph-extension`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaChangedError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`SchemaChangedError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaChangedErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`SchemaChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaChangedErrorDetails",
+    "member": "expected",
+    "kind": "member-removed",
+    "reason": "`SchemaChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaChangedErrorDetails",
+    "member": "actual",
+    "kind": "member-removed",
+    "reason": "`SchemaChangedErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictErrorDetails",
+    "member": "version",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictErrorDetails",
+    "member": "existingHash",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictErrorDetails",
+    "member": "incomingHash",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaFenceTimeoutError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`SchemaFenceTimeoutError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaFenceTimeoutErrorDetails",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`SchemaFenceTimeoutErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaFenceTimeoutErrorDetails",
+    "member": "phase",
+    "kind": "member-removed",
+    "reason": "`SchemaFenceTimeoutErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaFenceTimeoutErrorDetails",
+    "member": "waitBudgetMs",
+    "kind": "member-removed",
+    "reason": "`SchemaFenceTimeoutErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SqlTag",
+    "member": "empty",
+    "kind": "member-removed",
+    "reason": "`SqlTag` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SqlTag",
+    "member": "identifier",
+    "kind": "member-removed",
+    "reason": "`SqlTag` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SqlTag",
+    "member": "join",
+    "kind": "member-removed",
+    "reason": "`SqlTag` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SqlTag",
+    "member": "placeholder",
+    "kind": "member-removed",
+    "reason": "`SqlTag` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SqlTag",
+    "member": "raw",
+    "kind": "member-removed",
+    "reason": "`SqlTag` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisCursorStaleError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`StoreAnalysisCursorStaleError` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisCursorStaleErrorDetails",
+    "member": "entity",
+    "kind": "member-removed",
+    "reason": "`StoreAnalysisCursorStaleErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisCursorStaleErrorDetails",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`StoreAnalysisCursorStaleErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisCursorStaleErrorDetails",
+    "member": "expectedSchemaFence",
+    "kind": "member-removed",
+    "reason": "`StoreAnalysisCursorStaleErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisCursorStaleErrorDetails",
+    "member": "actualSchemaFence",
+    "kind": "member-removed",
+    "reason": "`StoreAnalysisCursorStaleErrorDetails` is no longer exported from the package root; import it from `@nicia-ai/typegraph/errors`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreProjection",
+    "member": "nodes",
+    "kind": "member-removed",
+    "reason": "`StoreProjection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreProjection",
+    "member": "nodes.[index]",
+    "kind": "member-removed",
+    "reason": "`StoreProjection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreProjection",
+    "member": "edges",
+    "kind": "member-removed",
+    "reason": "`StoreProjection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "fromKind",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "fromId",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "toKind",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphEdgeKey",
+    "member": "toId",
+    "kind": "member-removed",
+    "reason": "`SubgraphEdgeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphIndex",
+    "member": "node",
+    "kind": "member-removed",
+    "reason": "`SubgraphIndex` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphIndex",
+    "member": "outgoing",
+    "kind": "member-removed",
+    "reason": "`SubgraphIndex` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphIndex",
+    "member": "incoming",
+    "kind": "member-removed",
+    "reason": "`SubgraphIndex` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphNodeKey",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`SubgraphNodeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SubgraphNodeKey",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`SubgraphNodeKey` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SystemIndexDeclarationFor",
+    "member": "table",
+    "kind": "member-removed",
+    "reason": "`SystemIndexDeclarationFor` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SystemIndexDeclarationFor",
+    "member": "suffix",
+    "kind": "member-removed",
+    "reason": "`SystemIndexDeclarationFor` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SystemIndexDeclarationFor",
+    "member": "binaryOrderColumns",
+    "kind": "member-removed",
+    "reason": "`SystemIndexDeclarationFor` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SystemIndexDeclarationFor",
+    "member": "columns",
+    "kind": "member-removed",
+    "reason": "`SystemIndexDeclarationFor` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TrustedImportOptions",
+    "member": "schemaWrite",
+    "kind": "member-removed",
+    "reason": "`TrustedImportOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TrustedImportOptions",
+    "member": "schemaWrite.graphId",
+    "kind": "member-removed",
+    "reason": "`TrustedImportOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TrustedImportOptions",
+    "member": "schemaWrite.expectedVersion",
+    "kind": "member-removed",
+    "reason": "`TrustedImportOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateEdgeInput",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`UpdateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateEdgeInput",
+    "member": "props",
+    "kind": "member-removed",
+    "reason": "`UpdateEdgeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeInput",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeInput",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeInput",
+    "member": "props",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeInput` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ValidateGraphExtensionOptions",
+    "member": "strict",
+    "kind": "member-removed",
+    "reason": "`ValidateGraphExtensionOptions` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictError",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`VersionConflictError` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictErrorDetails",
+    "member": "kind",
+    "kind": "member-removed",
+    "reason": "`VersionConflictErrorDetails` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictErrorDetails",
+    "member": "id",
+    "kind": "member-removed",
+    "reason": "`VersionConflictErrorDetails` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictErrorDetails",
+    "member": "expectedVersion",
+    "kind": "member-removed",
+    "reason": "`VersionConflictErrorDetails` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictErrorDetails",
+    "member": "actualVersion",
+    "kind": "member-removed",
+    "reason": "`VersionConflictErrorDetails` is removed from the package root and from the public surface. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "indexSubgraph(subgraph)",
+    "member": "nodes",
+    "kind": "member-removed",
+    "reason": "`indexSubgraph(subgraph)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "indexSubgraph(subgraph)",
+    "member": "edges",
+    "kind": "member-removed",
+    "reason": "`indexSubgraph(subgraph)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "instantiateGraph(params)",
+    "member": "template",
+    "kind": "member-removed",
+    "reason": "`instantiateGraph(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "instantiateGraph(params)",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`instantiateGraph(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "instantiateGraphTemplate(params)",
+    "member": "template",
+    "kind": "member-removed",
+    "reason": "`instantiateGraphTemplate(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "instantiateGraphTemplate(params)",
+    "member": "graphId",
+    "kind": "member-removed",
+    "reason": "`instantiateGraphTemplate(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "introspectGraphExtension(=>)",
+    "member": "kinds",
+    "kind": "member-removed",
+    "reason": "`introspectGraphExtension(=>)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "introspectGraphExtension(=>)",
+    "member": "edges",
+    "kind": "member-removed",
+    "reason": "`introspectGraphExtension(=>)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "recordedInstant(coordinate)",
+    "member": "revision",
+    "kind": "member-removed",
+    "reason": "`recordedInstant(coordinate)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "recordedInstant(coordinate)",
+    "member": "wallTime",
+    "kind": "member-removed",
+    "reason": "`recordedInstant(coordinate)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "recordedInstant(coordinate)",
+    "member": "owner",
+    "kind": "member-removed",
+    "reason": "`recordedInstant(coordinate)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "registerGraphTemplate(params)",
+    "member": "templateId",
+    "kind": "member-removed",
+    "reason": "`registerGraphTemplate(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "registerGraphTemplate(params)",
+    "member": "reconciled",
+    "kind": "member-removed",
+    "reason": "`registerGraphTemplate(params)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "supportsInteractiveTransactions(backendOrCapabilities)",
+    "member": "capabilities",
+    "kind": "member-removed",
+    "reason": "`supportsInteractiveTransactions(backendOrCapabilities)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "supportsRootAtomicBatch(backendOrCapabilities)",
+    "member": "capabilities",
+    "kind": "member-removed",
+    "reason": "`supportsRootAtomicBatch(backendOrCapabilities)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendDisposedError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`BackendDisposedError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BaseSchemaMigrationError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`BaseSchemaMigrationError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "CompilerInvariantError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`CompilerInvariantError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionRebuildUnsupportedError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`ContributionRebuildUnsupportedError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ContributionUnavailableError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`ContributionUnavailableError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DatabaseOperationError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`DatabaseOperationError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeMatchIdentityConflictError.constructor(details)",
+    "member": "attempted",
+    "kind": "member-removed",
+    "reason": "`EdgeMatchIdentityConflictError.constructor(details)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeMatchIdentityConflictError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`EdgeMatchIdentityConflictError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EmbeddingDimensionChangedError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`EmbeddingDimensionChangedError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError.constructor(details)",
+    "member": "edgeKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError.constructor(details)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError.constructor(details)",
+    "member": "fromKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError.constructor(details)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError.constructor(details)",
+    "member": "toKind",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError.constructor(details)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError.constructor(details)",
+    "member": "allowedPairs",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError.constructor(details)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EndpointPairError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`EndpointPairError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExportStreamCancelledError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`ExportStreamCancelledError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ExportStreamCancelledError.constructor(options)",
+    "member": "suggestion",
+    "kind": "member-removed",
+    "reason": "`ExportStreamCancelledError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphAlgorithmConvergenceError.constructor(options)",
+    "member": "oscillating",
+    "kind": "member-removed",
+    "reason": "`GraphAlgorithmConvergenceError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "message",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "code",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "details",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "suggestion",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "category",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphExtensionError.constructor(spec)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`GraphExtensionError.constructor(spec)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentityContradictionError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`IdentityContradictionError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "IdentitySeparationViolationError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`IdentitySeparationViolationError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeConstraintNotFoundError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`NodeConstraintNotFoundError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeIndexNotFoundError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`NodeIndexNotFoundError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaContentConflictError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`SchemaContentConflictError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionClosedError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`TransactionClosedError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TrustedImportError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`TrustedImportError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TrustedImportError.constructor(options)",
+    "member": "suggestion",
+    "kind": "member-removed",
+    "reason": "`TrustedImportError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UnsupportedPredicateError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`UnsupportedPredicateError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UnsupportedPredicateError.constructor(options)",
+    "member": "suggestion",
+    "kind": "member-removed",
+    "reason": "`UnsupportedPredicateError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "VersionConflictError.constructor(options)",
+    "member": "cause",
+    "kind": "member-removed",
+    "reason": "`VersionConflictError.constructor(options)` is an unexported declaration the root rendered only through names that left the root, so it no longer appears in the root report. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "issue": "#865"
   }
 ]

@@ -2,16 +2,17 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompiledRowsSql,
-  type CompiledStatementSql,
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
-  pruneIdentityTransitions,
-  type TransactionBackend,
 } from "../src";
+import type {
+  CompiledRowsSql,
+  CompiledStatementSql,
+  TransactionBackend,
+} from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   RECORDED_MAX_REVISION,
@@ -21,6 +22,7 @@ import {
 import { IdentityContradictionError, ValidationError } from "../src/errors";
 import { type IdentityTransferAssertion } from "../src/identity/service";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
+import { pruneIdentityTransitions } from "../src/identity-entry";
 import {
   exportGraph,
   exportGraphStream,

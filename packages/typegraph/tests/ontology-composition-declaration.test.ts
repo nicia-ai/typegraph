@@ -26,13 +26,13 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   hasPart,
-  type OntologyRelation,
   partOf,
   subClassOf,
 } from "../src";
+import type { OntologyRelation } from "../src/core";
+import { defineGraphExtension } from "../src/graph-extension";
 import { validateOntologyRelations } from "../src/ontology/validation";
 import { buildKindRegistry } from "../src/registry";
 import {

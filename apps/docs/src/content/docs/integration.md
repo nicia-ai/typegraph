@@ -243,7 +243,7 @@ When multiple allocations share one PostgreSQL database, give each backend a
 stable namespace so its pgvector tables and indexes remain physically isolated:
 
 ```typescript
-import { createPgvectorStrategy } from "@nicia-ai/typegraph";
+import { createPgvectorStrategy } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 const backend = createPostgresBackend(pool, {
@@ -740,7 +740,8 @@ Verify **once per isolate**, then build a zero-query store per request from the
 cached reconciled schema:
 
 ```typescript
-import { createAdapterStore, createVerifiedAdapterStore, getCommittedSchemaVersion, type ReconciledSchema } from "@nicia-ai/typegraph";
+import { createAdapterStore } from "@nicia-ai/typegraph";
+import { createVerifiedAdapterStore, getCommittedSchemaVersion, type ReconciledSchema } from "@nicia-ai/typegraph/schema";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 type Cached = {

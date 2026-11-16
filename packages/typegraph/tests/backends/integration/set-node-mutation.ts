@@ -2,7 +2,6 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  compareAndSetAbsent,
   ConfigurationError,
   defineEdge,
   defineGraph,
@@ -21,6 +20,7 @@ import type { QueryAst } from "../../../src/query/ast";
 import { compileQuery } from "../../../src/query/compiler";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write-pipeline";
+import { compareAndSetAbsent } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";

@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BaseSchemaMigrationError, CompilerInvariantError } from "../src";
 import {
   createBaseSchemaLifecycle,
   CURRENT_BASE_SCHEMA_VERSION,
 } from "../src/backend/drizzle/base-schema";
+import {
+  BaseSchemaMigrationError,
+  CompilerInvariantError,
+} from "../src/errors-entry";
 
 function migrationReason(error: unknown): string | undefined {
   return error instanceof BaseSchemaMigrationError ?

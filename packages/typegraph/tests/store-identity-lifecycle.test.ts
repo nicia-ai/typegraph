@@ -22,12 +22,12 @@ import { z } from "zod";
 import {
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   StaleVersionError,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
+import { defineGraphExtension } from "../src/graph-extension";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import {

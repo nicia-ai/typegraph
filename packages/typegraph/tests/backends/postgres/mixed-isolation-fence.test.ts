@@ -31,7 +31,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
   partOf,
   type Store,
   TransactionConflictError,
@@ -44,6 +43,7 @@ import type {
   GraphBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
+import { EdgeAcyclicityError } from "../../../src/errors-entry";
 import { branch } from "../../../src/graph-merge/branch";
 import { BaseVersionMismatchError } from "../../../src/graph-merge/errors";
 import { merge } from "../../../src/graph-merge/merge";

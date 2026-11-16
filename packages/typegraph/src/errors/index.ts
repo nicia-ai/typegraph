@@ -1721,43 +1721,6 @@ export class CompositionExistenceError extends TypeGraphError {
 // ============================================================
 
 /**
- * Details for VersionConflictError.
- */
-export type VersionConflictErrorDetails = Readonly<{
-  kind: string;
-  id: string;
-  expectedVersion: number;
-  actualVersion: number;
-}>;
-
-/**
- * Thrown when optimistic locking detects a concurrent modification.
- *
- * This occurs when two operations try to update the same entity simultaneously.
- * The operation with the stale version fails.
- */
-export class VersionConflictError extends TypeGraphError {
-  declare readonly details: VersionConflictErrorDetails;
-
-  constructor(
-    details: VersionConflictErrorDetails,
-    options?: { cause?: unknown },
-  ) {
-    super(
-      `Version conflict on ${details.kind}/${details.id}: expected version ${details.expectedVersion}, found ${details.actualVersion}`,
-      "VERSION_CONFLICT",
-      {
-        details,
-        category: "system",
-        suggestion: `Fetch the latest version of the entity and retry the operation. This error indicates concurrent modification.`,
-        cause: options?.cause,
-      },
-    );
-    this.name = "VersionConflictError";
-  }
-}
-
-/**
  * Details for TransactionConflictError.
  */
 export type TransactionConflictErrorDetails = Readonly<{

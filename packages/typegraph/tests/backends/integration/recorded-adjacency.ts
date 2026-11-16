@@ -2,22 +2,19 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  asRecordedInstant,
-  type CompiledRowsSql,
-  createStore,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  type RecordedAdjacencyEntry,
-  type RecordedAdjacencyOptions,
-  type RecordedAdjacencyPage,
-  type RecordedStoreView,
-} from "../../../src";
+import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
+import type { CompiledRowsSql } from "../../../src/backend";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { asRecordedInstant } from "../../../src/core";
 import { decodeCursor } from "../../../src/query/cursor";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import type {
+  RecordedAdjacencyEntry,
+  RecordedAdjacencyOptions,
+  RecordedAdjacencyPage,
+  RecordedStoreView,
+} from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 

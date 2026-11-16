@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineGraph,
-  defineNode,
-  UnsupportedBackendCapabilityError,
-} from "../src";
+import { createStore, defineGraph, defineNode } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import type { CompiledRowsSql } from "../src/query/sql-intent";
 import { createTestBackend } from "./test-utils";
 

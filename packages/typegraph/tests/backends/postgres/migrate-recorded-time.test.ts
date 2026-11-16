@@ -3,11 +3,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { ConfigurationError } from "../../../src";
 import {
-  ConfigurationError,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
-} from "../../../src";
+} from "../../../src/backend";
 import {
   createPostgresBackend,
   createPostgresTables,

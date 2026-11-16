@@ -5494,6 +5494,9 @@ export type LibsqlBackendResult = Readonly<{
     db: LibSQLDatabase;
 }>;
 
+// @public (undocumented)
+export const libsqlVectorStrategy: VectorStrategy;
+
 // @public
 type LineageBackend = Pick<GraphBackend, "lineage">;
 

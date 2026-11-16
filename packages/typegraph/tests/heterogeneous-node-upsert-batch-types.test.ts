@@ -1,12 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
-import {
-  asNodeId,
-  defineGraph,
-  defineNode,
-  type HistoryTransactionContext,
-} from "../src";
+import { asNodeId, defineGraph, defineNode } from "../src";
+import type { HistoryTransactionContext } from "../src/store-entry";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Company = defineNode("Company", {

@@ -2,15 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  type AnyEdgeType,
-  type CompiledRowsSql,
-  type CompiledStatementSql,
   ConfigurationError,
   createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type EdgeCollection,
   embedding,
@@ -19,14 +15,12 @@ import {
   type NodeId,
   type NodeType,
   param as parameter,
-  type RecordedInstant,
-  recordedInstant,
-  recordedInstantRevision,
-  recordedRelation,
   searchable,
-  type StoreSearch,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
+import type {
+  CompiledRowsSql,
+  CompiledStatementSql,
+} from "../../../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -37,12 +31,20 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import {
+  type AnyEdgeType,
+  type RecordedInstant,
+  recordedInstant,
+  recordedInstantRevision,
+} from "../../../src/core";
+import {
   createRecordedInstant,
   parseRecordedInstant,
   type ReadCoordinate,
   RECORDED_MAX_REVISION,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   applyMergePlan,
   branch,
@@ -65,6 +67,7 @@ import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
+import { recordedRelation } from "../../../src/query-entry";
 import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
@@ -79,6 +82,7 @@ import {
 } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
+import type { StoreSearch } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { createGate } from "../../concurrency-utils";
 import {

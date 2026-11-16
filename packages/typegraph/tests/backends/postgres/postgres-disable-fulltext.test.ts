@@ -26,14 +26,7 @@ import { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  ContributionRebuildUnsupportedError,
-  createStoreWithSchema,
-  defineGraph,
-  defineGraphExtension,
-  defineNode,
-  UnsupportedBackendCapabilityError,
-} from "../../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { tables as postgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
@@ -41,6 +34,11 @@ import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { createLocalPgliteStore } from "../../../src/backend/postgres/pglite-store";
 import { embedding } from "../../../src/core/embedding";
 import { searchable } from "../../../src/core/searchable";
+import {
+  ContributionRebuildUnsupportedError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createAdapterStoreWithSchema } from "../../../src/store";

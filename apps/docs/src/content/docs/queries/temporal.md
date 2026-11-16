@@ -149,7 +149,7 @@ Advanced hosts can bind an already-populated recorded relation for reads without
 using TypeGraph's writer wrapper:
 
 ```typescript
-import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph";
+import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph/query";
 
 const recordedRead = recordedRelation({
   schema: createSqlSchema({
@@ -181,7 +181,7 @@ round-tripped through untyped storage:
 import {
   asRecordedInstant,
   recordedInstantWallTime,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/core";
 
 const recorded = store.asOfRecorded(
   asRecordedInstant(savedCheckpointString),

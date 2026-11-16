@@ -35,7 +35,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type HistoryStore,
 } from "../../../src";
 import {
   type EngineRecordedRevision,
@@ -70,6 +69,7 @@ import {
   readRecordedClock,
   recordedRelationsLineage,
 } from "../../../src/store/recorded-capture";
+import type { HistoryStore } from "../../../src/store-entry";
 import { attachEngineNativeRecordedTime } from "../../engine-native-recorded-time-fixture";
 
 /** Wall time this simulation's `revisionNow` answers before any commit. */

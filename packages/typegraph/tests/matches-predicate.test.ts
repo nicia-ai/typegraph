@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
@@ -16,6 +15,7 @@ import {
   subClassOf,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
+import { createQueryBuilder } from "../src/query";
 import { type PropsAccessor } from "../src/query/builder/types";
 import { compileQuery } from "../src/query/compiler";
 import {

@@ -27,7 +27,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompositionCascadedPart,
   createStore,
   createStoreWithSchema,
   defineEdge,
@@ -55,6 +54,7 @@ import {
 import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
 import { transactionDeleteNodeWithPolicy } from "../src/store/runtime-port";
 import { type OperationHookContext } from "../src/store/types";
+import type { CompositionCascadedPart } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, matchingObject } from "./test-utils";
 

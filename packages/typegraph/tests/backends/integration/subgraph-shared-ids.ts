@@ -18,14 +18,16 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type GraphNodeReference,
-  indexSubgraph,
   KindNotFoundError,
   type NodeKinds,
-  type SubgraphOptions,
-  type SubgraphResult,
   ValidationError,
 } from "../../../src";
+import {
+  type GraphNodeReference,
+  indexSubgraph,
+  type SubgraphOptions,
+  type SubgraphResult,
+} from "../../../src/store-entry";
 import type { InspectableStore, IntegrationTestContext } from "./test-context";
 
 const Show = defineNode("Show", { schema: z.object({}) });

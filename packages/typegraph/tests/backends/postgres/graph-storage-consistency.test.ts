@@ -24,13 +24,15 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
-  type GraphStorageInspection,
-  inspectGraphStorage,
   type Store,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  type GraphStorageInspection,
+  inspectGraphStorage,
+} from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 

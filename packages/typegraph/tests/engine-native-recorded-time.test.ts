@@ -27,17 +27,13 @@ import { z } from "zod";
 import {
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
   hasPart,
-  migrateLegacyRecordedTime,
   partOf,
-  pruneIdentityTransitions,
-  recordedRelation,
-  UnsupportedBackendCapabilityError,
 } from "../src";
+import { migrateLegacyRecordedTime } from "../src/backend";
 import {
   type EngineRecordedRevision,
   type EngineRecordedTimeMembers,
@@ -61,8 +57,10 @@ import {
   createRecordedInstant,
 } from "../src/core/temporal";
 import { ConfigurationError, IdentityReplayError } from "../src/errors";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import { MergePlanCapabilityError } from "../src/graph-merge/errors";
 import { planMerge } from "../src/graph-merge/merge";
+import { pruneIdentityTransitions } from "../src/identity-entry";
 import { exportGraphStream, importGraphStream } from "../src/interchange";
 import { type GraphInterchangeChunk } from "../src/interchange/types";
 import { createQueryBuilder } from "../src/query/builder";
@@ -74,7 +72,9 @@ import {
 } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
+import { recordedRelation } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
+import { createVerifiedStore } from "../src/schema";
 import { runRecordedTransactionSavepoint } from "../src/store/recorded-capture";
 import { resolveLineage } from "../src/store/recorded-capture";
 import { transactionBackend } from "../src/store/runtime-port";

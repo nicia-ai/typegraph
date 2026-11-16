@@ -32,6 +32,10 @@ export {
   type SqliteTransactionMode,
   tables,
 } from "../drizzle/sqlite";
+
+// Fulltext and vector strategies for createSqliteBackend
+export { fts5Strategy } from "../../query/dialect/fulltext-strategy";
+export { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   BundledBackendCapabilityOverrides,

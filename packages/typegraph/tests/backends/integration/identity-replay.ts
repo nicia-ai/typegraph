@@ -16,12 +16,7 @@ import {
   asNodeId,
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  GraphAllocationMismatchError,
-  IdentityReplayError,
-  pruneIdentityTransitions,
-  type TransitionPageCursor,
   ValidationError,
 } from "../../../src";
 import {
@@ -31,6 +26,13 @@ import {
   recordedInstantRevision,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
+import { GraphAllocationMismatchError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import {
+  IdentityReplayError,
+  pruneIdentityTransitions,
+  type TransitionPageCursor,
+} from "../../../src/identity-entry";
 import {
   exportGraph,
   exportGraphStream,

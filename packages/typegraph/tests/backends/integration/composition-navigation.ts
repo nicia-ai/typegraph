@@ -28,12 +28,12 @@ import {
   defineGraph,
   defineNode,
   hasPart,
-  indexSubgraph,
   partOf,
-  type QualifiedRecursivePath,
   subClassOf,
 } from "../../../src";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../../src/query/compiler/recursive";
+import type { QualifiedRecursivePath } from "../../../src/query-entry";
+import { indexSubgraph } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import {

@@ -18,20 +18,19 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
-  type ContributionProbeEntry,
-  ContributionRebuildUnsupportedError,
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  fts5Strategy,
   searchable,
 } from "../src";
+import type { ContributionProbeEntry } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type ContributionMaterializerDeps,
   contributionRebuildSupported,
   createContributionMaterializer,
 } from "../src/backend/drizzle/contribution-materializations";
+import { fts5Strategy } from "../src/backend/sqlite";
 import type {
   ContributionMaterializationIdentity,
   ContributionMaterializationRow,
@@ -39,6 +38,7 @@ import type {
   RecordContributionMaterializationParams,
   SchemaWriteTransactionBackend,
 } from "../src/backend/types";
+import { ContributionRebuildUnsupportedError } from "../src/errors-entry";
 import { type FulltextStrategy } from "../src/query/dialect/fulltext-strategy";
 import { createTestBackend } from "./test-utils";
 

@@ -62,7 +62,7 @@ telling you which rows had moved, which is its own quiet bug.
 So the repair is an explicit operator action, with a dry run:
 
 ```typescript
-import { repairInvertedValidityWindows } from "@nicia-ai/typegraph";
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph/backend";
 
 const report = await repairInvertedValidityWindows({
   backend: anyBackend,

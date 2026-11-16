@@ -7,12 +7,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  createQueryBuilder,
-  defineGraph,
-  defineNode,
-  param as parameter,
-} from "../src";
+import { defineGraph, defineNode, param as parameter } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlString as sqlToString } from "./sql-test-utils";
 

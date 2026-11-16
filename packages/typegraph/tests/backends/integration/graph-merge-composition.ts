@@ -25,7 +25,6 @@ import {
   defineNode,
   partOf,
   type Store,
-  type StoreHooks,
 } from "../../../src";
 import {
   CardinalityMergeConflictError,
@@ -45,6 +44,7 @@ import {
   planMergeIncremental,
 } from "../../../src/graph-merge/merge";
 import { asBranchId, type GraphBranch } from "../../../src/graph-merge/types";
+import type { StoreHooks } from "../../../src/store-entry";
 import { refenceMergePlan } from "../../graph-merge/test-utils";
 import { type IntegrationTestContext } from "./test-context";
 

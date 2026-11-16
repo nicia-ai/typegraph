@@ -5,17 +5,17 @@ import {
   CardinalityError,
   ConfigurationError,
   createStoreWithSchema,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   DisjointError,
   disjointWith,
   EndpointNotFoundError,
   subClassOf,
   UniquenessError,
 } from "@nicia-ai/typegraph";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+import { createVerifiedStore } from "@nicia-ai/typegraph/schema";
 import fc from "fast-check";
 import {
   afterAll,

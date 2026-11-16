@@ -16,6 +16,10 @@
       "@nicia-ai/typegraph/graph-extension": ["./src/graph-extension/index.ts"],
       "@nicia-ai/typegraph/graph-merge": ["./src/graph-merge/index.ts"],
       "@nicia-ai/typegraph/provenance": ["./src/provenance/index.ts"],
+      "@nicia-ai/typegraph/store": ["./src/store-entry.ts"],
+      "@nicia-ai/typegraph/query": ["./src/query-entry.ts"],
+      "@nicia-ai/typegraph/errors": ["./src/errors-entry.ts"],
+      "@nicia-ai/typegraph/identity": ["./src/identity-entry.ts"],
       "@nicia-ai/typegraph/sqlite/local": [
         "./src/backend/sqlite/local-store.ts"
       ],

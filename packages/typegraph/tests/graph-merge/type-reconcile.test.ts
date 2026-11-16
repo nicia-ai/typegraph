@@ -3,11 +3,10 @@ import {
   defineGraph,
   defineNode,
   equivalentTo,
-  generateId,
   type NodeType,
-  type OntologyRelation,
   subClassOf,
 } from "@nicia-ai/typegraph";
+import { generateId, type OntologyRelation } from "@nicia-ai/typegraph/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 

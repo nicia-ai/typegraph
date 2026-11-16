@@ -16,13 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  defineNodeIndex,
-  type Store,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode, type Store } from "../../../src";
 import {
   CardinalityMergeConflictError,
   isErr,
@@ -37,6 +31,7 @@ import {
   planMergeIncremental,
 } from "../../../src/graph-merge/merge";
 import { asBranchId, type GraphBranch } from "../../../src/graph-merge/types";
+import { defineNodeIndex } from "../../../src/indexes";
 import { type IntegrationTestContext } from "./test-context";
 
 const Assignee = defineNode("GmtAssignee", { schema: z.object({}) });

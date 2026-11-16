@@ -20,17 +20,17 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  defineNodeIndex,
   disjointWith,
   hasPart,
   partOf,
   subClassOf,
-  type UniqueConstraint,
 } from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import type { UniqueConstraint } from "../src/core";
+import { defineGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
+import { defineNodeIndex } from "../src/indexes";
 import { applyDeprecatedKinds } from "../src/schema/manager";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { type SerializedSchema } from "../src/schema/types";

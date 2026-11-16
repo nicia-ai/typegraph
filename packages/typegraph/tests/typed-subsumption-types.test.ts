@@ -12,29 +12,20 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AssignableNodeKinds,
-  type BaseStoreOptions,
   broader,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   equivalentTo,
-  type FulltextSearchOptions,
-  type GraphNodeReferenceInput,
-  type HybridSearchOptions,
   type Node,
   type NodeId,
-  type NodeReferenceLookup,
   type NodeType,
-  type PolymorphicNodeReference,
-  type PolymorphicNodeType,
   relatedTo,
   type Store,
   subClassOf,
   type TransactionContext,
-  type VectorSearchOptions,
 } from "../src";
+import type { PolymorphicNodeType } from "../src/core";
 import { ConfigurationError } from "../src/errors";
 import type {
   IncompatibleKeys,
@@ -42,11 +33,22 @@ import type {
   StructuralSubtypeMismatch,
   TypedOntologyRelation,
 } from "../src/ontology/types";
+import { createQueryBuilder } from "../src/query";
 import {
   type AliasExpansionOptions,
   type DefaultAliasExpansionAxis,
 } from "../src/query/builder/alias-expansion";
+import type { AssignableNodeKinds } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry/builders";
+import type {
+  BaseStoreOptions,
+  FulltextSearchOptions,
+  GraphNodeReferenceInput,
+  HybridSearchOptions,
+  NodeReferenceLookup,
+  PolymorphicNodeReference,
+  VectorSearchOptions,
+} from "../src/store-entry";
 
 // ============================================================
 // Fixtures

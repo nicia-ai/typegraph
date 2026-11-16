@@ -948,7 +948,7 @@ nodes that share a cheap key.
   ignored on the snapshot `merge()` path.
 
 ```typescript
-import { defineNodeIndex } from "@nicia-ai/typegraph";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 
 const patientCohort = defineNodeIndex(Patient, { name: "patient_cohort_idx", fields: ["cohort"] });
 const graph = defineGraph({ /* ... */ indexes: [patientCohort] });

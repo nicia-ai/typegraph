@@ -38,7 +38,6 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   partOf,
 } from "../../src";
@@ -47,6 +46,7 @@ import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../../src/backend/types";
 import type { EngineRevision, LineageMembers } from "../../src/backend/types";
 import type { GraphDef } from "../../src/core/define-graph";
+import { defineGraphExtension } from "../../src/graph-extension";
 import {
   applyDurableMergePlan,
   applyMergePlan,

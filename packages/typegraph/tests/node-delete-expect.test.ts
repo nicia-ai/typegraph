@@ -14,13 +14,12 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type NodeDeletePlan,
-  NodeDeletePlanMismatchError,
-  type OperationHookContext,
   partOf,
   type Store,
   ValidationError,
 } from "../src";
+import { NodeDeletePlanMismatchError } from "../src/errors-entry";
+import type { NodeDeletePlan, OperationHookContext } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, matchingArray } from "./test-utils";
 

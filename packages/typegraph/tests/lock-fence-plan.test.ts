@@ -65,7 +65,6 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  fts5Strategy,
 } from "../src";
 import {
   requireWriteFence,
@@ -79,6 +78,7 @@ import {
 } from "../src/backend/drizzle/contribution-materializations";
 import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { lockPostgresTrustedImportTables } from "../src/backend/drizzle/trusted-import";
+import { fts5Strategy } from "../src/backend/sqlite";
 import type {
   BackendCapabilities,
   TransactionBackend,

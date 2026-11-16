@@ -35,6 +35,10 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/graph-extension", expectedExport: "defineGraphExtension" },
   { subpath: "/graph-merge", expectedExport: "branch" },
   { subpath: "/provenance", expectedExport: "createRetractionCapability" },
+  { subpath: "/store", expectedExport: "StoreView" },
+  { subpath: "/query", expectedExport: "QueryBuilder" },
+  { subpath: "/errors", expectedExport: "DatabaseOperationError" },
+  { subpath: "/identity", expectedExport: "pruneIdentityTransitions" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteStore" },
   { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteStore" },
   {

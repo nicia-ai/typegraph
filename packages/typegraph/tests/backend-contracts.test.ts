@@ -35,8 +35,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type HookContext,
-  type QueryHookContext,
   searchable,
 } from "../src";
 import {
@@ -71,6 +69,7 @@ import {
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
+import type { HookContext, QueryHookContext } from "../src/store-entry";
 import { requireDefined } from "../src/utils/presence";
 import { dumpObservableState } from "./state-snapshot";
 import { createTestBackend, makeUnauditedBackend } from "./test-utils";

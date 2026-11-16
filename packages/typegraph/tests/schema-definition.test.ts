@@ -13,16 +13,14 @@ import { z } from "zod";
 import {
   ConfigurationError,
   defineEdge,
-  defineEdgeIndex,
   defineGraph,
   defineNode,
-  defineNodeIndex,
-  getEdgeKinds,
-  getNodeKinds,
   subClassOf,
 } from "../src";
+import { getEdgeKinds, getNodeKinds } from "../src/core";
 import { type DefineEdgeOptions } from "../src/core/edge";
 import { type DefineNodeOptions } from "../src/core/node";
+import { defineEdgeIndex, defineNodeIndex } from "../src/indexes";
 import { requireDefined } from "../src/utils/presence";
 
 describe("defineNode()", () => {

@@ -22,25 +22,27 @@ import { z } from "zod";
 import {
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
-  defineNodeIndex,
   embedding,
   type GraphBackend,
   type GraphDef,
-  type GraphStorageInspection,
-  inspectGraphStorage,
-  listGraphIds,
   searchable,
 } from "../../../src";
+import { listGraphIds } from "../../../src/backend";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_RELATIONS } from "../../../src/backend/graph-relations";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import { defineNodeIndex } from "../../../src/indexes";
 import { sql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
 import type { LiveStoreOptions } from "../../../src/store/types";
+import {
+  type GraphStorageInspection,
+  inspectGraphStorage,
+} from "../../../src/store-entry";
 import { compareCodePoints } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { refuseRecursiveTraversal } from "./capability-refusals";

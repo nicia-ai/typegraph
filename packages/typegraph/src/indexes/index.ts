@@ -12,7 +12,8 @@
  *
  * @example Indexes via defineGraph
  * ```ts
- * import { defineGraph, defineNode, defineNodeIndex } from "@nicia-ai/typegraph";
+ * import { defineGraph, defineNode } from "@nicia-ai/typegraph";
+ * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
  * import { z } from "zod";
  *
  * const Person = defineNode("Person", {

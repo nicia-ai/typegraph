@@ -14,12 +14,12 @@ import {
   asNodeId,
   createStore,
   type EdgeId,
-  IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   type Node,
   type NodeId,
   type Store,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { IMMUTABLE_VALIDITY_LOWER_BOUND_CODE } from "../../../src/errors-entry";
 import {
   FORMAT_VERSION,
   type GraphData,

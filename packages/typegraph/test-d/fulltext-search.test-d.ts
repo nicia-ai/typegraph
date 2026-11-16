@@ -5,15 +5,17 @@ import {
   defineGraph,
   defineNode,
   embedding,
-  type FulltextSearchHit,
-  type FulltextSearchOptions,
-  type HybridSearchHit,
-  type HybridSearchOptions,
   type Node,
   searchable,
-  type SearchableMetadata,
   type Store,
 } from "..";
+import type {
+  FulltextSearchHit,
+  FulltextSearchOptions,
+  HybridSearchHit,
+  HybridSearchOptions,
+} from "../dist/store-entry";
+import type { SearchableMetadata } from "../dist/core";
 
 // ============================================================
 // searchable() schema — runtime values type as string

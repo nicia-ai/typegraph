@@ -17,23 +17,27 @@ import {
   defineGraph,
   defineNode,
   embedding,
-  EmbeddingDimensionChangedError,
   type GraphBackend,
-  getEmbeddingDimensions,
-  libsqlVectorStrategy,
+  type Node,
+  type Store,
+} from "..";
+import { EmbeddingDimensionChangedError } from "../dist/errors-entry";
+import { getEmbeddingDimensions } from "../dist/core";
+import { libsqlVectorStrategy } from "../dist/backend/sqlite/libsql";
+import {
   migrateLegacyEmbeddings,
   type MigrateLegacyEmbeddingsResult,
-  type Node,
-  pgvectorStrategy,
-  type ReclaimedVectorFieldEntry,
-  type ReembedVectorFieldResult,
-  sqliteVecStrategy,
-  type Store,
-  type VectorSearchHit,
-  type VectorSearchOptions,
   type VectorSlot,
   type VectorStrategy,
-} from "..";
+} from "../dist/backend";
+import { pgvectorStrategy } from "../dist/backend/postgres";
+import type {
+  ReclaimedVectorFieldEntry,
+  ReembedVectorFieldResult,
+  VectorSearchHit,
+  VectorSearchOptions,
+} from "../dist/store-entry";
+import { sqliteVecStrategy } from "../dist/backend/sqlite";
 
 const Doc = defineNode("Doc", {
   schema: z.object({

@@ -2,13 +2,9 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import type { GraphBackend, GraphDef } from "../../../src";
-import {
-  createStoreWithSchema,
-  defineGraph,
-  defineGraphExtension,
-  defineNode,
-} from "../../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { computeSchemaHash, serializeSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";

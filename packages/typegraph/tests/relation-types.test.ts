@@ -1,7 +1,8 @@
 import { expectTypeOf, test } from "vitest";
 import { z } from "zod";
 
-import { createQueryBuilder, defineGraph, defineNode, expr } from "../src";
+import { defineGraph, defineNode, expr } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 
 const Person = defineNode("Person", {

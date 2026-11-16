@@ -42,8 +42,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  repairInvertedValidityWindows,
 } from "../src";
+import { repairInvertedValidityWindows } from "../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,

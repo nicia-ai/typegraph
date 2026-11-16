@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStoreWithSchema,
-  defineGraph,
-  defineNode,
-  IdentityEndpointValidityError,
-} from "../../../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { snapshotExportContention } from "../../../src/backend/transaction-resource";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
+import { IdentityEndpointValidityError } from "../../../src/identity-entry";
 import {
   exportGraph,
   exportGraphStream,

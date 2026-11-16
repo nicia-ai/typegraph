@@ -1,13 +1,13 @@
 import {
   CardinalityError,
   createStoreWithSchema,
-  DatabaseOperationError,
   defineGraph,
   defineNode,
-  generateId,
   TypeGraphError,
   UniquenessError,
 } from "@nicia-ai/typegraph";
+import { generateId } from "@nicia-ai/typegraph/core";
+import { DatabaseOperationError } from "@nicia-ai/typegraph/errors";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 

@@ -40,13 +40,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  defineGraph,
-  defineNode,
-  embedding,
-  searchable,
-  UnsupportedBackendCapabilityError,
-} from "../src";
+import { defineGraph, defineNode, embedding, searchable } from "../src";
 import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { requireCatalog } from "../src/backend/capabilities/catalog";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
@@ -59,6 +53,7 @@ import {
   type GraphBackend,
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
 } from "../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import {
   FORMAT_VERSION,
   type GraphData,

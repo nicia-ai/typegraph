@@ -9,9 +9,9 @@ import {
   defineGraph,
   defineNode,
   type Store,
-  UnsupportedBackendCapabilityError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
 import { defineGraphExtension } from "../../../src/graph-extension/define-graph-extension";
 import {
   applyMergePlanInTransaction,

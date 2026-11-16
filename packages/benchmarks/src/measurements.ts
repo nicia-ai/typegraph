@@ -1,10 +1,5 @@
-import {
-  count,
-  countDistinct,
-  countEdges,
-  field,
-  param,
-} from "@nicia-ai/typegraph";
+import { count, countDistinct, field, param } from "@nicia-ai/typegraph";
+import { countEdges } from "@nicia-ai/typegraph/query";
 
 import { BENCHMARK_CONFIG, type QueryMetrics } from "./config";
 import { type PerfStore } from "./graph";

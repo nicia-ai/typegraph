@@ -15,7 +15,6 @@ import {
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   disjointWith,
   inverseOf,
@@ -29,6 +28,7 @@ import {
 } from "../../../src/backend/derive-backend";
 import { type AdapterBackend } from "../../../src/backend/types";
 import { computeUniqueKey } from "../../../src/constraints";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { buildKindRegistry } from "../../../src/registry";
 import {
   getActiveSchema,

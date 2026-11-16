@@ -7,22 +7,24 @@
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
+import type { CompositionWholeKinds } from "../dist/query-entry";
+import type {
+  CompositionWholeReference,
+  CreateNodeInput,
+  StoreProjection,
+} from "../dist/store-entry";
 import {
-  type CompositionWholeKinds,
-  type CompositionWholeReference,
-  type CreateNodeInput,
   defineEdge,
   defineGraph,
   defineNode,
   hasPart,
   type Node,
   type NodeCollection,
-  type OntologyRelation,
   partOf,
   type Store,
-  type StoreProjection,
   subClassOf,
 } from "..";
+import type { OntologyRelation } from "../dist/core";
 
 const Episode = defineNode("Episode", {
   schema: z.object({ title: z.string() }),

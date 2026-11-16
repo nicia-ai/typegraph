@@ -2165,6 +2165,12 @@ export type EdgeRow = Readonly<{
 }>;
 
 // @public
+type EmbeddingIndexType = "hnsw" | "ivfflat" | "none";
+
+// @public
+type EmbeddingMetric = "cosine" | "l2" | "inner_product";
+
+// @public
 export const ENDPOINT_SET_READ: {
     readonly id: "endpointSetRead";
     readonly kind: "graduated";
@@ -3293,6 +3299,12 @@ export type KindRemovalRow = Readonly<{
 }>;
 
 // @public
+export type LegacyEmbeddingSlotConfig = Readonly<{
+    metric: EmbeddingMetric;
+    indexType: EmbeddingIndexType;
+}>;
+
+// @public
 export type LineageBackend = Pick<GraphBackend, "lineage">;
 
 // @public
@@ -3312,6 +3324,16 @@ export type LineageMembers = Readonly<{
 
 // @public
 export type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
+
+// @public
+export function listGraphIds(backend: GraphBackend, options?: ListGraphIdsOptions): Promise<readonly string[]>;
+
+// @public
+export type ListGraphIdsOptions = Readonly<{
+    prefix?: string | undefined;
+    after?: string | undefined;
+    limit?: number | undefined;
+}>;
 
 // @public
 export type LiveNodeRow = NodeRow & Readonly<{
@@ -3352,6 +3374,27 @@ export type ManagedNodeCreatePlan = Readonly<{
 
 // @public (undocumented)
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
+
+// @public
+export function migrateLegacyEmbeddings(options: MigrateLegacyEmbeddingsOptions): Promise<MigrateLegacyEmbeddingsResult>;
+
+// @public
+export type MigrateLegacyEmbeddingsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string;
+    resolveSlotConfig?: (nodeKind: string, fieldPath: string) => LegacyEmbeddingSlotConfig | undefined;
+    batchSize?: number;
+    legacyTableName?: string;
+}>;
+
+// @public
+export type MigrateLegacyEmbeddingsResult = Readonly<{
+    migrated: number;
+    perField: Readonly<Record<string, number>>;
+    skippedDimensionMismatch: Readonly<Record<string, number>>;
+    skippedDecodeError: Readonly<Record<string, number>>;
+    legacyTablePresent: boolean;
+}>;
 
 // @public
 export function migrateLegacyRecordedTime(options: MigrateLegacyRecordedTimeOptions): Promise<MigrateLegacyRecordedTimeResult>;

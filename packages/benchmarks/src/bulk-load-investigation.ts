@@ -14,8 +14,8 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
-  type TransactionBackend,
 } from "@nicia-ai/typegraph";
+import type { TransactionBackend } from "@nicia-ai/typegraph/backend";
 import {
   FORMAT_VERSION,
   type GraphInterchangeChunk,

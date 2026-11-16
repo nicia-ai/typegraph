@@ -398,6 +398,9 @@ type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createPgvectorStrategy(namespace: string): VectorStrategy;
+
+// @public
 export function createPostgresBackend(db: AnyPgDatabase, options?: PostgresBackendOptions): AdapterBackend<AnyPgTransaction>;
 
 // @public
@@ -6177,6 +6180,9 @@ type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "o
 type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
+export const pgvectorStrategy: VectorStrategy;
+
+// @public
 class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -11233,6 +11239,9 @@ type TrustedImportSession = Readonly<{
     insertNodes: (params: readonly InsertNodeParams[]) => Promise<void>;
     insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
 }>;
+
+// @public (undocumented)
+export const tsvectorStrategy: FulltextStrategy;
 
 // @public (undocumented)
 type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;

@@ -7,12 +7,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  createQueryBuilder,
-  defineEdge,
-  defineGraph,
-  defineNode,
-} from "../src";
+import { defineEdge, defineGraph, defineNode } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 
 // ============================================================

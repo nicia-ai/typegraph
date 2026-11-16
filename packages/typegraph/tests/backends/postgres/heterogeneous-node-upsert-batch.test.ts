@@ -8,9 +8,9 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
-  type RecordedInstant,
 } from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import type { RecordedInstant } from "../../../src/core";
 import { ConfigurationError, ValidationError } from "../../../src/errors";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 

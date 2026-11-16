@@ -8,13 +8,9 @@ import {
   ConfigurationError,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
-  DatabaseOperationError,
   defineEdge,
-  defineEdgeIndex,
   defineGraph,
   defineNode,
-  EdgeMatchIdentityConflictError,
   MigrationError,
   ValidationError,
 } from "../src";
@@ -30,10 +26,16 @@ import { createSqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import {
+  DatabaseOperationError,
+  EdgeMatchIdentityConflictError,
+} from "../src/errors-entry";
+import { defineEdgeIndex } from "../src/indexes";
+import {
   type GraphData,
   importGraph,
   ImportOptionsSchema,
 } from "../src/interchange";
+import { createVerifiedStore } from "../src/schema";
 import {
   getActiveSchema,
   initializeSchema,

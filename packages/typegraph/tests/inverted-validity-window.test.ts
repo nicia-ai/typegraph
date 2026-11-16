@@ -47,9 +47,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  INVERTED_VALIDITY_WINDOW_CODE,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
+import { INVERTED_VALIDITY_WINDOW_CODE } from "../src/errors-entry";
 import type { GraphData } from "../src/interchange";
 import {
   exportGraph,

@@ -17,12 +17,8 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineGraph,
-  defineNode,
-  listGraphIds,
-} from "../../../src";
+import { createStore, defineGraph, defineNode } from "../../../src";
+import { listGraphIds } from "../../../src/backend";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import {

@@ -6,9 +6,9 @@ import {
   defineGraph,
   defineNode,
   type Store,
-  type StoreProjection,
   type TransactionContext,
 } from "..";
+import type { StoreProjection } from "../dist/store-entry";
 
 // ============================================================
 // Shared node and edge types

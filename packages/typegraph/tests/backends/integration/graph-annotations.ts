@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { defineGraph, defineGraphExtension } from "../../../src";
+import { defineGraph } from "../../../src";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { type IntegrationTestContext } from "./test-context";
 
 export function registerGraphAnnotationsIntegrationTests(

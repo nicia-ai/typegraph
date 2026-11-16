@@ -18,14 +18,16 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  EdgeAcyclicityError,
-  EdgeAcyclicityIndeterminateError,
 } from "../src";
 import { resolveRecursiveTraversal } from "../src/backend/capabilities/recursive-traversal";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { generateVectorlessPostgresMigrationSQL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { type GraphBackend } from "../src/backend/types";
+import {
+  EdgeAcyclicityError,
+  EdgeAcyclicityIndeterminateError,
+} from "../src/errors-entry";
 import {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,

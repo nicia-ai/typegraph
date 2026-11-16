@@ -23,7 +23,6 @@ import {
   createStore,
   defineGraph,
   defineNode,
-  ENTITY_ALREADY_EXISTS_CODE,
   subClassOf,
   UniquenessError,
   ValidationError,
@@ -33,6 +32,7 @@ import {
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
+import { ENTITY_ALREADY_EXISTS_CODE } from "../../../src/errors-entry";
 import * as idUtilities from "../../../src/utils/id";
 import { type IntegrationTestContext } from "./test-context";
 

@@ -11,13 +11,13 @@ import { z } from "zod";
 
 import {
   count,
-  createQueryBuilder,
   createStore,
   defineEdge,
   defineGraph,
   defineNode,
   sum,
 } from "../../src";
+import { createQueryBuilder } from "../../src/query";
 import { buildKindRegistry } from "../../src/registry";
 import { requireDefined } from "../../src/utils/presence";
 import { createTestBackend } from "../test-utils";

@@ -63,7 +63,6 @@ import {
   defineNode,
   EdgeNotFoundError,
   EndpointNotFoundError,
-  inspectGraphStorage,
   RestrictedDeleteError,
   type Store,
   TransactionConflictError,
@@ -78,6 +77,7 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
+import { inspectGraphStorage } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";

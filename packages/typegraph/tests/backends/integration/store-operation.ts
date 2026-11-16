@@ -6,13 +6,13 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  type JsonValue,
-  sql,
 } from "../../../src";
+import { sql } from "../../../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
+import type { JsonValue } from "../../../src/core";
 import {
   applyMergePlanInTransaction,
   branch,

@@ -124,7 +124,7 @@ no DDL** and fails fast if the database is not at the same schema
 version as the code graph.
 
 ```typescript
-import { createVerifiedStore } from "@nicia-ai/typegraph";
+import { createVerifiedStore } from "@nicia-ai/typegraph/schema";
 
 // Runtime — least-privilege, DML-only role. Zero DDL.
 const [store, result] = await createVerifiedStore(graph, backend);
@@ -218,7 +218,7 @@ For a long-lived local handle, pass a `StoreRef` and use either the return value
 or the updated `ref.current` after the call:
 
 ```typescript
-import type { StoreRef } from "@nicia-ai/typegraph";
+import type { StoreRef } from "@nicia-ai/typegraph/store";
 
 const ref: StoreRef<typeof store> = { current: store };
 const evolved = await ref.current.evolve(extension, { ref });
@@ -409,7 +409,7 @@ in `typegraph_schema_versions.schema_doc`, parsed into a `SerializedSchema`.
 Read it instead of querying that table by hand:
 
 ```typescript
-import { getActiveSchema, isSchemaInitialized, type SerializedSchema } from "@nicia-ai/typegraph";
+import { getActiveSchema, isSchemaInitialized, type SerializedSchema } from "@nicia-ai/typegraph/schema";
 
 // Check whether this graph has been committed at all
 const initialized = await isSchemaInitialized(backend, "my_graph");
@@ -477,10 +477,11 @@ tables are materialized by `createStoreWithSchema`, which the legacy migration
 below also relies on having run.
 
 Deployments that already hold rows in the legacy table run a one-time, idempotent
-cutover with `migrateLegacyEmbeddings()`, exported from the package root:
+cutover with `migrateLegacyEmbeddings()`, exported from
+`@nicia-ai/typegraph/backend`:
 
 ```typescript
-import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph";
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/backend";
 
 // `backend` is the post-cutover backend, wired with its VectorStrategy.
 const result = await migrateLegacyEmbeddings({ backend });
@@ -516,7 +517,7 @@ import {
   deleteLegacyRecordedAnchorMap,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/backend";
 
 const result = await migrateLegacyRecordedTime({ backend });
 console.log(result.graphs, result.anchors);
@@ -608,7 +609,7 @@ queries would be the worse surprise.
 `valid_from = NULL` ("ended at T, start unknown").
 
 ```typescript
-import { repairInvertedValidityWindows } from "@nicia-ai/typegraph";
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph/backend";
 
 // Diagnose. `report` reads through `execute`, a required backend member, so it
 // runs against ANY backend — including a history-capturing one and one with no

@@ -6,14 +6,16 @@ import {
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type GraphBackend,
+} from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import {
   IdentityContradictionError,
   IdentityEndpointValidityError,
   rebuildIdentityClosure,
-} from "../../../src";
-import { deriveBackend } from "../../../src/backend/derive-backend";
+} from "../../../src/identity-entry";
 import { exportGraph, importGraph } from "../../../src/interchange";
 import { inverseOf } from "../../../src/ontology";
 import { createSqlSchema } from "../../../src/query/compiler/schema";

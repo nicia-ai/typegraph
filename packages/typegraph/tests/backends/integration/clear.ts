@@ -23,15 +23,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  createStore,
-  defineGraph,
-  defineNode,
-  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-  resolveGraphVectorSlots,
-  searchable,
-  UnsupportedBackendCapabilityError,
-} from "../../../src";
+import { createStore, defineGraph, defineNode, searchable } from "../../../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../../../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -41,6 +34,8 @@ import type {
   ContributionMaterializationIdentity,
   GraphBackend,
 } from "../../../src/backend/types";
+import { resolveGraphVectorSlots } from "../../../src/core";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
 import { sql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,

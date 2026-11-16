@@ -1,17 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  asNodeId,
-  createStore,
-  defineGraph,
-  indexSubgraph,
-  type Store,
-} from "../../../src";
+import { asNodeId, createStore, defineGraph, type Store } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { ConfigurationError } from "../../../src/errors";
 import type { OneStatementBatchableQuery } from "../../../src/query/builder/types";
 import type { CompiledRowsSql } from "../../../src/query/sql-intent";
 import { recursivePlanCount } from "../../../src/query/sql-intent";
+import { indexSubgraph } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";

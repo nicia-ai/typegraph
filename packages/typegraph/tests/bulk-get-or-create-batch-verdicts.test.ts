@@ -17,9 +17,9 @@ import {
   defineGraph,
   defineNode,
   disjointWith,
-  IdentityContradictionError,
   partOf,
 } from "../src";
+import { IdentityContradictionError } from "../src/identity-entry";
 import type * as CompositionCreate from "../src/store/operations/composition-create";
 import { findLiveCompositionAttachment } from "../src/store/operations/composition-create";
 import { createTestBackend } from "./test-utils";

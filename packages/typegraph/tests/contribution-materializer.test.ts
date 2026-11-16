@@ -13,22 +13,20 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  ContributionUnavailableError,
-  DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
-  fts5Strategy,
-  pgvectorStrategy,
-  StoreNotInitializedError,
-} from "../src";
+import { StoreNotInitializedError } from "../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../src/backend";
 import {
   type ContributionMaterializerDeps,
   createContributionMaterializer,
 } from "../src/backend/drizzle/contribution-materializations";
+import { pgvectorStrategy } from "../src/backend/postgres";
+import { fts5Strategy } from "../src/backend/sqlite";
 import type {
   ContributionMaterializationIdentity,
   ContributionMaterializationRow,
   RecordContributionMaterializationParams,
 } from "../src/backend/types";
+import { ContributionUnavailableError } from "../src/errors-entry";
 import {
   type VectorSlot,
   type VectorStrategy,

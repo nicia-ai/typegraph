@@ -13,9 +13,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type OperationHookContext,
   partOf,
 } from "../src";
+import type { OperationHookContext } from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 const RhShow = defineNode("RhShow", { schema: z.object({}) });

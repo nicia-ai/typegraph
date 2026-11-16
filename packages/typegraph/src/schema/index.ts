@@ -156,3 +156,11 @@ export type {
   SerializedSchema,
   SerializedUniqueConstraint,
 } from "./types";
+
+// Verify-only store factories: open a store and refuse when the committed
+// schema differs, for deployments whose migrations run elsewhere
+export {
+  createVerifiedAdapterStore,
+  createVerifiedStore,
+  type ReconciledSchema,
+} from "../store/store";

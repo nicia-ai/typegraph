@@ -2,16 +2,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type CompiledRowsSql,
   createStoreWithSchema,
-  DatabaseOperationError,
   defineGraph,
   defineNode,
   type GraphBackend,
-  type TransactionBackend,
 } from "../src";
+import type { CompiledRowsSql, TransactionBackend } from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import type { UpdateNodeParams } from "../src/backend/types";
+import { DatabaseOperationError } from "../src/errors-entry";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import {
   createInitializedStore,

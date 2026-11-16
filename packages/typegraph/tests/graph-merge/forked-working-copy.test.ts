@@ -25,14 +25,16 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  recordedInstant,
-  recordedInstantRevision,
-  recordedInstantWallTime,
 } from "../../src";
 import { deriveBackend } from "../../src/backend/derive-backend";
 import { createSqliteTables } from "../../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import {
+  recordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "../../src/core";
 import { computeBaseVersion } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import { BranchError } from "../../src/graph-merge/errors";

@@ -1,8 +1,8 @@
 import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
+import type { AnyEdgeType, OntologyRelation } from "../dist/core";
 import {
-  type AnyEdgeType,
   broader,
   defineEdge,
   defineGraph,
@@ -11,7 +11,6 @@ import {
   equivalentTo,
   inverseOf,
   type NodeType,
-  type OntologyRelation,
   type Store,
   subClassOf,
 } from "..";

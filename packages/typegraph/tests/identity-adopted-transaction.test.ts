@@ -32,16 +32,12 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  type AdapterStore,
-  createAdapterStoreWithSchema,
-  defineGraph,
-  defineNode,
-} from "../src";
+import { createAdapterStoreWithSchema, defineGraph, defineNode } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
 import { ConfigurationError } from "../src/errors";
+import type { AdapterStore } from "../src/store-entry";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),

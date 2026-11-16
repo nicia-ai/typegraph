@@ -19,11 +19,13 @@ import { z } from "zod";
 import {
   createStoreWithSchema,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type GraphBackend,
-  type GraphExtension,
 } from "@nicia-ai/typegraph";
+import {
+  defineGraphExtension,
+  type GraphExtension,
+} from "@nicia-ai/typegraph/graph-extension";
 import {
   createPostgresBackend,
   createPostgresTables,

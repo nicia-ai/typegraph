@@ -28,7 +28,6 @@ import type {
   StaleVersionErrorDetails,
   StoreNotInitializedErrorDetails,
   UniquenessErrorDetails,
-  VersionConflictErrorDetails,
 } from "../src/errors";
 import {
   CardinalityError,
@@ -64,11 +63,11 @@ import {
   StaleVersionError,
   StoreNotInitializedError,
   TransactionClosedError,
+  TransactionConflictError,
   TypeGraphError,
   UniquenessError,
   UnsupportedPredicateError,
   ValidationError,
-  VersionConflictError,
 } from "../src/errors";
 import type { MaterializeIndexesResult } from "../src/store/materialize-indexes";
 
@@ -268,46 +267,6 @@ describe("EndpointNotFoundError", () => {
     });
     expectTypeOf(error.details).toEqualTypeOf<EndpointNotFoundErrorDetails>();
     expectTypeOf(error.details.nodeId).toBeString();
-  });
-});
-
-describe("VersionConflictError", () => {
-  it("formats message with version info", () => {
-    const error = new VersionConflictError({
-      kind: "User",
-      id: "user-123",
-      expectedVersion: 5,
-      actualVersion: 7,
-    });
-    expect(error.message).toContain("User/user-123");
-    expect(error.message).toContain("5");
-    expect(error.message).toContain("7");
-    expect(error.code).toBe("VERSION_CONFLICT");
-    expect(error.name).toBe("VersionConflictError");
-    expect(error.category).toBe("system");
-  });
-
-  it("stores version details", () => {
-    const details = {
-      kind: "Post",
-      id: "post-456",
-      expectedVersion: 1,
-      actualVersion: 2,
-    };
-    const error = new VersionConflictError(details);
-    expect(error.details).toEqual(details);
-  });
-
-  it("exposes details typed as VersionConflictErrorDetails, no cast needed", () => {
-    const error = new VersionConflictError({
-      kind: "Post",
-      id: "post-456",
-      expectedVersion: 1,
-      actualVersion: 2,
-    });
-    expectTypeOf(error.details).toEqualTypeOf<VersionConflictErrorDetails>();
-    expectTypeOf(error.details.expectedVersion).toBeNumber();
-    expectTypeOf(error.details.actualVersion).toBeNumber();
   });
 });
 
@@ -1296,11 +1255,9 @@ describe("error inheritance chain", () => {
         nodeKind: "N",
         nodeId: "id",
       }),
-      new VersionConflictError({
-        kind: "K",
-        id: "id",
-        expectedVersion: 1,
-        actualVersion: 2,
+      new TransactionConflictError({
+        operation: "transaction",
+        attempts: 3,
       }),
       new RestrictedDeleteError({
         nodeKind: "N",
@@ -1403,11 +1360,9 @@ describe("error utility functions", () => {
     ).toBe(true);
     expect(
       isUserRecoverable(
-        new VersionConflictError({
-          kind: "K",
-          id: "id",
-          expectedVersion: 1,
-          actualVersion: 2,
+        new TransactionConflictError({
+          operation: "transaction",
+          attempts: 3,
         }),
       ),
     ).toBe(false);
@@ -1417,11 +1372,9 @@ describe("error utility functions", () => {
   it("isSystemError identifies system errors", () => {
     expect(
       isSystemError(
-        new VersionConflictError({
-          kind: "K",
-          id: "id",
-          expectedVersion: 1,
-          actualVersion: 2,
+        new TransactionConflictError({
+          operation: "transaction",
+          attempts: 3,
         }),
       ),
     ).toBe(true);

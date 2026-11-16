@@ -11,11 +11,10 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  recordedInstantOwner,
-  recordedInstantRevision,
 } from "../src";
 import { createSqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { recordedInstantOwner, recordedInstantRevision } from "../src/core";
 import {
   branchDurable,
   type DurableBranchOrigin,

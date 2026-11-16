@@ -11,15 +11,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { defineGraph, defineNode, type GraphBackend } from "../src";
 import {
   type CompiledRowsSql,
   type CompiledStatementSql,
-  defineGraph,
-  defineNode,
-  type GraphBackend,
   renderPostgres,
   type TransactionBackend,
-} from "../src";
+} from "../src/backend";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { separationRebuildRequired } from "../src/identity/separation";
 import { MAX_REFERENCE_CHUNK_SIZE } from "../src/identity/sql-target";

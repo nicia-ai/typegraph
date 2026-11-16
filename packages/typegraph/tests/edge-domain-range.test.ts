@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineEdge,
-  defineGraph,
-  defineNode,
-  isEdgeTypeWithEndpoints,
-} from "../src";
+import { defineEdge, defineGraph, defineNode } from "../src";
+import { isEdgeTypeWithEndpoints } from "../src/core";
 import { EDGE_TYPE_BRAND } from "../src/core/types";
 import { createStore } from "../src/store";
 import { createTestBackend } from "./test-utils";

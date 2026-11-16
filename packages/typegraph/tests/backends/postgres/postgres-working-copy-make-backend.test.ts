@@ -5,7 +5,6 @@ import { z } from "zod";
 
 import {
   defineGraph,
-  defineGraphExtension,
   defineNode,
   embedding,
   type GraphDef,
@@ -22,6 +21,7 @@ import {
   type PostgresWorkingCopyManager,
 } from "../../../src/backend/postgres/working-copy";
 import { ConfigurationError } from "../../../src/errors";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   branch,
   branchDurable,

@@ -31,7 +31,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createQueryBuilder,
   createStore,
   defineEdge,
   defineGraph,
@@ -40,6 +39,7 @@ import {
 } from "../src";
 import { searchable } from "../src/core/searchable";
 import { ConfigurationError } from "../src/errors";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
