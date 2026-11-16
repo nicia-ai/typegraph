@@ -12,7 +12,9 @@ const { date, version } = Astro.props;
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 if (!ISO_DATE_PATTERN.test(date)) {
-  throw new Error(`UpdateNote: date must be an ISO date (YYYY-MM-DD), got "${date}"`);
+  throw new Error(
+    `UpdateNote: date must be an ISO date (YYYY-MM-DD), got "${date}"`,
+  );
 }
 
 // Midnight UTC, formatted in UTC, so the printed day never shifts with the
@@ -28,14 +30,12 @@ const formattedDate = new Intl.DateTimeFormat("en-US", {
     <span class="update-note-kind">Update</span>
     <span aria-hidden="true">&middot;</span>
     <time datetime={date}>{formattedDate}</time>
-    {
-      version !== undefined && (
-        <>
-          <span aria-hidden="true">&middot;</span>
-          <span>as of {version}</span>
-        </>
-      )
-    }
+    {version !== undefined && (
+      <>
+        <span aria-hidden="true">&middot;</span>
+        <span>as of {version}</span>
+      </>
+    )}
   </p>
   <div class="update-note-body">
     <slot />
