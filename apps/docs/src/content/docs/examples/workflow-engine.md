@@ -32,7 +32,7 @@ const State = defineNode("State", {
   schema: z.object({
     name: z.string(),
     type: z.enum(["initial", "intermediate", "terminal", "approval"]),
-    config: z.record(z.unknown()).optional(), // State-specific config
+    config: z.record(z.string(), z.unknown()).optional(), // State-specific config
   }),
 });
 
@@ -51,7 +51,7 @@ const WorkflowInstance = defineNode("WorkflowInstance", {
     referenceId: z.string(), // ID of the entity being processed
     referenceType: z.string(), // Type of entity (e.g., "PurchaseOrder")
     status: z.enum(["active", "completed", "cancelled", "failed"]).default("active"),
-    data: z.record(z.unknown()).optional(), // Instance-specific data
+    data: z.record(z.string(), z.unknown()).optional(), // Instance-specific data
     createdAt: z.string().datetime(),
     completedAt: z.string().datetime().optional(),
   }),
@@ -66,7 +66,7 @@ const Task = defineNode("Task", {
     status: z.enum(["pending", "in_progress", "completed", "rejected", "escalated"]).default("pending"),
     dueDate: z.string().datetime().optional(),
     priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
-    result: z.record(z.unknown()).optional(),
+    result: z.record(z.string(), z.unknown()).optional(),
     completedAt: z.string().datetime().optional(),
   }),
 });
@@ -808,7 +808,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       .orderBy("e", "meta.validFrom", "asc")
       .select((ctx) => ({
         stateName: ctx.s.name,
-        timestamp: ctx.e.validFrom,
+        timestamp: ctx.e.meta.validFrom,
       })),
     store
       .query()
@@ -821,7 +821,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       .select((ctx) => ({
         title: ctx.t.title,
         status: ctx.t.status,
-        createdAt: ctx.t.createdAt,
+        createdAt: ctx.t.meta.createdAt,
         completedAt: ctx.t.completedAt,
         assignee: ctx.u?.name,
       })),
@@ -837,7 +837,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
 
   for (const task of tasks) {
     events.push({
-      timestamp: task.createdAt.toISOString(),
+      timestamp: task.createdAt,
       type: "task_created",
       description: `Task created: ${task.title}`,
       actor: task.assignee,

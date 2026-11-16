@@ -686,12 +686,12 @@ const history = await store
   .from("Article", "a")
   .temporal("includeEnded")
   .whereNode("a", (a) => a.id.eq(articleId))
-  .orderBy((ctx) => ctx.a.validFrom, "desc")
+  .orderBy("a", "meta.validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.validFrom,
-    validTo: ctx.a.validTo,
-    version: ctx.a.version,
+    validFrom: ctx.a.meta.validFrom,
+    validTo: ctx.a.meta.validTo,
+    version: ctx.a.meta.version,
   }))
   .execute();
 
@@ -715,12 +715,12 @@ async function getAuditTrail(nodeId: string) {
     .temporal("includeEnded")
     .whereNode("d", (d) => d.id.eq(nodeId))
     .select((ctx) => ({
-      version: ctx.d.version,
+      version: ctx.d.meta.version,
       title: ctx.d.title,
       status: ctx.d.status,
-      validFrom: ctx.d.validFrom,
-      validTo: ctx.d.validTo,
-      updatedAt: ctx.d.updatedAt,
+      validFrom: ctx.d.meta.validFrom,
+      validTo: ctx.d.meta.validTo,
+      updatedAt: ctx.d.meta.updatedAt,
     }))
     .orderBy("d", "meta.version", "asc")
     .execute();
@@ -739,7 +739,7 @@ const allIncludingDeleted = await store
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
-    deletedAt: ctx.u.deletedAt,  // Will have a value for deleted records
+    deletedAt: ctx.u.meta.deletedAt,  // Will have a value for deleted records
   }))
   .execute();
 ```
@@ -756,7 +756,7 @@ const deletedUsers = await store
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
-    deletedAt: ctx.u.deletedAt,
+    deletedAt: ctx.u.meta.deletedAt,
   }))
   .execute();
 ```
@@ -814,12 +814,12 @@ branches afterwards.
 ```typescript
 .select((ctx) => ({
   ...ctx.a,                     // All node properties
-  validFrom: ctx.a.validFrom,
-  validTo: ctx.a.validTo,
-  createdAt: ctx.a.createdAt,
-  updatedAt: ctx.a.updatedAt,
-  deletedAt: ctx.a.deletedAt,
-  version: ctx.a.version,
+  validFrom: ctx.a.meta.validFrom,
+  validTo: ctx.a.meta.validTo,
+  createdAt: ctx.a.meta.createdAt,
+  updatedAt: ctx.a.meta.updatedAt,
+  deletedAt: ctx.a.meta.deletedAt,
+  version: ctx.a.meta.version,
 }))
 ```
 
@@ -867,8 +867,8 @@ async function compareVersions(docId: string, v1: number, v2: number) {
     .select((ctx) => ctx.d)
     .execute();
 
-  const version1 = versions.find((v) => v.version === v1);
-  const version2 = versions.find((v) => v.version === v2);
+  const version1 = versions.find((v) => v.meta.version === v1);
+  const version2 = versions.find((v) => v.meta.version === v2);
 
   return { version1, version2 };
 }

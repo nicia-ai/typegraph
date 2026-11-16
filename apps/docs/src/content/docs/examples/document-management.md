@@ -496,14 +496,14 @@ async function getDocumentHistory(documentId: string): Promise<DocumentVersion[]
     .from("Document", "d")
     .temporal("includeEnded")
     .whereNode("d", (d) => d.id.eq(documentId))
-    .orderBy((ctx) => ctx.d.validFrom, "desc")
+    .orderBy("d", "meta.validFrom", "desc")
     .select((ctx) => ({
       title: ctx.d.title,
       content: ctx.d.content,
       status: ctx.d.status,
-      validFrom: ctx.d.validFrom,
-      validTo: ctx.d.validTo,
-      version: ctx.d.version,
+      validFrom: ctx.d.meta.validFrom,
+      validTo: ctx.d.meta.validTo,
+      version: ctx.d.meta.version,
     }))
     .execute();
 }
@@ -538,16 +538,18 @@ async function compareVersions(
     .query()
     .from("Document", "d")
     .temporal("includeEnded")
-    .whereNode("d", (d) =>
-      d.id.eq(documentId).and(d.version.in([version1, version2]))
-    )
-    .orderBy((ctx) => ctx.d.version, "asc")
+    .whereNode("d", (d) => d.id.eq(documentId))
+    .orderBy("d", "meta.version", "asc")
     .select((ctx) => ctx.d)
     .execute();
 
-  if (versions.length !== 2) return undefined;
+  // The version is system metadata, so it is matched on the selected rows.
+  const [before, after] = versions.filter(
+    (row) => row.meta.version === version1 || row.meta.version === version2,
+  );
+  if (before === undefined || after === undefined) return undefined;
 
-  return { before: versions[0], after: versions[1] };
+  return { before, after };
 }
 ```
 

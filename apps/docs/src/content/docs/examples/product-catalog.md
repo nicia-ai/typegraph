@@ -61,7 +61,7 @@ const Variant = defineNode("Variant", {
     // that complements the product-level embedding.
     name: searchable({ language: "english" }),
     priceModifier: z.number().default(0), // Added to base price
-    attributes: z.record(z.string()), // { size: "L", color: "blue" }
+    attributes: z.record(z.string(), z.string()), // { size: "L", color: "blue" }
     isDefault: z.boolean().default(false),
   }),
 });
@@ -545,7 +545,7 @@ async function reserveInventory(
 ### Low Stock Report
 
 ```typescript
-import { field, sum, havingLt } from "@nicia-ai/typegraph";
+import { field, max, sum } from "@nicia-ai/typegraph";
 
 interface LowStockItem {
   productName: string;
@@ -556,23 +556,27 @@ interface LowStockItem {
 }
 
 async function getLowStockItems(): Promise<LowStockItem[]> {
-  return store
+  const variants = await store
     .query()
     .from("Product", "p")
     .traverse("hasVariant", "e1")
     .to("Variant", "v")
     .traverse("inventoryFor", "e2", { direction: "in" })
     .to("Inventory", "i")
-    .groupByNode("v")
-    .having(havingLt(sum("i", "quantity"), field("i", "reorderPoint")))
+    .groupBy("p", "name")
+    .groupBy("v", "sku")
+    .groupBy("v", "name")
     .aggregate({
       productName: field("p", "name"),
       variantSku: field("v", "sku"),
       variantName: field("v", "name"),
       totalQuantity: sum("i", "quantity"),
-      reorderPoint: field("i", "reorderPoint"),
+      reorderPoint: max("i", "reorderPoint"),
     })
     .execute();
+  // `having*` compares an aggregate with a constant, so the per-variant
+  // threshold is applied to the grouped rows.
+  return variants.filter((row) => row.totalQuantity < row.reorderPoint);
 }
 ```
 
@@ -778,7 +782,7 @@ async function getProductsInCategory(
     sortBy === "price"
       ? query.orderBy((ctx) => ctx.p.basePrice, "asc")
       : sortBy === "newest"
-        ? query.orderBy((ctx) => ctx.p.createdAt, "desc")
+        ? query.orderBy("p", "meta.createdAt", "desc")
         : query.orderBy((ctx) => ctx.p.name, "asc");
 
   const products = await sortedQuery
@@ -814,11 +818,11 @@ async function getPriceHistory(
     .from("Product", "p")
     .temporal("includeEnded")
     .whereNode("p", (p) => p.sku.eq(sku))
-    .orderBy((ctx) => ctx.p.validFrom, "desc")
+    .orderBy("p", "meta.validFrom", "desc")
     .select((ctx) => ({
       price: ctx.p.basePrice,
-      validFrom: ctx.p.validFrom,
-      validTo: ctx.p.validTo,
+      validFrom: ctx.p.meta.validFrom,
+      validTo: ctx.p.meta.validTo,
     }))
     .execute();
 }

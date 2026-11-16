@@ -112,24 +112,26 @@ parse.
 
 ```typescript
 // Create with auto-generated ID
-const node = await store.nodes.Person.create({ fullName: "Alice Smith" });
+const bob = await store.nodes.Person.create({ fullName: "Bob Jones" });
 
 // Create with specific ID
-const node = await store.nodes.Person.create({ fullName: "Alice Smith" }, { id: "person-alice" });
+const alice = await store.nodes.Person.create({ fullName: "Alice Smith" }, { id: "person-alice" });
 
-// Retrieve
-const person = await store.nodes.Person.getById("person-alice");
+// Retrieve. Ids are typed `NodeId<typeof Person>`; use the id a node carries,
+// or brand a string you hold with `asNodeId`.
+const person = await store.nodes.Person.getById(alice.id);
+const same = await store.nodes.Person.getById(asNodeId<typeof Person>("person-alice"));
 
 // Update (partial)
-const updated = await store.nodes.Person.update("person-alice", {
+const updated = await store.nodes.Person.update(alice.id, {
   email: "alice@example.com",
 });
 
 // Delete (soft delete by default)
-await store.nodes.Person.delete("person-alice");
+await store.nodes.Person.delete(alice.id);
 
 // Hard delete (permanent removal) - use carefully!
-await store.nodes.Person.hardDelete("person-alice");
+await store.nodes.Person.hardDelete(bob.id);
 ```
 
 ### Node Object Shape
@@ -855,8 +857,8 @@ alice.id;              // NodeId<typeof Person> - branded string
 alice.name;            // string
 alice.email;           // string | undefined
 alice.age;             // number | undefined
-alice.version;         // number
-alice.createdAt;       // Date
+alice.meta.version;    // number
+alice.meta.createdAt;  // string (ISO 8601)
 
 // Type errors caught at compile time
 await store.nodes.Person.create({

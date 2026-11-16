@@ -845,7 +845,7 @@ edge keys. Use this to type reusable helpers that work with any store containing
 subgraph.
 
 ```typescript
-import type { StoreProjection } from "@nicia-ai/typegraph";
+import type { Node, StoreProjection } from "@nicia-ai/typegraph";
 
 type CoreStore = StoreProjection<
   typeof myGraph,
@@ -3202,7 +3202,7 @@ defeating compile-time narrowing. Use `defineSubgraphProject()` to preserve lite
 ```typescript
 import { defineSubgraphProject } from "@nicia-ai/typegraph";
 
-const agentProjection = defineSubgraphProject<typeof graph>()({
+const agentProjection = defineSubgraphProject(graph)({
   nodes: {
     Task: ["title", "status"],
     Skill: ["name"],

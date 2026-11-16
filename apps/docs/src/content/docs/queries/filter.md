@@ -223,7 +223,7 @@ d.$fulltext.matches("climate", 20).and(d.tenantId.eq(tenant)).and(d.published.eq
 ### Null Checks
 
 ```typescript
-p.deletedAt.isNull(); // is null/undefined
+p.nickname.isNull(); // is null/undefined
 p.email.isNotNull(); // is not null
 ```
 

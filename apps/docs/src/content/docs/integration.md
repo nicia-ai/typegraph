@@ -141,7 +141,6 @@ export const typegraphTables = createSqliteTables({
   edges: "myapp_graph_edges",
   uniques: "myapp_graph_uniques",
   schemaVersions: "myapp_graph_schema_versions",
-  embeddings: "myapp_graph_embeddings",
   fulltext: "myapp_graph_fulltext",
   indexMaterializations: "myapp_graph_index_materializations",
   kindRemovals: "myapp_graph_kind_removals",
@@ -149,7 +148,7 @@ export const typegraphTables = createSqliteTables({
 });
 
 // Export individual tables for drizzle-kit
-export const { nodes: myappGraphNodes, edges: myappGraphEdges, uniques: myappGraphUniques, schemaVersions: myappGraphSchemaVersions, embeddings: myappGraphEmbeddings, indexMaterializations: myappGraphIndexMaterializations, kindRemovals: myappGraphKindRemovals, reconciliationMarkers: myappGraphReconciliationMarkers } = typegraphTables;
+export const { nodes: myappGraphNodes, edges: myappGraphEdges, uniques: myappGraphUniques, schemaVersions: myappGraphSchemaVersions, indexMaterializations: myappGraphIndexMaterializations, kindRemovals: myappGraphKindRemovals, reconciliationMarkers: myappGraphReconciliationMarkers } = typegraphTables;
 
 // SQLite fulltext is an FTS5 virtual table — drizzle-kit can't model
 // virtual tables, so this name is exposed as a string. The backend
@@ -400,7 +399,7 @@ const authored = defineEdge("authored");
 
 const graph = defineGraph({
   id: "document_graph",
-  nodes: { User, Document },
+  nodes: { User: { type: User }, Document: { type: Document } },
   edges: {
     relatedTo: { type: relatedTo, from: [Document], to: [Document] },
     authored: { type: authored, from: [User], to: [Document] },
@@ -741,7 +740,7 @@ Verify **once per isolate**, then build a zero-query store per request from the
 cached reconciled schema:
 
 ```typescript
-import { createAdapterStore, createVerifiedAdapterStore, getCommittedSchemaVersion, type GraphBackend, type ReconciledSchema } from "@nicia-ai/typegraph";
+import { createAdapterStore, createVerifiedAdapterStore, getCommittedSchemaVersion, type ReconciledSchema } from "@nicia-ai/typegraph";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
 type Cached = {
@@ -756,7 +755,9 @@ type Cached = {
 let cached: Cached | undefined;
 let inFlight: Promise<Cached> | undefined;
 
-function reconcileOnce(verifyBackend: GraphBackend): Promise<Cached> {
+function reconcileOnce(
+  verifyBackend: ReturnType<typeof createPostgresBackend>,
+): Promise<Cached> {
   inFlight ??= (async () => {
     const [store, result] = await createVerifiedAdapterStore(graph, verifyBackend);
     cached = {

@@ -37,12 +37,12 @@ type NodeId<N extends NodeType> = string & { readonly [__nodeId]: N };
 **Example:**
 
 ```typescript
-import { type NodeId } from "@nicia-ai/typegraph";
+import { type Node, type NodeId } from "@nicia-ai/typegraph";
 
 type PersonId = NodeId<typeof Person>;
 type CompanyId = NodeId<typeof Company>;
 
-function getPersonById(id: PersonId): Promise<Node<typeof Person>> {
+function getPersonById(id: PersonId): Promise<Node<typeof Person> | undefined> {
   // TypeScript prevents passing a CompanyId here
   return store.nodes.Person.getById(id);
 }
@@ -651,8 +651,7 @@ Generates a unique ID using nanoid.
 ```typescript
 import { generateId } from "@nicia-ai/typegraph";
 
-function generateId(): string;
-
+// generateId(): string
 const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 ```
 

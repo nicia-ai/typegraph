@@ -62,7 +62,7 @@ const AuditEntry = defineNode("AuditEntry", {
     entityId: z.string(),
     action: z.enum(["create", "update", "delete", "restore"]),
     timestamp: z.string().datetime(),
-    changes: z.record(z.object({
+    changes: z.record(z.string(), z.object({
       before: z.unknown().optional(),
       after: z.unknown().optional(),
     })).optional(),
@@ -334,7 +334,7 @@ async function getEntityHistory(
     .to("User", "u")
     .orderBy((ctx) => ctx.a.timestamp, "desc")
     .select((ctx) => ({
-      version: ctx.a.version,
+      version: ctx.a.meta.version,
       timestamp: ctx.a.timestamp,
       action: ctx.a.action,
       changes: ctx.a.changes,
@@ -486,12 +486,12 @@ async function getSettingVersions(id: string): Promise<SettingVersion[]> {
     .from("Setting", "s")
     .temporal("includeEnded")
     .whereNode("s", (s) => s.id.eq(id))
-    .orderBy((ctx) => ctx.s.validFrom, "desc")
+    .orderBy("s", "meta.validFrom", "desc")
     .select((ctx) => ({
       props: ctx.s,
-      validFrom: ctx.s.validFrom,
-      validTo: ctx.s.validTo,
-      version: ctx.s.version,
+      validFrom: ctx.s.meta.validFrom,
+      validTo: ctx.s.meta.validTo,
+      version: ctx.s.meta.version,
     }))
     .execute();
 }
@@ -516,7 +516,7 @@ async function compareVersions(
     .from("Setting", "s")
     .temporal("includeEnded")
     .whereNode("s", (s) => s.id.eq(id).and(s.version.in([version1, version2])))
-    .orderBy((ctx) => ctx.s.version, "asc")
+    .orderBy("s", "meta.version", "asc")
     .select((ctx) => ctx.s)
     .execute();
 

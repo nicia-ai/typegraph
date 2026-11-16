@@ -37,7 +37,7 @@ const Tenant = defineNode("Tenant", {
     plan: z.enum(["free", "starter", "pro", "enterprise"]),
     status: z.enum(["active", "suspended", "cancelled"]).default("active"),
     createdAt: z.string().datetime(),
-    settings: z.record(z.unknown()).optional(),
+    settings: z.record(z.string(), z.unknown()).optional(),
   }),
 });
 

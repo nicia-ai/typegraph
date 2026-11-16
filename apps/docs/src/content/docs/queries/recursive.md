@@ -767,7 +767,7 @@ const dependencies = await store
   .select((ctx) => ({
     package: ctx.pkg.name,
     dependency: ctx.dep.name,
-    version: ctx.dep.version,
+    version: ctx.dep.meta.version,
     depth: ctx.depth,
     chain: ctx.chain,
   }))
