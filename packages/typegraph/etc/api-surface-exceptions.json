@@ -7590,5 +7590,69 @@
     "kind": "member-removed",
     "reason": "The brand was not dropped: `EmbeddingValue` is now `readonly number[] & EmbeddingBrand`, where the named alias `EmbeddingBrand` is `Readonly<{ [EMBEDDING_BRAND]: true }>`, so the type carries the identical member. The checker does not inventory type-reference bodies, so it reads the move into a named alias as a removal. The alias exists so the compile-time subsumption check can name the tag an `embedding()` field carries.",
     "issue": "#637"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ArrayFieldAccessor",
+    "member": "length",
+    "kind": "member-removed",
+    "reason": "`ArrayFieldAccessor.length` was declared as a `NumberFieldAccessor` but the runtime accessor (`arrayField()` in src/query/predicates.ts) never built it, so every use compiled and then threw `TypeError: Cannot read properties of undefined` on both backends. Removing the declaration turns that runtime failure into a compile error; the documented `lengthEq` / `lengthGt` / `lengthGte` / `lengthLt` / `lengthLte` predicates are unchanged. Declared in .changeset/sqlite-like-case-and-array-length.md.",
+    "issue": "#844"
   }
 ]

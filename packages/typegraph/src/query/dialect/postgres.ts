@@ -414,6 +414,10 @@ export const postgresDialect: BuiltinDialectAdapter = {
   // String Operations
   // ============================================================
 
+  like(column, pattern) {
+    return sql`${column} LIKE ${pattern} ${likeEscapeClause}`;
+  },
+
   ilike(column, pattern) {
     // PostgreSQL has native ILIKE operator. Declaring backslash as the escape
     // character is a no-op (it is the LIKE default) but keeps the emitted SQL

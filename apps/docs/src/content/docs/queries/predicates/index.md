@@ -177,6 +177,12 @@ p.email.isNotNull()
 > **Wildcard escaping:** User input passed to `contains`, `startsWith`, and `endsWith` is
 > automatically escaped — `%` and `_` characters are treated as literals. Use `like` or `ilike`
 > when you need wildcard control.
+>
+> **Case:** `like` is case-sensitive on both backends. `ilike`, `contains`, `startsWith`, and
+> `endsWith` fold case the way the database does. SQLite folds ASCII letters only, unless the ICU
+> extension is loaded. PostgreSQL follows the database's `LC_CTYPE`: a UTF-8 locale folds `É` to `é`,
+> while the `C` locale folds ASCII only. Characters other than `%`, `_`, and `\` have no special
+> meaning in a `like` pattern on either backend.
 
 ---
 
