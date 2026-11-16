@@ -89,9 +89,15 @@ kind that declares its own `createdAt` property is ordered by it with
 `orderBy("t", "createdAt")`, and by TypeGraph's creation timestamp with
 `orderBy("t", "meta.createdAt")`.
 
-Any other name is a compile error, and a `ConfigurationError` at runtime for
-callers the type checker does not reach. The names are the same whether
-`orderBy()` appears before or after `select()`.
+On a kind with a closed schema (`z.object`, `z.strictObject`, and objects
+wrapped by `.refine()` or built with `.extend()`), any other name is a compile
+error, and a `ConfigurationError` at runtime for callers the type checker does
+not reach. A kind whose schema admits unknown keys (`z.looseObject`,
+`.passthrough()`, `.catchall()`) may store keys it does not declare, so it orders
+by any name as a property. A key stored outside a closed schema, for example by
+an import with `onUnknownProperty: "allow"`, cannot be ordered by until the
+schema declares it (`z.string().optional()` is enough). The names are the same
+whether `orderBy()` appears before or after `select()`.
 
 ### Null Handling
 

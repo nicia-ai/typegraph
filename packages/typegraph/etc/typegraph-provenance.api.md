@@ -6275,6 +6275,8 @@ type SchemaIntrospector = Readonly<{
     getSharedEdgeFieldTypeInfo: (edgeKindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     hasDeclaredField: (kindNames: readonly string[], fieldName: string) => boolean;
     hasDeclaredEdgeField: (edgeKindNames: readonly string[], fieldName: string) => boolean;
+    hasClosedPropertySet: (kindNames: readonly string[]) => boolean;
+    hasClosedEdgePropertySet: (edgeKindNames: readonly string[]) => boolean;
     kindsWithoutSearchableField: (kindNames: readonly string[]) => readonly string[];
     kindsDivergingFromSubsumingDeclaration: (kindNames: readonly string[], fieldName: string) => readonly string[];
 }>;

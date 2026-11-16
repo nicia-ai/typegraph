@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-`orderBy(alias, field)` now takes typed field names. `field` is a property the alias's kind declares, `"id"`, `"kind"`, a metadata field by its path in a selected row (`"meta.createdAt"`, `"meta.updatedAt"`, `"meta.validFrom"`, `"meta.validTo"`, `"meta.deletedAt"`, and on a node alias `"meta.version"`), or on an edge alias `"fromId"` / `"toId"`. Any other name is a compile error and a `ConfigurationError` at runtime. Before this release an unknown name was read as a property and the query silently sorted by NULL. That covered every camelCase timestamp such as `orderBy("u", "createdAt")` on a kind that declares no `createdAt`, which several documentation pages showed.
+`orderBy(alias, field)` now takes typed field names. `field` is a property the alias's kind declares, `"id"`, `"kind"`, a metadata field by its path in a selected row (`"meta.createdAt"`, `"meta.updatedAt"`, `"meta.validFrom"`, `"meta.validTo"`, `"meta.deletedAt"`, and on a node alias `"meta.version"`), or on an edge alias `"fromId"` / `"toId"`. On a kind whose property set is closed (`z.object`, `z.strictObject`, including objects wrapped by `.refine()` / `.superRefine()` or built with `.extend()`), any other name is a compile error and a `ConfigurationError` at runtime. Before this release an unknown name was read as a property and the query silently sorted by NULL. A kind whose schema admits unknown keys (`z.looseObject`, `.passthrough()`, `.catchall()`) can store keys it does not declare, so it still orders by any name as a property, as before, and its field type is `string`. That covered every camelCase timestamp such as `orderBy("u", "createdAt")` on a kind that declares no `createdAt`, which several documentation pages showed.
 
 System fields are named by where a full select returns them, so `orderBy("p", "meta.createdAt")` sorts by `row.meta.createdAt`. Because metadata lives under the reserved `meta.` prefix, a declared property never collides with it. A kind that declares its own `createdAt` is ordered by that property with `"createdAt"` and by the system timestamp with `"meta.createdAt"`. The old rule, under which a declared property with a snake_case system name shadowed the system column, is gone. Node `meta.version` becomes orderable, including with `paginate()` and `stream()`.
 
@@ -10,7 +10,7 @@ System fields are named by where a full select returns them, so `orderBy("p", "m
 
 ### Breaking
 
-The snake_case system names are removed, with no alias. A caller the type checker does not reach gets a `ConfigurationError` (`details.code: "ORDER_FIELD_RENAMED"`) whose message and `details.replacement` name the new spelling.
+The snake_case system names are removed, with no alias. A caller the type checker does not reach gets a `ConfigurationError` (`details.code: "ORDER_FIELD_RENAMED"`) whose message and `details.replacement` name the new spelling. This applies on open schemas too, unless the kind declares a property of that name, so that a query written against the previous release can never silently switch from the system column to an undeclared property.
 
 | Removed | Use |
 | --- | --- |
@@ -22,7 +22,8 @@ The snake_case system names are removed, with no alias. A caller the type checke
 | `"from_id"` (edge alias) | `"fromId"` |
 | `"to_id"` (edge alias) | `"toId"` |
 
-- Changed: an `orderBy(alias, field)` name that is neither a declared property nor a system field throws `ConfigurationError` (`details.code: "ORDER_FIELD_UNKNOWN"`) instead of sorting by NULL. An alias that is not part of the query throws `ConfigurationError` (`details.code: "ORDER_ALIAS_UNKNOWN"`).
+- Changed: on a closed schema, an `orderBy(alias, field)` name that is neither a declared property nor a system field throws `ConfigurationError` (`details.code: "ORDER_FIELD_UNKNOWN"`) instead of sorting by NULL. An undeclared `"version"` is refused this way and pointed at `"meta.version"`; it was never a system order name, so on an open schema it is still a property. An alias that is not part of the query throws `ConfigurationError` (`details.code: "ORDER_ALIAS_UNKNOWN"`).
+- Changed, deliberately: a key stored outside a closed schema can no longer be ordered by in the alias form. Such keys come from an `importGraph` with `onUnknownProperty: "allow"`, or from a property later removed from the schema. Declare the key in the schema, optionally (`z.string().optional()`), to order by it.
 - Changed: a property declared under a removed snake_case name, such as `created_at`, is now always ordered as that property. Order by the system column with its `meta.` name.
 - Changed: `orderByFragment`'s `field` parameter is typed as `GraphOrderField<G>` instead of `string`.
 - Unchanged: the expression form `orderBy((ctx) => ...)` and aggregate `orderBy(key)`.

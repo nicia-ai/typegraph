@@ -20,6 +20,12 @@ type SystemOrderField = Readonly<{
   nullable: boolean;
   owner: SystemOrderOwner;
   valueType: NonNullable<FieldRef["valueType"]>;
+  /**
+   * The snake_case name the previous release's `orderBy` accepted for this
+   * field, now removed. Absent for a field that was not orderable by a
+   * system name before (`meta.version`) or kept its name (`id`, `kind`).
+   */
+  removedName?: string;
 }>;
 
 /**
@@ -47,6 +53,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["fromId"],
     column: "from_id",
+    removedName: "from_id",
     nullable: false,
     owner: "edge",
     valueType: "string",
@@ -54,6 +61,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["toId"],
     column: "to_id",
+    removedName: "to_id",
     nullable: false,
     owner: "edge",
     valueType: "string",
@@ -68,6 +76,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "validFrom"],
     column: "valid_from",
+    removedName: "valid_from",
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -75,6 +84,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "validTo"],
     column: "valid_to",
+    removedName: "valid_to",
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -82,6 +92,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "createdAt"],
     column: "created_at",
+    removedName: "created_at",
     nullable: false,
     owner: "both",
     valueType: "string",
@@ -89,6 +100,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "updatedAt"],
     column: "updated_at",
+    removedName: "updated_at",
     nullable: false,
     owner: "both",
     valueType: "string",
@@ -96,6 +108,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "deletedAt"],
     column: "deleted_at",
+    removedName: "deleted_at",
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -108,6 +121,17 @@ function orderName(field: SystemOrderField): string {
 
 const SYSTEM_ORDER_FIELDS_BY_NAME: ReadonlyMap<string, SystemOrderField> =
   new Map(SYSTEM_ORDER_FIELDS.map((field) => [orderName(field), field]));
+
+const SYSTEM_ORDER_FIELDS_BY_REMOVED_NAME: ReadonlyMap<
+  string,
+  SystemOrderField
+> = new Map(
+  SYSTEM_ORDER_FIELDS.flatMap((field) =>
+    field.removedName === undefined ?
+      []
+    : [[field.removedName, field] as const],
+  ),
+);
 
 const SYSTEM_ORDER_FIELDS_BY_COLUMN: ReadonlyMap<string, SystemOrderField> =
   new Map(SYSTEM_ORDER_FIELDS.map((field) => [field.column, field]));
@@ -160,34 +184,50 @@ function systemOrderNames(isEdge: boolean): readonly string[] {
 }
 
 /**
- * Refuses an order field that names neither a system field nor a declared
- * property. A removed snake_case column name is told its replacement.
+ * Refuses a snake_case system name the previous release accepted
+ * (`created_at`, `from_id`, …) that the alias does not declare as a
+ * property, naming its replacement. Refused on every schema, open ones
+ * included: the previous release read the name as the system column, so
+ * reading a property of that name instead would silently change what
+ * existing queries sort by.
+ */
+function refuseRemovedSystemName(
+  alias: string,
+  field: string,
+  isEdge: boolean,
+): void {
+  const removed = SYSTEM_ORDER_FIELDS_BY_REMOVED_NAME.get(field);
+  if (removed === undefined || !ownedBy(removed, isEdge)) return;
+  const replacement = orderName(removed);
+  throw new ConfigurationError(
+    `orderBy("${alias}", "${field}"): "${field}" is no longer an order field name; use "${replacement}".`,
+    { code: "ORDER_FIELD_RENAMED", alias, field, replacement },
+    {
+      suggestion: `System fields are ordered by their path in a selected row: orderBy("${alias}", "${replacement}"). Declare "${field}" in the schema to order by a property of that name.`,
+    },
+  );
+}
+
+/**
+ * Refuses an order field that names neither a system field nor a property
+ * the alias's closed schema declares. A name equal to a system column
+ * (`version`) is pointed at that field's order name.
  */
 function refuseUnknownOrderField(
   alias: string,
   field: string,
   isEdge: boolean,
 ): never {
-  const renamed = SYSTEM_ORDER_FIELDS_BY_COLUMN.get(field);
-  if (
-    renamed !== undefined &&
-    ownedBy(renamed, isEdge) &&
-    orderName(renamed) !== field
-  ) {
-    const replacement = orderName(renamed);
-    throw new ConfigurationError(
-      `orderBy("${alias}", "${field}"): "${field}" is no longer an order field name; use "${replacement}".`,
-      { code: "ORDER_FIELD_RENAMED", alias, field, replacement },
-      {
-        suggestion: `System fields are ordered by their path in a selected row: orderBy("${alias}", "${replacement}").`,
-      },
-    );
-  }
+  const column = SYSTEM_ORDER_FIELDS_BY_COLUMN.get(field);
+  const nearest =
+    column !== undefined && ownedBy(column, isEdge) ?
+      `Did you mean "${orderName(column)}"? `
+    : "";
   throw new ConfigurationError(
     `orderBy("${alias}", "${field}"): "${field}" is not a property declared by this ${isEdge ? "edge" : "node"} alias or an orderable system field.`,
     { code: "ORDER_FIELD_UNKNOWN", alias, field },
     {
-      suggestion: `Order by a declared property or one of: ${systemOrderNames(isEdge).join(", ")}.`,
+      suggestion: `${nearest}Order by a declared property or one of: ${systemOrderNames(isEdge).join(", ")}.`,
     },
   );
 }
@@ -223,7 +263,19 @@ export function resolveAliasOrderSpec(
     kinds.isEdge ?
       introspector.hasDeclaredEdgeField(kinds.edgeKindNames, field)
     : introspector.hasDeclaredField(kinds.nodeKindNames, field);
-  if (!declared) refuseUnknownOrderField(alias, field, kinds.isEdge);
+  if (!declared) {
+    // A removed snake_case system name is refused on any schema: the previous
+    // release read it as the system column, so silently reading a property of
+    // the same name instead would change what existing queries sort by.
+    refuseRemovedSystemName(alias, field, kinds.isEdge);
+    const closed =
+      kinds.isEdge ?
+        introspector.hasClosedEdgePropertySet(kinds.edgeKindNames)
+      : introspector.hasClosedPropertySet(kinds.nodeKindNames);
+    // Only a closed property set proves the name cannot be stored: an open
+    // schema, or one whose shape cannot be read, may hold any key.
+    if (closed) refuseUnknownOrderField(alias, field, kinds.isEdge);
+  }
 
   const typeInfo =
     kinds.isEdge ?

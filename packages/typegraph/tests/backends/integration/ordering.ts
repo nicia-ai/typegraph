@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../../../src";
 import { ConfigurationError } from "../../../src/errors";
+import { registerOrderingSchemaFormTests } from "./ordering-schema-forms";
 import {
   seedMultiHopEdgePropertiesFixture,
   seedPeopleCompaniesForEdgePropertySelection,
@@ -37,6 +38,18 @@ const declaredMetadataNameGraph = defineGraph({
 });
 
 /** Declared values run opposite to creation order and stored version. */
+/**
+ * Waits until the wall clock has moved past the current millisecond, so two
+ * writes on either side get distinct `created_at` values and their system
+ * order is not a tie.
+ */
+async function nextMillisecond(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() === start) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 async function seedPostsWithReversedDeclaredFields(
   store: InspectableStore<typeof declaredMetadataNameGraph>,
 ) {
@@ -45,6 +58,7 @@ async function seedPostsWithReversedDeclaredFields(
     createdAt: "2030-01-01T00:00:00.000Z",
     version: 1,
   });
+  await nextMillisecond();
   const second = await store.nodes.OrderPost.create({
     title: "second",
     createdAt: "2020-01-01T00:00:00.000Z",
@@ -70,6 +84,8 @@ function orderRefusal(build: () => unknown): ConfigurationError {
 export function registerOrderingIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  registerOrderingSchemaFormTests(context);
+
   describe("orderBy field names", () => {
     it("orders a declared createdAt by the property and meta.createdAt by the system column", async () => {
       const store = await context.createStore(declaredMetadataNameGraph);
@@ -150,7 +166,6 @@ export function registerOrderingIntegrationTests(
       ["valid_from", "meta.validFrom"],
       ["valid_to", "meta.validTo"],
       ["deleted_at", "meta.deletedAt"],
-      ["version", "meta.version"],
     ] as const)(
       "names the replacement for the removed node name %s",
       (removed, replacement) => {
@@ -165,6 +180,18 @@ export function registerOrderingIntegrationTests(
         });
       },
     );
+
+    it("refuses an undeclared version on a closed schema and points at meta.version", () => {
+      const query = context.getStore().query().from("Person", "p");
+      // `version` was never a system order name, so it is unknown, not renamed.
+      // @ts-expect-error Person declares no `version`.
+      const refusal = orderRefusal(() => query.orderBy("p", "version"));
+      expect(refusal.details).toMatchObject({
+        code: "ORDER_FIELD_UNKNOWN",
+        field: "version",
+      });
+      expect(refusal.suggestion).toContain('"meta.version"');
+    });
 
     it.each([
       ["from_id", "fromId"],
@@ -212,6 +239,7 @@ export function registerOrderingIntegrationTests(
       await store.edges.orderCites.create(first, second, {
         createdAt: "2030-01-01T00:00:00.000Z",
       });
+      await nextMillisecond();
       await store.edges.orderCites.create(second, first, {
         createdAt: "2020-01-01T00:00:00.000Z",
       });
