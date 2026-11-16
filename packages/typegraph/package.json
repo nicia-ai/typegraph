@@ -135,6 +135,7 @@
   },
   "files": [
     "dist",
+    "etc/root-export-moves.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
