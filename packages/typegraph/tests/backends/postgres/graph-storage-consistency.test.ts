@@ -32,7 +32,7 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import {
   type GraphStorageInspection,
   inspectGraphStorage,
-} from "../../../src/store-entry";
+} from "../../../src/maintenance";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 

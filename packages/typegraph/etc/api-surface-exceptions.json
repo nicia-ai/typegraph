@@ -7940,7 +7940,7 @@
     "declaration": "DeleteLegacyRecordedAnchorMapOptions",
     "member": "backend",
     "kind": "member-removed",
-    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -7948,7 +7948,7 @@
     "declaration": "DeleteLegacyRecordedAnchorMapOptions",
     "member": "graphId",
     "kind": "member-removed",
-    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -7956,7 +7956,7 @@
     "declaration": "DeleteLegacyRecordedAnchorMapOptions",
     "member": "tableNames",
     "kind": "member-removed",
-    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -7964,7 +7964,7 @@
     "declaration": "DeleteLegacyRecordedAnchorMapOptions",
     "member": "mappingTableName",
     "kind": "member-removed",
-    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -7972,7 +7972,7 @@
     "declaration": "DeleteLegacyRecordedAnchorMapOptions",
     "member": "dropWhenEmpty",
     "kind": "member-removed",
-    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`DeleteLegacyRecordedAnchorMapOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8564,7 +8564,7 @@
     "declaration": "GraphStorageInspection",
     "member": "graphId",
     "kind": "member-removed",
-    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8572,7 +8572,7 @@
     "declaration": "GraphStorageInspection",
     "member": "relations",
     "kind": "member-removed",
-    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8580,7 +8580,7 @@
     "declaration": "GraphStorageInspection",
     "member": "totalRows",
     "kind": "member-removed",
-    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8588,7 +8588,7 @@
     "declaration": "GraphStorageInspection",
     "member": "consistency",
     "kind": "member-removed",
-    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageInspection` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8596,7 +8596,7 @@
     "declaration": "GraphStorageRelation",
     "member": "relation",
     "kind": "member-removed",
-    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8604,7 +8604,7 @@
     "declaration": "GraphStorageRelation",
     "member": "table",
     "kind": "member-removed",
-    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -8612,7 +8612,7 @@
     "declaration": "GraphStorageRelation",
     "member": "rows",
     "kind": "member-removed",
-    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/store`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`GraphStorageRelation` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9228,7 +9228,7 @@
     "declaration": "LegacyEmbeddingSlotConfig",
     "member": "metric",
     "kind": "member-removed",
-    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9236,7 +9236,7 @@
     "declaration": "LegacyEmbeddingSlotConfig",
     "member": "indexType",
     "kind": "member-removed",
-    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`LegacyEmbeddingSlotConfig` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9244,7 +9244,7 @@
     "declaration": "ListGraphIdsOptions",
     "member": "prefix",
     "kind": "member-removed",
-    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9252,7 +9252,7 @@
     "declaration": "ListGraphIdsOptions",
     "member": "after",
     "kind": "member-removed",
-    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9260,7 +9260,7 @@
     "declaration": "ListGraphIdsOptions",
     "member": "limit",
     "kind": "member-removed",
-    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`ListGraphIdsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9268,7 +9268,7 @@
     "declaration": "MigrateLegacyEmbeddingsOptions",
     "member": "backend",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9276,7 +9276,7 @@
     "declaration": "MigrateLegacyEmbeddingsOptions",
     "member": "graphId",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9284,7 +9284,7 @@
     "declaration": "MigrateLegacyEmbeddingsOptions",
     "member": "resolveSlotConfig",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9292,7 +9292,7 @@
     "declaration": "MigrateLegacyEmbeddingsOptions",
     "member": "batchSize",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9300,7 +9300,7 @@
     "declaration": "MigrateLegacyEmbeddingsOptions",
     "member": "legacyTableName",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9308,7 +9308,7 @@
     "declaration": "MigrateLegacyEmbeddingsResult",
     "member": "migrated",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9316,7 +9316,7 @@
     "declaration": "MigrateLegacyEmbeddingsResult",
     "member": "perField",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9324,7 +9324,7 @@
     "declaration": "MigrateLegacyEmbeddingsResult",
     "member": "skippedDimensionMismatch",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9332,7 +9332,7 @@
     "declaration": "MigrateLegacyEmbeddingsResult",
     "member": "skippedDecodeError",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9340,7 +9340,7 @@
     "declaration": "MigrateLegacyEmbeddingsResult",
     "member": "legacyTablePresent",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyEmbeddingsResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9348,7 +9348,7 @@
     "declaration": "MigrateLegacyRecordedTimeOptions",
     "member": "backend",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9356,7 +9356,7 @@
     "declaration": "MigrateLegacyRecordedTimeOptions",
     "member": "tableNames",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9364,7 +9364,7 @@
     "declaration": "MigrateLegacyRecordedTimeOptions",
     "member": "mappingTableName",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9372,7 +9372,7 @@
     "declaration": "MigrateLegacyRecordedTimeResult",
     "member": "migrated",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9380,7 +9380,7 @@
     "declaration": "MigrateLegacyRecordedTimeResult",
     "member": "graphs",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9388,7 +9388,7 @@
     "declaration": "MigrateLegacyRecordedTimeResult",
     "member": "anchors",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9396,7 +9396,7 @@
     "declaration": "MigrateLegacyRecordedTimeResult",
     "member": "mappingTableName",
     "kind": "member-removed",
-    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateLegacyRecordedTimeResult` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9404,7 +9404,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "backend",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9412,7 +9412,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "graphId",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9420,7 +9420,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "anchor",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9428,7 +9428,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "origin",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9436,7 +9436,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "tableNames",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9444,7 +9444,7 @@
     "declaration": "MigrateRecordedAnchorOptions",
     "member": "mappingTableName",
     "kind": "member-removed",
-    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`MigrateRecordedAnchorOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9748,7 +9748,7 @@
     "declaration": "RepairInvertedWindowsOptions",
     "member": "backend",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9756,7 +9756,7 @@
     "declaration": "RepairInvertedWindowsOptions",
     "member": "graphId",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9764,7 +9764,7 @@
     "declaration": "RepairInvertedWindowsOptions",
     "member": "relations",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9772,7 +9772,7 @@
     "declaration": "RepairInvertedWindowsOptions",
     "member": "mode",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9780,7 +9780,7 @@
     "declaration": "RepairInvertedWindowsOptions",
     "member": "tableNames",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsOptions` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9788,7 +9788,7 @@
     "declaration": "RepairInvertedWindowsReport",
     "member": "relations",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9796,7 +9796,7 @@
     "declaration": "RepairInvertedWindowsReport",
     "member": "counts",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9804,7 +9804,7 @@
     "declaration": "RepairInvertedWindowsReport",
     "member": "nonCanonical",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {
@@ -9812,7 +9812,7 @@
     "declaration": "RepairInvertedWindowsReport",
     "member": "atomic",
     "kind": "member-removed",
-    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/backend`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
+    "reason": "`RepairInvertedWindowsReport` is no longer exported from the package root; import it from `@nicia-ai/typegraph/maintenance`, whose API report carries it unchanged. Declared in .changeset/root-export-diet.md under \"Breaking\"; etc/root-export-moves.json maps every moved name.",
     "issue": "#865"
   },
   {

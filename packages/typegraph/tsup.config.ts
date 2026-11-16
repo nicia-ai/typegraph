@@ -21,6 +21,7 @@ const ENTRY = {
   "query-entry": "src/query-entry.ts",
   "errors-entry": "src/errors-entry.ts",
   "identity-entry": "src/identity-entry.ts",
+  maintenance: "src/maintenance.ts",
   "backend/sqlite/index": "src/backend/sqlite/index.ts",
   "backend/sqlite/local": "src/backend/sqlite/local.ts",
   "backend/sqlite/local-store": "src/backend/sqlite/local-store.ts",

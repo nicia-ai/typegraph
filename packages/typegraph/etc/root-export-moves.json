@@ -867,13 +867,13 @@
     "symbol": "deleteLegacyRecordedAnchorMap",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "DeleteLegacyRecordedAnchorMapOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "DEPLOYMENT_CONTRIBUTION_GRAPH_ID",
@@ -1869,19 +1869,19 @@
     "symbol": "GraphStorageConsistency",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/store"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "GraphStorageInspection",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/store"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "GraphStorageRelation",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/store"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "GraphTemplate",
@@ -2349,7 +2349,7 @@
     "symbol": "inspectGraphStorage",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/store"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "instantiateGraph",
@@ -2619,7 +2619,7 @@
     "symbol": "LegacyEmbeddingSlotConfig",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "libsqlVectorStrategy",
@@ -2643,13 +2643,13 @@
     "symbol": "listGraphIds",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "ListGraphIdsOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "LiveStoreOptions",
@@ -2781,49 +2781,49 @@
     "symbol": "migrateLegacyEmbeddings",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MigrateLegacyEmbeddingsOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MigrateLegacyEmbeddingsResult",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "migrateLegacyRecordedTime",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MigrateLegacyRecordedTimeOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MigrateLegacyRecordedTimeResult",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "migrateRecordedAnchor",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MigrateRecordedAnchorOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "MIGRATION_FAILURE_REASONS",
@@ -3771,31 +3771,31 @@
     "symbol": "repairInvertedValidityWindows",
     "kind": "value",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "RepairInvertedWindowsOptions",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "RepairInvertedWindowsReport",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "RepairRelation",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "RepairRelationScope",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/backend"
+    "to": "@nicia-ai/typegraph/maintenance"
   },
   {
     "symbol": "RequiredEdgeCollectionLookup",

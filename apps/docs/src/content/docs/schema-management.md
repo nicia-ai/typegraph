@@ -478,10 +478,10 @@ below also relies on having run.
 
 Deployments that already hold rows in the legacy table run a one-time, idempotent
 cutover with `migrateLegacyEmbeddings()`, exported from
-`@nicia-ai/typegraph/backend`:
+`@nicia-ai/typegraph/maintenance`:
 
 ```typescript
-import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/backend";
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/maintenance";
 
 // `backend` is the post-cutover backend, wired with its VectorStrategy.
 const result = await migrateLegacyEmbeddings({ backend });
@@ -517,7 +517,7 @@ import {
   deleteLegacyRecordedAnchorMap,
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
-} from "@nicia-ai/typegraph/backend";
+} from "@nicia-ai/typegraph/maintenance";
 
 const result = await migrateLegacyRecordedTime({ backend });
 console.log(result.graphs, result.anchors);
@@ -609,7 +609,7 @@ queries would be the worse surprise.
 `valid_from = NULL` ("ended at T, start unknown").
 
 ```typescript
-import { repairInvertedValidityWindows } from "@nicia-ai/typegraph/backend";
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph/maintenance";
 
 // Diagnose. `report` reads through `execute`, a required backend member, so it
 // runs against ANY backend — including a history-capturing one and one with no

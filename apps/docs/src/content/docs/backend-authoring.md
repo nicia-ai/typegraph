@@ -27,9 +27,9 @@ it was written against and re-run its tests before taking a new release.
 
 The application API is covered by semver as usual. It is the package root,
 `@nicia-ai/typegraph`, and these subpaths: `/store`, `/query`, `/errors`,
-`/identity`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
-`/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
-`/postgres/pglite`, `/adapters/drizzle/sqlite`,
+`/identity`, `/maintenance`, `/core`, `/schema`, `/indexes`,
+`/graph-extension`, `/graph-merge`, `/interchange`, `/profiler`,
+`/provenance`, `/sqlite/local`, `/postgres/pglite`, `/adapters/drizzle/sqlite`,
 `/adapters/drizzle/sqlite/local`, `/adapters/drizzle/sqlite/libsql`,
 `/adapters/drizzle/postgres`, `/adapters/drizzle/postgres/working-copy`,
 `/adapters/drizzle/postgres/pglite` and `/adapters/drizzle/indexes`. The

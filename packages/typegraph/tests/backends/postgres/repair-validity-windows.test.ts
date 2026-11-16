@@ -23,7 +23,6 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { repairInvertedValidityWindows } from "../../../src/backend";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
@@ -32,6 +31,7 @@ import type {
   TransactionBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
+import { repairInvertedValidityWindows } from "../../../src/maintenance";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";

@@ -39,6 +39,7 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/query", expectedExport: "QueryBuilder" },
   { subpath: "/errors", expectedExport: "DatabaseOperationError" },
   { subpath: "/identity", expectedExport: "pruneIdentityTransitions" },
+  { subpath: "/maintenance", expectedExport: "listGraphIds" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteStore" },
   { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteStore" },
   {

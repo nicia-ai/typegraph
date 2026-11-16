@@ -11,11 +11,6 @@ import {
   defineNode,
 } from "../src";
 import {
-  deleteLegacyRecordedAnchorMap,
-  migrateLegacyRecordedTime,
-  migrateRecordedAnchor,
-} from "../src/backend";
-import {
   deriveBackend,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
@@ -28,6 +23,11 @@ import {
 import { recordedInstantRevision } from "../src/core";
 import { createRecordedInstant } from "../src/core/temporal";
 import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
+import {
+  deleteLegacyRecordedAnchorMap,
+  migrateLegacyRecordedTime,
+  migrateRecordedAnchor,
+} from "../src/maintenance";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import {

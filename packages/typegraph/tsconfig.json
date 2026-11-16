@@ -20,6 +20,7 @@
       "@nicia-ai/typegraph/query": ["./src/query-entry.ts"],
       "@nicia-ai/typegraph/errors": ["./src/errors-entry.ts"],
       "@nicia-ai/typegraph/identity": ["./src/identity-entry.ts"],
+      "@nicia-ai/typegraph/maintenance": ["./src/maintenance.ts"],
       "@nicia-ai/typegraph/sqlite/local": [
         "./src/backend/sqlite/local-store.ts"
       ],

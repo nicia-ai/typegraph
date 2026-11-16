@@ -77,6 +77,11 @@
       "import": "./dist/identity-entry.js",
       "require": "./dist/identity-entry.cjs"
     },
+    "./maintenance": {
+      "types": "./dist/maintenance.d.ts",
+      "import": "./dist/maintenance.js",
+      "require": "./dist/maintenance.cjs"
+    },
     "./sqlite/local": {
       "types": "./dist/backend/sqlite/local-store.d.ts",
       "import": "./dist/backend/sqlite/local-store.js",

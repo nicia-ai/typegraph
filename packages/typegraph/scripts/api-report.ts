@@ -40,8 +40,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 /**
  * Exact fingerprints of forgotten-export debt. The backend authoring
  * entrypoint holds near-zero debt and a new entrypoint defaults to zero; the
- * four root-export-diet entrypoints (`./store`, `./query`, `./errors`,
- * `./identity`) are registered at their measured debt instead. A changed symbol set fails verification even when its count is
+ * five root-export-diet entrypoints (`./store`, `./query`, `./errors`,
+ * `./identity`, `./maintenance`) are registered at their measured debt
+ * instead. A changed symbol set fails verification even when its count is
  * unchanged, while API report diffs continue to show the declaration change.
  *
  * `recursiveTraversal` batch (WS5 B1): the six member-bearing entrypoints
@@ -1072,7 +1073,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // entrypoints gain exactly these two transitive names (+2 each); subtracting
 // them reproduces every preceding fingerprint. Their narrower exports stay intact.
 // Root export diet: the root keeps the application surface (86 names) and the
-// rest moves to `./store`, `./query`, `./errors`, `./identity` (new) and to
+// rest moves to `./store`, `./query`, `./errors`, `./identity`,
+// `./maintenance` (new) and to
 // `./backend`, `./core`, `./schema`, `./indexes`, `./graph-extension` and the
 // Drizzle adapter entrypoints (existing); `etc/root-export-moves.json` maps
 // every moved or deleted name. A moved type that a root signature still
@@ -1081,8 +1083,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `CreateQueryBuilderOptions`, the JSON-pointer resolution helpers, the
 // collection method-name constants, the graph-extension issue and change
 // constants, the system-index declaration helpers, `Result`, ...): 559→1082.
-// `./backend` gains `EmbeddingIndexType` and `EmbeddingMetric` through
-// `LegacyEmbeddingSlotConfig` (+2). `./core` gains the ten ontology relation
+// `./backend` is unchanged: the operator tooling it gains nothing from lives
+// in `./maintenance`. `./core` gains the ten ontology relation
 // factories and their `META_EDGE_*` name constants through the `core`
 // meta-edge object, plus the structural-subtype wording helpers through
 // `StructuralSubtypeMismatch` and `IncompatibleKeys` / `LiteralKeysOf`, and
@@ -1091,7 +1093,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `EdgeTargets` / `EdgeTargetMap` through the runtime kind tokens (+6).
 // `./schema` gains the `Store` type graph through `createVerifiedStore` and
 // `createVerifiedAdapterStore` and drops `ReconciledSchema`, which it now
-// exports (+683 −1). The four new entrypoints are registered at their
+// exports (+683 −1). `./maintenance` renders the `Store` type graph through
+// `inspectGraphStorage(store)`. The five new entrypoints are registered at their
 // measured debt instead of defaulting to zero, by maintainer decision: each
 // re-exports public option and result types whose bodies name internals
 // (`KindRegistry`, `PredicateExpression`, the store runtime port, ...), and
@@ -1282,8 +1285,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "bc6b26a92e7f7a59f7c039d98ccbaa33295a5fde1e616b7c470dabdc66b4d423",
   },
   "./backend": {
-    count: 28,
-    sha256: "787b98d0e7e21e5271e00160cd097d113cdacf6eb2540736f67db5001dd84273",
+    count: 26,
+    sha256: "3d657aa71ed47e43904143825eb9a60e957194664a5e4d821f7256b822b350e9",
   },
   "./core": {
     count: 96,
@@ -1329,6 +1332,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   "./interchange": {
     count: 969,
     sha256: "07356a24a425d2cdb4590558ed3ba26c1000f453366ca98edccb7995c7ea4e66",
+  },
+  "./maintenance": {
+    count: 977,
+    sha256: "dddf029f1134bc37518766dfb998bcb9978d6dad76e46fb33eb94b0899ef6bbf",
   },
   "./postgres/pglite": {
     count: 975,

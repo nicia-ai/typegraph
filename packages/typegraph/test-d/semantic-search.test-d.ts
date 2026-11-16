@@ -24,12 +24,11 @@ import {
 import { EmbeddingDimensionChangedError } from "../dist/errors-entry";
 import { getEmbeddingDimensions } from "../dist/core";
 import { libsqlVectorStrategy } from "../dist/backend/sqlite/libsql";
+import type { VectorSlot, VectorStrategy } from "../dist/backend";
 import {
   migrateLegacyEmbeddings,
   type MigrateLegacyEmbeddingsResult,
-  type VectorSlot,
-  type VectorStrategy,
-} from "../dist/backend";
+} from "../dist/maintenance";
 import { pgvectorStrategy } from "../dist/backend/postgres";
 import type {
   ReclaimedVectorFieldEntry,

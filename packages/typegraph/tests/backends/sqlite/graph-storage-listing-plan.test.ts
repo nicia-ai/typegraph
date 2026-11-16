@@ -11,11 +11,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../../../src";
-import { listGraphIds } from "../../../src/backend";
 import {
   GRAPH_PRESENCE_ANCHOR_KEYS,
   resolveGraphRelationNames,
 } from "../../../src/backend/graph-relations";
+import { listGraphIds } from "../../../src/maintenance";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   createPlanCaptureBackend,

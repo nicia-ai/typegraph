@@ -1,7 +1,7 @@
 /**
  * `@nicia-ai/typegraph/store`: the option, result and surface types behind
  * `Store` and its collections, views, algorithms, subgraphs, search, hooks,
- * bulk operations, recorded reads, transactions and storage inspection.
+ * bulk operations, recorded reads and transactions.
  *
  * The store entry points (`createStore`, `createStoreWithSchema`,
  * `createAdapterStore`, `createAdapterStoreWithSchema`) and the everyday
@@ -10,11 +10,6 @@
  * these shapes.
  */
 
-export type {
-  GraphStorageConsistency,
-  GraphStorageInspection,
-  GraphStorageRelation,
-} from "./backend/graph-storage";
 export {
   type AdapterHistoryStore,
   type AdapterHistoryTransactionContext,
@@ -158,7 +153,6 @@ export type {
   EdgeCardinalityAxisRef,
   EdgeCardinalityDirection,
 } from "./store/claims/edge-claims";
-export { inspectGraphStorage } from "./store/inspect-graph-storage";
 export type {
   PruneRecordedInstantsOptions,
   PruneRecordedInstantsResult,

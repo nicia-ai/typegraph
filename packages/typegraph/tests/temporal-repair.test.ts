@@ -43,7 +43,6 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import { repairInvertedValidityWindows } from "../src/backend";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -56,6 +55,7 @@ import {
   type TransactionOptions,
 } from "../src/backend/types";
 import { asNodeId } from "../src/core";
+import { repairInvertedValidityWindows } from "../src/maintenance";
 import { renderSql, sql } from "../src/query/sql-fragment";
 import {
   asCompiledRowsSql,

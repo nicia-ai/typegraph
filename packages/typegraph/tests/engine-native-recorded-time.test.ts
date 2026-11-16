@@ -33,7 +33,6 @@ import {
   hasPart,
   partOf,
 } from "../src";
-import { migrateLegacyRecordedTime } from "../src/backend";
 import {
   type EngineRecordedRevision,
   type EngineRecordedTimeMembers,
@@ -63,6 +62,7 @@ import { planMerge } from "../src/graph-merge/merge";
 import { pruneIdentityTransitions } from "../src/identity-entry";
 import { exportGraphStream, importGraphStream } from "../src/interchange";
 import { type GraphInterchangeChunk } from "../src/interchange/types";
+import { migrateLegacyRecordedTime } from "../src/maintenance";
 import { createQueryBuilder } from "../src/query/builder";
 import { compileQuery } from "../src/query/compiler";
 import {

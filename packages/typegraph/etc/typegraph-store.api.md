@@ -3547,24 +3547,6 @@ export type GraphNodeReference<G extends GraphDef> = {
 export type GraphNodeReferenceInput<G extends GraphDef> = GraphNodeReference<G> | PolymorphicNodeReference<AllNodeTypes<G>>;
 
 // @public
-export type GraphStorageConsistency = "snapshot" | "per-statement";
-
-// @public
-export type GraphStorageInspection = Readonly<{
-    graphId: string;
-    relations: readonly GraphStorageRelation[];
-    totalRows: number;
-    consistency: GraphStorageConsistency;
-}>;
-
-// @public
-export type GraphStorageRelation = Readonly<{
-    relation: string;
-    table: string;
-    rows: number;
-}>;
-
-// @public
 type GraphTemplateRow = Readonly<{
     template_id: string;
     schema_hash: string;
@@ -4199,9 +4181,6 @@ type InsertUniqueParams = Readonly<{
     nodeId: string;
     concreteKind: string;
 }>;
-
-// @public
-export function inspectGraphStorage<G extends GraphDef>(store: Store<G>): Promise<GraphStorageInspection>;
 
 // @public
 type InSubquery = Readonly<{

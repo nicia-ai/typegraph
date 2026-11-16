@@ -19,7 +19,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../src";
-import { repairInvertedValidityWindows } from "../src/backend";
 import {
   CAPABILITY_BUNDLES,
   RECORDED_REVISION_ORIGINS,
@@ -34,6 +33,7 @@ import {
   projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
+import { repairInvertedValidityWindows } from "../src/maintenance";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry";
 import {

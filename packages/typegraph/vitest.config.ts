@@ -105,6 +105,10 @@ export default defineConfig({
         __dirname,
         "src/identity-entry.ts",
       ),
+      "@nicia-ai/typegraph/maintenance": resolve(
+        __dirname,
+        "src/maintenance.ts",
+      ),
       "@nicia-ai/typegraph/adapters/drizzle/indexes": resolve(
         __dirname,
         "src/backend/drizzle/indexes.ts",

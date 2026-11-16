@@ -326,7 +326,7 @@ one-time, idempotent `migrateLegacyEmbeddings()` utility to copy it into the new
 per-field tables (new deployments need no action):
 
 ```typescript
-import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/backend";
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/maintenance";
 
 const result = await migrateLegacyEmbeddings({ backend });
 // → { migrated, perField, skippedDimensionMismatch, legacyTablePresent }

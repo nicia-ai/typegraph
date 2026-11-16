@@ -574,12 +574,3 @@ export type {
   SerializedSchema,
   SerializedUniqueConstraint,
 } from "../schema/types";
-
-// Graph inventory and one-shot vector-storage migration (operator tooling)
-export { listGraphIds, type ListGraphIdsOptions } from "./graph-storage";
-export {
-  type LegacyEmbeddingSlotConfig,
-  migrateLegacyEmbeddings,
-  type MigrateLegacyEmbeddingsOptions,
-  type MigrateLegacyEmbeddingsResult,
-} from "./migrate-vectors";
