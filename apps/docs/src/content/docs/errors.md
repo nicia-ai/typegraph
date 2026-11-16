@@ -1490,6 +1490,20 @@ and `store.search.hybrid` refuse every mismatched override on their own broader
 rule. See
 [Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
 
+#### Kind schema codes
+
+`defineNode` and `defineEdge` refuse a property schema that is not a Zod object.
+A kind's properties are stored, validated and introspected as one object, so a
+schema without an object shape cannot back a kind. TypeScript rejects these at
+compile time; the runtime check is for untyped callers. Objects wrapped by
+`.refine()` / `.superRefine()` or built with `.extend()`, `z.strictObject` and
+`z.looseObject` are objects and are accepted.
+
+| `details.code` | Raised when |
+| --- | --- |
+| `NODE_SCHEMA_NOT_OBJECT` | `defineNode`'s `schema` is not a Zod object: a union or discriminated union, an intersection, a record, an object behind `.transform()` / `.pipe()`, `.optional()`, `.readonly()` or `z.lazy()`, or not a Zod schema at all. `details.nodeType` names the kind and `details.schemaType` the schema type received (`"union"`, `"pipe"`, …). Declare the properties as `z.object({...})`; model alternatives as a property inside one object or as separate kinds, and apply transforms to individual fields. |
+| `EDGE_SCHEMA_NOT_OBJECT` | The same for `defineEdge`'s `schema`, with `details.edgeType`. An edge with no `schema` still defaults to an empty object. |
+
 #### Edge integrity option codes
 
 `defineGraph` refuses an edge registration whose integrity options are stated
