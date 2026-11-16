@@ -92,7 +92,7 @@ export default defineConfig({
   format: ["esm", "cjs"],
   dts: { entry: DECLARATION_ENTRY },
   splitting: true,
-  sourcemap: true,
+  sourcemap: false,
   clean: true,
   treeshake: true,
   external: [
