@@ -463,12 +463,15 @@ describe.runIf(process.env["POSTGRES_URL"])(
               return {
                 pool,
                 dispose: async () => {
-                  await pool.end();
-                  await withAdmin(async (admin) => {
-                    await admin.query(
-                      `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
-                    );
-                  });
+                  try {
+                    await pool.end();
+                  } finally {
+                    await withAdmin(async (admin) => {
+                      await admin.query(
+                        `DROP DATABASE IF EXISTS ${quoteIdentifier(forkedDatabase)} WITH (FORCE)`,
+                      );
+                    });
+                  }
                 },
               };
             },
@@ -507,6 +510,23 @@ describe.runIf(process.env["POSTGRES_URL"])(
           ).catch((error: unknown) => error);
           expect(isOk(failed as never)).toBe(false);
           expect(forkPools[1]?.ended).toBe(true);
+          expect(await forkExists()).toBe(false);
+
+          // A pool that fails to end still lets the host branch be deleted:
+          // `pg` refuses a second `end()`, so ending it early makes the
+          // handle's own `end()` reject, and `finally` still drops the fork.
+          const leaky = unwrap(
+            await branch<G>(
+              baseStore,
+              rejectMakeBackend,
+              undefined,
+              strategyWith((fork) =>
+                Promise.resolve(createPostgresBackend(drizzle(fork.pool))),
+              ),
+            ),
+          );
+          await forkPools[2]?.end();
+          await expect(leaky.close()).rejects.toThrow();
           expect(await forkExists()).toBe(false);
         } finally {
           await swappablePool.current.end();

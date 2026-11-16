@@ -2117,8 +2117,11 @@ const strategy = forkedWorkingCopyStrategy<G, HostBranch>({
     return {
       pool,
       dispose: async () => {
-        await pool.end();
-        await hostBranchApi.deleteBranch(created.id);
+        try {
+          await pool.end();
+        } finally {
+          await hostBranchApi.deleteBranch(created.id);
+        }
       },
     };
   },
