@@ -6,6 +6,7 @@ import {
 } from "../store/reserved-keys";
 import { normalizeTargetMap, validateTargetMapEntries } from "./edge-endpoints";
 import { assertJsonValue } from "./json-value";
+import { assertKindSchemaIsObject } from "./kind-schema";
 import {
   EDGE_TYPE_BRAND,
   type EdgeTargets,
@@ -138,6 +139,7 @@ export function defineEdge<
   options?: DefineEdgeOptions<S, From, To>,
 ): EdgeType<K, S, From, To> | EdgeType<K, EmptySchema> {
   const schema = options?.schema ?? EMPTY_SCHEMA;
+  assertKindSchemaIsObject("Edge", name, schema);
   validateSchemaKeys(schema, name);
   if (options?.annotations !== undefined) {
     assertJsonValue(options.annotations, "annotations", `Edge "${name}"`);

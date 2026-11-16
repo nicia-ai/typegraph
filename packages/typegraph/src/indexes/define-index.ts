@@ -5,6 +5,7 @@ import {
   MAX_PG_IDENTIFIER_LENGTH,
   TRUNCATED_IDENTIFIER_MAX_LENGTH,
 } from "../constants";
+import { objectSchemaShape } from "../core/kind-schema";
 import {
   type AnyEdgeType,
   type KindEntity,
@@ -729,14 +730,9 @@ function createSystemColumnMapForEdge(): Map<
 }
 
 function getSchemaShape(schema: z.ZodType): NodeShape | EdgeShape {
-  if (schema.type !== "object") {
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) {
     throw new Error("Index definitions require an object schema");
-  }
-
-  const def = schema.def as { shape?: Record<string, z.ZodType> };
-  const shape = def.shape;
-  if (!shape) {
-    throw new Error("Index definitions require a resolvable object shape");
   }
 
   return shape;

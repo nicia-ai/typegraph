@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { VectorSlot } from "../query/dialect/vector-strategy";
 import type { GraphDef } from "./define-graph";
+import { objectSchemaShape } from "./kind-schema";
 
 // ============================================================
 // Embedding Brand Symbol
@@ -321,9 +322,8 @@ export const DEFAULT_EMBEDDING_INDEX_TYPE: EmbeddingIndexType = "hnsw";
 export function resolveEmbeddingFields(
   schema: z.ZodType,
 ): readonly ResolvedEmbeddingField[] {
-  if (schema.type !== "object") return [];
-  const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-  if (!shape) return [];
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) return [];
 
   const fields: ResolvedEmbeddingField[] = [];
   for (const [fieldPath, fieldSchema] of Object.entries(shape)) {

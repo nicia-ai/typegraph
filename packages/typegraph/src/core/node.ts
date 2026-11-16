@@ -7,6 +7,7 @@ import {
 } from "../store/reserved-keys";
 import { assertPathTokenSafeKind } from "../utils/path";
 import { assertJsonValue } from "./json-value";
+import { assertKindSchemaIsObject } from "./kind-schema";
 import { type KindAnnotations, NODE_TYPE_BRAND, type NodeType } from "./types";
 
 // ============================================================
@@ -71,6 +72,7 @@ export function defineNode<
   S extends z.ZodObject<z.ZodRawShape>,
 >(name: K, options: DefineNodeOptions<S>): NodeType<K, S> {
   assertNodeKindNameSafe(name);
+  assertKindSchemaIsObject("Node", name, options.schema);
   validateSchemaKeys(options.schema, name);
   if (options.annotations !== undefined) {
     assertJsonValue(options.annotations, "annotations", `Node "${name}"`);
