@@ -545,7 +545,7 @@ async function reserveInventory(
 ### Low Stock Report
 
 ```typescript
-import { field, max, sum } from "@nicia-ai/typegraph";
+import { expr, field, max, sum } from "@nicia-ai/typegraph";
 
 interface LowStockItem {
   productName: string;
@@ -556,7 +556,7 @@ interface LowStockItem {
 }
 
 async function getLowStockItems(): Promise<LowStockItem[]> {
-  const variants = await store
+  return store
     .query()
     .from("Product", "p")
     .traverse("hasVariant", "e1")
@@ -566,6 +566,9 @@ async function getLowStockItems(): Promise<LowStockItem[]> {
     .groupBy("p", "name")
     .groupBy("v", "sku")
     .groupBy("v", "name")
+    // `havingLt()` compares an aggregate with a constant; comparing two
+    // aggregates uses the expression form.
+    .having((e) => expr.lt(expr.sum(e.i.quantity), expr.max(e.i.reorderPoint)))
     .aggregate({
       productName: field("p", "name"),
       variantSku: field("v", "sku"),
@@ -574,9 +577,6 @@ async function getLowStockItems(): Promise<LowStockItem[]> {
       reorderPoint: max("i", "reorderPoint"),
     })
     .execute();
-  // `having*` compares an aggregate with a constant, so the per-variant
-  // threshold is applied to the grouped rows.
-  return variants.filter((row) => row.totalQuantity < row.reorderPoint);
 }
 ```
 
