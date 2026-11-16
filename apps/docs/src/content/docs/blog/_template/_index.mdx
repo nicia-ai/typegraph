@@ -50,6 +50,35 @@ social:
 # `pnpm dev` but out of production builds — useful while you're still
 # writing. Remove it when the post is ready to publish.
 draft: true
+# UPDATE NOTES. A published post is a record of its time: never rewrite its
+# prose, numbers or dates. When a later release makes a statement untrue in a
+# way that would lead a reader to write code that fails or to misunderstand
+# current behavior, add a dated note with the <UpdateNote> component instead:
+#
+#   import UpdateNote from "../../../../components/blog/UpdateNote.astro";
+#
+#   <UpdateNote date="2026-11-16" version="0.75">
+#
+#   `thing()` was removed in 0.75. Use `otherThing()`; see
+#   [Batch Execution](/queries/execute#batch-execution).
+#
+#   </UpdateNote>
+#
+# - Where: immediately after the paragraph or code block it corrects, so the
+#   correction sits with the claim.
+# - What it says, in one to three sentences: what changed, since which
+#   version, and what to use now, with a link to the current docs page (check
+#   that the page and anchor exist).
+# - What it must not do: edit the original text, change its numbers or dates,
+#   or editorialize. It is a correction, not a retrospective.
+# - Props: `date` (ISO date of the update, required) and `version` (the
+#   release it refers to, optional). The body is Markdown. Keep a blank line
+#   after the opening tag and before the closing tag so the body is parsed as
+#   Markdown.
+# - Not for style, polish, or changes that do not affect what a reader would
+#   do; those leave the post as it is.
+# - Blog posts have no .md twin or llms.txt entry, so the note appears in the
+#   post's HTML only.
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";

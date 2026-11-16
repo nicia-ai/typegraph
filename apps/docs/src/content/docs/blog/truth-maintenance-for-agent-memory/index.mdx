@@ -13,6 +13,7 @@ social:
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+import UpdateNote from "../../../../components/blog/UpdateNote.astro";
 
 Say a vuln-feed agent in your overnight security pipeline flags 60 services
 as shipping a vulnerable library, blocks their deploys, opens fix PRs, and
@@ -227,6 +228,12 @@ moves backwards, even if the system clock does. A raw ISO string no longer
 type-checks as an anchor, on purpose; get anchors from `recordedNow()`.
 Deployments that adopted the earlier format run `migrateLegacyRecordedTime()`
 once before opening the upgraded store.
+
+<UpdateNote date="2026-11-16" version="0.75">
+
+Since 0.75, `migrateLegacyRecordedTime` is no longer exported from the package root. Import it from `@nicia-ai/typegraph/maintenance`. See [Migrating Preview Recorded Time](/schema-management#migrating-preview-recorded-time).
+
+</UpdateNote>
 
 **Walking a whole snapshot.** 0.39 adds `scan()` to recorded collections:
 bounded, deterministic pages (up to 1,000 per call) ordered by id, with a

@@ -13,6 +13,7 @@ social:
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+import UpdateNote from "../../../../components/blog/UpdateNote.astro";
 
 The first versions of TypeGraph depended on Drizzle and assumed the database
 underneath was either a `pg` pool or `better-sqlite3`. That held up until
@@ -83,6 +84,12 @@ import ever drags it back in. The last three routes to Drizzle
 (recorded-time migration DDL, a claim comparison, and some removal-statement
 builders) moved to portable code with golden tests pinning byte-identical SQL
 on both dialects.
+
+<UpdateNote date="2026-11-16" version="0.75">
+
+The count of ten is as of 0.51. In 0.75 the package root was cut down to the application surface (86 names) and five portable entrypoints were added: `store`, `query`, `errors`, `identity`, and `maintenance`. Every entrypoint other than the `/adapters/drizzle/...` ones and the two managed-store entrypoints (`sqlite/local`, `postgres/pglite`) is now Drizzle-free. See [Drizzle-Free Entrypoints](/backend-setup#drizzle-free-entrypoints).
+
+</UpdateNote>
 
 If you use a managed store or a `/adapters/drizzle/...` entrypoint you still
 need Drizzle, and if your package manager skips optional peers you'll need to
