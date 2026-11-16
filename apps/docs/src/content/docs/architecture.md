@@ -675,7 +675,8 @@ graph DSL and its schema-derived types from the Drizzle-free
 `@nicia-ai/typegraph/core` entrypoint. Backend and search-strategy authors can
 import the full Drizzle-free port vocabulary, including `GraphBackend`,
 `AdapterBackend`, `DialectAdapter`, and `SqlFragment`, from
-`@nicia-ai/typegraph/backend`.
+`@nicia-ai/typegraph/backend`. That authoring surface is not covered by semver
+and may change in any release; see [Stability](/backend-authoring#stability).
 
 ### Why Zod for Schemas?
 

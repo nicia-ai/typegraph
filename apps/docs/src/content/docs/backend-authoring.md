@@ -8,6 +8,27 @@ This page is for adapting one: changing a lock spelling, loosening a
 declared capability, or swapping the resource-audit verdict without
 hand-copying every other field a profile carries.
 
+## Stability
+
+The backend authoring surface is not covered by semver. Everything exported
+from `@nicia-ai/typegraph/backend` and
+`@nicia-ai/typegraph/adapters/drizzle/engine` (the backend, dialect,
+SQL-fragment, fulltext and vector strategy contracts, engine profiles and
+their derivation) may change in any release, including a patch release,
+without a deprecation period. The release notes list such changes, but they
+are not breaking changes in the semver sense.
+
+The supported backends are the first-party ones: the bundled SQLite backends
+(better-sqlite3, libSQL, and any Drizzle SQLite driver through
+`createSqliteBackend`) and PostgreSQL backends (any Drizzle Postgres driver
+through `createPostgresBackend`, and PGlite). A backend you build or derive
+yourself is yours to keep working across upgrades: pin the TypeGraph version
+it was written against and re-run its tests before taking a new release.
+
+The application API (`@nicia-ai/typegraph` and the other entrypoints) is
+covered by semver as usual. Using a first-party backend through it never
+depends on the authoring surface staying stable.
+
 ## What a profile is
 
 A `SqlEngineProfile` is the data and dialect closures one SQL engine
