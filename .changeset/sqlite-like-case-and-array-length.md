@@ -12,3 +12,4 @@
 
 - Changed: on SQLite (better-sqlite3, libSQL, and any Drizzle SQLite driver), `like()` matches case-sensitively. Existing SQLite queries using `like()` may return fewer rows after upgrading. To keep the previous case-insensitive behaviour, use `ilike()` with the same pattern. PostgreSQL results are unchanged.
 - Removed: `ArrayFieldAccessor.length`. Code that used it threw at runtime; it is now a compile error. Replace `x.tags.length.gt(n)` with `x.tags.lengthGt(n)`, and likewise for `eq` / `gte` / `lt` / `lte`.
+- Changed (backend authoring surface, `@nicia-ai/typegraph/backend`): `DialectAdapter` gains a required `like(column, pattern)` member, the case-sensitive counterpart of `ilike`. A custom dialect adapter must implement it; the bundled SQLite and PostgreSQL dialects do.
