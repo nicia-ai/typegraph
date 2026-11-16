@@ -15,6 +15,7 @@ import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import {
   isEdgeTargetMap,
   normalizeTargetMap,
+  projectTargetNodes,
   validateTargetMapEntries,
 } from "./edge-endpoints";
 import { assertEdgeIntegrityOptions } from "./edge-integrity-options";
@@ -606,6 +607,7 @@ function defineGraphUnchecked<
 
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  assertEdgeEndpointsRegistered(config.nodes, normalizedEdges);
   assertClaimNamesAreSafe(config.nodes, normalizedEdges);
   const nodes = withUniqueConstraintDefaultsWritten(config.nodes);
   assertUniqueConstraintsAreDeclared(nodes);
@@ -872,6 +874,46 @@ function normalizeIndexes(
   }
 
   return inputs;
+}
+
+/**
+ * Refuses an edge whose `from` or `to` names a node kind the graph does not
+ * register in `nodes`. Such an edge could never be written (its endpoint kind
+ * has no rows) and every query or traversal through it silently returned
+ * nothing.
+ */
+function assertEdgeEndpointsRegistered(
+  nodes: Record<string, NodeRegistration>,
+  edges: Record<string, AnyEdgeRegistration>,
+): void {
+  const registeredKinds = collectKinds(nodes);
+  for (const [edgeName, registration] of Object.entries(edges)) {
+    const endpoints = [
+      ["from", registration.from],
+      ["to", projectTargetNodes(registration.to)],
+    ] as const;
+    for (const [endpoint, nodeTypes] of endpoints) {
+      for (const nodeType of nodeTypes) {
+        if (registeredKinds.has(nodeType.kind)) continue;
+        throw new ConfigurationError(
+          `Edge "${edgeName}" names node kind "${nodeType.kind}" in "${endpoint}", ` +
+            `which is not registered in this graph's "nodes".`,
+          {
+            code: "EDGE_ENDPOINT_KIND_NOT_REGISTERED",
+            edge: edgeName,
+            endpoint,
+            kind: nodeType.kind,
+            availableKinds: [...registeredKinds],
+          },
+          {
+            suggestion:
+              `Add { ${nodeType.kind}: { type: ${nodeType.kind} } } to defineGraph({ nodes }) ` +
+              `or remove it from edge "${edgeName}"'s "${endpoint}".`,
+          },
+        );
+      }
+    }
+  }
 }
 
 function collectKinds(
