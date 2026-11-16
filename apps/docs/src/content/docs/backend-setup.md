@@ -1363,6 +1363,8 @@ TypeGraph keeps its public core and backend contracts independent of Drizzle:
   schema-derived types for packages that only define or share schemas.
 - `@nicia-ai/typegraph/backend` exports the complete backend, dialect,
   SQL-fragment, fulltext, and vector strategy contracts for adapter authors.
+  This authoring surface is not covered by semver and may change in any
+  release; see [Stability](/backend-authoring#stability).
 - `@nicia-ai/typegraph/sqlite/local` and
   `@nicia-ai/typegraph/postgres/pglite` create managed Stores without exposing
   adapter-native handles.
@@ -1474,6 +1476,7 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy` — PostgreSQL table-backed working-copy manager
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
 - `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend`, `deriveEngineProfile`, the bundled builders, `SqlEngineProfile`
+  (backend authoring surface, not covered by semver; see [Stability](/backend-authoring#stability))
 
 Import from the entrypoint matching your database:
 

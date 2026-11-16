@@ -62,7 +62,10 @@ the database connection or needs adapter-native transaction handles.
 Schema-only packages can import the graph DSL and schema-derived types from the
 Drizzle-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and
 search-strategy authors can import the complete Drizzle-free contract vocabulary
-from `@nicia-ai/typegraph/backend`.
+from `@nicia-ai/typegraph/backend`. That authoring surface, and
+`@nicia-ai/typegraph/adapters/drizzle/engine`, is not covered by semver and may
+change in any release; the bundled SQLite and PostgreSQL backends are the
+supported ones.
 
 ## Optional Peer: drizzle-orm
 

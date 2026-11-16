@@ -121,7 +121,10 @@ live under the explicit `/adapters/drizzle/...` entrypoints.
 Packages that only define or share graph schemas can import the DSL and its
 schema-derived types from `@nicia-ai/typegraph/core`. Custom backend and search
 strategy authors can use the complete Drizzle-free contract vocabulary from
-`@nicia-ai/typegraph/backend`.
+`@nicia-ai/typegraph/backend`. That authoring surface, and
+`@nicia-ai/typegraph/adapters/drizzle/engine`, is not covered by semver and may
+change in any release; the bundled SQLite and PostgreSQL backends are the
+supported ones.
 
 `drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`
 and `@nicia-ai/typegraph/postgres/pglite` load it only when their factory is
