@@ -9,7 +9,7 @@
 
 import { ConfigurationError, ValidationError } from "../errors";
 import { type FieldRef, type OrderSpec } from "./ast";
-import { selectableSystemFieldPath } from "./execution/result-mapper";
+import { systemColumnSelectedPath } from "./builder/order-by-field";
 import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -179,7 +179,7 @@ export function buildColumnId(spec: OrderSpec): string {
  *
  * For mapped results, we navigate through the path and then jsonPointer. An
  * ordered system column is read where a selectable node or edge holds it
- * ({@link selectableSystemFieldPath}): `created_at` is `meta.createdAt` there,
+ * ({@link systemColumnSelectedPath}): `created_at` is `meta.createdAt` there,
  * not a top-level key.
  */
 export function extractCursorValue(
@@ -231,7 +231,7 @@ function selectableFieldPath(field: FieldRef): readonly string[] {
     field.path.length === 1 &&
     column !== undefined
   ) {
-    return selectableSystemFieldPath(column) ?? field.path;
+    return systemColumnSelectedPath(column) ?? field.path;
   }
   return field.path;
 }

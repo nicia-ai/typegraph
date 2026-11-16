@@ -54,12 +54,10 @@ import {
   mapSelectiveResults,
   MissingSelectiveFieldError,
   nullToUndefined,
-  selectableSystemFieldPath,
   transformPathColumns,
 } from "../execution";
 import { parseJsonPointer } from "../json-pointer";
 import { resolveNullOrdering } from "../order";
-import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
@@ -70,9 +68,8 @@ import {
   type OneStatementReadProvenance,
 } from "./one-statement-provenance";
 import {
-  assertSharedNodeField,
-  buildOrderSpec,
-  resolveSystemOrderField,
+  resolveAliasOrderSpec,
+  systemColumnSelectedPath,
 } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
@@ -83,6 +80,7 @@ import {
 import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
+  type AliasOrderField,
   type CompiledOneStatementRead,
   type EdgeAliasMap,
   type NodeCandidateSelection,
@@ -100,6 +98,7 @@ import {
   refuseRecursivePagination,
   validatePaginationOptions,
   validateQueryRange,
+  validateSortDirection,
 } from "./validation";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
@@ -195,61 +194,29 @@ export class ExecutableQuery<
    */
   orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
-    field: string,
+    field: AliasOrderField<Aliases, EdgeAliases, A>,
     direction: SortDirection = "asc",
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateSortDirection(direction);
     const edgeTraversal = this.#state.traversals.find(
       (traversal) => traversal.edgeAlias === alias,
     );
-    const isEdge = edgeTraversal !== undefined;
-    const edgeKindNames =
-      edgeTraversal === undefined ? undefined : mergeEdgeKinds(edgeTraversal);
     const nodeKindNames =
-      isEdge ? undefined
-      : alias === this.#state.startAlias ? this.#state.startKinds
+      alias === this.#state.startAlias ?
+        this.#state.startKinds
       : this.#state.traversals.find(
           (traversal) => traversal.nodeAlias === alias,
         )?.nodeKinds;
-    const hasDeclaredProperty =
-      edgeKindNames ?
-        this.#config.schemaIntrospector.hasDeclaredEdgeField(
-          edgeKindNames,
-          field,
-        )
-      : nodeKindNames !== undefined &&
-        this.#config.schemaIntrospector.hasDeclaredField(nodeKindNames, field);
-    const systemField = resolveSystemOrderField(
+    const orderSpec = resolveAliasOrderSpec(
+      this.#config.schemaIntrospector,
       alias,
-      field,
-      isEdge,
-      hasDeclaredProperty,
-    );
-
-    let typeInfo: FieldTypeInfo | undefined;
-    if (systemField === undefined) {
-      if (edgeKindNames) {
-        typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          edgeKindNames,
-          field,
-        );
-      } else {
-        typeInfo =
-          nodeKindNames ?
-            this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              nodeKindNames,
-              field,
-            )
-          : undefined;
-        assertSharedNodeField(nodeKindNames, field, typeInfo);
-      }
-    }
-
-    const orderSpec = buildOrderSpec(
-      alias,
+      edgeTraversal === undefined ?
+        nodeKindNames === undefined ?
+          undefined
+        : { isEdge: false, nodeKindNames }
+      : { isEdge: true, edgeKindNames: mergeEdgeKinds(edgeTraversal) },
       field,
       direction,
-      systemField,
-      typeInfo,
     );
 
     const newState: QueryBuilderState = {
@@ -296,7 +263,7 @@ export class ExecutableQuery<
    *
    * @example
    * ```typescript
-   * const paginated = (q) => q.orderBy("u", "createdAt", "desc").limit(10);
+   * const paginated = (q) => q.orderBy("u", "meta.createdAt", "desc").limit(10);
    *
    * const results = await query()
    *   .from("User", "u")
@@ -1430,7 +1397,7 @@ export class ExecutableQuery<
 
         // Placed where a selectable node or edge holds the column, the one
         // shape `extractCursorValue` reads for both selections.
-        const location = selectableSystemFieldPath(fieldName) ?? [fieldName];
+        const location = systemColumnSelectedPath(fieldName) ?? [fieldName];
         let container = this.#getOrCreateAliasObject(cursorContext, alias);
         for (const segment of location.slice(0, -1)) {
           const nested = container[segment];

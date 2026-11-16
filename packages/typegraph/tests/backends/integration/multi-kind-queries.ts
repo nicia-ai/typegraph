@@ -30,6 +30,7 @@ export function registerMultiKindQueryIntegrationTests(
         store
           .query()
           .from(["Person", "Company"] as const, "node")
+          // @ts-expect-error Company does not declare `age`.
           .orderBy("node", "age"),
       ).toThrow("age");
     });

@@ -118,6 +118,21 @@ export type SchemaIntrospector = Readonly<{
     fieldName: string,
   ) => boolean;
   /**
+   * True iff every kind in `kindNames` has a known, closed property set: its
+   * schema is an object whose shape is readable and whose unknown keys are
+   * stripped or refused (`z.object` / `z.strictObject`). An object that
+   * admits unknown keys (`z.looseObject`, `.passthrough()`, `.catchall()`),
+   * a schema without a readable object shape, or an unregistered kind is
+   * open: a stored row may hold a key no declaration names.
+   *
+   * The single owner of "can an undeclared name be a property here?". A
+   * layer that refuses an undeclared name asks this first and refuses only
+   * when the answer is `true`.
+   */
+  hasClosedPropertySet: (kindNames: readonly string[]) => boolean;
+  /** Edge counterpart of {@link SchemaIntrospector.hasClosedPropertySet}. */
+  hasClosedEdgePropertySet: (edgeKindNames: readonly string[]) => boolean;
+  /**
    * The kinds that leave the alias `kindNames` resolves to without searchable
    * content, empty when `$fulltext` is available: each kind no other kind
    * subsumes that declares no `searchable()` field, or else any kind beneath
@@ -479,6 +494,18 @@ export function createSchemaIntrospector(
     return result;
   }
 
+  function hasClosedPropertySet(kindNames: readonly string[]): boolean {
+    return kindNames.every((kindName) =>
+      isClosedObjectSchema(nodeKinds.get(kindName)?.schema),
+    );
+  }
+
+  function hasClosedEdgePropertySet(edgeKindNames: readonly string[]): boolean {
+    return edgeKindNames.every((edgeKindName) =>
+      isClosedObjectSchema(edgeKinds?.get(edgeKindName)?.schema),
+    );
+  }
+
   return {
     getFieldTypeInfo,
     getSharedFieldTypeInfo,
@@ -486,9 +513,29 @@ export function createSchemaIntrospector(
     getSharedEdgeFieldTypeInfo,
     hasDeclaredField,
     hasDeclaredEdgeField,
+    hasClosedPropertySet,
+    hasClosedEdgePropertySet,
     kindsWithoutSearchableField,
     kindsDivergingFromSubsumingDeclaration,
   };
+}
+
+/**
+ * Whether `schema` is an object with a readable shape that strips or refuses
+ * unknown keys. Zod records the unknown-key policy as `def.catchall`: absent
+ * for `z.object` (strip), `never` for `z.strictObject`, and the admitted value
+ * type for `z.looseObject`, `.passthrough()` and `.catchall()`.
+ */
+function isClosedObjectSchema(schema: z.ZodType | undefined): boolean {
+  if (schema?.type !== "object") return false;
+  const def = schema.def as Readonly<{
+    shape?: Record<string, z.ZodType>;
+    catchall?: z.ZodType;
+  }>;
+  return (
+    def.shape !== undefined &&
+    (def.catchall === undefined || def.catchall.type === "never")
+  );
 }
 
 const registryIntrospectors = new WeakMap<KindRegistry, SchemaIntrospector>();

@@ -1148,6 +1148,43 @@ export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
       Readonly<z.infer<E["schema"]>>;
 
 /**
+ * The field names `orderBy(alias, field)` accepts for a node alias: a
+ * declared property, `id`, `kind`, or a metadata field by its path in a
+ * selected row (`meta.createdAt`, `meta.version`, …). A dynamic alias accepts
+ * any name and refuses an unknown one at runtime.
+ */
+export type NodeOrderField<N extends NodeType> =
+  IsDynamicNodeType<N> extends true ? string
+  : | "id"
+    | "kind"
+    | `meta.${keyof SelectableNodeMeta}`
+    | (keyof z.infer<N["schema"]> & string);
+
+/**
+ * The field names `orderBy(alias, field)` accepts for an edge alias: a
+ * declared property, `id`, `kind`, `fromId`, `toId`, or a metadata field by
+ * its path in a selected row (`meta.createdAt`, …).
+ */
+export type EdgeOrderField<E extends AnyEdgeType> =
+  IsDynamicEdgeType<E> extends true ? string
+  : | "id"
+    | "kind"
+    | "fromId"
+    | "toId"
+    | `meta.${keyof SelectableEdgeMeta}`
+    | (keyof z.infer<E["schema"]> & string);
+
+/** The field names `orderBy(alias, field)` accepts for `alias`. */
+export type AliasOrderField<
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  A extends string,
+> =
+  A extends keyof EdgeAliases ? EdgeOrderField<EdgeAliases[A]["type"]>
+  : A extends keyof Aliases ? NodeOrderField<Aliases[A]["type"]>
+  : never;
+
+/**
  * Selection context passed to select callback.
  *
  * Includes node aliases, edge aliases, and recursive metadata aliases

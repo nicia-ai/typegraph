@@ -891,6 +891,7 @@ export { compareAndSetAbsent } from "./store/types";
 export type {
   AggregateResult,
   AliasMap,
+  AliasOrderField,
   AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
@@ -910,6 +911,7 @@ export type {
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EdgeOrderField,
   EmbeddableOneStatementRead,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
@@ -930,6 +932,7 @@ export type {
   NodeAlias,
   NodeCandidateQuery,
   NodeCandidateSelection,
+  NodeOrderField,
   NodePropsFor,
   OneStatementBatchableQuery,
   OneStatementBatchResults,
@@ -1033,6 +1036,7 @@ export {
 // Fragment composition types
 export type {
   FlexibleQueryFragment,
+  GraphOrderField,
   QueryFragment,
   TraversalFragment,
 } from "./query";

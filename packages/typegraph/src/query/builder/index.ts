@@ -69,6 +69,7 @@ export {
   composeFragments,
   createFragment,
   type FlexibleQueryFragment,
+  type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
@@ -82,6 +83,7 @@ export { buildQueryAst } from "./ast-builder";
 // Types
 export {
   type AliasMap,
+  type AliasOrderField,
   type ArrayFieldAccessor,
   type AssignableNodeKinds,
   type BaseFieldAccessor,
@@ -94,6 +96,7 @@ export {
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,
+  type EdgeOrderField,
   type EmbeddableOneStatementRead,
   type EmbeddingFieldAccessor,
   type EmptyAliasMap,
@@ -107,6 +110,7 @@ export {
   type NodeAlias,
   type NodeCandidateQuery,
   type NodeCandidateSelection,
+  type NodeOrderField,
   type NodePropsFor,
   type NumberFieldAccessor,
   type ObjectFieldAccessor,

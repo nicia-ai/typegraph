@@ -101,11 +101,7 @@ import {
 import { createExpressionSubqueryHelpers } from "./expression-subqueries";
 import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import {
-  assertSharedNodeField,
-  buildOrderSpec,
-  resolveSystemOrderField,
-} from "./order-by-field";
+import { assertSharedNodeField, resolveAliasOrderSpec } from "./order-by-field";
 import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
 import {
@@ -115,6 +111,7 @@ import {
 import {
   type AliasMap,
   type AliasNodeType,
+  type AliasOrderField,
   type BaseFieldAccessor,
   type BuildRecursiveAliases,
   type EdgeAccessor,
@@ -2064,7 +2061,7 @@ export class QueryBuilder<
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
-    field: string,
+    field: AliasOrderField<Aliases, EdgeAliases, A>,
     direction?: SortDirection,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   orderBy(
@@ -2098,44 +2095,17 @@ export class QueryBuilder<
       throw new ConfigurationError("orderBy() requires a field.");
     validateSortDirection(direction);
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
-    const isEdge = edgeKindNames !== undefined;
-    const nodeKindNames =
-      isEdge ? undefined : this.#getKindNamesForAlias(alias);
-    const hasDeclaredProperty =
-      isEdge ?
-        this.#config.schemaIntrospector.hasDeclaredEdgeField(
-          edgeKindNames,
-          field,
-        )
-      : nodeKindNames !== undefined &&
-        this.#config.schemaIntrospector.hasDeclaredField(nodeKindNames, field);
-    const systemField = resolveSystemOrderField(
+    const nodeKindNames = this.#getKindNamesForAlias(alias);
+    const orderSpec = resolveAliasOrderSpec(
+      this.#config.schemaIntrospector,
       alias,
-      field,
-      isEdge,
-      hasDeclaredProperty,
-    );
-    let typeInfo: FieldTypeInfo | undefined;
-    if (systemField === undefined) {
-      typeInfo =
-        isEdge ?
-          this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-            edgeKindNames,
-            field,
-          )
-        : nodeKindNames === undefined ? undefined
-        : this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-            nodeKindNames,
-            field,
-          );
-      assertSharedNodeField(nodeKindNames, field, typeInfo);
-    }
-    const orderSpec = buildOrderSpec(
-      alias,
+      edgeKindNames === undefined ?
+        nodeKindNames === undefined ?
+          undefined
+        : { isEdge: false, nodeKindNames }
+      : { isEdge: true, edgeKindNames },
       field,
       direction,
-      systemField,
-      typeInfo,
     );
 
     const newState: QueryBuilderState = {

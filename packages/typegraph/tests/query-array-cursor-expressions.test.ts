@@ -266,11 +266,14 @@ describe("cursor tuple comparisons", () => {
   });
 
   it("keeps nullable temporal system columns out of native tuple comparisons", () => {
-    for (const fieldName of ["valid_from", "valid_to", "deleted_at"] as const) {
+    for (const fieldName of [
+      "meta.validFrom",
+      "meta.validTo",
+      "meta.deletedAt",
+    ] as const) {
       const temporalEndField = resolveSystemOrderField(
         "item",
         fieldName,
-        false,
         false,
       );
       expect(temporalEndField?.nullable).toBe(true);

@@ -251,7 +251,7 @@ const history = await store
   .from("Article", "a")
   .temporal("includeEnded") // Include historical rows
   .whereNode("a", (a) => a.id.eq(article.id))
-  .orderBy("a", "validFrom", "desc")
+  .orderBy("a", "meta.validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
     validFrom: ctx.a.validFrom,

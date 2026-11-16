@@ -2839,6 +2839,13 @@ Both methods accept `direction: "out" | "in" | "both"` and the Store's temporal 
 positive integer `limit`. Null metadata sorts last on both dialects, and ties are resolved by edge
 ID so a bounded read is deterministic.
 
+:::note
+These names are a known inconsistency. The query builder's `orderBy(alias, field)` names the same
+metadata `meta.createdAt`, `meta.validFrom` and so on (see [Field Names](/queries/order#field-names)),
+while `neighbors()` still takes the bare names. `neighbors()` will move to the `meta.` names in a
+later release; until then, use the bare names here.
+:::
+
 Set `orderBy.by` to `"node"` to order by a schema-declared adjacent-node property instead. Omit it
 or use `"edge"` for edge metadata. Inside `batchOnce()`, use the callback's `read.neighbors()` and
 `read.countNeighbors()` methods to compose these shapes with other independent reads.

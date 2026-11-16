@@ -315,7 +315,7 @@ const stream = store
   .query()
   .from("Event", "e")
   .select((ctx) => ctx.e)
-  .orderBy("e", "createdAt", "desc") // ORDER BY required
+  .orderBy("e", "meta.createdAt", "desc") // ORDER BY required
   .stream({ batchSize: 1000 });
 
 // Process results as they arrive
@@ -722,7 +722,7 @@ Both `paginate()` and `stream()` require an `orderBy()` clause:
 .paginate({ first: 20 });
 
 // Required for streaming
-.orderBy("e", "createdAt", "desc")
+.orderBy("e", "meta.createdAt", "desc")
 .stream();
 ```
 
@@ -762,7 +762,7 @@ async function listUsers(cursor?: string, limit = 20) {
       name: ctx.u.name,
       email: ctx.u.email,
     }))
-    .orderBy("u", "createdAt", "desc")
+    .orderBy("u", "meta.createdAt", "desc")
     .orderBy("u", "id", "desc");
 
   const result = cursor
@@ -786,7 +786,7 @@ async function processAllOrders() {
     .from("Order", "o")
     .whereNode("o", (o) => o.status.eq("pending"))
     .select((ctx) => ctx.o)
-    .orderBy("o", "createdAt", "asc")
+    .orderBy("o", "meta.createdAt", "asc")
     .stream({ batchSize: 100 });
 
   for await (const order of stream) {

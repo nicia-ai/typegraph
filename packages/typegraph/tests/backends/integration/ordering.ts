@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import { defineEdge, defineGraph, defineNode } from "../../../src";
+import { ConfigurationError } from "../../../src/errors";
+import { registerOrderingSchemaFormTests } from "./ordering-schema-forms";
 import {
   seedMultiHopEdgePropertiesFixture,
   seedPeopleCompaniesForEdgePropertySelection,
@@ -7,11 +11,267 @@ import {
   seedPeopleForOrderingWithNulls,
   seedWorksAtEdgesWithNullSalaryValues,
 } from "./seed-helpers";
-import { type IntegrationTestContext } from "./test-context";
+import {
+  type InspectableStore,
+  type IntegrationTestContext,
+} from "./test-context";
+
+/**
+ * A kind declaring its own `createdAt` and `version`, so the declared
+ * property and the `meta.*` system field of the same leaf name can be told
+ * apart in one query.
+ */
+const Post = defineNode("OrderPost", {
+  schema: z.object({
+    title: z.string(),
+    createdAt: z.string(),
+    version: z.number(),
+  }),
+});
+const cites = defineEdge("orderCites", {
+  schema: z.object({ createdAt: z.string() }),
+});
+const declaredMetadataNameGraph = defineGraph({
+  id: "order_declared_metadata_names",
+  nodes: { OrderPost: { type: Post } },
+  edges: { orderCites: { type: cites, from: [Post], to: [Post] } },
+});
+
+/** Declared values run opposite to creation order and stored version. */
+/**
+ * Waits until the wall clock has moved past the current millisecond, so two
+ * writes on either side get distinct `created_at` values and their system
+ * order is not a tie.
+ */
+async function nextMillisecond(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() === start) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+async function seedPostsWithReversedDeclaredFields(
+  store: InspectableStore<typeof declaredMetadataNameGraph>,
+) {
+  const first = await store.nodes.OrderPost.create({
+    title: "first",
+    createdAt: "2030-01-01T00:00:00.000Z",
+    version: 1,
+  });
+  await nextMillisecond();
+  const second = await store.nodes.OrderPost.create({
+    title: "second",
+    createdAt: "2020-01-01T00:00:00.000Z",
+    version: 9,
+  });
+  // `first` reaches stored version 3, `second` stays at 1.
+  await store.nodes.OrderPost.update(first.id, { title: "first" });
+  await store.nodes.OrderPost.update(first.id, { title: "first" });
+  return { first, second };
+}
+
+/** The `ConfigurationError` an `orderBy` call throws. */
+function orderRefusal(build: () => unknown): ConfigurationError {
+  try {
+    build();
+  } catch (error) {
+    if (error instanceof ConfigurationError) return error;
+    throw error;
+  }
+  throw new Error("expected orderBy to refuse the field");
+}
 
 export function registerOrderingIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  registerOrderingSchemaFormTests(context);
+
+  describe("orderBy field names", () => {
+    it("orders a declared createdAt by the property and meta.createdAt by the system column", async () => {
+      const store = await context.createStore(declaredMetadataNameGraph);
+      await seedPostsWithReversedDeclaredFields(store);
+      // Both directions: rows tied on NULL keep one order whichever way
+      // they are sorted, so a name read as a missing property cannot pass.
+      const titles = async (
+        field: "createdAt" | "meta.createdAt",
+        direction: "asc" | "desc",
+      ) => {
+        const rows = await store
+          .query()
+          .from("OrderPost", "p")
+          .orderBy("p", field, direction)
+          .select((ctx) => ({ title: ctx.p.title }))
+          .execute();
+        return rows.map((row) => row.title);
+      };
+
+      expect({
+        property: await titles("createdAt", "asc"),
+        propertyDesc: await titles("createdAt", "desc"),
+        system: await titles("meta.createdAt", "asc"),
+        systemDesc: await titles("meta.createdAt", "desc"),
+      }).toEqual({
+        property: ["second", "first"],
+        propertyDesc: ["first", "second"],
+        system: ["first", "second"],
+        systemDesc: ["second", "first"],
+      });
+    });
+
+    it("orders a declared version by the property and meta.version by the stored version", async () => {
+      const store = await context.createStore(declaredMetadataNameGraph);
+      await seedPostsWithReversedDeclaredFields(store);
+      const titles = async (field: "version" | "meta.version") => {
+        const rows = await store
+          .query()
+          .from("OrderPost", "p")
+          .select((ctx) => ({ title: ctx.p.title }))
+          .orderBy("p", field, "asc")
+          .execute();
+        return rows.map((row) => row.title);
+      };
+
+      expect({
+        property: await titles("version"),
+        system: await titles("meta.version"),
+      }).toEqual({
+        property: ["first", "second"],
+        system: ["second", "first"],
+      });
+    });
+
+    it("refuses an undeclared property on a node alias before and after select", () => {
+      const query = context.getStore().query().from("Person", "p");
+      const refusals = [
+        // @ts-expect-error Person declares no `createdAt`.
+        () => query.orderBy("p", "createdAt"),
+        () =>
+          query
+            .select((ctx) => ({ id: ctx.p.id }))
+            // @ts-expect-error Person declares no `createdAt`.
+            .orderBy("p", "createdAt"),
+      ];
+      for (const refuse of refusals) {
+        expect(orderRefusal(refuse).details).toMatchObject({
+          code: "ORDER_FIELD_UNKNOWN",
+          alias: "p",
+          field: "createdAt",
+        });
+      }
+    });
+
+    it.each([
+      ["created_at", "meta.createdAt"],
+      ["updated_at", "meta.updatedAt"],
+      ["valid_from", "meta.validFrom"],
+      ["valid_to", "meta.validTo"],
+      ["deleted_at", "meta.deletedAt"],
+    ] as const)(
+      "names the replacement for the removed node name %s",
+      (removed, replacement) => {
+        const query = context.getStore().query().from("Person", "p");
+        // @ts-expect-error Removed snake_case system names are not order fields.
+        const refusal = orderRefusal(() => query.orderBy("p", removed));
+        expect(refusal.message).toContain(`use "${replacement}"`);
+        expect(refusal.details).toMatchObject({
+          code: "ORDER_FIELD_RENAMED",
+          field: removed,
+          replacement,
+        });
+      },
+    );
+
+    it("refuses an undeclared version on a closed schema and points at meta.version", () => {
+      const query = context.getStore().query().from("Person", "p");
+      // `version` was never a system order name, so it is unknown, not renamed.
+      // @ts-expect-error Person declares no `version`.
+      const refusal = orderRefusal(() => query.orderBy("p", "version"));
+      expect(refusal.details).toMatchObject({
+        code: "ORDER_FIELD_UNKNOWN",
+        field: "version",
+      });
+      expect(refusal.suggestion).toContain('"meta.version"');
+    });
+
+    it.each([
+      ["from_id", "fromId"],
+      ["to_id", "toId"],
+      ["created_at", "meta.createdAt"],
+    ] as const)(
+      "names the replacement for the removed edge name %s",
+      (removed, replacement) => {
+        const query = context
+          .getStore()
+          .query()
+          .from("Person", "p")
+          .traverse("knows", "k")
+          .to("Person", "friend");
+        // @ts-expect-error Removed snake_case system names are not order fields.
+        const refusal = orderRefusal(() => query.orderBy("k", removed));
+        expect(refusal.message).toContain(`use "${replacement}"`);
+      },
+    );
+
+    it("refuses edge endpoint kinds and node-only metadata on an edge alias", () => {
+      const query = context
+        .getStore()
+        .query()
+        .from("Person", "p")
+        .traverse("knows", "k")
+        .to("Person", "friend");
+      for (const field of ["fromKind", "toKind", "meta.version"]) {
+        // A name the type refuses, passed the way an untyped caller would.
+        const refusal = orderRefusal(() => query.orderBy("k", field as never));
+        expect(refusal.details).toMatchObject({ code: "ORDER_FIELD_UNKNOWN" });
+      }
+    });
+
+    it("refuses edge endpoint ids on a node alias", () => {
+      const query = context.getStore().query().from("Person", "p");
+      // @ts-expect-error `fromId` belongs to edge aliases.
+      expect(() => query.orderBy("p", "fromId")).toThrow(ConfigurationError);
+    });
+
+    it("orders an edge's declared createdAt apart from meta.createdAt", async () => {
+      const store = await context.createStore(declaredMetadataNameGraph);
+      const { first, second } =
+        await seedPostsWithReversedDeclaredFields(store);
+      await store.edges.orderCites.create(first, second, {
+        createdAt: "2030-01-01T00:00:00.000Z",
+      });
+      await nextMillisecond();
+      await store.edges.orderCites.create(second, first, {
+        createdAt: "2020-01-01T00:00:00.000Z",
+      });
+      const sources = async (
+        field: "createdAt" | "meta.createdAt",
+        direction: "asc" | "desc",
+      ) => {
+        const rows = await store
+          .query()
+          .from("OrderPost", "source")
+          .traverse("orderCites", "c")
+          .to("OrderPost", "target")
+          .orderBy("c", field, direction)
+          .select((ctx) => ({ title: ctx.source.title }))
+          .execute();
+        return rows.map((row) => row.title);
+      };
+
+      expect({
+        property: await sources("createdAt", "asc"),
+        propertyDesc: await sources("createdAt", "desc"),
+        system: await sources("meta.createdAt", "asc"),
+        systemDesc: await sources("meta.createdAt", "desc"),
+      }).toEqual({
+        property: ["second", "first"],
+        propertyDesc: ["first", "second"],
+        system: ["first", "second"],
+        systemDesc: ["second", "first"],
+      });
+    });
+  });
+
   describe("system temporal columns", () => {
     it("orders by the physical validity lower bound before and after select", async () => {
       const store = context.getStore();
@@ -27,14 +287,14 @@ export function registerOrderingIntegrationTests(
       const beforeSelect = await store
         .query()
         .from("Person", "p")
-        .orderBy("p", "valid_from", "asc")
+        .orderBy("p", "meta.validFrom", "asc")
         .select((ctx) => ({ name: ctx.p.name }))
         .execute();
       const afterSelect = await store
         .query()
         .from("Person", "p")
         .select((ctx) => ({ name: ctx.p.name }))
-        .orderBy("p", "valid_from", "asc")
+        .orderBy("p", "meta.validFrom", "asc")
         .execute();
 
       expect(beforeSelect.map((row) => row.name)).toEqual(["Earlier", "Later"]);
