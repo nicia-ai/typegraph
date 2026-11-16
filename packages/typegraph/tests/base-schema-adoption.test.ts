@@ -337,6 +337,27 @@ const LEGACY_FACTORY_ADOPTION_PATHS = [
   },
 ] as const;
 
+/** Opens, verifies, materializes and reads and writes a store on `backend`. */
+async function expectStoreWorks(backend: GraphBackend): Promise<void> {
+  const [store, result] = await createStoreWithSchema(graph, backend);
+  expect(result.status).toBe("unchanged");
+  const materialized = await store.materializeSystemIndexes();
+  expect(
+    materialized.results.filter((entry) => entry.status === "failed"),
+  ).toEqual([]);
+  expect(await store.verifyContributions()).toEqual([]);
+  await expect(createVerifiedStore(graph, backend)).resolves.toBeDefined();
+  const alice = await store.nodes.Person.create({ name: "Alice" });
+  const bob = await store.nodes.Person.create({ name: "Bob" });
+  await store.edges.knows.create(alice, bob, { label: "friend" });
+  const people = await store.nodes.Person.find({ limit: 10 });
+  expect(people.map((person) => person.name).toSorted()).toEqual([
+    "Alice",
+    "Bob",
+  ]);
+  expect(await store.edges.knows.find({ limit: 10 })).toHaveLength(1);
+}
+
 describe("deployment-wide base-schema adoption", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -1013,6 +1034,111 @@ describe("deployment-wide base-schema adoption", () => {
     } finally {
       await backend.close();
     }
+  });
+
+  // Base schema v9 stopped creating `typegraph_nodes_kind_idx` and
+  // `typegraph_edges_kind_idx`: each is a prefix of an index v9 keeps. No
+  // adoption step drops them, so a store upgraded from v8 keeps both and a
+  // fresh v9 store never has them. Both shapes are permanent, and both must
+  // open, verify, materialize system indexes and read and write.
+  describe("redundant kind indexes after base schema v9", () => {
+    const kindIndexNames = [
+      "typegraph_edges_kind_idx",
+      "typegraph_nodes_kind_idx",
+    ] as const;
+    const v8KindIndexDdl = [
+      'CREATE INDEX "typegraph_nodes_kind_idx" ON "typegraph_nodes" ("graph_id", "kind")',
+      'CREATE INDEX "typegraph_edges_kind_idx" ON "typegraph_edges" ("graph_id", "kind")',
+    ];
+    const v9RelationDrops = [
+      'DROP TABLE "typegraph_identity_transitions"',
+      'DROP TABLE "typegraph_identity_transition_retention"',
+      'UPDATE "typegraph_base_schema_versions" SET version = 8 WHERE installation = 1',
+    ];
+
+    it("SQLite: a fresh store has neither index", async () => {
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        const present = client
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${kindIndexNames.join("', '")}')`,
+          )
+          .all();
+        expect(present).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("SQLite: a store upgraded from v8 keeps both indexes and works", async () => {
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        client.exec([...v8KindIndexDdl, ...v9RelationDrops].join(";\n"));
+
+        const [, adoption] = await createStoreWithSchema(graph, backend);
+        expect(adoption.status).toBe("unchanged");
+        expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        await expectStoreWorks(backend);
+
+        const present = client
+          .prepare(
+            `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${kindIndexNames.join("', '")}') ORDER BY name`,
+          )
+          .all() as readonly Readonly<{ name: string }>[];
+        expect(present.map((row) => row.name)).toEqual([...kindIndexNames]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    async function presentKindIndexes(
+      client: PGlite,
+    ): Promise<readonly string[]> {
+      const rows = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN ('${kindIndexNames.join("', '")}') ORDER BY indexname`,
+      );
+      return rows.rows.map((row) => row.indexname);
+    }
+
+    it("PGlite: a fresh store has neither index", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(await presentKindIndexes(client)).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("PGlite: a store upgraded from v8 keeps both indexes and works", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        await client.exec([...v8KindIndexDdl, ...v9RelationDrops].join(";\n"));
+
+        const [, adoption] = await createStoreWithSchema(graph, backend);
+        expect(adoption.status).toBe("unchanged");
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        await expectStoreWorks(backend);
+
+        expect(await presentKindIndexes(client)).toEqual([...kindIndexNames]);
+      } finally {
+        await backend.close();
+      }
+    });
   });
 
   describe("version 5: byte-ordered graph_id indexes", () => {

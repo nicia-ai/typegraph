@@ -149,14 +149,12 @@ describe("system-index identifier bounds", () => {
   it("keeps every generated name distinct and within 63 characters for long custom table names", () => {
     // A valid 58-char custom table name: naive `${table}_${suffix}` names
     // would exceed PostgreSQL's 63-byte identifier bound, get silently
-    // truncated by the engine, and collide (kind_idx vs kind_created_idx
-    // share their first 63 chars).
+    // truncated by the engine, and collide whenever two suffixes share
+    // their first characters.
     const longBase = `t${"x".repeat(57)}`;
     // Distinctness matters within one physical table (suffixes repeat
     // across tables by design — their physical names differ in practice).
-    // Edges carries the largest suffix set, including the kind_idx /
-    // kind_created_idx pair whose first 63 chars collide when naively
-    // truncated.
+    // Edges carries the largest suffix set.
     const edgeNames = SYSTEM_INDEX_DECLARATIONS.filter(
       (declaration) => declaration.table === "edges",
     ).map((declaration) => systemIndexName(longBase, declaration.suffix));
@@ -166,8 +164,8 @@ describe("system-index identifier bounds", () => {
     expect(new Set(edgeNames).size).toBe(edgeNames.length);
     // Deterministic: the same inputs must resolve to the same name (the
     // Drizzle builders, runtime DDL, and catalog probes all derive it).
-    expect(systemIndexName(longBase, "kind_idx")).toBe(
-      systemIndexName(longBase, "kind_idx"),
+    expect(systemIndexName(longBase, "kind_created_idx")).toBe(
+      systemIndexName(longBase, "kind_created_idx"),
     );
     // Short names stay exactly as before — no gratuitous hashing.
     expect(systemIndexName("typegraph_nodes", "id_idx")).toBe(
@@ -179,7 +177,7 @@ describe("system-index identifier bounds", () => {
     const longNodes = `n${"x".repeat(57)}`;
     const ddl = generateSqliteDDL(createSqliteTables({ nodes: longNodes }));
     const script = ddl.join("\n");
-    expect(script).toContain(`"${systemIndexName(longNodes, "kind_idx")}"`);
+    expect(script).toContain(`"${systemIndexName(longNodes, "id_idx")}"`);
     expect(script).toContain(
       `"${systemIndexName(longNodes, "kind_created_idx")}"`,
     );

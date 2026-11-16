@@ -538,6 +538,36 @@ without `createStoreWithSchema` can run `store.materializeSystemIndexes()` once 
 upgrade; it shares `materializeIndexes()`'s status tracking, drift signatures, and concurrent-build
 claim protocol, and settles with no DDL when everything already exists.
 
+### Redundant kind indexes on upgraded databases
+
+Databases created before this release also carry `typegraph_nodes_kind_idx` and
+`typegraph_edges_kind_idx`, both on `(graph_id, kind)`. Each is a prefix of an index TypeGraph keeps
+(`kind_created_idx`, and on nodes the primary key), so every query they served still has an index.
+New databases no longer create them, and upgrading does not remove them. Keeping them is harmless.
+
+Dropping them is optional. On PostgreSQL it made inserts 7 to 11% cheaper in our measurements (node
+bulk insert −11%, single-row node insert −9%, edge bulk insert −7%). Run the concurrent form outside
+a transaction, so the drop does not take an `ACCESS EXCLUSIVE` lock that queues behind long-running
+reads:
+
+```sql
+-- PostgreSQL: run each statement on its own, not inside BEGIN ... COMMIT
+DROP INDEX CONCURRENTLY IF EXISTS "typegraph_nodes_kind_idx";
+DROP INDEX CONCURRENTLY IF EXISTS "typegraph_edges_kind_idx";
+```
+
+```sql
+-- SQLite
+DROP INDEX IF EXISTS "typegraph_nodes_kind_idx";
+DROP INDEX IF EXISTS "typegraph_edges_kind_idx";
+```
+
+Use your custom table names if you configured them. If you manage the schema with drizzle-kit, the
+next `drizzle-kit generate` produces a migration with two plain `DROP INDEX` statements for these
+indexes. On PostgreSQL those take an `ACCESS EXCLUSIVE` lock inside the migration transaction.
+Either delete the two statements from the generated migration, which is harmless because the
+indexes are redundant, or delete them and run the concurrent form above separately.
+
 ## Next Steps
 
 - [Performance Overview](/performance/overview) — Best practices, N+1 prevention, batch patterns

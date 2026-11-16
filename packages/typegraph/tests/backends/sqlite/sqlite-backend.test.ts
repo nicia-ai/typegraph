@@ -214,8 +214,11 @@ describe("SQLite Backend - Adapter Specific", () => {
       const sql = ddl.join("\n");
 
       expect(sql).toContain("CREATE INDEX IF NOT EXISTS");
-      expect(sql).toContain("typegraph_nodes_kind_idx");
       expect(sql).toContain("typegraph_nodes_kind_created_idx");
+      // `(graph_id, kind)` is a prefix of kind_created_idx and the primary
+      // key, so base schema v9 no longer creates a separate kind_idx.
+      expect(sql).not.toContain('"typegraph_nodes_kind_idx"');
+      expect(sql).not.toContain('"typegraph_edges_kind_idx"');
       // Bare-id node lookup (kind resolved by id) — see typegraph#280.
       expect(sql).toContain('"typegraph_nodes" ("graph_id", "id")');
       expect(sql).toContain('"typegraph_recorded_nodes" ("graph_id", "id")');
