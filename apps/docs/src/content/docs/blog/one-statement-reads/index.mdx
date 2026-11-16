@@ -13,6 +13,7 @@ social:
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+import UpdateNote from "../../../../components/blog/UpdateNote.astro";
 
 Most apps have a page like this one: a workspace lists its published
 documents, and each row shows the title, how many versions the document has,
@@ -325,6 +326,12 @@ doing one thing per row:
   stream, and has no byte cap. Bound your reads with limits and projections.
 - **The counts are SQLite driver counts.** They show the shape of the
   improvement, and your actual latency depends on your network.
+
+<UpdateNote date="2026-11-16" version="0.75">
+
+The first point above no longer holds for subgraph reads. Since 0.75, compatible `subgraph()` reads in a `batchOnce()` compile through one origin-keyed recursive traversal instead of one plan per root. On PostgreSQL a batch is also limited to 25 independent recursive plans in total and throws `ConfigurationError` before running if it exceeds that; the 500-read cap still applies. See [Batch Execution](/queries/execute#batch-execution).
+
+</UpdateNote>
 
 ## Try it
 

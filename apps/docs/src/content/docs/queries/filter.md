@@ -195,7 +195,7 @@ p.age.between(18, 65); // inclusive range
 p.name.contains("ali"); // substring match
 p.name.startsWith("A"); // prefix match
 p.name.endsWith("ice"); // suffix match
-p.email.like("%@example.com"); // SQL LIKE pattern
+p.email.like("%@example.com"); // case-sensitive LIKE pattern
 p.name.ilike("alice"); // case-insensitive LIKE
 ```
 

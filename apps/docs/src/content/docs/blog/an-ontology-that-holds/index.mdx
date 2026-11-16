@@ -144,6 +144,7 @@ computed by the same planner the delete runs:
 
 ```typescript
 const plan = await store.nodes.Runbook.planDelete(failover.id);
+if (plan === undefined) throw new Error("Runbook not found");
 for (const part of plan.cascadedParts) {
   console.log(
     `${part.kind} ${part.id} (part of ${part.whole.id} via ${part.viaEdgeKind})`,

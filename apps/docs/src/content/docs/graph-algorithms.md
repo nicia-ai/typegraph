@@ -87,6 +87,14 @@ Every traversal algorithm takes the same base options:
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `workingMemory` | `string` | *(inherits server `work_mem`)* | Opt-in, transaction-scoped `work_mem` override for iterative rounds on PostgreSQL (`SET LOCAL` semantics); validated as `<digits>kB\|MB\|GB` within 64kB–2147483647kB, ignored by SQLite |
 
+Every algorithm rejects with `KindNotFoundError` when `edges`, or the
+`nodeKinds` scope of `labelPropagation`, `weaklyConnectedComponents` and
+`pageRank`, names a kind the graph does not register, rather than answering
+with an empty result. A view returned by `store.asOf(...)` or `store.view(...)`
+exposes the same algorithms with its temporal coordinate sealed: stating
+`temporalMode` or `asOf` on a view call rejects with `ConfigurationError`
+(`STORE_VIEW_SEALED_COORDINATE`).
+
 `direction: "both"` treats edges as undirected. `cyclePolicy` remains accepted
 for compatibility with recursive query-builder traversals, but it does not
 change these algorithms: their node-set results and shortest paths never need
@@ -159,7 +167,7 @@ Options differ from the unweighted traversals:
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
 | `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight |
-| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e289) |
+| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e288) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
 | `temporalMode` / `asOf` / `workingMemory` | | | Same as the shared options above |
@@ -181,7 +189,7 @@ visible edge of the selected kinds is audited; the call throws a typed
 - **non-numeric** — a JSON string like `"5"` does not count; the property
   must be stored as a JSON number (a JSON `null` counts as missing, not
   non-numeric);
-- **out of range** — a magnitude above ~9.7e289 (bounded so path sums can
+- **out of range** — a magnitude above ~9.7e288 (bounded so path sums can
   never overflow the double range, on either backend) or a nonzero
   magnitude below the smallest IEEE 754 double. One engine caveat:
   SQLite's JSON parser rounds sub-denormal text like `1e-400` to `0`
@@ -523,7 +531,7 @@ const alice = await store.nodes.Person.getById(aliceId);
 // All equivalent
 store.algorithms.canReach(alice, bobId, { edges: ["knows"] });
 store.algorithms.canReach(alice.id, bobId, { edges: ["knows"] });
-store.algorithms.canReach(aliceId, { kind: "Person", id: bobId }, {
+store.algorithms.canReach(aliceId, { id: bobId }, {
   edges: ["knows"],
 });
 ```

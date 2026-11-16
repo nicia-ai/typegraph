@@ -1714,6 +1714,10 @@ const ancestors = await store
   .execute();
 ```
 
+A refused write's `EdgeAcyclicityError` carries one cycle-closing return path
+(at most 64 edges) in `details.witness`; see
+[`EdgeAcyclicityError`](/errors#edgeacyclicityerror).
+
 This is not expressible as an OWL 2 DL axiom — OWL has no acyclicity
 constraint on a property — but it matches SHACL-SPARQL's cycle shape
 (`$this ex:broader+ $this`) exactly, enforced transactionally rather than

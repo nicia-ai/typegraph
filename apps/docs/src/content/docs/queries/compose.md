@@ -138,7 +138,7 @@ const results = await store
 |--------|-------------|
 | `limitFragment(n)` | Limits results to n rows |
 | `offsetFragment(n)` | Skips the first n rows |
-| `orderByFragment(alias, field, direction)` | Orders by a field |
+| `orderByFragment(alias, field, direction)` | Orders by a field. `field` is typed against every node and edge kind of the graph; the alias is checked when the fragment is applied |
 
 ## Fragments with Traversals
 
@@ -225,8 +225,10 @@ function searchUsers(filters: {
 ### Configurable Pagination
 
 ```typescript
+import type { GraphOrderField } from "@nicia-ai/typegraph/query";
+
 function createPaginationFragment(options: {
-  sortField: string;
+  sortField: GraphOrderField<typeof graph>;
   sortDir: "asc" | "desc";
   page: number;
   pageSize: number;
@@ -240,7 +242,7 @@ function createPaginationFragment(options: {
 
 // Use with any query
 const pagination = createPaginationFragment({
-  sortField: "createdAt",
+  sortField: "meta.createdAt",
   sortDir: "desc",
   page: 2,
   pageSize: 25,

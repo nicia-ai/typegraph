@@ -422,6 +422,7 @@ store
       .and(d.tenantId.eq(tenant))
   )
   .fuseWith({ k: 60, weights: { vector: 1.0, fulltext: 1.5 } })
+  .select((ctx) => ctx.d)
   .limit(10)
   .execute();
 ```

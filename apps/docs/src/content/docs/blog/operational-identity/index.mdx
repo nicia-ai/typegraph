@@ -13,6 +13,7 @@ social:
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+import UpdateNote from "../../../../components/blog/UpdateNote.astro";
 
 Say a bank's KYC onboarding writes a `Person` node for each customer, keyed by
 the bank's customer id, and its fraud pipeline writes a `CaseSubject` for
@@ -27,6 +28,12 @@ related _kinds_ rather than rows, and `differentFrom` never checked anything
 about actual data, which is of no use when a compliance team needs to say that
 this particular customer is that particular case subject. Both factories are
 deprecated now.
+
+<UpdateNote date="2026-11-16" version="0.75">
+
+In 0.75 `sameAs` and `differentFrom` were removed rather than deprecated. Replace `sameAs(A, B)` with `equivalentTo(A, B)` and drop `differentFrom` calls; for identity between individual nodes, use `store.identity` as described below. See [Migrating from type-level factories](/identity#migrating-from-type-level-factories).
+
+</UpdateNote>
 
 Their replacement, `store.identity`, is one of my favorite things in the
 library. It's a ledger of claims about individual nodes, either that two of

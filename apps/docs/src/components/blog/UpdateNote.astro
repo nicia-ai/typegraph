@@ -1,0 +1,82 @@
+---
+// A dated correction beneath the statement it corrects, in a post that stays
+// otherwise as published. See blog/_template/_index.mdx for when to use it.
+interface Props {
+  /** ISO calendar date of the update, e.g. "2026-11-16". */
+  date: string;
+  /** Library version the note refers to, e.g. "0.75". */
+  version?: string;
+}
+
+const { date, version } = Astro.props;
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+if (!ISO_DATE_PATTERN.test(date)) {
+  throw new Error(
+    `UpdateNote: date must be an ISO date (YYYY-MM-DD), got "${date}"`,
+  );
+}
+
+// Midnight UTC, formatted in UTC, so the printed day never shifts with the
+// build machine's time zone.
+const formattedDate = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "long",
+  timeZone: "UTC",
+}).format(new Date(`${date}T00:00:00Z`));
+---
+
+<aside class="update-note" aria-label={`Update, ${formattedDate}`}>
+  <p class="update-note-label">
+    <span class="update-note-kind">Update</span>
+    <span aria-hidden="true">&middot;</span>
+    <time datetime={date}>{formattedDate}</time>
+    {version !== undefined && (
+      <>
+        <span aria-hidden="true">&middot;</span>
+        <span>as of {version}</span>
+      </>
+    )}
+  </p>
+  <div class="update-note-body">
+    <slot />
+  </div>
+</aside>
+
+<style>
+  .update-note {
+    margin-block: 1.25rem;
+    padding: 0.625rem 0.875rem;
+    border-inline-start: 2px solid var(--sl-color-gray-4);
+    background-color: var(--sl-color-gray-6);
+    border-radius: 0 0.25rem 0.25rem 0;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+
+  .update-note-label {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.5rem;
+    font-size: var(--sl-text-xs);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+
+  .update-note-kind {
+    font-weight: 600;
+  }
+
+  .update-note-body > :global(:first-child) {
+    margin-top: 0.375rem;
+  }
+
+  .update-note-body > :global(:last-child) {
+    margin-bottom: 0;
+  }
+
+  .update-note-body :global(p) {
+    margin-block: 0.5rem;
+  }
+</style>

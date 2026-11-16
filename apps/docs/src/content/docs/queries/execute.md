@@ -814,7 +814,10 @@ function useInfiniteUsers() {
       .from("User", "u")
       .select((ctx) => ctx.u)
       .orderBy("u", "name", "asc")
-      .paginate({ first: 20, after: cursor });
+      .paginate({
+        first: 20,
+        ...(cursor === undefined ? {} : { after: cursor }),
+      });
 
     setUsers((prev) => [...prev, ...result.data]);
     setCursor(result.nextCursor);

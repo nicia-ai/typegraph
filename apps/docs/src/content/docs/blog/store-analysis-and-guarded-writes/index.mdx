@@ -13,6 +13,7 @@ social:
 ---
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+import UpdateNote from "../../../../components/blog/UpdateNote.astro";
 
 Suppose you tighten the schema on an account directory so that `email` has to
 be a real address, `plan` has to be one of three values, and `seats` has to be
@@ -177,7 +178,7 @@ unowned account:
 
 ```typescript
 const claim = (ownerId: string) =>
-  store.nodes.Account.compareAndSet("acct_1", {
+  store.nodes.Account.compareAndSet(asNodeId("acct_1"), {
     expected: { ownerId: compareAndSetAbsent },
     patch: { ownerId },
   });
@@ -188,6 +189,12 @@ console.log(await claim("rep-9"), await claim("rep-4"));
 ```text
 true false
 ```
+
+<UpdateNote date="2026-11-16" version="0.75">
+
+Since 0.75, `compareAndSetAbsent` is no longer exported from the package root. Import it from `@nicia-ai/typegraph/store`. See [`compareAndSet(id, params)`](/schemas-stores#compareandsetid-params).
+
+</UpdateNote>
 
 The first agent gets the account and the second finds out immediately,
 without a lock or a retry loop.

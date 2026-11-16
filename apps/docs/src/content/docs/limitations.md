@@ -521,24 +521,25 @@ open. Close that driver or pool through its own API.
 
 ## Predicate Serialization
 
-Where predicates in unique constraints cannot be serialized. If you use schema
-serialization for versioning or migration, predicates are stored as
-`"[predicate]"` and cannot be reconstructed.
+A unique constraint's `where` clause is limited to a null check on a declared
+field (`isNull()` or `isNotNull()`). Schema serialization stores it as that
+field and operator, and `deserializeWherePredicate` reconstructs it. A callback
+that does not return such a predicate throws a `ConfigurationError` when the
+schema is serialized.
 
 ```typescript
-// This predicate works at runtime...
 unique({
   name: "email_unique_when_active",
   fields: ["email"],
   where: (props) => props.status.isNotNull(),
 });
 
-// ...but serializes as:
-// { "where": "[predicate]" }
+// serializes as:
+// { "where": "{\"field\":\"status\",\"op\":\"isNotNull\"}" }
 ```
 
-**Workaround:** For full schema serialization support, avoid predicates in unique constraints.
-Use application-level validation instead.
+Conditions that are not a single null check on a field cannot be expressed in
+a unique constraint. Enforce them with application-level validation.
 
 ## Vector Search Backend Requirements
 

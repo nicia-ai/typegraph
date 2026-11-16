@@ -79,7 +79,7 @@ semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
 and `@nicia-ai/typegraph/postgres/pglite` load it only when their factory is
 called and refuse with a typed `ConfigurationError`
 (`MISSING_PEER_DEPENDENCY`) naming the package and the install command
-(`npm install drizzle-orm`) when it is absent. The six explicit
+(`npm install drizzle-orm`) when it is absent. The explicit
 `/adapters/drizzle/...` entrypoints expose Drizzle-native backends, connections,
 or schema builders and load `drizzle-orm` when the module is evaluated. Importing
 one without the peer installed therefore surfaces the raw module-resolution

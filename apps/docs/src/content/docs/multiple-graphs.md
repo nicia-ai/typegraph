@@ -167,7 +167,9 @@ async function searchDocuments(query: string, embedding: number[]) {
 }
 
 // Business queries in organization
-async function getActiveSuppliers(category: string) {
+async function getActiveSuppliers(
+  category: "materials" | "services" | "logistics",
+) {
   return organizationStore
     .query()
     .from("Supplier", "s")
@@ -234,6 +236,8 @@ async function getSupplierDocuments(supplierId: string) {
 Combine results from multiple graphs in your application:
 
 ```typescript
+import { asNodeId } from "@nicia-ai/typegraph";
+
 interface SupplierWithDocuments {
   supplier: { name: string; category: string };
   documents: Array<{ title: string }>;
@@ -244,9 +248,12 @@ async function getSupplierOverview(
 ): Promise<SupplierWithDocuments> {
   // Parallel queries to both graphs
   const [supplier, documents] = await Promise.all([
-    organizationStore.nodes.Supplier.getById(supplierId),
+    organizationStore.nodes.Supplier.getById(asNodeId(supplierId)),
     getSupplierDocuments(supplierId),
   ]);
+  if (supplier === undefined) {
+    throw new Error(`Supplier ${supplierId} not found`);
+  }
 
   return {
     supplier: {
@@ -490,6 +497,7 @@ import {
   defineGraph,
   type Node,
 } from "@nicia-ai/typegraph";
+import { z } from "zod";
 import type { StoreProjection } from "@nicia-ai/typegraph/store";
 
 const Document = defineNode("Document", {
@@ -506,6 +514,16 @@ const Comment = defineNode("Comment", {
 
 const hasChunk = defineEdge("hasChunk", { from: [Document], to: [Chunk] });
 const aboutChunk = defineEdge("aboutChunk", { from: [Comment], to: [Chunk] });
+
+// Types that only one graph uses
+const Label = defineNode("Label", {
+  schema: z.object({ name: z.string() }),
+});
+const Category = defineNode("Category", {
+  schema: z.object({ name: z.string() }),
+});
+const hasLabel = defineEdge("hasLabel", { from: [Document], to: [Label] });
+const inCategory = defineEdge("inCategory", { from: [Document], to: [Category] });
 
 const reviewGraph = defineGraph({
   id: "review",

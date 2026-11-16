@@ -171,11 +171,13 @@ extension to load. It uses libSQL's built-in engine (`F32_BLOB(N)` storage, `vec
 `vector_distance_l2`, and DiskANN approximate nearest neighbor via `libsql_vector_idx` + `vector_top_k`) and
 supports the `cosine` and `l2` metrics. See [Semantic Search](/semantic-search) for query examples.
 
-:::caution[In-memory databases and transactions]
-libsql's `file::memory:` creates a separate database per connection. Since transactions
-open a new connection, the original database is destroyed after a transaction completes
-([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)).
-Use a file-based database (`file:path.db`) or remote URL when transactions are needed.
+:::note[In-memory databases and transactions]
+`file::memory:` databases work for all operations, including transactions. On
+a local client whose `client.transaction()` would hand the client's connection to the
+transaction and lazily open a fresh, empty in-memory database afterwards
+([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)),
+`createLibsqlBackend` frames transactions with raw `BEGIN`/`COMMIT` on the single stable
+connection instead. See [libsql Single-Connection Transactions](/limitations#libsql-single-connection-transactions).
 :::
 
 ### API Reference
@@ -558,10 +560,12 @@ See [Semantic Search](/semantic-search) for query examples.
 
 `importGraph()` refreshes planner statistics automatically after an import
 that created or updated rows, and `store.materializeIndexes()` does the
-same on SQLite after creating indexes (pass `refreshStatistics: false` to
-opt out). On PostgreSQL, `materializeIndexes()` builds with
-`CREATE INDEX CONCURRENTLY` and skips the automatic refresh — call
-`store.refreshStatistics()` after materializing.
+same after creating indexes on both bundled backends (pass
+`refreshStatistics: false` to opt out). PostgreSQL builds with
+`CREATE INDEX CONCURRENTLY`; a custom concurrent backend that does not
+implement the index-build claim members (`claimIndexMaterialization` and
+`releaseIndexMaterializationClaim`) skips the automatic refresh, so call
+`store.refreshStatistics()` after materializing there.
 
 `bulkCreate` and `bulkInsert` on nodes and edges also refresh
 automatically when a single autocommit call writes 1,000 rows or more. Tune or disable this
@@ -647,7 +651,10 @@ Interactive PostgreSQL adapters validate the active session, retain the existing
 schema advisory lock → schema row → recorded-write lock order, and use
 transaction-scoped advisory locks. This lock lifetime is suitable for transaction
 poolers such as Hyperdrive. The adapter restores temporary timeout settings before
-the callback. Noninteractive HTTP drivers cannot adopt schema transactions.
+the callback. A PostgreSQL schema write needs a `READ COMMITTED` session: the caller's
+transaction is refused with `SCHEMA_WRITE_REQUIRES_READ_COMMITTED` when it runs at
+`REPEATABLE READ` or `SERIALIZABLE`, before the adapter acquires anything.
+Noninteractive HTTP drivers cannot adopt schema transactions.
 
 SQLite schema adoption requires an active transaction on the backend's exact
 native connection with an observable `inTransaction` state, as provided by
@@ -720,7 +727,7 @@ For a custom backend, the migration shape is:
 ```typescript
 const commands: GraphCommandPort = {
   session: "transaction", // use "root" for a single-statement backend
-  execute(command, context) {
+  async execute(command, context) {
     // Apply every requested dimension, or explicitly refuse the command.
     switch (command.kind) {
       case "node.create": {
@@ -751,7 +758,7 @@ of `lockSchemaVersionAndGraphWrite` must advance the graph's fence row exactly
 when `params.fenceRow` is `"advance"`, and return the
 `GraphWriteFenceAcquisition` its combined statement observed and did: the
 normalized isolation, and `fenceRow: "advanced"` only if it wrote the row. When
-decorating a first-party backend with `deriveBackend`, a same-session
+decorating a first-party backend with `decorateBackend`, a same-session
 `commands` override retains the session identity. A wrapper that changes
 session or forwards to a different connection is a new command boundary and
 cannot reuse a token from the original port.
@@ -1804,6 +1811,11 @@ fields within each record, and returns `[]` for empty input. The same `orderedAg
 governs scalar and record collections; a custom adapter must supply both SQL emitters before
 declaring that capability.
 
+The dialect adapter contract also requires `like(column, pattern)`, the case-sensitive
+counterpart of `ilike`, with backslash as the escape character. A custom adapter must
+implement it when upgrading; the bundled SQLite adapter emits `GLOB` because SQLite's own
+`LIKE` ignores ASCII case.
+
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
 including for JavaScript and already-compiled callers, because transaction
@@ -2194,7 +2206,7 @@ promise `caller-serialized` makes. Open the transaction through this backend's o
 `transactionWithNative()` instead, or do not declare `caller-serialized` on a backend that needs
 cross-store adoption.
 
-`createPostgresBackend` accepts `writeFence: { mechanism: "caller-serialized" }` — a claim about the
+`createPostgresBackend` accepts `capabilities: { writeFence: { mechanism: "caller-serialized" } }` — a claim about the
 deployment — while still refusing `mechanism: "engine-serialized"` outright, because that value is
 a claim about the *engine*, which this factory's own engine does not back.
 
@@ -2630,17 +2642,18 @@ for (const violation of await store.verifyConstraintFences()) {
 ```
 
 `target` exists only on the families that are a contended claim row. Narrow on
-`violation.family` before reading it: four of the eight members carry none.
+`violation.family` before reading it: five of the nine members carry none.
 The audit reports these families:
 
 | `family` | Reports | Carries |
 | --- | --- | --- |
-| `nodeUniqueness` | a uniqueness axis held by more than one live node | `target`, `owners` (each a `concrete_kind` / `node_id` pair, because ids are unique only per kind) |
+| `nodeUniqueness` | a uniqueness axis held by more than one live node | `target`, `owners` (each a `concreteKind` / `nodeId` pair, because ids are unique only per kind) |
 | `nodeDisjointness` | a `disjointWith` axis held by more than one live node | `target`, `owners` |
 | `edgeCardinality` | a source- or target-side cardinality axis held by more than one live edge | `target`, `edgeIds` |
 | `composition` | a part holding more than one live whole across every declared composition relation | `target`, `edgeIds` |
 | `compositionExistence` | live nodes of an `existence: "required"` part kind with no live whole | `partKind`, `parts` (no `target`) |
 | `compositionFutureWindow` | non-deleted rows of a composition realizing edge kind whose `validFrom` or `validTo` is later than now | `edgeKind`, `edgeIds` (no `target`) |
+| `compositionWindowOverlap` | a part whose composition edges' valid-time windows overlap | `partKind`, `partId`, `edgeIds` (no `target`) |
 | `edgeEndpointAssignability` | edge kinds whose live rows sit outside every endpoint pair the current ontology admits | `edgeKind`, `allowedPairs`, `edges` (no `target`) |
 | `edgeAcyclicity` | live edges of an `acyclic: true` relation whose `to` reaches their `from` | `relation`, `edgeIds` (no `target`) |
 
@@ -3097,7 +3110,8 @@ least-privilege, DML-only database role.
   when the schema is current but runtime-contribution markers are
   missing. The runtime-side counterpart of `createStoreWithSchema` for
   least-privilege deployments. If you only need the gate without
-  building a Store (e.g. a readiness probe), call `assertSchemaCurrent`.
+  building a Store (e.g. a readiness probe), call `assertSchemaCurrent`. Both
+  are exported from `@nicia-ai/typegraph/schema`.
   Its managed writes require a transactional backend with the schema-write
   fence; non-transactional and unsupported custom backends can attach for
   reads but fail closed on the first write.
@@ -3244,6 +3258,8 @@ const [/* store */] = await createStoreWithSchema(graph, adminBackend);
 ```typescript
 // 2. Runtime — least-privilege, DML-only role. Zero DDL.
 // createVerifiedStore fails fast if the privileged migrator is behind.
+import { createVerifiedStore } from "@nicia-ai/typegraph/schema";
+
 const runtimePool = new Pool({ connectionString: process.env.APP_DATABASE_URL });
 const backend = createPostgresBackend(drizzle(runtimePool));
 const [store] = await createVerifiedStore(graph, backend);

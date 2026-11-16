@@ -81,7 +81,7 @@ cases—knowledge bases, organizational structures, content relationships—the 
 not a standalone system.
 
 **Tradeoff**: You don't get Neo4j's broad graph-data-science suite (community
-detection, betweenness centrality, and similar specialized analytics), but you
+detection such as Leiden or Louvain, betweenness centrality, and similar specialized analytics), but you
 avoid:
 
 - Additional deployment complexity
@@ -247,12 +247,12 @@ import { getActiveSchema, getSchemaChanges } from "@nicia-ai/typegraph/schema";
 
 // Query the active schema at runtime
 const schema = await getActiveSchema(backend, "my_graph");
-console.log("Node types:", Object.keys(schema.nodes));
-console.log("Edge types:", Object.keys(schema.edges));
+console.log("Node types:", Object.keys(schema?.nodes ?? {}));
+console.log("Edge types:", Object.keys(schema?.edges ?? {}));
 
 // Detect pending changes before deployment
 const diff = await getSchemaChanges(backend, graph);
-if (!diff.isBackwardsCompatible) {
+if (diff && !diff.isBackwardsCompatible) {
   console.error("Breaking changes require migration");
 }
 ```
@@ -264,7 +264,9 @@ benefit is a database that explains itself.
 
 ### Storage Schema
 
-TypeGraph uses two core tables:
+TypeGraph keeps graph data in two core tables. Bookkeeping tables (schema
+versions, uniqueness and edge claims, write fences, recorded history, and
+others) sit beside them.
 
 ```sql
 -- Nodes table
@@ -272,21 +274,21 @@ CREATE TABLE typegraph_nodes (
   graph_id    TEXT NOT NULL,
   kind        TEXT NOT NULL,
   id          TEXT NOT NULL,
-  props       JSON NOT NULL,      -- Properties as JSON
+  props       JSON NOT NULL,      -- Properties as JSON (TEXT on SQLite, JSONB on PostgreSQL)
   version     INTEGER NOT NULL,   -- Optimistic concurrency
-  valid_from  TEXT NOT NULL,      -- Temporal validity
+  valid_from  TEXT,               -- Temporal validity
   valid_to    TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
   deleted_at  TEXT,               -- Soft delete
-  PRIMARY KEY (graph_id, kind, id, valid_from)
+  PRIMARY KEY (graph_id, kind, id)
 );
 
 -- Edges table
 CREATE TABLE typegraph_edges (
   graph_id    TEXT NOT NULL,
-  kind        TEXT NOT NULL,
   id          TEXT NOT NULL,
+  kind        TEXT NOT NULL,
   from_kind   TEXT NOT NULL,
   from_id     TEXT NOT NULL,
   to_kind     TEXT NOT NULL,
@@ -294,8 +296,7 @@ CREATE TABLE typegraph_edges (
   props       JSON NOT NULL,
   match_identity_name TEXT,
   match_identity_key  TEXT,
-  version     INTEGER NOT NULL,
-  valid_from  TEXT NOT NULL,
+  valid_from  TEXT,
   valid_to    TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
@@ -303,9 +304,11 @@ CREATE TABLE typegraph_edges (
   CHECK (
     (match_identity_name IS NULL) = (match_identity_key IS NULL)
   ),
-  UNIQUE (graph_id, kind, match_identity_name, match_identity_key),
-  PRIMARY KEY (graph_id, kind, id, valid_from)
+  PRIMARY KEY (graph_id, id)
 );
+
+CREATE UNIQUE INDEX typegraph_edges_match_identity_uq
+  ON typegraph_edges (graph_id, kind, match_identity_name, match_identity_key);
 ```
 
 ### Why JSON for Properties?
@@ -381,30 +384,32 @@ history, and operation hooks aligned.
 
 ### Temporal Model
 
-Every node and edge tracks temporal validity:
+Every node and edge row carries a validity window, `valid_from` to `valid_to`:
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ Node: Article#123                                            │
 ├──────────────────────────────────────────────────────────────┤
-│ Version 1: "Draft"      │ valid_from: 2024-01-01            │
-│                         │ valid_to:   2024-01-15            │
-├─────────────────────────┼────────────────────────────────────┤
-│ Version 2: "Published"  │ valid_from: 2024-01-15            │
-│                         │ valid_to:   NULL (current)        │
-└─────────────────────────┴────────────────────────────────────┘
+│ props:      { "title": "Published" }                         │
+│ version:    2                                                │
+│ valid_from: 2024-01-01                                       │
+│ valid_to:   NULL (open-ended)                                │
+│ deleted_at: NULL                                             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-When you update a node:
-
-1. The current row's `valid_to` is set to now
-2. A new row is inserted with `valid_from = now`, `valid_to = NULL`
+When you update a node, TypeGraph rewrites its one row in place: the props
+change, `version` increments, and `updated_at` advances. The validity window
+moves only when you state `validFrom`, `validTo` or `clearValidTo` on the
+write. Past states of a row are not kept by default. With `history: true` the
+store captures every committed write into recorded-time relations that
+`store.asOfRecorded(T)` reads (see [Temporal](/queries/temporal#recorded-time-bitemporal)).
 
 This enables:
 
-- **Point-in-time queries**: "What did the graph look like on January 10th?"
-- **Audit trails**: "What were all the versions of this article?"
-- **Soft deletes**: `deleted_at` marks deletion without losing history
+- **Point-in-time queries**: "Which facts were valid on January 10th?"
+- **Ended facts**: a `valid_to` in the past ends a fact without deleting it
+- **Soft deletes**: `deleted_at` marks deletion without removing the row
 
 ## Query Compilation
 
@@ -513,8 +518,11 @@ Each backend wires a strategy that knows how to store embeddings and compile sim
 | libSQL / Turso | `libsqlVectorStrategy` (wired automatically)              | `F32_BLOB(N)`, DiskANN ANN via `libsql_vector_idx` + `vector_top_k` | cosine, l2                |
 
 `createSqliteBackend` and `createPostgresBackend` accept a `vector?: VectorStrategy` option to override the
-default. The strategies, `buildVectorCapabilities`, and the complete `VectorStrategy` / `VectorSlot` authoring
-vocabulary are exported from `@nicia-ai/typegraph/backend`.
+default (the PostgreSQL option also accepts `false`). Each strategy is exported from its adapter entrypoint
+(`pgvectorStrategy` from `@nicia-ai/typegraph/adapters/drizzle/postgres`, `sqliteVecStrategy` from
+`.../adapters/drizzle/sqlite`, `libsqlVectorStrategy` from `.../adapters/drizzle/sqlite/libsql`). The
+`VectorStrategy` / `VectorSlot` authoring vocabulary and `buildVectorCapabilities` are exported from
+`@nicia-ai/typegraph/backend`.
 
 A backend advertises its vector support as data on `backend.capabilities.vector`:
 
@@ -527,7 +535,9 @@ backend.capabilities.vector; // { supported, metrics, indexTypes, maxDimensions,
 Embeddings are stored in **per-field typed tables**, one per `(graphId, nodeKind, fieldPath)`, each carrying
 that field's fixed dimension. Tables are provisioned by the privileged migrator (`createStoreWithSchema`, and
 `evolve()` for runtime-added fields), with a durable contribution marker; the runtime hot path asserts the
-marker and never issues DDL. They are named `tg_vec_<graphId>_<kind>_<field>`. Graph-scoping the table name lets
+marker and never issues DDL. They are named `tg_vec_<graphId>_<kind>_<field>_<hash>`
+(lowercased and sanitized, with a hash of the exact
+`(graphId, kind, field)` tuple; the SQL below omits the hash). Graph-scoping the table name lets
 multiple graphs in one database declare the same kind+field at different dimensions without collision.
 
 ```sql

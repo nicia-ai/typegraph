@@ -29,7 +29,15 @@ This example extends the built-in capabilities with:
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, searchable } from "@nicia-ai/typegraph";
+import {
+  type Node,
+  type NodeId,
+  type TransactionContext,
+  defineNode,
+  defineEdge,
+  defineGraph,
+  searchable,
+} from "@nicia-ai/typegraph";
 
 // Audited entity (example: Settings)
 const Setting = defineNode("Setting", {
@@ -129,8 +137,8 @@ Create a context object to track the current user and session:
 
 ```typescript
 interface AuditContext {
-  userId: string;
-  sessionId?: string;
+  userId: NodeId<typeof User>;
+  sessionId?: NodeId<typeof Session>;
   ipAddress?: string;
   userAgent?: string;
   reason?: string;
@@ -192,7 +200,7 @@ async function createSetting(
 
 ```typescript
 async function updateSetting(
-  id: string,
+  id: NodeId<typeof Setting>,
   updates: Partial<{ value: string; description: string }>
 ): Promise<Node<typeof Setting>> {
   const ctx = getAuditContext();
@@ -236,7 +244,7 @@ async function updateSetting(
 ### Delete with Audit
 
 ```typescript
-async function deleteSetting(id: string): Promise<void> {
+async function deleteSetting(id: NodeId<typeof Setting>): Promise<void> {
   const ctx = getAuditContext();
   if (!ctx) throw new Error("Audit context required");
 
@@ -274,7 +282,7 @@ interface AuditEntryInput {
 }
 
 async function createAuditEntry(
-  tx: Transaction,
+  tx: TransactionContext<typeof graph>,
   input: AuditEntryInput
 ): Promise<Node<typeof AuditEntry>> {
   const ctx = getAuditContext()!;
@@ -323,7 +331,7 @@ interface HistoryEntry {
 async function getEntityHistory(
   entityType: string,
   entityId: string
-): Promise<HistoryEntry[]> {
+): Promise<readonly HistoryEntry[]> {
   return store
     .query()
     .from("AuditEntry", "a")
@@ -361,7 +369,7 @@ interface UserActivity {
 async function getUserActivity(
   userId: string,
   options: { since?: Date; limit?: number } = {}
-): Promise<UserActivity[]> {
+): Promise<readonly UserActivity[]> {
   const { since, limit = 100 } = options;
 
   let query = store
@@ -402,7 +410,7 @@ interface ChangeReport {
 async function getChangesInRange(
   startDate: Date,
   endDate: Date
-): Promise<ChangeReport[]> {
+): Promise<readonly ChangeReport[]> {
   const entries = await store
     .query()
     .from("AuditEntry", "a")
@@ -456,8 +464,10 @@ async function getChangesInRange(
 ### View Entity at Point in Time
 
 ```typescript
+type SettingProps = Node<typeof Setting>;
+
 async function getSettingAsOf(
-  id: string,
+  id: NodeId<typeof Setting>,
   timestamp: Date
 ): Promise<SettingProps | undefined> {
   return store
@@ -475,12 +485,12 @@ async function getSettingAsOf(
 ```typescript
 interface SettingVersion {
   props: SettingProps;
-  validFrom: string;
+  validFrom: string | undefined;
   validTo: string | undefined;
   version: number;
 }
 
-async function getSettingVersions(id: string): Promise<SettingVersion[]> {
+async function getSettingVersions(id: NodeId<typeof Setting>): Promise<readonly SettingVersion[]> {
   return store
     .query()
     .from("Setting", "s")
@@ -507,18 +517,22 @@ interface VersionDiff {
 }
 
 async function compareVersions(
-  id: string,
+  id: NodeId<typeof Setting>,
   version1: number,
   version2: number
-): Promise<VersionDiff[]> {
-  const versions = await store
+): Promise<readonly VersionDiff[]> {
+  const history = await store
     .query()
     .from("Setting", "s")
     .temporal("includeEnded")
-    .whereNode("s", (s) => s.id.eq(id).and(s.version.in([version1, version2])))
+    .whereNode("s", (s) => s.id.eq(id))
     .orderBy("s", "meta.version", "asc")
-    .select((ctx) => ctx.s)
+    .select((ctx) => ({ props: ctx.s, version: ctx.s.meta.version }))
     .execute();
+
+  const versions = history
+    .filter((row) => row.version === version1 || row.version === version2)
+    .map((row) => row.props);
 
   if (versions.length !== 2) {
     throw new Error("Versions not found");
@@ -548,7 +562,7 @@ async function compareVersions(
 
 ```typescript
 async function startSession(
-  userId: string,
+  userId: NodeId<typeof User>,
   metadata: { ipAddress?: string; userAgent?: string }
 ): Promise<Node<typeof Session>> {
   return store.transaction(async (tx) => {
@@ -570,7 +584,7 @@ async function startSession(
 ### End Session
 
 ```typescript
-async function endSession(sessionId: string): Promise<void> {
+async function endSession(sessionId: NodeId<typeof Session>): Promise<void> {
   await store.nodes.Session.update(sessionId, {
     endedAt: new Date().toISOString(),
   });
@@ -582,7 +596,7 @@ async function endSession(sessionId: string): Promise<void> {
 ```typescript
 async function getSessionActivity(
   sessionId: string
-): Promise<Array<{ timestamp: string; action: string; entityType: string }>> {
+): Promise<ReadonlyArray<{ timestamp: string; action: string; entityType: string }>> {
   return store
     .query()
     .from("Session", "s")
@@ -739,6 +753,8 @@ async function searchAuditInRange(
 ### Stream to External System
 
 ```typescript
+type AuditEntryProps = Node<typeof AuditEntry>;
+
 async function* exportAuditLogs(
   since: Date,
   batchSize = 1000

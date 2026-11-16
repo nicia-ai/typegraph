@@ -422,8 +422,7 @@ if (schema) {
 }
 ```
 
-These are exported from both the package root and the
-`@nicia-ai/typegraph/schema` subpath. Reach for `getCommittedSchemaVersion`
+These are exported from `@nicia-ai/typegraph/schema`. Reach for `getCommittedSchemaVersion`
 instead when you only need the version number — for example, to invalidate a
 cached schema across isolates.
 
@@ -698,7 +697,7 @@ import { serializeSchema, computeSchemaHash } from "@nicia-ai/typegraph/schema";
 const serialized = serializeSchema(graph, 1);
 
 // Compute hash for comparison
-const hash = computeSchemaHash(serialized);
+const hash = await computeSchemaHash(serialized);
 ```
 
 The serialized schema includes:

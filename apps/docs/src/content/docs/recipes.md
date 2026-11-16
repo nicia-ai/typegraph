@@ -167,17 +167,19 @@ const recommendations = await store
 
 ## Content Versioning with History
 
-TypeGraph has built-in support for temporal data. Every node and edge tracks
-`validFrom` and `validTo` timestamps, allowing you to travel through time
-without complex schema changes.
+TypeGraph has built-in support for temporal data. Every node and edge carries a
+valid-time window (`validFrom` and `validTo`) that you can query with `asOf`.
+An `update()` rewrites the row in place and does not keep the previous
+properties; to keep them, enable recorded history (see below).
 For audit cases that need TypeGraph's captured state before a correction, enable
 recorded/system-time capture with `history: true` and use
 [`store.asOfRecorded(T)`](/queries/temporal#recorded-time-bitemporal).
 
-### Enabling Temporal Mode
+### Default Read Mode
 
-Ensure your graph definition allows for history. By default, TypeGraph uses
-`temporalMode: "current"`, which only returns currently valid data.
+By default, TypeGraph uses `temporalMode: "current"`, which only returns
+currently valid, non-deleted data. Set it in the graph defaults, or override it
+per query with `.temporal(...)`.
 
 ```typescript
 const cmsGraph = defineGraph({
@@ -189,7 +191,6 @@ const cmsGraph = defineGraph({
     /* ... */
   },
   defaults: {
-    // This allows us to query past states
     temporalMode: "current", // Default, but can be overridden per query
   },
 });
@@ -197,10 +198,9 @@ const cmsGraph = defineGraph({
 
 ### Updating Content
 
-When you update a node, TypeGraph automatically:
-
-1. Marks the old row as valid until `now()`.
-2. Inserts a new row valid from `now()`.
+`update()` modifies the node in place: it replaces the properties, increments
+`meta.version` and sets `meta.updatedAt`. The previous properties are not
+retained unless the store records history.
 
 ```typescript
 // 1. Create initial version
@@ -209,19 +209,21 @@ const article = await store.nodes.Article.create({
   content: "Work in progress...",
 });
 
-// 2. Update it (automatically versions)
+// 2. Update it (in place; meta.version increments)
 await store.nodes.Article.update(article.id, {
   title: "Final Version",
   content: "Ready to publish!",
 });
 ```
 
-### Querying Past States
+### Querying Valid Time
 
-You can query the state of the graph as it existed at any point in time using `asOf`.
+`asOf` selects rows whose validity window (`validFrom` to `validTo`) covers an
+instant. Set the window when you create or update a node to model when a fact
+is true in the domain:
 
 ```typescript
-// Get the current version (Final Version)
+// The current version (rows valid now)
 const current = await store
   .query()
   .from("Article", "a")
@@ -229,9 +231,8 @@ const current = await store
   .select((ctx) => ctx.a)
   .execute();
 
-// Get the version from 5 minutes ago (Draft 1)
+// Rows whose validity window covered this instant
 const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
 const past = await store
   .query()
   .from("Article", "a")
@@ -243,7 +244,7 @@ const past = await store
 
 ### Audit Logs
 
-To see the full history of changes for a specific node, you can use `includeEnded`.
+To include rows whose validity window has already ended, use `includeEnded`.
 
 ```typescript
 const history = await store
@@ -428,14 +429,26 @@ const allChildren = await store
     name: ctx.child.name,
     level: ctx.level,
   }))
-  .orderBy((ctx) => ctx.level, "asc")
   .execute();
+
+// The recursive depth is selectable but not an `orderBy` field: sort in memory
+const byLevel = allChildren.toSorted((a, b) => a.level - b.level);
 ```
 
 ### Build a Tree Structure
 
 ```typescript
-async function buildTree(rootSlug: string): Promise<TreeNode> {
+type TreeNode = { id: string; name: string; children: TreeNode[] };
+
+async function buildTree(rootSlug: string): Promise<TreeNode | undefined> {
+  const root = await store
+    .query()
+    .from("Category", "root")
+    .whereNode("root", (c) => c.slug.eq(rootSlug))
+    .select((ctx) => ({ id: ctx.root.id, name: ctx.root.name }))
+    .first();
+  if (root === undefined) return undefined;
+
   const descendants = await store
     .query()
     .from("Category", "root")
@@ -451,16 +464,16 @@ async function buildTree(rootSlug: string): Promise<TreeNode> {
     .execute();
 
   // Build tree in memory
-  const nodeMap = new Map<string, TreeNode>();
-  for (const d of descendants) {
-    nodeMap.set(d.id, { ...d, children: [] });
+  const nodeMap = new Map<string, TreeNode>([
+    [root.id, { ...root, children: [] }],
+  ]);
+  for (const { id, name } of descendants) {
+    nodeMap.set(id, { id, name, children: [] });
   }
-  for (const d of descendants) {
-    if (d.parentId && nodeMap.has(d.parentId)) {
-      nodeMap.get(d.parentId)!.children.push(nodeMap.get(d.id)!);
-    }
+  for (const { id, parentId } of descendants) {
+    nodeMap.get(parentId)?.children.push(nodeMap.get(id)!);
   }
-  return nodeMap.get(rootSlug)!;
+  return nodeMap.get(root.id);
 }
 ```
 
@@ -504,7 +517,7 @@ const related = await store
     score: ctx.e.score,
     type: ctx.e.type,
   }))
-  .orderBy((ctx) => ctx.score, "desc")
+  .orderBy("e", "score", "desc")
   .execute();
 ```
 
@@ -574,7 +587,9 @@ const deletedDocs = await store
 ### Cascade Delete Pattern
 
 ```typescript
-async function cascadeDelete(documentId: string): Promise<void> {
+import { asEdgeId, type NodeId } from "@nicia-ai/typegraph";
+
+async function cascadeDelete(documentId: NodeId<typeof Document>): Promise<void> {
   await store.transaction(async (tx) => {
     // Find all related edges
     const edges = await tx
@@ -588,7 +603,7 @@ async function cascadeDelete(documentId: string): Promise<void> {
 
     // Delete edges first
     for (const { edgeId } of edges) {
-      await tx.edges.relatedTo.delete(edgeId);
+      await tx.edges.relatedTo.delete(asEdgeId(edgeId));
     }
 
     // Then delete the node
@@ -823,7 +838,7 @@ const graph = defineGraph({
       type: User,
       unique: [
         { name: "user_email", fields: ["email"], scope: "kind", collation: "caseInsensitive" },
-        { name: "user_username", fields: ["username"], scope: "kind", collation: "caseSensitive" },
+        { name: "user_username", fields: ["username"], scope: "kind", collation: "binary" },
       ],
     },
   },
@@ -852,7 +867,12 @@ async function createOrUpdateUserByEmail(
 ### Use `getOrCreateByEndpoints` for Edge Deduplication
 
 ```typescript
-async function followUser(followerId: string, followeeId: string): Promise<void> {
+import { type NodeId } from "@nicia-ai/typegraph";
+
+async function followUser(
+  followerId: NodeId<typeof User>,
+  followeeId: NodeId<typeof User>,
+): Promise<void> {
   const follower = await store.nodes.User.getById(followerId);
   const followee = await store.nodes.User.getById(followeeId);
   if (!follower || !followee) {

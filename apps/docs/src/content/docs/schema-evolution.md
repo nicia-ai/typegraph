@@ -184,7 +184,7 @@ transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
 | `broader`, `narrower`, `relatedTo`            | Safe | Safe |
 | a custom meta-edge (from the removed `metaEdge()`) | Safe | Breaking — see [the upgrade guide](#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis) |
 | an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
-| an edge's admitted endpoint pair              | Safe                                                | Warning — checked against live edges               |
+| an edge's admitted endpoint pair              | Warning — no data check (more pairs are admitted)   | Warning — checked against live edges               |
 
 Where a change is reported follows one rule: `SchemaDiff.ontology` carries
 ontology relations (the meta-edge rows above), and `SchemaDiff.edges` carries
@@ -677,11 +677,11 @@ Safe migration. Then backfill existing data:
 ```typescript
 const [store] = await createStoreWithSchema(graph, backend);
 
-const people = await store.query(Person).execute();
+const people = await store.nodes.Person.find();
 for (const person of people) {
-  if (!person.properties.fullName) {
+  if (!person.fullName) {
     await store.nodes.Person.update(person.id, {
-      fullName: person.properties.name,
+      fullName: person.name,
     });
   }
 }
@@ -749,7 +749,7 @@ themselves:
 
 ```typescript
 // Delete all edges connected to deprecated nodes
-const deprecated = await store.query(OldNode).execute();
+const deprecated = await store.nodes.OldNode.find();
 for (const node of deprecated) {
   await store.nodes.OldNode.delete(node.id);
 }
@@ -781,11 +781,11 @@ const Person = defineNode("Person", {
 #### Deploy 2 — Backfill and switch
 
 ```typescript
-const people = await store.query(Person).execute();
+const people = await store.nodes.Person.find();
 for (const person of people) {
-  if (person.properties.ageNumeric === undefined) {
+  if (person.ageNumeric === undefined) {
     await store.nodes.Person.update(person.id, {
-      ageNumeric: parseInt(person.properties.age, 10),
+      ageNumeric: parseInt(person.age, 10),
     });
   }
 }
@@ -1056,11 +1056,11 @@ const [store, result] = await createStoreWithSchema(graph, backend);
 
 if (result.status === "migrated" && result.toVersion === 3) {
   // Backfill fullName from name for the expand phase
-  const people = await store.query(Person).execute();
+  const people = await store.nodes.Person.find();
   for (const person of people) {
-    if (!person.properties.fullName) {
+    if (!person.fullName) {
       await store.nodes.Person.update(person.id, {
-        fullName: person.properties.name,
+        fullName: person.name,
       });
     }
   }

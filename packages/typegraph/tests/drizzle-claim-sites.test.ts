@@ -42,13 +42,13 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 674,
+    line: 684,
     text:
       "graph DSL and its schema-derived types from the " + CLAIM_WORD + "-free",
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 676,
+    line: 686,
     text:
       "import the full " +
       CLAIM_WORD +
@@ -61,7 +61,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/fulltext-search.md",
-    line: 768,
+    line: 769,
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {

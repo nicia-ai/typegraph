@@ -113,8 +113,11 @@ const everyVersion = await audit.nodes.Document.find();
 A view is **read-only**: writes stay on the live `store`, and a view collection
 rejects `create` / `update` / `delete` with a `ConfigurationError`. `search` is
 refused on a non-`"current"` view (the fulltext / vector index reflects current
-state only). `asOf` must be a canonical UTC ISO-8601 timestamp
-(`YYYY-MM-DDTHH:mm:ss.sssZ`).
+state only). A view's coordinate is sealed: a view read that states its own
+`temporalMode`, `asOf` or `recordedAsOf` (reachable only from untyped code)
+rejects with `ConfigurationError` `STORE_VIEW_SEALED_COORDINATE`. Read at
+another coordinate through the live store or a second `store.view(...)`. `asOf`
+must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
 
 See the [`store.asOf` / `store.view`
 reference](/schemas-stores#temporal-views-storeasof-and-storeview) for the full
@@ -747,23 +750,25 @@ const allIncludingDeleted = await store
 ### Filtering Deleted Records
 
 ```typescript
-// Find only deleted records
-const deletedUsers = await store
+// Find only deleted records. Predicates see declared properties plus `id` and
+// `kind`, not `meta`, so filter on the selected `deletedAt`.
+const allUsers = await store
   .query()
   .from("User", "u")
   .temporal("includeTombstones")
-  .whereNode("u", (u) => u.deletedAt.isNotNull())
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
     deletedAt: ctx.u.meta.deletedAt,
   }))
   .execute();
+const deletedUsers = allUsers.filter((user) => user.deletedAt !== undefined);
 ```
 
 ## Temporal Metadata Fields
 
-When querying with temporal context, these fields are available:
+When querying with temporal context, these fields are available under `meta`
+(`ctx.a.meta.validFrom`):
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -772,7 +777,7 @@ When querying with temporal context, these fields are available:
 | `createdAt` | `string` | When the node was first created |
 | `updatedAt` | `string` | When this version was written |
 | `deletedAt` | `string \| undefined` | Soft-delete timestamp (undefined if not deleted) |
-| `version` | `number` | Optimistic concurrency version number |
+| `version` | `number` | Optimistic concurrency version number (nodes only) |
 
 ### Open-left rows (`validFrom` is `undefined`)
 

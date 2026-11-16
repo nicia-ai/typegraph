@@ -407,9 +407,11 @@ import { defineGraph } from "@nicia-ai/typegraph";
 
 function defineGraph<G extends GraphDef>(config: {
   id: string;
+  annotations?: GraphAnnotations;
   nodes: Record<string, NodeRegistration>;
   edges: Record<string, EdgeRegistration | EdgeType>;
   ontology?: OntologyRelation[];
+  identity?: GraphIdentityConfig;
   indexes?: IndexDeclaration[];
   defaults?: {
     onNodeDelete?: DeleteBehavior;
@@ -423,15 +425,19 @@ function defineGraph<G extends GraphDef>(config: {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | `string` | Unique identifier for this graph |
+| `annotations` | `GraphAnnotations` | Optional consumer-owned JSON metadata; see [`defineGraph(config)` annotations](#definegraphconfig-annotations) |
 | `nodes` | `Record<string, NodeRegistration>` | Node type registrations |
 | `edges` | `Record<string, EdgeRegistration \| EdgeType>` | Edge registrations or edge types directly |
 | `ontology` | `OntologyRelation[]` | Optional semantic relationships |
+| `identity` | `GraphIdentityConfig` | Optional identity profile (`sameIdAcrossKinds`, ...); see [Identity](/identity) |
 | `indexes` | `IndexDeclaration[]` | Optional explicit index declarations from `defineNodeIndex` / `defineEdgeIndex`. Vector indexes are auto-derived from `embedding()` brands; explicit declarations win on `(kind, fieldPath)` collisions. |
 | `defaults` | `{ onNodeDelete?, temporalMode? }` | Optional graph-wide defaults. `onNodeDelete` defaults to `"restrict"`; `temporalMode` defaults to `"current"`. |
 
 Edge entries can be:
 
-- **`EdgeRegistration`** — explicit `{ type, from, to }` with optional `cardinality`
+- **`EdgeRegistration`** — explicit `{ type, from, to }` with optional `cardinality`, `targetCardinality` and
+  `acyclic` (see [Edge Constraints](/core-concepts#edge-constraints)); an unknown value raises `ConfigurationError`
+  with `details.code: "EDGE_INTEGRITY_OPTION_INVALID"`
 - **`EdgeType` with `from`/`to`** — uses built-in constraints
 - **`EdgeType` without `from`/`to`** — unconstrained, connects any node to any node
 
@@ -1008,7 +1014,7 @@ issued concurrently rather than sequentially.
 const [alice, bob, unknown] = await store.nodes.Person.getByIds([
   aliceId,
   bobId,
-  "nonexistent",
+  asNodeId<typeof Person>("nonexistent"),
 ]);
 // alice: Node<Person>
 // bob: Node<Person>
@@ -1055,7 +1061,7 @@ if (!reopened) {
 ```
 
 Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`).
-Use the exported `compareAndSetAbsent` marker to require that an optional
+Use the `compareAndSetAbsent` marker (imported from `@nicia-ai/typegraph/store`) to require that an optional
 property is not stored. `undefined` is refused rather than treated as absence,
 because it can disappear while an object is assembled or serialized; arrays and
 objects are also refused so every backend uses the same exact scalar comparison.
@@ -3252,8 +3258,9 @@ queries for one-off operations.
 #### `store.algorithms`
 
 Lazy-initialized facade exposing the graph algorithms —
-`shortestPath`, `reachable`, `canReach`, `neighbors`, and `degree`.
-See [Graph Algorithms](/graph-algorithms) for the full API; this section
+`shortestPath`, `weightedShortestPath`, `reachable`, `canReach`, `neighbors`,
+`degree`, `labelPropagation`, `weaklyConnectedComponents`, `pageRank`, and
+`personalizedPageRank`. See [Graph Algorithms](/graph-algorithms) for the full API; this section
 is a quick reference.
 
 ```typescript
@@ -3611,7 +3618,7 @@ coordinate:
 | `view.bulkFindEdgesTo(params, options?)` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
 | `view.subgraph(root, options)` | pinned |
-| `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
+| `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree`, and `view.algorithms.*` (all ten reads, adding `weightedShortestPath`, `labelPropagation`, `weaklyConnectedComponents`, `pageRank`, `personalizedPageRank`) | pinned |
 | `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` / `planDelete` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
 | `view.search` reads (`fulltext` / `vector` / `hybrid`) | delegate to the live search on a `"current"` view; reject on any other pin |
 | `view.search.rebuildFulltext()` | rejected on every view (maintenance write) |
@@ -3730,6 +3737,7 @@ Configuration for observability callbacks:
 
 ```typescript
 import type {
+  BulkOperationHookContext,
   CompositionNodeRef,
   HookContext,
   QueryHookContext,
@@ -3743,9 +3751,14 @@ type StoreHooks = Readonly<{
   onQueryStart?: (ctx: QueryHookContext) => void;
   onQueryEnd?: (ctx: QueryHookContext, result: { rowCount: number; durationMs: number }) => void;
   onOperationStart?: (ctx: OperationHookContext) => void;
+  onBulkOperationStart?: (ctx: BulkOperationHookContext) => void;
   onOperationEnd?: (
     ctx: OperationHookContext,
     result: { durationMs: number; outcome: "written" | "unchanged" | "unknown" },
+  ) => void;
+  onBulkOperationEnd?: (
+    ctx: BulkOperationHookContext,
+    result: { affectedCount: number; durationMs: number },
   ) => void;
   onError?: (ctx: HookContext, error: Error) => void;
 }>;
@@ -3762,6 +3775,13 @@ type QueryHookContext = HookContext &
   Readonly<{
     sql: string;
     params: readonly unknown[];
+  }>;
+
+type BulkOperationHookContext = HookContext &
+  Readonly<{
+    operation: "compareAndSet" | "updateWhere";
+    entity: "node";
+    kind: string;
   }>;
 
 type OperationHookContext = HookContext &
@@ -3784,7 +3804,8 @@ type OperationHookContext = HookContext &
 
 > **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkReparent`) skip per-item
 operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not
-stand in for them — those fire only for node `updateWhere`, so a batch method emits no hook events at all, neither
+stand in for them — those fire only for node `updateWhere` and `compareAndSet`, so a batch method emits no hook
+events at all, neither
 per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally.
 
 `onOperationEnd.result.outcome` is `"written"` when durable graph state
@@ -3795,6 +3816,10 @@ successful unchanged completion, never an `onError` event. This is the same
 decision TypeGraph uses to suppress revision/history churn. It is `"unknown"`
 when the backend command does not report an authoritative physical-write
 verdict; TypeGraph never guesses from a successful return alone.
+
+When TypeGraph rolls back a savepoint inside a transaction (for example, a refused in-transaction merge that the
+caller catches), the operations the savepoint covered are reported through `onError` with the rollback cause rather
+than as completed writes.
 
 **Example:**
 
