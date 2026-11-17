@@ -391,6 +391,17 @@ export async function closeRecordedHardDeletedKind(
   );
 }
 
+/**
+ * The ids of the edges a hard delete of the node removes, at either endpoint.
+ *
+ * Spelled like `edgeAtEitherEndpoint` (`backend/drizzle/operations/shared.ts`),
+ * the predicate of the delete this capture mirrors: the graph equality is
+ * repeated inside each arm with no conjunct shared by both, so SQLite without
+ * planner statistics seeks both endpoint indexes instead of walking the
+ * graph's edges. That builder renders Drizzle columns and this one a portable
+ * fragment, so the two spellings stay side by side rather than share code;
+ * `tests/backends/sqlite/edge-endpoint-delete-plan.test.ts` plans both.
+ */
 export async function queryConnectedEdgeIds(
   target: TransactionBackend,
   schema: SqlSchema,
@@ -400,11 +411,8 @@ export async function queryConnectedEdgeIds(
     asCompiledRowsSql(sql`
       SELECT id
       FROM ${schema.edgesTable}
-      WHERE graph_id = ${params.graphId}
-        AND (
-          (from_kind = ${params.kind} AND from_id = ${params.id})
-          OR (to_kind = ${params.kind} AND to_id = ${params.id})
-        )
+      WHERE (graph_id = ${params.graphId} AND from_kind = ${params.kind} AND from_id = ${params.id})
+        OR (graph_id = ${params.graphId} AND to_kind = ${params.kind} AND to_id = ${params.id})
     `),
   );
   return rows.map((row) => row.id);
