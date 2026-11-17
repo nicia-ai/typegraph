@@ -37,6 +37,7 @@ import { type PlainNodeRef } from "../src/identity/sql-target";
 import {
   advanceIdentityTransitionCut,
   diffClosureTransitions,
+  identityTransitionIdSequence,
   type IdentityTransitionRow,
   pruneIdentityTransitions,
   pruneIdentityTransitionsForContext,
@@ -54,6 +55,7 @@ import {
   withRecordedIdentityMutationTarget,
 } from "../src/store/recorded-capture";
 import { storeRuntime } from "../src/store/runtime-port";
+import { compareCodePoints } from "../src/utils/compare";
 import { generateId } from "../src/utils/id";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -115,6 +117,28 @@ function transitionHops(
 }
 
 describe("identity transition log", () => {
+  it("mints ids that sort in recording order within one flush", () => {
+    const transitionIdAt = identityTransitionIdSequence();
+    // Past one base-36 digit and past two, where an unpadded position would
+    // sort "10" before "2".
+    const positions = [0, 1, 2, 9, 10, 35, 36, 37, 1295, 1296, 50_000];
+    const ids = positions.map((position) => transitionIdAt(position));
+
+    expect(new Set(ids).size).toBe(positions.length);
+    expect(
+      ids.toSorted((left, right) => compareCodePoints(left, right)),
+    ).toEqual(ids);
+    expect(new Set(ids.map((id) => id.length)).size).toBe(1);
+    expect(() => transitionIdAt(-1)).toThrow(/outside the range/);
+    expect(() => transitionIdAt(1.5)).toThrow(/outside the range/);
+  });
+
+  it("gives separate flushes separate id prefixes", () => {
+    const first = identityTransitionIdSequence();
+    const second = identityTransitionIdSequence();
+    expect(first(0)).not.toBe(second(0));
+  });
+
   it("notes an assert transition when assertSame fuses two singletons", async () => {
     const [store] = await createAdapterStoreWithSchema(
       graph,

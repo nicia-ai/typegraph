@@ -12,6 +12,7 @@ import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import {
   encodeIdentityTransitionRow,
   IDENTITY_TRANSITION_COLUMNS,
+  identityTransitionIdSequence,
   type IdentityTransitionNote,
   withIdentityTransitionLogRelations,
 } from "../../identity/transition-log";
@@ -20,7 +21,6 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
-import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -293,10 +293,18 @@ export async function flushIdentityTransitions(
 ): Promise<void> {
   if (notes.length === 0) return;
   const chunkSize = recordedIdentityTransitionChunkSize(target);
-  for (const noteChunk of chunk(notes, chunkSize)) {
-    const values = noteChunk.map((note) =>
-      encodeIdentityTransitionRow(note, revision, recordedAt, generateId()),
-    );
+  // Ids that sort in recording order, so the readers' (revision, id) order
+  // lists the transitions of one flush the way they were noted.
+  const transitionIdAt = identityTransitionIdSequence();
+  const rows = notes.map((note, position) =>
+    encodeIdentityTransitionRow(
+      note,
+      revision,
+      recordedAt,
+      transitionIdAt(position),
+    ),
+  );
+  for (const values of chunk(rows, chunkSize)) {
     await withIdentityTransitionLogRelations(
       schema,
       target.dialect,

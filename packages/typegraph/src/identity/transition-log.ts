@@ -41,6 +41,7 @@ import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
+import { generateId } from "../utils/id";
 import { requireDefined } from "../utils/presence";
 import { decodeRevisionColumn } from "../utils/revision-column";
 import { withIdentityTransitionRelationsPrecondition } from "../utils/sql-errors";
@@ -399,6 +400,41 @@ function decodeOptionalRef(
   return { kind, id };
 }
 
+const TRANSITION_ORDINAL_RADIX = 36;
+const TRANSITION_ORDINAL_WIDTH = 7;
+const TRANSITION_ORDINAL_LIMIT =
+  TRANSITION_ORDINAL_RADIX ** TRANSITION_ORDINAL_WIDTH;
+
+/**
+ * Mints the ids of the transitions one capture flush writes, so that they
+ * sort (by code point, the readers' tie-break) in the order the transitions
+ * were recorded: one random prefix for the flush, then the transition's
+ * zero-padded position in it.
+ *
+ * Every transition of a flush shares a recorded revision, and the readers
+ * order by revision and then by id. An independent random id for each row
+ * made that tie-break arbitrary: two stores that recorded the same changes
+ * listed them in different orders. With the position in the id, the listing
+ * order within a revision is the recording order, on every store.
+ */
+export function identityTransitionIdSequence(): (position: number) => string {
+  const flushId = generateId();
+  return (position) => {
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 0 ||
+      position >= TRANSITION_ORDINAL_LIMIT
+    ) {
+      throw new Error(
+        `Identity transition position ${String(position)} is outside the range one flush can order.`,
+      );
+    }
+    return `${flushId}${position
+      .toString(TRANSITION_ORDINAL_RADIX)
+      .padStart(TRANSITION_ORDINAL_WIDTH, "0")}`;
+  };
+}
+
 /**
  * Builds one transition row's INSERT value tuple, in
  * {@link IDENTITY_TRANSITION_COLUMNS} order.
@@ -690,13 +726,12 @@ export type IdentityTransitionReadScope = Readonly<{
  * transition id, so the result is DETERMINISTIC and stable across repeated
  * reads of the same committed rows.
  *
- * NOT insertion order: `transition_id` is a random `nanoid` (`generateId()`,
- * `flush.ts`), so two notes buffered at the SAME recorded revision can sort
- * either way relative to each other here, regardless of which was written
- * first. Nothing depends on their relative order today — every note sharing
- * one boundary shares the same `before`/`after` step in replay — but a
- * future reader that does must not assume this ordering reflects buffering
- * order.
+ * Within one recorded revision the order is the order the transitions were
+ * recorded in: a capture flush mints its ids through
+ * {@link identityTransitionIdSequence}, which sort by position. Rows written
+ * before that (each with an independent random id) and rows an archival
+ * restore brought in keep whatever order their ids give them, which is still
+ * stable across reads.
  *
  * TAKES NO RECORDED-REVISION BOUNDS, on purpose. Its one caller is replay's
  * fixed-point lineage walk, whose seed set has to reach every class name the
