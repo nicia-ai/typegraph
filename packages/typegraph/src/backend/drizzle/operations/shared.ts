@@ -148,6 +148,15 @@ export function expectedValidFromPredicate(
  * the graph inside each arm, every plan SQLite can choose is the two endpoint
  * index seeks. PostgreSQL plans both spellings as the same BitmapOr. An edge
  * that is a self-loop matches both arms and is still one row.
+ *
+ * This holds because each occurrence is its own bound parameter, as every
+ * bundled driver executes it. SQLite lifts a term common to every arm of an OR
+ * out of it, so the same statement with the graph id inlined as a literal
+ * would plan the graph-wide range again.
+ *
+ * History capture's `queryConnectedEdgeIds`
+ * (`store/recorded-capture/flush.ts`) selects the same edges as a portable
+ * fragment and spells the predicate the same way; keep the two in step.
  */
 export function edgeAtEitherEndpoint(
   edges: Tables["edges"],

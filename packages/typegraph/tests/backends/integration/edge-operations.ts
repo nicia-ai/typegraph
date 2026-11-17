@@ -8,6 +8,7 @@ import {
   EndpointNotFoundError,
   RestrictedDeleteError,
 } from "../../../src";
+import { RECORDED_MAX_REVISION } from "../../../src/core/temporal";
 import {
   EDGE_IDENTITY_MISMATCH_CODE,
   ValidationError,
@@ -1083,6 +1084,46 @@ export function registerEdgeOperationIntegrationTests(
       expect(
         await store.nodes.EndpointOther.getById(sameIdOtherKind.id),
       ).toBeDefined();
+    });
+
+    it("hard delete on a history store ends the recorded history of exactly the node's edges, a self-loop once", async () => {
+      const store = await context.createHistoryStore(
+        endpointGraph("endpoint_delete_history", "cascade"),
+      );
+      const target = await store.nodes.EndpointItem.create({ name: "target" });
+      const b = await store.nodes.EndpointItem.create({ name: "b" });
+      const c = await store.nodes.EndpointItem.create({ name: "c" });
+      const outgoing = await store.edges.endpointLink.create(target, b);
+      const incoming = await store.edges.endpointLink.create(c, target);
+      const selfLoop = await store.edges.endpointLink.create(target, target);
+      const unrelated = await store.edges.endpointLink.create(b, c);
+
+      await store.nodes.EndpointItem.hardDelete(target.id);
+
+      const { recordedEdgesTable } = createSqlSchema(store.backend.tableNames);
+      const rows = await store.backend.execute<
+        Readonly<{ id: string; rows: number | string; open: number | string }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT id, COUNT(*) AS rows,
+                 SUM(CASE WHEN recorded_to = ${RECORDED_MAX_REVISION} THEN 1 ELSE 0 END) AS open
+          FROM ${recordedEdgesTable}
+          WHERE graph_id = ${store.graphId}
+          GROUP BY id
+        `),
+      );
+      const history = Object.fromEntries(
+        rows.map((row) => [
+          row.id,
+          { rows: Number(row.rows), open: Number(row.open) },
+        ]),
+      );
+      expect(history).toEqual({
+        [outgoing.id]: { rows: 1, open: 0 },
+        [incoming.id]: { rows: 1, open: 0 },
+        [selfLoop.id]: { rows: 1, open: 0 },
+        [unrelated.id]: { rows: 1, open: 1 },
+      });
     });
 
     it("a restricted delete refuses a node whose only live edge is incoming or a self-loop, and deletes an edge-free node", async () => {

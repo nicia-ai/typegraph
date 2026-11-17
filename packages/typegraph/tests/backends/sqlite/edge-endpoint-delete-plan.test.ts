@@ -5,10 +5,11 @@
  * graph.
  *
  * The statements are the edge hard delete for a node
- * (`buildHardDeleteEdgesByNode`, run by `hardDelete`) and the live-edge probe
+ * (`buildHardDeleteEdgesByNode`, run by `hardDelete`), the live-edge probe
  * inside the atomic node-delete batch
- * (`buildAtomicNodeDeleteBatchWithSchemaFence`). Both match `(from side) OR
- * (to side)`. With the graph equality written once, outside the OR, SQLite
+ * (`buildAtomicNodeDeleteBatchWithSchemaFence`), and history capture's
+ * selection of the edges that hard delete removes (`queryConnectedEdgeIds`).
+ * All three match `(from side) OR (to side)`. With the graph equality written once, outside the OR, SQLite
  * with no `sqlite_stat1` planned `typegraph_edges_to_idx (graph_id=?)`: a walk
  * of the graph's edges for every deleted node. The three states covered are a
  * database that was never analyzed, the sampled statistics
@@ -16,7 +17,8 @@
  * a build without STAT4).
  *
  * Revert check: restoring the shared `graph_id = ?` conjunct in
- * `edgeAtEitherEndpoint` fails both cases in the never-analyzed state.
+ * `edgeAtEitherEndpoint` fails the first two cases in the never-analyzed
+ * state, and restoring it in `queryConnectedEdgeIds` fails the third.
  */
 import type Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
@@ -37,6 +39,14 @@ import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
 } from "../../../src/backend/sqlite/local";
+import { type TransactionBackend } from "../../../src/backend/types";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import {
+  renderSqlite,
+  type SqlFragment,
+} from "../../../src/query/sql-fragment";
+import { queryConnectedEdgeIds } from "../../../src/store/recorded-capture/flush";
+import { requireDefined } from "../../../src/utils/presence";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const links = defineEdge("links");
@@ -151,6 +161,32 @@ describe("edge lookups by endpoint on the SQLite delete path", () => {
           ),
         ),
       );
+    },
+  );
+
+  it.each(STATES)(
+    "history capture's selection of a hard-deleted node's edges seeks both endpoint indexes (%s)",
+    async (state) => {
+      await enterState(state, client, store);
+      let captured: SqlFragment | undefined;
+      const recordingTarget = {
+        execute: (query: SqlFragment) => {
+          captured = query;
+          return Promise.resolve([]);
+        },
+      } as unknown as TransactionBackend;
+      await queryConnectedEdgeIds(recordingTarget, createSqlSchema(), {
+        graphId: "edge_endpoint_delete_plan",
+        kind: "Item",
+        id: "n7",
+      });
+      // Bound parameters, as the driver executes it: inlined as literals,
+      // the two arms' identical graph equalities would be one expression.
+      const rendered = renderSqlite(requireDefined(captured));
+      const rows = client
+        .prepare(`EXPLAIN QUERY PLAN ${rendered.sql}`)
+        .all(...rendered.params) as readonly Readonly<{ detail: string }>[];
+      expectEndpointSeeks(rows.map((row) => row.detail).join("\n"));
     },
   );
 
