@@ -4,7 +4,9 @@
  *
  * Both dialect schema factories (`createSqliteTables` /
  * `createPostgresTables`) derive their Drizzle index builders from this
- * list, so the two dialects cannot drift, and
+ * list, so the two dialects cannot drift (a declaration's `dialects` scope
+ * is the one sanctioned asymmetry, read through
+ * `systemIndexDeclarationsFor`), and
  * `materializeSystemIndexes()` derives the same indexes as runtime DDL so
  * an index added in a new library version reaches already-initialized
  * databases (bootstrap DDL only runs on first boot — see
@@ -75,6 +77,15 @@ type SystemIndexColumnsFor<T extends SystemIndexTable> =
   : T extends "recordedNodes" ? RecordedColumn
   : RecordedEdgeColumn;
 
+/**
+ * The rows a partial system index covers: those whose `isNull` column is
+ * NULL. Structured rather than SQL text so the runtime DDL, the Drizzle
+ * builders and the drift signature all derive the same predicate.
+ */
+export type SystemIndexPredicate<C extends string = string> = Readonly<{
+  isNull: C;
+}>;
+
 type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
   table: T;
   /** Physical index name is `${physicalTableName}_${suffix}`. */
@@ -82,6 +93,10 @@ type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
   /** Text keys whose ordering must be independent of database locale. */
   binaryOrderColumns?: readonly string[];
   columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
+  /** Makes the index partial; absent means it covers every row. */
+  predicate?: SystemIndexPredicate<SystemIndexColumnsFor<T>>;
+  /** The dialects that carry the index; absent means every dialect. */
+  dialects?: readonly [SqlDialect, ...SqlDialect[]];
 }>;
 
 export type SystemIndexDeclaration =
@@ -99,6 +114,22 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     table: "nodes",
     suffix: "kind_created_idx",
     columns: ["graph_id", "kind", "deleted_at", "created_at"],
+  },
+  // Live listing order on PostgreSQL (typegraph#859). PostgreSQL does not
+  // treat `deleted_at IS NULL` as an ordering equality, so kind_created_idx
+  // cannot serve `ORDER BY created_at DESC, id DESC` and every listing page
+  // sorted the whole live kind. Leaving deleted rows out of the index and
+  // ending the key in `id` lets the listing read in index order. SQLite
+  // treats IS NULL as an equality and already serves the order from
+  // kind_created_idx; a second ordering index there turns
+  // `edges.findFrom` into a walk of the whole kind under sampled
+  // statistics, so the index is PostgreSQL's alone.
+  {
+    table: "nodes",
+    suffix: "live_created_idx",
+    columns: ["graph_id", "kind", "created_at", "id"],
+    predicate: { isNull: "deleted_at" },
+    dialects: ["postgres"],
   },
   {
     table: "nodes",
@@ -165,6 +196,14 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     table: "edges",
     suffix: "kind_created_idx",
     columns: ["graph_id", "kind", "deleted_at", "created_at"],
+  },
+  // Same rationale as nodes' live_created_idx.
+  {
+    table: "edges",
+    suffix: "live_created_idx",
+    columns: ["graph_id", "kind", "created_at", "id"],
+    predicate: { isNull: "deleted_at" },
+    dialects: ["postgres"],
   },
   {
     table: "edges",
@@ -300,6 +339,21 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   },
 ];
 
+/**
+ * The system indexes `dialect` carries: the single owner of a declaration's
+ * dialect scope, consulted by both schema factories and by
+ * `materializeSystemIndexes`.
+ */
+export function systemIndexDeclarationsFor(
+  dialect: SqlDialect,
+): readonly SystemIndexDeclaration[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) =>
+      declaration.dialects === undefined ||
+      declaration.dialects.includes(dialect),
+  );
+}
+
 /** Default physical table names for the system-index relations. */
 const DEFAULT_SYSTEM_INDEX_TABLE_NAMES: Readonly<
   Record<SystemIndexTable, string>
@@ -325,13 +379,16 @@ export function resolveSystemIndexTableName(
 /**
  * The suffix of the byte-ordered `graph_id` index the graph id listing seeks.
  *
- * Not a {@link SYSTEM_INDEX_DECLARATIONS} entry, on purpose: those are the
- * indexes both dialects carry, and this one is PostgreSQL's alone. A SQLite
- * text index is already kept in byte order, so the `graph_id`-leading primary
- * keys serve the listing's seeks there and a second index would only add write
- * cost. PostgreSQL orders text indexes by the database collation, so a
- * byte-order bound on `graph_id` is only an index range when the index itself
- * is `COLLATE "C"`.
+ * PostgreSQL's alone: a SQLite text index is already kept in byte order, so
+ * the `graph_id`-leading primary keys serve the listing's seeks there and a
+ * second index would only add write cost. PostgreSQL orders text indexes by the
+ * database collation, so a byte-order bound on `graph_id` is only an index
+ * range when the index itself is `COLLATE "C"`.
+ *
+ * Not a {@link SYSTEM_INDEX_DECLARATIONS} entry: it covers every graph presence
+ * anchor, including the schema-versions relation, which is not a
+ * {@link SystemIndexTable}, and base-schema adoption creates it rather than
+ * `materializeSystemIndexes`.
  */
 const GRAPH_ID_ORDER_INDEX_SUFFIX = "graph_id_bytes_idx";
 
@@ -456,8 +513,8 @@ export function assertNoSystemIndexNameCollision(
 /**
  * Runtime DDL for one system index — byte-compatible with the index the
  * bootstrap path creates from the Drizzle schema (same name, same
- * columns), plus `CONCURRENTLY` where the dialect supports building
- * without blocking writes.
+ * columns, same predicate), plus `CONCURRENTLY` where the dialect supports
+ * building without blocking writes.
  */
 export function generateSystemIndexDDL(
   declaration: SystemIndexDeclaration,
@@ -488,7 +545,11 @@ export function generateSystemIndexDDL(
     )
     .join(", ");
   const concurrently = options.concurrent ? "CONCURRENTLY " : "";
-  return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns});`;
+  const where =
+    declaration.predicate === undefined ?
+      ""
+    : ` WHERE ${quoteIdentifier(declaration.predicate.isNull)} IS NULL`;
+  return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns})${where};`;
 }
 
 /**

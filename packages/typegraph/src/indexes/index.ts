@@ -54,6 +54,7 @@ export {
   generateSystemIndexDDL,
   SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
+  type SystemIndexPredicate,
   type SystemIndexTable,
 } from "./system";
 export type {

@@ -97,7 +97,7 @@ export const BASE_SCHEMA_RELEASES = [
     id: "recorded-retention-and-identity-transition-log",
     orderedShapeDigests: {
       postgres:
-        "cb200ed3377b8e4d69bdccc40adeec9481899be3dc842c1a1c0dc1635ad37f18",
+        "5dadec3edb40abcd5baa306e4c7992bfba8f037d456afeb3bc53265ba5bbda02",
       sqlite:
         "41593e08cc5e3b8f15077f705ece8def6b24e8f344d4dad95b879227cb3c81da",
     },

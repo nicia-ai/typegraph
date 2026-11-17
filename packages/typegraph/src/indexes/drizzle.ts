@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import { toDrizzleSql } from "../backend/drizzle/execution/types";
+import { type SqlDialect } from "../query/dialect";
 import { sql as portableSql, type SqlFragment } from "../query/sql-fragment";
 import { requireDefined } from "../utils/presence";
 import {
@@ -23,8 +24,8 @@ import {
 } from "./compiler";
 import {
   graphIdOrderIndexName,
-  SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
+  systemIndexDeclarationsFor,
   systemIndexName,
   type SystemIndexTable,
 } from "./system";
@@ -408,7 +409,7 @@ function getSqliteEdgeSystemColumn(
 }
 
 // ============================================================
-// System indexes (both dialects)
+// System indexes (both dialects, each declaration's dialect scope applied)
 // ============================================================
 //
 // The schema factories derive their system-index Drizzle builders from
@@ -428,25 +429,50 @@ type SystemIndexColumns<C extends { name: string }> = Readonly<
  * and the schema. A column the table doesn't define throws at
  * table-construction time (exercised by the system-index parity tests).
  */
+function resolveSystemIndexColumn<C extends { name: string }>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+  column: string,
+): C {
+  const value = Object.values(columns).find(
+    (candidate) => candidate.name === column,
+  );
+  if (value === undefined) {
+    throw new Error(
+      `System index "${declaration.table}_${declaration.suffix}" references ` +
+        `a column "${column}" the ${declaration.table} table does not define`,
+    );
+  }
+  return value;
+}
+
 function resolveSystemIndexColumns<C extends { name: string }>(
   declaration: SystemIndexDeclaration,
   columns: SystemIndexColumns<C>,
 ): readonly [C, ...C[]] {
-  const byPhysicalName = new Map(
-    Object.values(columns).map((column) => [column.name, column]),
+  const resolved = declaration.columns.map((column) =>
+    resolveSystemIndexColumn(declaration, columns, column),
   );
-  const resolved = declaration.columns.map((column) => {
-    const value = byPhysicalName.get(column);
-    if (value === undefined) {
-      throw new Error(
-        `System index "${declaration.table}_${declaration.suffix}" references ` +
-          `a column "${column}" the ${declaration.table} table does not define`,
-      );
-    }
-    return value;
-  });
   // `declaration.columns` is non-empty by type, so `resolved` is too.
   return resolved as [C, ...C[]];
+}
+
+/**
+ * A partial declaration's predicate over the table's own column object, so
+ * the generated DDL renders `WHERE "<column>" IS NULL` exactly as the runtime
+ * DDL does.
+ */
+function resolveSystemIndexPredicate<C extends { name: string }>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+): ReturnType<typeof drizzleSql> | undefined {
+  if (declaration.predicate === undefined) return undefined;
+  const column = resolveSystemIndexColumn(
+    declaration,
+    columns,
+    declaration.predicate.isNull,
+  );
+  return drizzleSql`${column} IS NULL`;
 }
 
 /**
@@ -454,6 +480,7 @@ function resolveSystemIndexColumns<C extends { name: string }>(
  * binary text collations to the additional ordered text keys below.
  */
 function buildSystemIndexBuilders<C extends { name: string }, B>(
+  dialect: SqlDialect,
   tableKey: SystemIndexTable,
   physicalTableName: string,
   columns: SystemIndexColumns<C>,
@@ -463,15 +490,15 @@ function buildSystemIndexBuilders<C extends { name: string }, B>(
     declaration: SystemIndexDeclaration,
   ) => B,
 ): readonly B[] {
-  return SYSTEM_INDEX_DECLARATIONS.filter(
-    (declaration) => declaration.table === tableKey,
-  ).map((declaration) =>
-    indexFactory(
-      systemIndexName(physicalTableName, declaration.suffix),
-      resolveSystemIndexColumns(declaration, columns),
-      declaration,
-    ),
-  );
+  return systemIndexDeclarationsFor(dialect)
+    .filter((declaration) => declaration.table === tableKey)
+    .map((declaration) =>
+      indexFactory(
+        systemIndexName(physicalTableName, declaration.suffix),
+        resolveSystemIndexColumns(declaration, columns),
+        declaration,
+      ),
+    );
 }
 
 export function buildSqliteSystemIndexBuilders(
@@ -480,10 +507,15 @@ export function buildSqliteSystemIndexBuilders(
   columns: SystemIndexColumns<SQLiteColumn>,
 ): readonly SqliteIndexBuilder[] {
   return buildSystemIndexBuilders(
+    "sqlite",
     tableKey,
     physicalTableName,
     columns,
-    (name, resolved) => sqliteIndex(name).on(...resolved),
+    (name, resolved, declaration) => {
+      const builder = sqliteIndex(name).on(...resolved);
+      const predicate = resolveSystemIndexPredicate(declaration, columns);
+      return predicate === undefined ? builder : builder.where(predicate);
+    },
   );
 }
 
@@ -508,6 +540,7 @@ export function buildPostgresSystemIndexBuilders(
   columns: SystemIndexColumns<PgColumn>,
 ): readonly PgIndexBuilder[] {
   return buildSystemIndexBuilders(
+    "postgres",
     tableKey,
     physicalTableName,
     columns,
@@ -517,7 +550,12 @@ export function buildPostgresSystemIndexBuilders(
           drizzleSql`${column} COLLATE "C"`
         : column,
       );
-      return pgIndex(name).on(requireDefined(keys[0]), ...keys.slice(1));
+      const builder = pgIndex(name).on(
+        requireDefined(keys[0]),
+        ...keys.slice(1),
+      );
+      const predicate = resolveSystemIndexPredicate(declaration, columns);
+      return predicate === undefined ? builder : builder.where(predicate);
     },
   );
 }
