@@ -32,6 +32,17 @@
  * goes on changing without it: its lineage keeps naming that class, and none
  * of that class's later history may be reported as its own.
  *
+ * One state loosens the "a boundary changes membership" half, on purpose. A
+ * class is structural: a node whose validity window has already ended can
+ * still be asserted into one, and it then connects the class without being a
+ * VISIBLE member of it. A transition that touches such a class (the assertion
+ * that joins the ended node, the delete or retraction that removes it) is a
+ * real change to the class that leaves visible membership as it was, so
+ * `replay` reports a step whose `before` equals its `after`. Once a run holds
+ * an ended node, its later revisions may therefore carry a boundary without a
+ * visible change. Every other pin still holds there: a visible change always
+ * has a boundary, and every step's before and after match brute force.
+ *
  * `kind-drop` is the one cause this generator does NOT model, and cannot:
  * it requires a SCHEMA EVOLUTION (dropping a node kind mid-run), which is a
  * fixed-graph property outside what a per-operation generator over one
@@ -212,6 +223,13 @@ type ExhaustiveRun = Readonly<{
    * transition log never touches.
    */
   windowEndRevisions: ReadonlyMap<string, readonly number[]>;
+  /**
+   * Revisions written while some node's validity window had already ended.
+   * Such a node can be a structural member of a class without being a visible
+   * one, so a transition at one of these revisions may leave visible
+   * membership unchanged.
+   */
+  structuralOnlyRevisions: ReadonlySet<number>;
 }>;
 
 async function runExhaustiveScenario(
@@ -229,6 +247,10 @@ async function runExhaustiveScenario(
   const recordedByRevision = new Map<number, RecordedInstant>();
   const bornAt = new Map<string, number>();
   const windowEndRevisions = new Map<string, number[]>();
+  // References whose validity window has ended, and the revisions written
+  // while any existed.
+  const ended = new Set<string>();
+  const structuralOnlyRevisions = new Set<number>();
 
   async function recordCheckpoint(): Promise<number | undefined> {
     const now = await store.recordedNow();
@@ -263,12 +285,15 @@ async function runExhaustiveScenario(
 
   for (const intent of intents) {
     let narrowedClass: readonly string[] = [];
+    const endedNodeExisted = ended.size > 0;
     try {
       switch (intent.type) {
         case "create": {
           const ref = requireDefined(UNIVERSE[intent.refIndex]);
           await store.nodes[ref.kind].create({}, { id: ref.id });
           live.add(refKeyOf(ref));
+          // A re-created node starts a fresh, open window.
+          ended.delete(refKeyOf(ref));
           break;
         }
         case "assertSame":
@@ -308,6 +333,7 @@ async function runExhaustiveScenario(
           if (!live.has(refKeyOf(ref))) break;
           await store.nodes[ref.kind].hardDelete(ref.id as never);
           live.delete(refKeyOf(ref));
+          ended.delete(refKeyOf(ref));
           break;
         }
         case "windowEnd": {
@@ -320,6 +346,9 @@ async function runExhaustiveScenario(
           // A WIDENING update (a later end than one already applied) is
           // refused by `requireNodeValidityEndCompatible` — a typed refusal.
           await store.nodes[ref.kind].update(ref.id as never, {}, { validTo });
+          // An end at the current instant is already in the past for every
+          // later operation.
+          if (intent.daysFromNow === 0) ended.add(refKeyOf(ref));
           if (currentMembers.length >= 2) {
             narrowedClass = currentMembers.map(
               (member) => `${member.kind} ${member.id}`,
@@ -334,13 +363,20 @@ async function runExhaustiveScenario(
     }
     const revision = await recordCheckpoint();
     if (revision === undefined) continue;
+    if (endedNodeExisted) structuralOnlyRevisions.add(revision);
     for (const member of narrowedClass) {
       const revisions = windowEndRevisions.get(member) ?? [];
       revisions.push(revision);
       windowEndRevisions.set(member, revisions);
     }
   }
-  return { store, recordedByRevision, bornAt, windowEndRevisions };
+  return {
+    store,
+    recordedByRevision,
+    bornAt,
+    windowEndRevisions,
+    structuralOnlyRevisions,
+  };
 }
 
 /**
@@ -462,7 +498,10 @@ async function expectExhaustiveLineage(
       `${key}: membership changed at ${String(revision)} with no transition`,
     ).toBe(true);
     expect(
-      changed || !touched || selfReferentialRevisions.has(revision),
+      changed ||
+        !touched ||
+        selfReferentialRevisions.has(revision) ||
+        run.structuralOnlyRevisions.has(revision),
       `${key}: a transition at ${String(revision)} changed nothing`,
     ).toBe(true);
   }
@@ -491,8 +530,15 @@ async function expectExhaustiveLineage(
   const replayBoundaries = [
     ...new Set(ownSteps.map((step) => revisionOf(step.transition.recorded))),
   ].toSorted((left, right) => left - right);
+  const structuralOnlyBoundaries = [...touchedRevisions].filter((revision) =>
+    run.structuralOnlyRevisions.has(revision),
+  );
   const expectedBoundaries = [
-    ...new Set([...changedRevisions, ...selfReferentialRevisions]),
+    ...new Set([
+      ...changedRevisions,
+      ...selfReferentialRevisions,
+      ...structuralOnlyBoundaries,
+    ]),
   ].toSorted((left, right) => left - right);
   expect(replayBoundaries, `${key}: replay boundaries`).toEqual(
     expectedBoundaries,
@@ -542,6 +588,36 @@ describe.each(["fold", "ignore"] as const)(
     it("membership changes iff the transition log carries a boundary, on every lineage of a fixed corpus", async () => {
       await fc.assert(property, { numRuns: 100, seed: 20_260_908 });
     }, 120_000);
+
+    // The history a random run once found (seed -361331201): an assertion
+    // joins a node whose window ended an instant earlier. The class changes;
+    // what is visible of it does not.
+    it("reports a boundary that leaves membership unchanged when an assertion joins an ended node", async () => {
+      const run = await runExhaustiveScenario(
+        graph,
+        [
+          { type: "create", refIndex: 3 },
+          { type: "windowEnd", refIndex: 0, daysFromNow: 0 },
+          { type: "assertSame", aIndex: 3, bIndex: 0 },
+          { type: "softDelete", refIndex: 0 },
+        ],
+        false,
+      );
+      for (const ref of UNIVERSE) await expectExhaustiveLineage(run, ref);
+
+      const joined = requireDefined(UNIVERSE[3]);
+      const replay = await run.store.identity.replay(joined);
+      const unchanged = replay.steps.filter(
+        (step) =>
+          normalizeMembers(step.before) === normalizeMembers(step.after),
+      );
+      expect(unchanged.map((step) => step.transition.cause)).toContain(
+        "assert",
+      );
+      expect(normalizeMembers(await run.store.identity.membersOf(joined))).toBe(
+        refKeyOf(joined),
+      );
+    });
 
     it("membership changes iff the transition log carries a boundary, on every lineage of random histories", async () => {
       await fc.assert(property, {
