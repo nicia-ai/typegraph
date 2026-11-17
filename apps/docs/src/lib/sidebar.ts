@@ -26,6 +26,7 @@ export const documentationSidebar: readonly SidebarItem[] = [
       { label: "Graph Extensions", slug: "graph-extensions" },
       { label: "Graph Merge", slug: "graph-merge" },
       { label: "Provenance and Retraction", slug: "provenance" },
+      { label: "Read-Set Fence", slug: "read-set-fence" },
       { label: "Multiple Graphs", slug: "multiple-graphs" },
       { label: "Import/export", slug: "interchange" },
       { label: "Testing", slug: "testing" },

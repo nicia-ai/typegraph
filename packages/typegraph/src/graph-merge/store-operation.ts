@@ -16,6 +16,7 @@ import { type JsonValue } from "../core/types";
 import { storeOperationsTableName } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import {
   readRecordedClock,
@@ -43,6 +44,7 @@ import {
   DurableOperationOwnerMismatchError,
   DurableOperationRequestError,
   DurableOperationUnsupportedError,
+  mergeCallbackIsolationError,
   MergePlanCapabilityError,
   StoreOperationError,
 } from "./errors";
@@ -55,7 +57,6 @@ import {
   transactionBackend,
   TransactionConflictError,
 } from "./typegraph-internal";
-import { lockMergeTargetWrite } from "./write-fence";
 
 /** Persist this allocation target with the request, before the first attempt. */
 export type StoreOperationTarget = Readonly<{
@@ -511,11 +512,12 @@ export async function operateStore<G extends GraphDef>(
       attemptState.commitBoundary = false;
       const backend: TransactionBackend = transactionBackend(tx);
       requireOperationStatementMembers(backend);
-      await lockMergeTargetWrite(backend, {
+      await lockStoreWriteFence(backend, {
         graphId: store.graphId,
         schemaVersion: activeSchema?.version,
         graphLock: "required",
         requireFreshSnapshot: true,
+        freshSnapshotError: mergeCallbackIsolationError,
         staleSchemaError: (cause) =>
           new DurableOperationRequestError(
             "The Store schema changed before the durable operation.",

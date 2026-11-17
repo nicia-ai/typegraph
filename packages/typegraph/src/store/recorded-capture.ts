@@ -115,9 +115,12 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  changesInReadSet,
   changesSinceIncludingIdentity,
   encodeRecordedLineageRevision,
   mintsOriginNamespacedAnchor,
+  type ReadSetRegion,
+  type RecordedLineageStore,
   recordedRelationsLineage,
   resolveLineage,
 } from "./recorded-capture/lineage";

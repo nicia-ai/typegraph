@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+Add `tx.assertUnchangedSince(anchor, scopes)`, a read-set fence for callers that read, compute for a while, then write a result derived from what they read. Capture `store.lineageRevisionNow()` before reading, then declare what was read as nodes, edges, edge neighbourhoods, node or edge kinds, or the whole graph. Inside the write transaction the store takes its write lock, then refuses with `ReadSetChangedError` (listing each changed scope and its keys) if anything declared has changed, or `ReadSetUnverifiableError` if the lineage source cannot prove the span. It needs a store with `history: true` or `revisionTracking: true` and, on PostgreSQL, read committed isolation; otherwise it raises `UnsupportedBackendCapabilityError` naming `lineage`, `graphWriteFence` or `observedReadCommittedIsolation`. A history store answers each scope exactly by index seek; a `revisionTracking` store without history answers an edge-neighbourhood scope at edge-kind granularity, because its journal records no endpoints. Graph-merge's write-fence prelude moved to a shared store-level owner with no change in merge behavior.

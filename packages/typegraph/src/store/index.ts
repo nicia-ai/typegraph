@@ -14,6 +14,11 @@ export type {
   NeighborReadOptions,
   NeighborResult,
 } from "./neighbors";
+export type {
+  ReadSetEdgeDirection,
+  ReadSetEdgeReference,
+  ReadSetScope,
+} from "./read-set";
 export type { CheckedReadScope } from "./store";
 export type { StoreEvolution } from "./store";
 export {

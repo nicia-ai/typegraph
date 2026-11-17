@@ -5,8 +5,11 @@ import type {
   BackendCapabilities,
   TransactionBackend,
 } from "../../src/backend/types";
-import { MergePlanCapabilityError } from "../../src/graph-merge/errors";
-import { lockMergeTargetWrite } from "../../src/graph-merge/write-fence";
+import {
+  mergeCallbackIsolationError,
+  MergePlanCapabilityError,
+} from "../../src/graph-merge/errors";
+import { lockStoreWriteFence } from "../../src/store/operations/write-fence-prelude";
 
 const EXECUTION_CAPABILITIES = {
   interactiveTransactions: true,
@@ -45,11 +48,12 @@ async function mutateAfterFreshFence(
   backend: TransactionBackend,
   witness: { mutated: boolean },
 ): Promise<void> {
-  await lockMergeTargetWrite(backend, {
+  await lockStoreWriteFence(backend, {
     graphId: "fresh-snapshot-fence",
     schemaVersion: 1,
     graphLock: "required",
     requireFreshSnapshot: true,
+    freshSnapshotError: mergeCallbackIsolationError,
     staleSchemaError: (cause) =>
       new MergePlanCapabilityError("schema changed", { cause }),
   });

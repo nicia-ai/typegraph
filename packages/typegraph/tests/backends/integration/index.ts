@@ -88,6 +88,7 @@ export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
 export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";
+export { registerReadSetFenceIntegrationTests } from "./read-set-fence";
 export { registerReconciledSchemaIntegrationTests } from "./reconciled-schema";
 export { registerRecordedAdjacencyIntegrationTests } from "./recorded-adjacency";
 export { registerRecordedOwnershipStatementIntegrationTests } from "./recorded-ownership-statements";

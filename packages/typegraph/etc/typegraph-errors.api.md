@@ -1121,6 +1121,75 @@ type OntologyChange = Readonly<{
 }>;
 
 // @public
+export class ReadSetChangedError extends TypeGraphError {
+    constructor(details: ReadSetChangedErrorDetails);
+    // (undocumented)
+    readonly details: ReadSetChangedErrorDetails;
+}
+
+// @public
+export type ReadSetChangedErrorDetails = Readonly<{
+    graphId: string;
+    anchor: string;
+    changes: readonly ReadSetScopeChange[];
+}>;
+
+// @public
+export type ReadSetChangedKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public
+export type ReadSetEdgeDirection = "out" | "in" | "both";
+
+// @public
+export type ReadSetScopeChange = Readonly<{
+    index: number;
+    scope: ReadSetScopeDescriptor;
+    nodes: readonly ReadSetChangedKey[];
+    edges: readonly ReadSetChangedKey[];
+}>;
+
+// @public
+export type ReadSetScopeDescriptor = Readonly<{
+    target: "node";
+    kind: string;
+    id: string;
+}> | Readonly<{
+    target: "edge";
+    kind: string;
+    id: string;
+}> | Readonly<{
+    target: "edgesAt";
+    nodeKind: string;
+    nodeId: string;
+    direction: ReadSetEdgeDirection;
+    edgeKind: string | undefined;
+}> | Readonly<{
+    target: "nodeKind";
+    kind: string;
+}> | Readonly<{
+    target: "edgeKind";
+    kind: string;
+}> | Readonly<{
+    target: "graph";
+}>;
+
+// @public
+export class ReadSetUnverifiableError extends TypeGraphError {
+    constructor(details: ReadSetUnverifiableErrorDetails);
+    // (undocumented)
+    readonly details: ReadSetUnverifiableErrorDetails;
+}
+
+// @public
+export type ReadSetUnverifiableErrorDetails = Readonly<{
+    graphId: string;
+    anchor: string;
+}>;
+
+// @public
 export const RECORDED_CAPTURE_GUARD_CODES: readonly ["RECORDED_CAPTURE_REQUIRES_CALLBACK_TRANSACTION", "RECORDED_CAPTURE_RAW_SQL_DISABLED", "REVISION_TRACKING_RAW_SQL_DISABLED"];
 
 // @public
