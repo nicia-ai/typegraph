@@ -65,6 +65,10 @@ export const documentationSidebar: readonly SidebarItem[] = [
     label: "Examples",
     items: [
       {
+        label: "An Ontology, End to End",
+        slug: "examples/ontology-end-to-end",
+      },
+      {
         label: "FHIR Graph Merge",
         slug: "examples/fhir-graph-merge",
       },

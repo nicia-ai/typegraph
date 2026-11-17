@@ -17,6 +17,25 @@ level. You need ontology when:
 Without ontology, you'd implement these manually—if statements scattered throughout your code, hand-rolled
 validation, duplicate queries. Ontology centralizes this logic in your schema.
 
+Put plainly: a domain already has rules. A runbook is a kind of document. A section belongs to one document.
+Dependencies don't loop. When those rules live only in application code, each writer enforces its own copy: the
+API, the import script, the background job, and whatever wrote to the database without reading any of them. An
+ontology declares each rule once, beside the schema, and the store applies it on every read and write. That
+matters most when some of the writers are agents: a rule the store enforces holds for a writer that never saw
+the application code.
+
+### What Each Declaration Replaces
+
+| You declare | The store then | Application code it replaces |
+| --- | --- | --- |
+| `subClassOf(Runbook, Document)` | returns runbooks from a query over documents, and admits them wherever a document is accepted | an opt-in flag on every query, and endpoint lists that name every subtype |
+| `partOf(Section, Document, { via })` | deletes a document's sections with it, in one transaction, and previews the cascade with `planDelete` | a cleanup job for orphaned parts |
+| `acyclic: true` on an edge kind | refuses a write that would close a cycle, with the path it would close | a depth limit on every traversal of the relation |
+| `targetCardinality: "one"` | refuses a second edge arriving at a node, atomically | a read-then-write check that concurrent requests can both pass |
+| a tighter rule on a populated graph | checks stored rows inside the schema commit and lists the ones in the way | a data audit after the migration |
+
+[An Ontology, End to End](/examples/ontology-end-to-end) runs all five on one small graph.
+
 ## How It Works
 
 TypeGraph treats semantic relationships between types as **meta-edges**—edges at the type level rather than instance level:
@@ -1717,6 +1736,14 @@ const ancestors = await store
 A refused write's `EdgeAcyclicityError` carries one cycle-closing return path
 (at most 64 edges) in `details.witness`; see
 [`EdgeAcyclicityError`](/errors#edgeacyclicityerror).
+
+The check walks the edges reachable from the new edge's target, so its cost
+follows the shape of the relation. Measured on a relation of 100,000 edges, a
+typical insert costs about what a `cardinality: "one"` insert does (0.2 ms on
+SQLite, about 4 ms on PostgreSQL). The worst case is an edge pointing at the
+head of one long chain, where the walk visits every reachable edge: about
+220 ms on SQLite for a chain of that size. Measure before declaring
+`acyclic: true` on a relation that is one very long chain.
 
 This is not expressible as an OWL 2 DL axiom — OWL has no acyclicity
 constraint on a property — but it matches SHACL-SPARQL's cycle shape

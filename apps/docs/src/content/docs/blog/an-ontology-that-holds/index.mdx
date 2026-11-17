@@ -23,10 +23,19 @@ remembered to ask. A custom meta-edge was metadata that no read or write ever
 looked at. The ontology described your domain the way a poster describes a
 company's values.
 
-0.75 is the release where I stop getting away with that. Every relation the
-ontology declares now has a defined effect on reads, writes, schema changes and
-merges, and the store refuses the writes that would break one. If you say a
-section is part of a document, the database behaves as though you meant it.
+## Why would you want an ontology?
+
+Fair question, and the word doesn't help. It sounds like something you'd need a philosophy degree and a committee for, or pay Palantir to build for you.
+
+Here's the plain version. Your domain already has rules. A runbook is a kind of document. A section belongs to one document. Dependencies don't loop. Everyone on your team knows them, and they're written down nowhere the database can see. So they get enforced in application code: once in the API, again in the import script, differently in the background job, and not at all in the one-off migration someone ran on a Friday.
+
+An ontology is those rules, declared once, next to the schema. The database then applies them on every read and every write, including the ones you forgot about and the ones written by someone, or something, that never read your wiki. If you have agents writing to your graph, that last part is most of the point: a rule the store enforces is the only kind an agent reliably follows.
+
+That's the promise. Until now TypeGraph kept about half of it. 0.75 is the
+release where it keeps the rest: every relation the ontology declares now has a
+defined effect on reads, writes, schema changes and merges, and the store
+refuses the writes that would break one. If you say a section is part of a
+document, the database behaves as though you meant it.
 
 It's the biggest release I've shipped, and it breaks more than any release
 before it, so this post is part tour and part apology. The tour comes first:
@@ -344,11 +353,36 @@ enforce it.
 question you'd like to answer with something better than a shrug. On a graph
 with [operational identity](/identity) and `history: true`, the store now keeps
 an append-only log of every change to a node's identity class.
-`store.identity.transitionsOf(ref)` and `replay(ref)` return each change with
-its cause, both temporal coordinates and, for a change a merge applied, the
-branch, plan and review that produced it. Replay reconstructs membership
-through the same historical reader as `asOfRecorded`, so it can't disagree
-with a read.
+
+Say the architecture overview also exists as a page in the old wiki. Someone
+marks the two records as the same document, then thinks better of it:
+
+```typescript
+const joined = await store.identity.assertSame(overview, wikiCopy);
+await store.identity.retractAssertion(joined.assertion.id);
+
+const history = await store.identity.replay(overview);
+const lines = history.steps.map((step) => {
+  const ids = (members: typeof step.before) =>
+    members.map((member) => member.id).join(", ");
+  return `${step.transition.cause}: [${ids(step.before)}] -> [${ids(step.after)}]`;
+});
+console.log([...new Set(lines)].join("\n"));
+```
+
+```text
+assert: [doc-architecture] -> [doc-architecture, wiki-architecture]
+retract: [doc-architecture, wiki-architecture] -> [doc-architecture]
+```
+
+That's the whole story of the belief, in order: joined, then split. (A split
+is logged once for each class it leaves behind, so the `Set` folds the two
+entries that read the same from this document's side.) Each step also carries
+when it happened in both valid and recorded time and, for a change a merge applied,
+the branch, plan and review that produced it. `transitionsOf(ref)` returns the
+same changes without the before-and-after membership. Replay reconstructs
+membership through the same historical reader as `asOfRecorded`, so it can't
+disagree with a read.
 
 Graph merge carries identity through branches with fixed rules: a three-way
 classification of every staged assertion, a hard conflict when two branches
@@ -357,6 +391,37 @@ between two entities a `different` assertion holds apart. Conflicts that are
 certain to fail at apply (two branches filling one `targetCardinality` slot,
 moving one part to different wholes, closing a cycle) are now refused while
 the plan is built, not halfway through the commit.
+
+## Putting it together
+
+Look back at the graph definition at the top of this post. The ontology is two
+lines, and the edge rules are three options. Here's what those five
+declarations bought:
+
+| You declare                          | You stop writing                                                           |
+| ------------------------------------ | -------------------------------------------------------------------------- |
+| `subClassOf(Runbook, Document)`      | the opt-in flag on every query, and the search bug when someone forgets it |
+| `partOf(Section, Document, { via })` | the nightly job that sweeps up orphans                                     |
+| `acyclic: true`                      | the depth limit and the "should never happen" comment                      |
+| `targetCardinality: "one"`           | the read-then-write check that two requests can both pass                  |
+| a tighter rule on a live graph       | the data audit you run after the migration, hoping                         |
+
+Five declarations, five pieces of code nobody enjoyed owning. And none of it
+is specific to documentation. The same shapes turn up wherever the rules are
+about how things relate:
+
+- **An org chart.** Reporting lines can't loop, and everyone has one manager,
+  however many people would like to be it.
+- **A bill of materials.** Components go with their assembly, and a revision
+  supersedes exactly one predecessor.
+- **Permissions.** A group can't contain itself, directly or through four
+  other groups, and a service account is a kind of principal.
+- **Agent memory.** An agent can't file a fact under a type it doesn't fit, or
+  attach a part to two wholes, no matter how confident it sounds.
+
+The whole tour is one runnable file,
+[An Ontology, End to End](/examples/ontology-end-to-end), with every output in
+this post asserted, so it can't drift from what the library does.
 
 ## The rest of 0.75: fewer ways to be quietly wrong
 
@@ -392,7 +457,7 @@ answer where it should have given you an error.
 ## Upgrading (the apology)
 
 This release asks more of you than any before it. I batched the breaking
-changes on purpose, so you pay once instead of in five instalments, but it's
+changes on purpose, so you pay once instead of in five installments, but it's
 still a real upgrade. The short version:
 
 - **It's one-way. Upgrade every reader of a shared database together.** Base
@@ -433,6 +498,8 @@ read before you upgrade anything you care about.
 
 ## Try it
 
+- [An Ontology, End to End](/examples/ontology-end-to-end): the runnable
+  source behind this post
 - [Composition](/ontology#composition) and
   [previewing a delete](/ontology#previewing-a-delete)
 - [Acyclic edges](/ontology#enforce-an-instance-level-taxonomy-with-acyclic-true)
