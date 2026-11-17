@@ -181,6 +181,18 @@ describe("CI workflow contract", () => {
     expect(readFileSync(RELEASE_WORKFLOW_PATH, "utf8")).toContain(invocation);
   });
 
+  it("publishes from a GitHub-hosted runner, which npm provenance requires", () => {
+    // npm rejects a provenance bundle produced on a self-hosted runner
+    // (E422 "Unsupported GitHub Actions runner environment"), so the job that
+    // publishes with NPM_CONFIG_PROVENANCE must stay on a hosted label.
+    const releaseWorkflow = readFileSync(RELEASE_WORKFLOW_PATH, "utf8");
+    expect(releaseWorkflow).toContain("NPM_CONFIG_PROVENANCE");
+    const runnerLabels = [
+      ...releaseWorkflow.matchAll(/^\s*runs-on:\s*(.+)$/gm),
+    ].map((match) => match[1]?.trim());
+    expect(runnerLabels).toEqual(["ubuntu-24.04"]);
+  });
+
   it("detects metadata-only changes on pushes and pull requests", () => {
     const workflow = readFileSync(WORKFLOW_PATH, "utf8");
     const baseSha = runGit(fixtureDirectory, ["rev-parse", "HEAD"]);
