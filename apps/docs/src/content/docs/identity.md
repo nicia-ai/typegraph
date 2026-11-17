@@ -392,7 +392,12 @@ graph's, so it can list before or after this graph's own rows regardless of
 when it happened, and no comparison orders a restored `recorded` against a
 native one (`compareRecordedInstants` refuses the pair, and their strings sort
 by format, not time). Native transitions are in recorded order among
-themselves, and restored ones in their source's order among themselves. An
+themselves, and restored ones in their source's order among themselves. Transitions
+recorded in one commit share a revision and are listed in the order the commit
+recorded them, so two stores that record the same changes list them the same
+way; a split, for example, records one transition for each class it leaves
+behind. Transitions written by a release before 0.75.1 keep the arbitrary but
+stable order they already had within a revision. An
 audit timeline that mixes them places each restored transition by
 `restored.at`, the destination's wall clock when the restore inserted it, and
 each native one by its recorded wall time (`recordedInstantWallTime`, exported

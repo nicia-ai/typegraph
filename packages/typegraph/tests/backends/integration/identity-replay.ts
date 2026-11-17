@@ -67,6 +67,15 @@ async function provisionIdentityReplayStore(context: IntegrationTestContext) {
   return store;
 }
 
+function splitOrderGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: ReplayPerson } },
+    edges: {},
+    identity: { sameIdAcrossKinds: "fold" },
+  });
+}
+
 const DepartedPerson = defineNode("Person", { schema: z.object({}) });
 const DepartedOrg = defineNode("Org", { schema: z.object({}) });
 
@@ -1701,6 +1710,44 @@ export function registerIdentityReplayIntegrationTests(
           replayed.steps.map((step) => step.transition.transitionId),
         ).toEqual(ids(startsAfterCursor));
       });
+    });
+  });
+
+  describe("identity transitions recorded in one commit", () => {
+    const SPLIT_STORES = 12;
+
+    it("lists the transitions of one commit in the same order on every store", async () => {
+      // A retraction splits one class into two and records a transition for
+      // each, at one recorded revision. The readers order by revision and then
+      // by transition id, so the two list in id order: with an independent
+      // random id per row, separate stores that recorded the same split
+      // listed it in different orders.
+      const orders: string[] = [];
+      for (let index = 0; index < SPLIT_STORES; index += 1) {
+        const [store] = await createStoreWithSchema(
+          splitOrderGraph(`identity_split_order_${String(index)}`),
+          context.getStore().backend,
+          { history: true },
+        );
+        const a = await store.nodes.Person.create({}, { id: "split-a" });
+        const b = await store.nodes.Person.create({}, { id: "split-b" });
+        const joined = await store.identity.assertSame(a, b);
+        await store.identity.retractAssertion(joined.assertion.id);
+
+        const history = await store.identity.transitionsOf(a);
+        // One transition for the join, then two at the split's revision.
+        const revisions = history.transitions.map((transition) =>
+          recordedInstantRevision(nativeRecorded(transition)),
+        );
+        expect(revisions).toEqual([revisions[0], revisions[1], revisions[1]]);
+        orders.push(
+          history.transitions
+            .map((transition) => `${transition.cause}:${transition.class.id}`)
+            .join(" "),
+        );
+      }
+
+      expect([...new Set(orders)]).toEqual([orders[0]]);
     });
   });
 }
