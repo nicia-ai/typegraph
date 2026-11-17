@@ -370,9 +370,9 @@ export async function main(): Promise<void> {
         members.map((member) => member.id).join(", ");
       return `${step.transition.cause}: [${ids(step.before)}] -> [${ids(step.after)}]`;
     });
-    // A split records one transition for each class it leaves behind, in no
-    // fixed order. Both read the same from this document's side, so the
-    // account of its membership keeps one line per distinct change.
+    // A split records one transition for each class it leaves behind. Both
+    // read the same from this document's side, so the account of its
+    // membership keeps one line per distinct change.
     const account = [...new Set(lines)];
     for (const line of account) console.log(line);
     assertEqual(
