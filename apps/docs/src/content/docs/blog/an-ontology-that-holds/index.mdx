@@ -1,7 +1,7 @@
 ---
 title: "An Ontology That Holds"
-date: 2026-11-14
-excerpt: "TypeGraph 0.75 makes every ontology relation do something: supertype queries return subtypes, parts are deleted with their whole, acyclic and target-side cardinality refuse bad edges, and tightening a relation is checked against the rows you already have."
+date: 2026-11-16
+excerpt: "TypeGraph 0.75 makes every ontology relation do something: supertype queries return subtypes, parts are deleted with their whole, acyclic and target-side cardinality refuse bad edges, and tightening a relation is checked against the rows you already have. Plus a much smaller package root, and an apology for your import statements."
 tags:
   - announcements
 cover:
@@ -14,18 +14,34 @@ social:
 
 import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
 
-Until now, parts of a TypeGraph ontology were labels. You could declare that a
-`Section` is part of a `Document`, but the declaration wasn't tied to the edge
-that stored the containment, so deleting the document left its sections
-behind. A subclass only showed up in a supertype query when you asked for it,
-and a custom meta-edge was metadata that no read or write consulted.
+I have a confession about TypeGraph's ontology. For a long time, a fair amount
+of it was decoration. You could declare that a `Section` is part of a
+`Document`, and it read beautifully in a code review. Then you deleted the
+document, and its sections stayed right where they were, loyal parts of a whole
+that no longer existed. A subclass only showed up in a supertype query if you
+remembered to ask. A custom meta-edge was metadata that no read or write ever
+looked at. The ontology described your domain the way a poster describes a
+company's values.
 
-In 0.75 every relation the ontology declares has a defined effect on reads,
-writes, schema changes and merges, and the store refuses the writes that would
-break one. This post walks through the parts you'll touch
-first on a small documentation graph: documents, runbooks (a kind of
-document), and the sections they're made of. The outputs below come from
-running this code on SQLite.
+## Why would you want an ontology?
+
+Fair question, and the word doesn't help. It sounds like something you'd need a philosophy degree and a committee for, or pay Palantir to build for you.
+
+Here's the plain version. Your domain already has rules. A runbook is a kind of document. A section belongs to one document. Dependencies don't loop. Everyone on your team knows them, and they're written down nowhere the database can see. So they get enforced in application code: once in the API, again in the import script, differently in the background job, and not at all in the one-off migration someone ran on a Friday.
+
+An ontology is those rules, declared once, next to the schema. The database then applies them on every read and every write, including the ones you forgot about and the ones written by someone, or something, that never read your wiki. If you have agents writing to your graph, that last part is most of the point: a rule the store enforces is the only kind an agent reliably follows.
+
+That's the promise. Until now TypeGraph kept about half of it. 0.75 is the
+release where it keeps the rest: every relation the ontology declares now has a
+defined effect on reads, writes, schema changes and merges, and the store
+refuses the writes that would break one. If you say a section is part of a
+document, the database behaves as though you meant it.
+
+It's the biggest release I've shipped, and it breaks more than any release
+before it, so this post is part tour and part apology. The tour comes first:
+the pieces you'll touch soonest, on a small documentation graph with documents,
+runbooks (a kind of document) and the sections they're made of. The outputs
+below come from running this code on SQLite.
 
 ```typescript
 const Document = defineNode("Document", {
@@ -83,6 +99,12 @@ The graph holds one plain document, `doc-architecture`, and two runbooks,
 
 ## Supertypes include their subtypes
 
+Here's a question with an obvious answer: if a runbook is a kind of document,
+and you ask for every document, do you get the runbooks? Before 0.75 the answer
+was "only if you opted in", which is how you end up with a search page that
+quietly leaves out a whole category of content and a bug report titled "search
+is broken (sometimes)".
+
 ```typescript
 const titles = await store
   .query()
@@ -108,25 +130,35 @@ const documentsOnly = await store
 ```
 
 A query over `Document` now returns runbooks too, because a runbook is a
-document. One option, `expansion: "exact" | "subclasses" | "narrower"`,
-replaces `includeSubClasses` on `from()`, `to()` and `search()`, and the same
-answer drives endpoint admission, uniqueness scope, merge reconciliation and
-search. The `sectionOf` edge above never mentions `Runbook`, yet a runbook can
-hold sections, as the next section shows.
+document. When you do want only the plain ones, you say so. One option,
+`expansion: "exact" | "subclasses" | "narrower"`, replaces `includeSubClasses`
+on `from()`, `to()` and `search()`, and the same answer drives endpoint
+admission, uniqueness scope, merge reconciliation and search. Notice that the
+`sectionOf` edge above never mentions `Runbook`, yet a runbook can hold
+sections, as the next section shows. You declare the relationship once and it
+applies everywhere, which is the whole point of having declared it.
 
-That only makes sense if a runbook really is a document, so `subClassOf` is
-now checked: the child's Zod schema has to accept only values the parent's
-schema accepts, both at compile time and when the registry is built.
-`isStructuralSubtype(child, parent)` exposes the same verdict.
-`equivalentTo` between two registered kinds is now subsumption in both
-directions.
+All of that only makes sense if a runbook really is a document, and I no longer
+take your word for it. `subClassOf` is now checked: the child's Zod schema has
+to accept only values the parent's schema accepts, both at compile time and
+when the registry is built. If your `Runbook` has drifted away from `Document`,
+you find out when you define the graph, not when a query hands a runbook to
+code expecting a document. `isStructuralSubtype(child, parent)` exposes the
+same verdict, and `equivalentTo` between two registered kinds is now
+subsumption in both directions.
 
 ## Parts go with their whole
 
-`partOf(Section, Document, { via: sectionOf })` declares a composition, and
-`via` names the edge that stores it. A part has at most one whole, enforced by
-a claim across every edge that realizes the relation. You attach a part when
-you create it:
+Every app that models containment by hand eventually grows the same cleanup
+job: the one that sweeps up comments on deleted posts, line items on deleted
+invoices, steps of deleted runbooks. It runs nightly, it's nobody's favorite
+code, and it exists because the database was never told that those things
+belong to each other.
+
+Now you can tell it. `partOf(Section, Document, { via: sectionOf })` declares a
+composition, and `via` names the edge that stores it. A part has at most one
+whole, enforced by a claim across every edge that realizes the relation. You
+attach a part when you create it:
 
 ```typescript
 const steps = ["Detect the failure", "Promote the replica", "Repoint clients"];
@@ -138,9 +170,11 @@ for (const [index, heading] of steps.entries()) {
 }
 ```
 
-Deleting a whole deletes its parts in the same transaction, leaf-first. Since
-that is a bigger delete than it looks, `planDelete` shows what it would remove,
-computed by the same planner the delete runs:
+Deleting a whole deletes its parts in the same transaction, leaf-first, so the
+cleanup job can retire. But "this delete is bigger than it looks" is a sentence
+that should make anyone nervous, me included. So `planDelete` shows what a
+delete would remove before you run it, computed by the same planner the delete
+uses:
 
 ```typescript
 const plan = await store.nodes.Runbook.planDelete(failover.id);
@@ -160,9 +194,10 @@ Section failover-3 (part of rb-failover via sectionOf)
 3 edges removed
 ```
 
-Show that to a person, and pass it back as a guard when they confirm. If
-someone adds a step while the dialog is open, the delete refuses instead of
-removing a section nobody saw:
+That's your "Are you sure?" dialog, with real contents for once. Show the plan
+to a person, and pass it back as a guard when they confirm. If a colleague adds
+a step while the dialog is open, the delete refuses instead of removing a
+section nobody saw:
 
 ```typescript
 await store.nodes.Section.create(
@@ -191,9 +226,14 @@ a part in two wholes at once.
 
 ## Relations that can't close a loop
 
-`acyclic: true` declares that an edge kind never forms a cycle. Every write
-that could add an edge to it is checked first, and a batch is checked as a
-whole before its first row is written:
+Everyone has a relation that must never loop: dependencies, reporting lines,
+folder trees, "this replaces that". And everyone discovers the loop the same
+way, when a job that walks the relation doesn't come back. The usual fix is a
+depth limit and a comment that says "should never happen".
+
+`acyclic: true` makes it not happen. It declares that an edge kind never forms
+a cycle. Every write that could add an edge to it is checked first, and a batch
+is checked as a whole before its first row is written:
 
 ```typescript
 await store.edges.dependsOn.create(overview, incident, {}, { id: "dep-1" });
@@ -215,22 +255,30 @@ doc-architecture -> rb-incident -> rb-cache-flush
 [ 'dep-1 (stored)', 'dep-2 (stored)' ]
 ```
 
-The refusal carries a witness: the path the new edge would close, so you can
-show someone which dependency to remove instead of only saying no. Graph merge
+A database that only says "no" is a database you end up arguing with. So the
+refusal carries a witness: the path the new edge would close. You can show
+someone exactly which dependency is in the way. Graph merge
 runs the same check while it builds a plan and reports a cycle the plan would
 close as an `AcyclicityMergeConflictError` with the same witness.
 
-The check walks the edges reachable from the new edge's target. On a relation
-of 100,000 edges, a typical insert costs about as much as a `cardinality: "one"`
-insert (0.2 ms on SQLite, about 4 ms on PostgreSQL). The worst case is an edge
-pointing at the head of a long chain, where the walk visits every reachable
-edge: about 220 ms on SQLite for a chain of that size.
+This isn't free, and I'd rather you hear the cost from me. The check walks the
+edges reachable from the new edge's target. On a relation of 100,000 edges, a
+typical insert costs about as much as a `cardinality: "one"` insert (0.2 ms on
+SQLite, about 4 ms on PostgreSQL). The worst case is an edge pointing at the
+head of a long chain, where the walk visits every reachable edge: about 220 ms
+on SQLite for a chain of that size. If your relation is one enormous chain,
+measure before you turn this on.
 
 ## Bounds on both ends
 
-`cardinality` limits the edges leaving a node. `targetCardinality` limits the
-edges arriving at one, so "each document is superseded at most once" is now a
-declaration rather than application code:
+`cardinality` has always limited the edges leaving a node. But half of the
+rules people actually have point the other way: a seat has one occupant, an
+invoice is paid by one payment, a document is superseded at most once. Until
+now those lived in application code, guarded by a read-then-write that two
+requests could both pass.
+
+`targetCardinality` limits the edges arriving at a node, so the rule becomes a
+declaration:
 
 ```typescript
 await store.edges.supersedes.create(overviewV2, overview);
@@ -242,13 +290,18 @@ CardinalityError: Cardinality violation: "supersedes" targeting Document/doc-arc
 ```
 
 It's enforced atomically on every write path, through the same claims as the
-source side.
+source side, so the two-requests-at-once case is refused too, not only the
+polite sequential one above.
 
 ## Tightening a schema checks your data first
 
-Declaring a relation is easy on an empty graph. On a populated one, the
-question is whether the rows you already have satisfy it. Here two documents
-link to each other, and a new release of the graph declares `linksTo` acyclic:
+Everything so far is easy on an empty graph. The interesting day is the one
+when you add a rule to a database that has been running without it for a year
+and has developed opinions. The question then is whether the rows you already
+have satisfy the rule, and the worst possible answer is finding out later.
+
+Here two documents link to each other, and a new release of the graph declares
+`linksTo` acyclic:
 
 ```typescript
 await store.edges.linksTo.create(overview, incident, {}, { id: "link-1" });
@@ -276,8 +329,8 @@ try {
 ]
 ```
 
-The commit is refused and nothing is published. Remove the back-link and the
-same call migrates:
+The commit is refused, nothing is published, and you get a list of the exact
+rows in the way. Remove the back-link and the same call migrates:
 
 ```text
 [ 'Edge "linksTo" declared acyclic: true' ]
@@ -296,13 +349,40 @@ enforce it.
 
 ## Identity history
 
-On a graph with [operational identity](/identity) and `history: true`, the
-store now keeps an append-only log of every change to a node's identity class.
-`store.identity.transitionsOf(ref)` and `replay(ref)` return each change with
-its cause, both temporal coordinates and, for a change a merge applied, the
-branch, plan and review that produced it. Replay reconstructs membership
-through the same historical reader as `asOfRecorded`, so it can't disagree
-with a read.
+"Why does the system think these two records are the same person?" is a
+question you'd like to answer with something better than a shrug. On a graph
+with [operational identity](/identity) and `history: true`, the store now keeps
+an append-only log of every change to a node's identity class.
+
+Say the architecture overview also exists as a page in the old wiki. Someone
+marks the two records as the same document, then thinks better of it:
+
+```typescript
+const joined = await store.identity.assertSame(overview, wikiCopy);
+await store.identity.retractAssertion(joined.assertion.id);
+
+const history = await store.identity.replay(overview);
+const lines = history.steps.map((step) => {
+  const ids = (members: typeof step.before) =>
+    members.map((member) => member.id).join(", ");
+  return `${step.transition.cause}: [${ids(step.before)}] -> [${ids(step.after)}]`;
+});
+console.log([...new Set(lines)].join("\n"));
+```
+
+```text
+assert: [doc-architecture] -> [doc-architecture, wiki-architecture]
+retract: [doc-architecture, wiki-architecture] -> [doc-architecture]
+```
+
+That's the whole story of the belief, in order: joined, then split. (A split
+is logged once for each class it leaves behind, so the `Set` folds the two
+entries that read the same from this document's side.) Each step also carries
+when it happened in both valid and recorded time and, for a change a merge applied,
+the branch, plan and review that produced it. `transitionsOf(ref)` returns the
+same changes without the before-and-after membership. Replay reconstructs
+membership through the same historical reader as `asOfRecorded`, so it can't
+disagree with a read.
 
 Graph merge carries identity through branches with fixed rules: a three-way
 classification of every staged assertion, a hard conflict when two branches
@@ -312,33 +392,114 @@ certain to fail at apply (two branches filling one `targetCardinality` slot,
 moving one part to different wholes, closing a cycle) are now refused while
 the plan is built, not halfway through the commit.
 
-## Upgrading
+## Putting it together
 
-- **Base schema version 9.** This release adds the identity transition log
-  and a retention column on the recorded clock. A privileged open
-  (`createStoreWithSchema`) or `backend.adoptBaseSchema()` adopts it in place.
-  Until one runs, a DML-only runtime such as `createVerifiedStore` refuses with
-  `BaseSchemaMigrationError`. The bump is one-way, so upgrade every reader of a
-  shared database before any process opens it with 0.75.
+Look back at the graph definition at the top of this post. The ontology is two
+lines, and the edge rules are three options. Here's what those five
+declarations bought:
+
+| You declare                          | You stop writing                                                           |
+| ------------------------------------ | -------------------------------------------------------------------------- |
+| `subClassOf(Runbook, Document)`      | the opt-in flag on every query, and the search bug when someone forgets it |
+| `partOf(Section, Document, { via })` | the nightly job that sweeps up orphans                                     |
+| `acyclic: true`                      | the depth limit and the "should never happen" comment                      |
+| `targetCardinality: "one"`           | the read-then-write check that two requests can both pass                  |
+| a tighter rule on a live graph       | the data audit you run after the migration, hoping                         |
+
+Five declarations, five pieces of code nobody enjoyed owning. And none of it
+is specific to documentation. The same shapes turn up wherever the rules are
+about how things relate:
+
+- **An org chart.** Reporting lines can't loop, and everyone has one manager,
+  however many people would like to be it.
+- **A bill of materials.** Components go with their assembly, and a revision
+  supersedes exactly one predecessor.
+- **Permissions.** A group can't contain itself, directly or through four
+  other groups, and a service account is a kind of principal.
+- **Agent memory.** An agent can't file a fact under a type it doesn't fit, or
+  attach a part to two wholes, no matter how confident it sounds.
+
+The whole tour is one runnable file,
+[An Ontology, End to End](/examples/ontology-end-to-end), with every output in
+this post asserted, so it can't drift from what the library does.
+
+## The rest of 0.75: fewer ways to be quietly wrong
+
+While I had the patient open, I fixed a pile of things that had nothing to do
+with ontology and everything to do with the library giving you a plausible
+answer where it should have given you an error.
+
+- **`orderBy` now knows your fields.** `orderBy("u", "createdAt")` on a kind
+  with no `createdAt` property used to compile, run, and sort by nothing at
+  all. The field name is now typed, so a typo is a red squiggle, and the
+  system timestamp is spelled the way a selected row spells it:
+  `"meta.createdAt"`.
+- **Pagination that paginates.** `stream()` and `paginate()` over full nodes
+  ordered by a system field returned the first page forever. I'd love to say
+  this was subtle. It wasn't; it just needed someone to read past page one.
+- **`like()` means the same thing on both databases.** It was case-sensitive
+  on PostgreSQL and case-insensitive on SQLite, which is a fun thing to
+  discover in production. It's case-sensitive on both now; `ilike()` is there
+  when you want the other one.
+- **Listings on PostgreSQL stop sorting the whole table.** `nodes.find()` on a
+  kind with two million rows went from about 285 ms a page to under a
+  millisecond in my benchmark, thanks to
+  [one new index](/performance/indexes#live-listing-indexes-on-postgresql)
+  that should have been there all along.
+- **A package root you can read.** `@nicia-ai/typegraph` exported 911 names,
+  most of which only a backend author would ever want. It now exports 86: the
+  graph DSL, the store, the query helpers and the errors you'd catch.
+  Everything else still exists, behind an entrypoint named for what it is
+  (`/store`, `/query`, `/errors`, `/identity`, `/maintenance`). Your
+  autocomplete will thank me. Your import statements will not, which brings us
+  to the apology.
+
+## Upgrading (the apology)
+
+This release asks more of you than any before it. I batched the breaking
+changes on purpose, so you pay once instead of in five installments, but it's
+still a real upgrade. The short version:
+
+- **It's one-way. Upgrade every reader of a shared database together.** Base
+  schema goes to version 9. A privileged open (`createStoreWithSchema`) or
+  `backend.adoptBaseSchema()` adopts it in place, and earlier releases refuse
+  the database afterwards. Take a backup first; you were going to anyway.
+- **Imports move.** Names that left the package root are importable from their
+  new entrypoint, with no aliases. There's a machine-readable map of every
+  move, shipped in the package at `etc/root-export-moves.json`, so the rewrite
+  is a script and not an afternoon.
+- **`orderBy` system fields are renamed.** `"created_at"` becomes
+  `"meta.createdAt"`, and so on. The old names throw an error that tells you
+  the new one.
 - **Supertype queries return subtypes by default.** Pass
   `queryDefaults: { expansion: "exact" }` to `createStore` to keep the old
   behavior in one place. `includeSubClasses` is replaced by `expansion`.
 - **Deleting a whole deletes its parts.** A graph that declared `partOf`
   without `via` must name the realizing edge before it opens.
-- **Stored merge plans and reviews must be planned again.** Plans move to
-  format 3 and reviews to formats 3 and 4.
+- **`like()` on SQLite may return fewer rows.** Swap in `ilike()` where you
+  were relying on the old case-insensitive matching.
 - **`zod` peer range is now `^4.5.0`**, which the structural subtype check
   needs.
 - **Custom `metaEdge()` is gone**, along with the `InferenceType` union and the
   deprecated `sameAs`/`differentFrom` factories. Move free-form vocabulary to
   `defineGraph({ annotations })` and run `migrateSchema()` once.
+- **Stored merge plans and reviews must be planned again.** Plans move to
+  format 3 and reviews to formats 3 and 4.
 - **On PostgreSQL**, a role that writes into an `acyclic` or composition
-  relation needs `INSERT` and `UPDATE` on `typegraph_fences`.
+  relation needs `INSERT` and `UPDATE` on `typegraph_fences`. If your tables
+  are large, build the two new listing indexes before you deploy so your first
+  boot doesn't wait for them; the
+  [indexes guide](/performance/indexes#live-listing-indexes-on-postgresql) has
+  the statements.
 
-The [changelog](/changelog) has every breaking change with its migration.
+That list is the highlights. The [changelog](/changelog) has every breaking
+change with its migration, grouped by who it affects, and it's the thing to
+read before you upgrade anything you care about.
 
 ## Try it
 
+- [An Ontology, End to End](/examples/ontology-end-to-end): the runnable
+  source behind this post
 - [Composition](/ontology#composition) and
   [previewing a delete](/ontology#previewing-a-delete)
 - [Acyclic edges](/ontology#enforce-an-instance-level-taxonomy-with-acyclic-true)
