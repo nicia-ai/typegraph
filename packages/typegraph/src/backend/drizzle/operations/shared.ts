@@ -136,6 +136,35 @@ export function expectedValidFromPredicate(
   return sql` AND ${column} = ${expected}`;
 }
 
+/**
+ * The edges with one endpoint at a node, as `(graph AND from side) OR (graph
+ * AND to side)`. `graphId`, `kind` and `id` are bound values or columns of an
+ * outer row.
+ *
+ * The graph equality is repeated inside each arm, with no conjunct shared by
+ * both, on purpose. A shared `graph_id = ?` conjunct gives SQLite a
+ * single-index plan to weigh against the two endpoint seeks: with no
+ * `sqlite_stat1` it takes that plan and walks every edge in the graph. With
+ * the graph inside each arm, every plan SQLite can choose is the two endpoint
+ * index seeks. PostgreSQL plans both spellings as the same BitmapOr. An edge
+ * that is a self-loop matches both arms and is still one row.
+ */
+export function edgeAtEitherEndpoint(
+  edges: Tables["edges"],
+  endpoint: Readonly<{
+    graphId: SQLWrapper | string;
+    kind: SQLWrapper | string;
+    id: SQLWrapper | string;
+  }>,
+): SQL {
+  return sql`
+    (
+            (${edges.graphId} = ${endpoint.graphId} AND ${edges.fromKind} = ${endpoint.kind} AND ${edges.fromId} = ${endpoint.id})
+            OR (${edges.graphId} = ${endpoint.graphId} AND ${edges.toKind} = ${endpoint.kind} AND ${edges.toId} = ${endpoint.id})
+          )
+  `;
+}
+
 export function quotedColumn(column: { name: string }): SQL {
   return sql.raw(`"${column.name.replaceAll('"', '""')}"`);
 }

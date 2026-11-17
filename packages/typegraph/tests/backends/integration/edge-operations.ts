@@ -6,15 +6,22 @@ import {
   defineGraph,
   defineNode,
   EndpointNotFoundError,
+  RestrictedDeleteError,
 } from "../../../src";
 import {
   EDGE_IDENTITY_MISMATCH_CODE,
   ValidationError,
 } from "../../../src/errors";
 import { EndpointPairError } from "../../../src/errors-entry";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import { expectImmutableLowerBoundRefusal } from "../../test-utils";
-import { type IntegrationTestContext } from "./test-context";
+import {
+  type InspectableStore,
+  type IntegrationTestContext,
+} from "./test-context";
 
 /**
  * Local fixture for the `toString`-matchOn regression (issue #424): a schema
@@ -970,6 +977,146 @@ export function registerEdgeOperationIntegrationTests(
         requireDefined(aliceEdge).id,
       );
       expect(storedAliceEdge?.role).toBe("Engineer");
+    });
+  });
+
+  describe("deleting a node touches exactly its own edges", () => {
+    const EndpointItem = defineNode("EndpointItem", {
+      schema: z.object({ name: z.string() }),
+    });
+    const EndpointOther = defineNode("EndpointOther", {
+      schema: z.object({ name: z.string() }),
+    });
+    const endpointLink = defineEdge("endpointLink");
+    const endpointMention = defineEdge("endpointMention");
+    function endpointGraph(id: string, onDelete: "cascade" | "restrict") {
+      return defineGraph({
+        id,
+        nodes: {
+          EndpointItem: { type: EndpointItem, onDelete },
+          EndpointOther: { type: EndpointOther },
+        },
+        edges: {
+          endpointLink: {
+            type: endpointLink,
+            from: [EndpointItem],
+            to: [EndpointItem],
+          },
+          endpointMention: {
+            type: endpointMention,
+            from: [EndpointOther],
+            to: [EndpointItem],
+          },
+        },
+      });
+    }
+
+    async function storedEdgeIds(
+      store: InspectableStore<ReturnType<typeof endpointGraph>>,
+    ): Promise<readonly string[]> {
+      const { edgesTable } = createSqlSchema(store.backend.tableNames);
+      const rows = await store.backend.execute<Readonly<{ id: string }>>(
+        asCompiledRowsSql(
+          sql`SELECT id FROM ${edgesTable} WHERE graph_id = ${store.graphId}`,
+        ),
+      );
+      return rows.map((row) => row.id).toSorted();
+    }
+
+    it("hard delete removes the node's outgoing, incoming, self-loop and soft-deleted edges, and nothing else", async () => {
+      const store = await context.createStore(
+        endpointGraph("endpoint_delete_cascade", "cascade"),
+      );
+      const neighbor = await context.createStore(
+        endpointGraph("endpoint_delete_cascade_neighbor", "cascade"),
+      );
+      const shared = { id: "shared-endpoint" };
+      const target = await store.nodes.EndpointItem.create(
+        { name: "target" },
+        shared,
+      );
+      const b = await store.nodes.EndpointItem.create({ name: "b" });
+      const c = await store.nodes.EndpointItem.create({ name: "c" });
+      const sameIdOtherKind = await store.nodes.EndpointOther.create(
+        { name: "same id, other kind" },
+        shared,
+      );
+      const outgoing = await store.edges.endpointLink.create(target, b);
+      const incoming = await store.edges.endpointLink.create(c, target);
+      const selfLoop = await store.edges.endpointLink.create(target, target);
+      const tombstoned = await store.edges.endpointLink.create(target, c);
+      await store.edges.endpointLink.delete(tombstoned.id);
+      const unrelated = await store.edges.endpointLink.create(b, c);
+      const otherKindSameId = await store.edges.endpointMention.create(
+        sameIdOtherKind,
+        b,
+      );
+
+      const neighborTarget = await neighbor.nodes.EndpointItem.create(
+        { name: "target in another graph" },
+        shared,
+      );
+      const neighborB = await neighbor.nodes.EndpointItem.create({ name: "b" });
+      const neighborEdge = await neighbor.edges.endpointLink.create(
+        neighborTarget,
+        neighborB,
+      );
+
+      expect(await storedEdgeIds(store)).toEqual(
+        [
+          outgoing.id,
+          incoming.id,
+          selfLoop.id,
+          tombstoned.id,
+          unrelated.id,
+          otherKindSameId.id,
+        ].toSorted(),
+      );
+
+      await store.nodes.EndpointItem.hardDelete(target.id);
+
+      expect(await storedEdgeIds(store)).toEqual(
+        [unrelated.id, otherKindSameId.id].toSorted(),
+      );
+      expect(await storedEdgeIds(neighbor)).toEqual([neighborEdge.id]);
+      expect(await store.nodes.EndpointItem.getById(target.id)).toBeUndefined();
+      expect(
+        await store.nodes.EndpointOther.getById(sameIdOtherKind.id),
+      ).toBeDefined();
+    });
+
+    it("a restricted delete refuses a node whose only live edge is incoming or a self-loop, and deletes an edge-free node", async () => {
+      const store = await context.createStore(
+        endpointGraph("endpoint_delete_restrict", "restrict"),
+      );
+      const source = await store.nodes.EndpointItem.create({ name: "source" });
+      const incomingOnly = await store.nodes.EndpointItem.create({
+        name: "incoming only",
+      });
+      const selfLoopOnly = await store.nodes.EndpointItem.create({
+        name: "self-loop only",
+      });
+      const edgeFree = await store.nodes.EndpointItem.create({
+        name: "edge-free",
+      });
+      await store.edges.endpointLink.create(source, incomingOnly);
+      await store.edges.endpointLink.create(selfLoopOnly, selfLoopOnly);
+
+      await expect(
+        store.nodes.EndpointItem.bulkDelete([incomingOnly.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+      await expect(
+        store.nodes.EndpointItem.bulkDelete([selfLoopOnly.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+
+      await store.nodes.EndpointItem.bulkDelete([edgeFree.id]);
+
+      expect(
+        await store.nodes.EndpointItem.getById(edgeFree.id),
+      ).toBeUndefined();
+      for (const kept of [source, incomingOnly, selfLoopOnly]) {
+        expect(await store.nodes.EndpointItem.getById(kept.id)).toBeDefined();
+      }
     });
   });
 

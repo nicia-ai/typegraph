@@ -34,6 +34,7 @@ import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
   castBoundValueForColumn,
   codePointOrderKey,
+  edgeAtEitherEndpoint,
   expectedValidFromPredicate,
   nodeColumnList,
   qualifiedColumn,
@@ -1236,12 +1237,8 @@ export function buildAtomicNodeDeleteBatchWithSchemaFence(
           WHEN EXISTS (
             SELECT 1
             FROM ${edges}
-            WHERE ${edges.graphId} = ${nodes.graphId}
-              AND ${edges.deletedAt} IS NULL
-              AND (
-                (${edges.fromKind} = ${nodes.kind} AND ${edges.fromId} = ${nodes.id})
-                OR (${edges.toKind} = ${nodes.kind} AND ${edges.toId} = ${nodes.id})
-              )
+            WHERE ${edges.deletedAt} IS NULL
+              AND ${edgeAtEitherEndpoint(edges, { graphId: nodes.graphId, kind: nodes.kind, id: nodes.id })}
           ) THEN NULL
           ELSE ${nodes.props}
         END

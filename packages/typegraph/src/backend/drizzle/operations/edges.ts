@@ -27,6 +27,7 @@ import type {
 import { rowPropsToJsonText } from "../../types";
 import {
   castBoundValueForColumn,
+  edgeAtEitherEndpoint,
   edgeColumnList,
   expectedValidFromPredicate,
   qualifiedColumn,
@@ -1423,11 +1424,7 @@ export function buildHardDeleteEdgesByNode(
 
   return sql`
     DELETE FROM ${edges}
-    WHERE ${edges.graphId} = ${graphId}
-      AND (
-        (${edges.fromKind} = ${nodeKind} AND ${edges.fromId} = ${nodeId})
-        OR (${edges.toKind} = ${nodeKind} AND ${edges.toId} = ${nodeId})
-      )
+    WHERE ${edgeAtEitherEndpoint(edges, { graphId, kind: nodeKind, id: nodeId })}
   `;
 }
 
