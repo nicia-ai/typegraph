@@ -214,42 +214,96 @@ function personMembership(id: string, labelId: string) {
   return { id, kind: "Person", labelId, labelKind: "Person" };
 }
 
+const ITERATIVE_WORKING_TABLE_PREFIX = "typegraph_iterative_";
+const ITERATIVE_NEIGHBOR_TABLE_PREFIX = "typegraph_iterative_n_";
+const ITERATIVE_ASSIGNMENT_TABLE_PREFIX = "typegraph_iterative_a_";
+
+type IterativeTableNames = Readonly<{
+  working: string;
+  neighbor: string;
+  assignment: string;
+}>;
+
+/**
+ * The temporary tables of one label-propagation run, read from the statements
+ * it issued: the working table `typegraph_iterative_<run>` and the neighbor
+ * and assignment tables `typegraph_iterative_{n,a}_<run>`.
+ *
+ * A run id is random and can itself start with `n_` or `a_`, so a name cannot
+ * be classified by its prefix: `typegraph_iterative_n_x` is the neighbor table
+ * of run `x` or the working table of run `n_x`. The working table is the one
+ * identifier whose neighbor-prefixed twin also appears.
+ */
+function iterativeTableNames(
+  statements: readonly string[],
+): IterativeTableNames | undefined {
+  const identifiers = new Set(
+    statements.flatMap((statement) =>
+      [...statement.matchAll(/"(typegraph_iterative_[^"]+)"/gu)].flatMap(
+        (match) => (match[1] === undefined ? [] : [match[1]]),
+      ),
+    ),
+  );
+  for (const working of identifiers) {
+    const run = working.slice(ITERATIVE_WORKING_TABLE_PREFIX.length);
+    const neighbor = `${ITERATIVE_NEIGHBOR_TABLE_PREFIX}${run}`;
+    if (!identifiers.has(neighbor)) continue;
+    return {
+      working,
+      neighbor,
+      assignment: `${ITERATIVE_ASSIGNMENT_TABLE_PREFIX}${run}`,
+    };
+  }
+  return undefined;
+}
+
+function dropStatement(table: string): string {
+  return `DROP TABLE IF EXISTS "${table}"`;
+}
+
 function expectAuxiliaryTableDroppedBeforeWorkingTable(
   statements: readonly string[],
 ): void {
-  const workingTablePrefix = "typegraph_iterative_";
-  const neighborTablePrefix = "typegraph_iterative_n_";
-  const drops = statements.flatMap((statement, index) => {
-    const identifier = /^DROP TABLE IF EXISTS "([^"]+)"/u.exec(statement)?.[1];
-    return identifier === undefined ? [] : [{ identifier, index }];
-  });
-  const workingDrop = drops.find((drop) => {
-    if (!drop.identifier.startsWith(workingTablePrefix)) return false;
-    const suffix = drop.identifier.slice(workingTablePrefix.length);
-    const neighborIdentifier = `${neighborTablePrefix}${suffix}`;
-    return drops.some(
-      (candidate) => candidate.identifier === neighborIdentifier,
+  const tables = iterativeTableNames(statements);
+  expect(tables).toBeDefined();
+  if (tables === undefined) return;
+  const dropIndex = (table: string) =>
+    statements.findIndex((statement) =>
+      statement.startsWith(dropStatement(table)),
     );
-  });
-  expect(workingDrop).toBeDefined();
-  if (workingDrop === undefined) return;
-
-  const suffix = workingDrop.identifier.slice(workingTablePrefix.length);
-  const neighborIdentifier = `${neighborTablePrefix}${suffix}`;
-  const neighborDrop = drops.find(
-    (drop) => drop.identifier === neighborIdentifier,
-  );
-  expect(neighborDrop).toBeDefined();
-  if (neighborDrop === undefined) return;
-  expect(neighborDrop.index).toBeLessThan(workingDrop.index);
+  const neighborDrop = dropIndex(tables.neighbor);
+  const workingDrop = dropIndex(tables.working);
+  expect(neighborDrop).toBeGreaterThanOrEqual(0);
+  expect(workingDrop).toBeGreaterThanOrEqual(0);
+  expect(neighborDrop).toBeLessThan(workingDrop);
 }
 
 describe("temporary table cleanup assertion", () => {
   it("matches a working suffix that starts with the neighbor prefix", () => {
-    expectAuxiliaryTableDroppedBeforeWorkingTable([
+    const statements = [
       'DROP TABLE IF EXISTS "typegraph_iterative_n_n_regression"',
       'DROP TABLE IF EXISTS "typegraph_iterative_n_regression"',
-    ]);
+    ];
+    expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    expect(iterativeTableNames(statements)).toEqual({
+      working: "typegraph_iterative_n_regression",
+      neighbor: "typegraph_iterative_n_n_regression",
+      assignment: "typegraph_iterative_a_n_regression",
+    });
+  });
+
+  it("matches a working suffix that starts with the assignment prefix", () => {
+    expect(
+      iterativeTableNames([
+        'CREATE TEMP TABLE "typegraph_iterative_a_regression" (x)',
+        'CREATE TEMP TABLE "typegraph_iterative_n_a_regression" (x)',
+        'CREATE TEMP TABLE "typegraph_iterative_a_a_regression" (x)',
+      ]),
+    ).toEqual({
+      working: "typegraph_iterative_a_regression",
+      neighbor: "typegraph_iterative_n_a_regression",
+      assignment: "typegraph_iterative_a_a_regression",
+    });
   });
 });
 
@@ -1704,24 +1758,20 @@ describe("store.algorithms", () => {
 
       await labelStore.algorithms.labelPropagation({ edges: ["knows"] });
 
+      const tables = requireDefined(iterativeTableNames(statements));
       const adjacencyWrites = statements.filter(
         (statement) =>
-          statement.includes('INSERT INTO "typegraph_iterative_n_') &&
+          statement.includes(`INSERT INTO "${tables.neighbor}"`) &&
           statement.includes('"typegraph_edges"'),
       );
       expect(adjacencyWrites).toHaveLength(1);
 
-      const auxiliaryIdentifiers = new Set(
-        statements.flatMap((statement) =>
-          [
-            ...statement.matchAll(
-              /"(typegraph_iterative_[an]_[a-zA-Z0-9_]+)"/g,
-            ),
-          ].flatMap((match) => (match[1] === undefined ? [] : [match[1]])),
-        ),
-      );
-      expect(auxiliaryIdentifiers.size).toBe(2);
-      for (const identifier of auxiliaryIdentifiers) {
+      // Both auxiliary relations are used, under PostgreSQL-safe names.
+      for (const identifier of [tables.neighbor, tables.assignment]) {
+        expect(
+          statements.some((statement) => statement.includes(`"${identifier}"`)),
+        ).toBe(true);
+        expect(identifier).toMatch(/^[a-zA-Z0-9_]+$/u);
         expect(identifier.length).toBeLessThanOrEqual(63);
       }
 
@@ -1954,14 +2004,13 @@ describe("store.algorithms", () => {
       ).rejects.toThrow("forced round failure");
 
       // The root failure survives both cleanup drops, in hook-then-table order.
+      const tables = requireDefined(iterativeTableNames(temporaryStatements));
       expect(temporaryStatements.at(-2)).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_n_',
+        dropStatement(tables.neighbor),
       );
-      const finalStatement = temporaryStatements.at(-1) ?? "";
-      expect(finalStatement).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      expect(temporaryStatements.at(-1)).toContain(
+        dropStatement(tables.working),
       );
-      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
     });
 
     it("propagates an auxiliary-cleanup failure after a computed result", async () => {
@@ -1979,10 +2028,11 @@ describe("store.algorithms", () => {
               ): Promise<void> {
                 const statement = requireDefined(backend.compileSql)(query).sql;
                 temporaryStatements.push(statement);
+                const neighbor =
+                  iterativeTableNames(temporaryStatements)?.neighbor;
                 if (
-                  statement.includes(
-                    'DROP TABLE IF EXISTS "typegraph_iterative_n_',
-                  )
+                  neighbor !== undefined &&
+                  statement.includes(dropStatement(neighbor))
                 ) {
                   throw new Error("forced cleanup failure");
                 }
@@ -2004,11 +2054,10 @@ describe("store.algorithms", () => {
       ).rejects.toThrow("forced cleanup failure");
 
       // The hook failure wins, and the working-table drop is still attempted.
-      const finalStatement = temporaryStatements.at(-1) ?? "";
-      expect(finalStatement).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      const tables = requireDefined(iterativeTableNames(temporaryStatements));
+      expect(temporaryStatements.at(-1)).toContain(
+        dropStatement(tables.working),
       );
-      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
     });
   });
 
