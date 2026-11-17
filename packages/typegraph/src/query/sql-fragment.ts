@@ -153,6 +153,14 @@ function appendChunks(chunks: SqlChunk[], fragment: SqlFragment): void {
   for (const chunk of getChunks(fragment)) chunks.push(chunk);
 }
 
+/**
+ * The most terms one compound SELECT (`UNION ALL` chain) may join on every
+ * engine: SQLite's default `SQLITE_LIMIT_COMPOUND_SELECT`. A statement built
+ * from caller-sized input splits its terms at this cap as well as at the
+ * bound-parameter budget.
+ */
+export const PORTABLE_COMPOUND_SELECT_TERMS_LIMIT = 500;
+
 /** How many bound parameters a fragment renders, placeholders included. */
 export function countSqlParameters(fragment: SqlFragment): number {
   let count = 0;

@@ -132,8 +132,8 @@ supplies its own lineage but whose store has neither is refused with
   caller-serialized cannot provide the evidence and is refused with
   `observedReadCommittedIsolation`.
 
-A history store answers from its recorded rows, one batched read per relation
-for all of the scopes. A `{ node }`, `{ edge }` or `edgesAt` scope is an index
+A history store answers from its recorded rows in batched reads, a few
+statements per relation however many scopes you declare. A `{ node }`, `{ edge }` or `edgesAt` scope is an index
 seek. A `{ nodeKind }` or `{ edgeKind }` scope reads that kind's recorded
 versions, and `{ graph: true }` the graph's, so their cost grows with that
 history. Other lineage sources answer from the key delta since the anchor,

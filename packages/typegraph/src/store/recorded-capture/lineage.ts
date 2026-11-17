@@ -198,6 +198,7 @@ import { getDialect } from "../../query/dialect";
 import { type DialectAdapter } from "../../query/dialect/types";
 import {
   countSqlParameters,
+  PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
   sql,
   type SqlFragment,
 } from "../../query/sql-fragment";
@@ -684,11 +685,13 @@ function recordedRegionKeysSelect(
 }
 
 /**
- * Splits `selects` into consecutive batches whose bound parameters fit
- * `budget`. A select that alone exceeds it is refused rather than sent to an
- * engine that would reject it.
+ * Splits `selects` into consecutive `UNION ALL` batches whose bound
+ * parameters fit `budget` and whose terms fit
+ * {@link PORTABLE_COMPOUND_SELECT_TERMS_LIMIT}. A select that alone exceeds
+ * the parameter budget is refused rather than sent to an engine that would
+ * reject it.
  */
-function batchesWithinParameterBudget(
+function compoundBatchesWithinLimits(
   selects: readonly SqlFragment[],
   budget: number,
 ): readonly (readonly SqlFragment[])[] {
@@ -708,7 +711,10 @@ function batchesWithinParameterBudget(
         },
       );
     }
-    if (currentParameters + parameters > budget) {
+    if (
+      currentParameters + parameters > budget ||
+      current.length === PORTABLE_COMPOUND_SELECT_TERMS_LIMIT
+    ) {
       batches.push(current);
       current = [];
       currentParameters = 0;
@@ -724,7 +730,7 @@ function batchesWithinParameterBudget(
  * Every region's first changed keys in one recorded relation, by region
  * index, each list in {@link compareChangedKeys} order. Regions are batched
  * as a `UNION ALL` of {@link recordedRegionKeysSelect}, as few statements as
- * the session's bound-parameter budget allows, read one after another: the
+ * the session's bound-parameter budget and the compound-term cap allow, read one after another: the
  * session is a transaction, and a driver may refuse overlapping queries on
  * one connection.
  */
@@ -753,7 +759,7 @@ async function recordedRelationRegionKeys(
         ];
   });
   const rows: Readonly<{ index: number; key: ReadSetChangedKey }>[] = [];
-  for (const batch of batchesWithinParameterBudget(
+  for (const batch of compoundBatchesWithinLimits(
     selects,
     recordedBindParamBudget(session),
   )) {

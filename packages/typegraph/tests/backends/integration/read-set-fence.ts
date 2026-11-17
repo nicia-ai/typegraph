@@ -70,7 +70,8 @@ const identityReadSetGraph = defineGraph({
 type IdentityReadSetGraph = typeof identityReadSetGraph;
 
 const REPORTED_KEYS_LIMIT = 100;
-const MANY_SCOPES = 400;
+/** Above two of SQLite's 500-term compound SELECTs, so the history path must split. */
+const MANY_SCOPES = 1100;
 
 type FenceTransaction = Pick<
   TransactionContext<ReadSetGraph>,
@@ -896,7 +897,7 @@ export function registerReadSetFenceIntegrationTests(
     });
 
     describe("many scopes", () => {
-      it("answers a call with hundreds of scopes and reports the right indexes", async () => {
+      it("answers a call with more scopes than one compound SELECT holds and reports the right indexes", async () => {
         const store = await createStore();
         const ids = Array.from(
           { length: MANY_SCOPES },
@@ -906,7 +907,7 @@ export function registerReadSetFenceIntegrationTests(
           ids.map((id) => ({ props: { title: id }, id })),
         );
         const anchor = await anchorNow(store);
-        const changedIndexes = [3, 150, MANY_SCOPES - 1];
+        const changedIndexes = [3, 499, 500, MANY_SCOPES - 1];
         for (const index of changedIndexes) {
           await store.nodes.Doc.update(
             asNodeId<typeof Document>(requireDefined(ids[index])),
@@ -921,7 +922,7 @@ export function registerReadSetFenceIntegrationTests(
           store,
           anchor,
           scopes,
-          "three changed scopes among hundreds",
+          "changed scopes on both sides of a compound-term split",
         );
 
         expect(error.details.changes.map((change) => change.index)).toEqual(
@@ -931,7 +932,7 @@ export function registerReadSetFenceIntegrationTests(
           store,
           await anchorNow(store),
           scopes,
-          "hundreds of unchanged scopes",
+          "over a thousand unchanged scopes",
         );
       });
     });
