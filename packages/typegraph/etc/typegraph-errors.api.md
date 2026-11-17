@@ -1149,6 +1149,8 @@ export type ReadSetScopeChange = Readonly<{
     scope: ReadSetScopeDescriptor;
     nodes: readonly ReadSetChangedKey[];
     edges: readonly ReadSetChangedKey[];
+    nodesTruncated: boolean;
+    edgesTruncated: boolean;
 }>;
 
 // @public

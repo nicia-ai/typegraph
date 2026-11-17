@@ -9,6 +9,8 @@
  *   fence lock, so the fence refuses it rather than deciding on stale reads.
  * - The fence's lock excludes a concurrent store writer until the holder
  *   commits, which is what makes "unchanged at the check" true at commit.
+ * - A writer already in flight when the fence is requested is waited for, and
+ *   its committed change is then reported, not missed.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -23,7 +25,10 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import {
+  ReadSetChangedError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   createGate,
@@ -64,7 +69,7 @@ function createPool(): Pool {
   return new Pool({
     connectionString: TEST_DATABASE_URL,
     connectionTimeoutMillis: 5000,
-    max: 4,
+    max: 2,
   });
 }
 
@@ -185,6 +190,45 @@ describe.runIf(process.env["POSTGRES_URL"])(
         "the blocked write must complete once the holder commits",
       ).not.toBe(TIMEOUT_SENTINEL);
       expect(await writerStore.nodes.Doc.find({})).toHaveLength(2);
+    });
+
+    it("waits for a writer already in flight, then reports that writer's committed change", async () => {
+      const { holder, writer } = requirePools();
+      const fenceStore = await storeOn(holder);
+      const writerStore = await storeOn(writer);
+      const seeded = await fenceStore.nodes.Doc.create({ title: "seed" });
+      const anchor = requireDefined(
+        await fenceStore.lineageRevisionNow(),
+        "the revision-tracked store must mint an anchor",
+      );
+
+      const writeApplied = createGate();
+      const commitWriter = createGate();
+      const writerTransaction = writerStore.transaction(async (tx) => {
+        await tx.nodes.Doc.update(seeded.id, { title: "in flight" });
+        writeApplied.open();
+        await commitWriter.opened;
+      });
+      await writeApplied.opened;
+
+      const fence = fenceStore
+        .transaction(async (tx) => {
+          await tx.assertUnchangedSince(anchor, [{ node: seeded }]);
+        })
+        .catch((error: unknown) => error);
+      expect(
+        await raceTimeout(fence, BLOCKED_WRITER_PROBE_MS),
+        "the fence must wait for the in-flight writer rather than decide before it commits",
+      ).toBe(TIMEOUT_SENTINEL);
+
+      commitWriter.open();
+      await writerTransaction;
+
+      const error = await raceTimeout(fence, WRITER_COMPLETION_TIMEOUT_MS);
+      expect(error).toBeInstanceOf(ReadSetChangedError);
+      expect((error as ReadSetChangedError).details.changes).toMatchObject([
+        { index: 0, nodes: [{ kind: "Doc", id: seeded.id }] },
+      ]);
     });
   },
 );

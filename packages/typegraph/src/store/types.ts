@@ -3166,7 +3166,8 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
      *   leave no evidence, so they are not seen. Every writer of the graph
      *   must be a history or revision-tracked Store.
      * - Identity assertions are not covered: an assertion that changes class
-     *   membership without changing a node or edge row is not a change here.
+     *   membership without changing a node or edge row is not a change here,
+     *   and an identity write in the span does not refuse the fence.
      * - Validity expiry is not covered: a row whose validity window closes
      *   between the read and the commit changes what a current read returns
      *   without any write.
@@ -3182,8 +3183,11 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
      *   is not verified against this one's journal. Dropping, disabling or
      *   partially installing the triggers is a change made outside the
      *   store, like a write that bypasses it.
-     * - Off the history path, the fence reads every change since the anchor
-     *   while holding the graph write lock, so its cost grows with the span,
+     * - Cost under the graph write lock: on a history store, row and
+     *   neighbourhood scopes are index seeks, while a kind scope reads that
+     *   kind's recorded versions and a whole-graph scope the graph's, so
+     *   their cost grows with that history. Off the history path, the fence
+     *   reads every change since the anchor, so its cost grows with the span,
      *   not with the read set.
      *
      * @example
@@ -3205,7 +3209,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
      * @throws KindNotFoundError when a scope names a kind the graph does not
      *   register.
      * @throws ConfigurationError (`details.code` `READ_SET_SCOPE_INVALID`)
-     *   when a scope names no target or several, carries a key its target
+     *   when a scope is not an object, names no target or several, carries a key its target
      *   does not define, or has a malformed reference or direction.
      * @throws UnsupportedBackendCapabilityError when the transaction is
      *   `accessMode: "read_only"`, or the store has no lineage source
@@ -3217,7 +3221,9 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
      *   the changes since `anchor` (an unknown or pre-`clear()` anchor, or a
      *   revision in the span that left no evidence).
      * @throws ReadSetChangedError listing every changed scope with the node
-     *   and edge keys that changed in it.
+     *   and edge keys that changed in it: at most the first 100 of each in
+     *   `(kind, id)` order, with `nodesTruncated` / `edgesTruncated` set when
+     *   more changed.
      */
     assertUnchangedSince: (
       anchor: EngineRevision,

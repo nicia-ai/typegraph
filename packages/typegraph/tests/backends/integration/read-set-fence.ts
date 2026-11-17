@@ -2,12 +2,11 @@
  * Cross-backend contract for `tx.assertUnchangedSince()`, the read-set fence.
  *
  * Parameterized over both lineage sources the fence can ask: a history store
- * (exact, answered from the recorded relations by index seek) and a
- * revision-tracked live store (answered from the entity-key journal and
- * filtered per scope). The two agree on everything except one documented
- * conservative case, pinned at the bottom: a hard-deleted edge's endpoints are
- * unrecoverable on the journal source, so an `edgesAt` scope of that kind
- * refuses.
+ * (exact, answered from the recorded relations) and a revision-tracked live
+ * store (answered from the entity-key journal and filtered per scope). The two
+ * agree on everything except one documented conservative difference: the
+ * journal records no edge endpoints, so on that source an `edgesAt` scope
+ * counts every changed edge of its kind (`exactNeighbourhoods` below).
  *
  * Belongs in the shared suite because scope semantics are query-layer
  * behavior: only the same case on every backend certifies equivalence.
@@ -16,12 +15,16 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
+  type GraphBackend,
   type Store,
   type TransactionContext,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { EngineRevision } from "../../../src/backend/types";
 import {
   ConfigurationError,
@@ -58,6 +61,17 @@ const PLAIN_STORE_GRAPH = defineGraph({
   edges: {},
 });
 
+const identityReadSetGraph = defineGraph({
+  id: "read_set_fence_identity",
+  nodes: { Doc: { type: Document }, Note: { type: Note } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+type IdentityReadSetGraph = typeof identityReadSetGraph;
+
+const REPORTED_KEYS_LIMIT = 100;
+const MANY_SCOPES = 400;
+
 type FenceTransaction = Pick<
   TransactionContext<ReadSetGraph>,
   "assertUnchangedSince" | "nodes" | "edges"
@@ -75,9 +89,17 @@ type FenceStore = Pick<
     ) => Promise<T>;
   }>;
 
+type IdentityFenceStore = Pick<
+  Store<IdentityReadSetGraph>,
+  "nodes" | "identity" | "lineageRevisionNow" | "changesSince" | "transaction"
+>;
+
 type LineageFlavor = Readonly<{
   name: string;
   create: (context: IntegrationTestContext) => Promise<FenceStore>;
+  createWithIdentity: (
+    context: IntegrationTestContext,
+  ) => Promise<IdentityFenceStore>;
   /**
    * The history source keeps every version's endpoints and answers an
    * `edgesAt` scope exactly. The journal records only edge kind and id, so it
@@ -91,15 +113,23 @@ const FLAVORS: readonly LineageFlavor[] = [
   {
     name: "history store",
     create: (context) => context.createHistoryStore(readSetGraph),
+    createWithIdentity: (context) =>
+      context.createHistoryStore(identityReadSetGraph),
     exactNeighbourhoods: true,
   },
   {
     name: "revision-tracked live store",
     create: (context) =>
       context.createStore(readSetGraph, { revisionTracking: true }),
+    createWithIdentity: (context) =>
+      context.createStore(identityReadSetGraph, { revisionTracking: true }),
     exactNeighbourhoods: false,
   },
 ];
+
+function paddedId(index: number): string {
+  return `capped-${String(index).padStart(4, "0")}`;
+}
 
 async function seed(store: FenceStore) {
   const a = await store.nodes.Doc.create({ title: "a" });
@@ -294,6 +324,8 @@ export function registerReadSetFenceIntegrationTests(
             scope: { target: "node", kind: "Doc", id: a.id },
             nodes: [{ kind: "Doc", id: a.id }],
             edges: [],
+            nodesTruncated: false,
+            edgesTruncated: false,
           },
         ]);
       });
@@ -581,6 +613,8 @@ export function registerReadSetFenceIntegrationTests(
             scope: { target: "node", kind: "Doc", id: a.id },
             nodes: [{ kind: "Doc", id: a.id }],
             edges: [],
+            nodesTruncated: false,
+            edgesTruncated: false,
           },
           {
             index: 2,
@@ -593,6 +627,8 @@ export function registerReadSetFenceIntegrationTests(
             },
             nodes: [],
             edges: [{ kind: "cites", id: edge.id }],
+            nodesTruncated: false,
+            edgesTruncated: false,
           },
         ]);
       });
@@ -731,6 +767,29 @@ export function registerReadSetFenceIntegrationTests(
         );
       });
 
+      it("refuses a scope that is not an object", async () => {
+        const store = await createStore();
+        await seed(store);
+        const anchor = await anchorNow(store);
+        const malformedScopes = [
+          // eslint-disable-next-line unicorn/no-null -- a null scope is the case under test
+          null,
+          "node",
+          7,
+          ["node"],
+        ] as unknown as readonly Scope[];
+        for (const scope of malformedScopes) {
+          const error = await rejectionOf(assertFence(store, anchor, [scope]));
+          expect(
+            error,
+            `scope ${JSON.stringify(scope)} must be refused as invalid`,
+          ).toBeInstanceOf(ConfigurationError);
+          expect((error as ConfigurationError).details["code"]).toBe(
+            "READ_SET_SCOPE_INVALID",
+          );
+        }
+      });
+
       it("refuses a read-only transaction, because the fence takes the write lock", async () => {
         const store = await createStore();
         await seed(store);
@@ -747,6 +806,133 @@ export function registerReadSetFenceIntegrationTests(
         expect(
           (error as UnsupportedBackendCapabilityError).details,
         ).toMatchObject({ operation: "tx.assertUnchangedSince()" });
+      });
+    });
+
+    describe("identity writes", () => {
+      it("does not refuse the fence for an identity assertion in the span, while changesSince stays unbounded", async () => {
+        const store = await flavor.createWithIdentity(context);
+        const document = await store.nodes.Doc.create({
+          title: "identity doc",
+        });
+        const note = await store.nodes.Note.create({ body: "identity note" });
+        const anchor = requireDefined(
+          await store.lineageRevisionNow(),
+          "the lineage store must mint an anchor",
+        );
+
+        await store.identity.assertSame(document, note);
+
+        await store.transaction(async (tx) => {
+          await tx.assertUnchangedSince(anchor, [
+            { node: document },
+            { node: note },
+            { nodeKind: "Doc" },
+            { graph: true },
+          ]);
+        });
+        expect(
+          await store.changesSince(anchor),
+          "the public key delta cannot name an identity write and must keep refusing",
+        ).toEqual({ kind: "unbounded" });
+      });
+    });
+
+    describe("reported key caps", () => {
+      it("reports at most the first 100 keys of a scope in (kind, id) order and flags the truncation", async () => {
+        const store = await createStore();
+        await seed(store);
+        const anchor = await anchorNow(store);
+        const total = REPORTED_KEYS_LIMIT + 5;
+        await store.nodes.Doc.bulkCreate(
+          // Created in reverse so a first-100 answer cannot come from insertion order.
+          Array.from({ length: total }, (_, index) => ({
+            props: { title: `capped ${index}` },
+            id: paddedId(total - 1 - index),
+          })),
+        );
+
+        const error = await expectRefused(
+          store,
+          anchor,
+          [{ nodeKind: "Doc" }],
+          "more changed rows than the reported-keys cap",
+        );
+
+        const [change] = error.details.changes;
+        expect(change?.nodesTruncated).toBe(true);
+        expect(change?.edgesTruncated).toBe(false);
+        expect(change?.edges).toEqual([]);
+        expect(change?.nodes).toEqual(
+          Array.from({ length: REPORTED_KEYS_LIMIT }, (_, index) => ({
+            kind: "Doc",
+            id: paddedId(index),
+          })),
+        );
+      });
+
+      it("does not flag a scope whose changed keys exactly fill the cap", async () => {
+        const store = await createStore();
+        await seed(store);
+        const anchor = await anchorNow(store);
+        await store.nodes.Doc.bulkCreate(
+          Array.from({ length: REPORTED_KEYS_LIMIT }, (_, index) => ({
+            props: { title: `exact ${index}` },
+            id: paddedId(index),
+          })),
+        );
+
+        const error = await expectRefused(
+          store,
+          anchor,
+          [{ nodeKind: "Doc" }],
+          "exactly as many changed rows as the cap",
+        );
+
+        const [change] = error.details.changes;
+        expect(change?.nodes).toHaveLength(REPORTED_KEYS_LIMIT);
+        expect(change?.nodesTruncated).toBe(false);
+      });
+    });
+
+    describe("many scopes", () => {
+      it("answers a call with hundreds of scopes and reports the right indexes", async () => {
+        const store = await createStore();
+        const ids = Array.from(
+          { length: MANY_SCOPES },
+          (_, index) => `scoped-${String(index).padStart(4, "0")}`,
+        );
+        await store.nodes.Doc.bulkCreate(
+          ids.map((id) => ({ props: { title: id }, id })),
+        );
+        const anchor = await anchorNow(store);
+        const changedIndexes = [3, 150, MANY_SCOPES - 1];
+        for (const index of changedIndexes) {
+          await store.nodes.Doc.update(
+            asNodeId<typeof Document>(requireDefined(ids[index])),
+            { title: "changed" },
+          );
+        }
+
+        const scopes: readonly Scope[] = ids.map((id) => ({
+          node: { kind: "Doc" as const, id: asNodeId<typeof Document>(id) },
+        }));
+        const error = await expectRefused(
+          store,
+          anchor,
+          scopes,
+          "three changed scopes among hundreds",
+        );
+
+        expect(error.details.changes.map((change) => change.index)).toEqual(
+          changedIndexes,
+        );
+        await expectPasses(
+          store,
+          await anchorNow(store),
+          scopes,
+          "hundreds of unchanged scopes",
+        );
       });
     });
 
@@ -799,6 +985,118 @@ export function registerReadSetFenceIntegrationTests(
         "conservatively refuses: a hard-deleted edge of that kind at a different node still refuses",
         hardDeleteElsewhere,
       );
+    });
+  });
+
+  describe("read-set fence: revision without recorded evidence", () => {
+    it("refuses as unverifiable when a revision-tracking-only writer advanced the clock behind a history store", async () => {
+      const historyStore = await context.createHistoryStore(readSetGraph);
+      const { a } = await seed(historyStore);
+      const anchor = await anchorNow(historyStore);
+
+      const [trackingOnlyStore] = await createStoreWithSchema(
+        readSetGraph,
+        context.getBackend(),
+        { revisionTracking: true },
+      );
+      await trackingOnlyStore.nodes.Doc.create({
+        title: "no recorded evidence",
+      });
+
+      const error = await rejectionOf(
+        assertFence(historyStore, anchor, [{ node: a }]),
+      );
+      expect(
+        error,
+        "a revision with no recorded row cannot be proven out of scope",
+      ).toBeInstanceOf(ReadSetUnverifiableError);
+    });
+  });
+
+  describe("read-set fence: backend-declared lineage", () => {
+    type EngineDelta = Awaited<
+      ReturnType<NonNullable<GraphBackend["lineage"]>["changesSince"]>
+    >;
+
+    function declareLineage(delta: () => EngineDelta): GraphBackend {
+      return deriveBackend(context.getBackend(), {
+        lineage: {
+          revision: () =>
+            Promise.resolve("declared-revision" as EngineRevision),
+          changesSince: () => Promise.resolve(delta()),
+        },
+      });
+    }
+
+    async function storeOver(backend: GraphBackend): Promise<FenceStore> {
+      const [store] = await createStoreWithSchema(readSetGraph, backend, {
+        revisionTracking: true,
+      });
+      return store;
+    }
+
+    const ANCHOR = "declared-revision" as EngineRevision;
+
+    it("answers from the backend's own key delta: refuses an in-scope key and passes an out-of-scope one", async () => {
+      let delta: EngineDelta = {
+        kind: "keys",
+        nodes: [{ kind: "Doc", id: "declared-1" }],
+        edges: [],
+      };
+      const store = await storeOver(declareLineage(() => delta));
+
+      const error = await expectRefused(
+        store,
+        ANCHOR,
+        [{ nodeKind: "Doc" }],
+        "declared delta names a Doc",
+      );
+      expect(error.details.changes[0]?.nodes).toEqual([
+        { kind: "Doc", id: "declared-1" },
+      ]);
+      await expectPasses(
+        store,
+        ANCHOR,
+        [{ nodeKind: "Note" }],
+        "declared delta names no Note",
+      );
+
+      delta = { kind: "keys", nodes: [], edges: [] };
+      await expectPasses(
+        store,
+        ANCHOR,
+        [{ graph: true }],
+        "declared delta is empty",
+      );
+    });
+
+    it("refuses as unverifiable when the backend's delta is unbounded", async () => {
+      const store = await storeOver(
+        declareLineage(() => ({ kind: "unbounded" })),
+      );
+      const error = await rejectionOf(
+        assertFence(store, ANCHOR, [{ nodeKind: "Doc" }]),
+      );
+      expect(error).toBeInstanceOf(ReadSetUnverifiableError);
+    });
+
+    it("refuses with the graph write fence capability when no writer of the store takes the fence", async () => {
+      const [store] = await createStoreWithSchema(
+        PLAIN_STORE_GRAPH,
+        declareLineage(() => ({ kind: "keys", nodes: [], edges: [] })),
+      );
+      const error = await rejectionOf(
+        store.transaction(async (tx) => {
+          await tx.assertUnchangedSince(ANCHOR, []);
+        }),
+      );
+      expect(error).toBeInstanceOf(UnsupportedBackendCapabilityError);
+      expect(
+        (error as UnsupportedBackendCapabilityError).details,
+      ).toMatchObject({
+        operation: "tx.assertUnchangedSince()",
+        capability: "graphWriteFence",
+      });
     });
   });
 

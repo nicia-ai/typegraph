@@ -85,7 +85,7 @@ change counts, including one that was later reversed.
 | Outcome | Meaning | What to do |
 |---------|---------|------------|
 | Resolves | No declared scope changed | Write |
-| [`ReadSetChangedError`](/errors/#readsetchangederror) | One or more scopes changed; `details.changes` lists each scope with its changed node and edge keys | Re-read and retry with a new anchor |
+| [`ReadSetChangedError`](/errors/#readsetchangederror) | One or more scopes changed; `details.changes` lists each scope with its changed node and edge keys (see [Reported keys](#reported-keys)) | Re-read and retry with a new anchor |
 | [`ReadSetUnverifiableError`](/errors/#readsetunverifiableerror) | The lineage source could not prove the span: an unknown anchor, an anchor from before `store.clear()`, or a revision that left no evidence | Retrying with the same anchor cannot succeed. Take a new anchor and re-read |
 | `UnsupportedBackendCapabilityError` | The store cannot provide what the fence needs; `details.capability` names it | See below |
 
@@ -100,10 +100,20 @@ The capability refusals, all raised with `operation: "tx.assertUnchangedSince()"
 
 A read-only transaction is refused as any other write is, because the assertion
 takes the graph write lock. A kind named in a scope that the graph does not
-declare raises `KindNotFoundError`. A malformed scope — one naming no target or
-several, carrying a key its target does not take (such as `direction` on a
+declare raises `KindNotFoundError`. A malformed scope — one that is not an
+object, one naming no target or several, carrying a key its target does not take (such as `direction` on a
 `{ node }` scope), or with a malformed reference or direction — raises
 `ConfigurationError` with `details.code` `READ_SET_SCOPE_INVALID`.
+
+### Reported keys
+
+Each entry in `details.changes` names the scope (`index` is its position in the
+list you passed) and the keys that changed in it. The key lists are bounded so a
+refusal stays small however much changed: `nodes` and `edges` each hold at most
+the first 100 changed keys in `(kind, id)` order, compared by code point, and
+`nodesTruncated` or `edgesTruncated` is `true` exactly when more keys changed
+than the list holds. Treat a truncated scope as "re-read everything in it". The
+bound applies only to what is reported; any change in a scope refuses the write.
 
 ## Which stores support it
 
@@ -122,10 +132,13 @@ supplies its own lineage but whose store has neither is refused with
   caller-serialized cannot provide the evidence and is refused with
   `observedReadCommittedIsolation`.
 
-A history store answers each scope with an index seek over its recorded rows.
-Other lineage sources answer from the key delta since the anchor, filtered per
-scope; on those, an `edgesAt` scope is checked at edge-kind granularity (see
-[Limits](#limits)).
+A history store answers from its recorded rows, one batched read per relation
+for all of the scopes. A `{ node }`, `{ edge }` or `edgesAt` scope is an index
+seek. A `{ nodeKind }` or `{ edgeKind }` scope reads that kind's recorded
+versions, and `{ graph: true }` the graph's, so their cost grows with that
+history. Other lineage sources answer from the key delta since the anchor,
+filtered per scope; on those, an `edgesAt` scope is checked at edge-kind
+granularity (see [Limits](#limits)).
 
 ## Caller contract
 
@@ -133,7 +146,7 @@ scope; on those, an `edgesAt` scope is checked at edge-kind granularity (see
   change that lands in between. One taken before can only cause a false refusal.
 - **Call the assertion before the transaction's own writes.** On the key journal,
   an earlier write in the same transaction reads as a change, which is a false
-  refusal.
+  refusal. A history store does not see the transaction's own writes.
 - **Declare every read.** The fence checks the scopes you pass, not the reads you
   made. A read you did not declare is not protected.
 
@@ -145,7 +158,9 @@ scope; on those, an `edgesAt` scope is checked at edge-kind granularity (see
   evidence. Every writer of the graph must be a history or revision-tracked
   Store. This is the existing limit of `store.changesSince()`.
 - **Identity.** The fence covers node and edge rows. An identity assertion that
-  changes class membership without changing a row is not covered.
+  changes class membership without changing a row is not covered, and an
+  identity write in the span does not refuse the fence, on a history store or a
+  `revisionTracking` store alike.
 - **Validity expiry.** A row whose validity window closes between the read and
   the commit changes what a current read returns without any write. The fence
   covers writes, not the passage of time.
@@ -161,6 +176,8 @@ scope; on those, an `edgesAt` scope is checked at edge-kind granularity (see
   verified against this one's journal. Dropping, disabling or partially
   installing the triggers is a change made outside the store, like a write that
   bypasses it.
-- **Cost off the history path.** Sources that answer by key delta read every
-  change since the anchor while holding the graph write lock, so cost grows with
-  the span, not with the read set.
+- **Cost under the write lock.** On a history store, kind and whole-graph scopes
+  read the recorded versions they cover, so their cost grows with that history.
+  Sources that answer by key delta read every change since the anchor while
+  holding the graph write lock, so cost grows with the span, not with the read
+  set.

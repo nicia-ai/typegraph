@@ -2302,7 +2302,10 @@ after the anchor. `details.graphId` and `details.anchor` identify the check, and
 `details.changes` lists one entry per changed scope: its `index` in the list you
 passed, the `scope` as the fence resolved it (kinds and ids only, never the
 objects you passed in, such as `{ target: "node", kind, id }`), and the changed
-`nodes` and `edges` keys. Re-read the inputs and retry with a new anchor. See [Refusing a Write Whose Inputs Changed](/read-set-fence/).
+`nodes` and `edges` keys. Each key list holds at most the first 100 changed keys
+in `(kind, id)` order; `nodesTruncated` and `edgesTruncated` are `true` when more
+changed, and a truncated scope should be treated as "re-read everything in it".
+Re-read the inputs and retry with a new anchor. See [Refusing a Write Whose Inputs Changed](/read-set-fence/).
 
 ### `ReadSetUnverifiableError`
 

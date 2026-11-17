@@ -1786,12 +1786,19 @@ export type ReadSetScopeDescriptor =
  * One declared read-set scope that changed after the anchor, with the node
  * and edge keys that changed inside it. `index` is the scope's position in
  * the list passed to `tx.assertUnchangedSince()`.
+ *
+ * Each key list is bounded: it holds at most the first 100 changed keys in
+ * `(kind, id)` code-point order, and its `*Truncated` flag is `true` exactly
+ * when more keys changed than it lists. Treat a truncated scope as "re-read
+ * everything in it".
  */
 export type ReadSetScopeChange = Readonly<{
   index: number;
   scope: ReadSetScopeDescriptor;
   nodes: readonly ReadSetChangedKey[];
   edges: readonly ReadSetChangedKey[];
+  nodesTruncated: boolean;
+  edgesTruncated: boolean;
 }>;
 
 /** Details for {@link ReadSetChangedError}. */
@@ -1804,7 +1811,8 @@ export type ReadSetChangedErrorDetails = Readonly<{
 /**
  * Thrown by `tx.assertUnchangedSince()` when a row inside a declared read-set
  * scope changed after the anchor revision. Every changed scope is listed with
- * the keys that changed in it. The caller re-reads its inputs under a fresh
+ * the keys that changed in it, up to a bounded number per scope (see
+ * {@link ReadSetScopeChange}). The caller re-reads its inputs under a fresh
  * anchor and retries.
  */
 export class ReadSetChangedError extends TypeGraphError {

@@ -109,7 +109,8 @@ export type ReadSetFenceContext<G extends GraphDef> = Readonly<{
  *   write fence, or the session cannot prove a fresh snapshot.
  * @throws ReadSetUnverifiableError when the lineage source cannot bound the
  *   span since `anchor`.
- * @throws ReadSetChangedError listing every changed scope and its keys.
+ * @throws ReadSetChangedError listing every changed scope and its keys,
+ *   bounded per scope.
  */
 export async function assertReadSetUnchangedSince<G extends GraphDef>(
   ctx: ReadSetFenceContext<G>,
@@ -193,6 +194,21 @@ function freshSnapshotUnprovableError(
   );
 }
 
+function isScopeObject(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A declared scope as an object, refused before any key is read when it is
+ * not one (`null`, a primitive, or an array).
+ */
+function requireScopeObject(scope: unknown): Readonly<Record<string, unknown>> {
+  if (isScopeObject(scope)) return scope;
+  throw invalidScopeError(scope, "a scope must be an object.");
+}
+
 /**
  * The one target key a scope sets, refused when it sets none or several, or
  * carries a key that target does not define.
@@ -220,10 +236,7 @@ function readSetScopeTarget(
   return target;
 }
 
-function invalidScopeError(
-  scope: Readonly<Record<string, unknown>>,
-  reason: string,
-): ConfigurationError {
+function invalidScopeError(scope: unknown, reason: string): ConfigurationError {
   return new ConfigurationError(
     `Invalid read-set scope: ${reason}`,
     { code: READ_SET_SCOPE_INVALID_CODE, scope },
@@ -261,7 +274,7 @@ function resolveReadSetRegion<G extends GraphDef>(
   scope: ReadSetScope<G>,
   index: number,
 ): ReadSetRegion {
-  const declared: Readonly<Record<string, unknown>> = scope;
+  const declared = requireScopeObject(scope);
   switch (readSetScopeTarget(declared)) {
     case "node": {
       const node = requireRowReference(declared, declared["node"]);
