@@ -440,6 +440,13 @@ type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
     suffix: string;
     binaryOrderColumns?: readonly string[];
     columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
+    predicate?: SystemIndexPredicate<SystemIndexColumnsFor<T>>;
+    dialects?: readonly [SqlDialect, ...SqlDialect[]];
+}>;
+
+// @public
+export type SystemIndexPredicate<C extends string = string> = Readonly<{
+    isNull: C;
 }>;
 
 // @public

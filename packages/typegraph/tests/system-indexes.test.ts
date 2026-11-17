@@ -32,6 +32,7 @@ import {
   generateGraphIdOrderIndexDDL,
   generateSystemIndexDDL,
   graphIdOrderIndexName,
+  systemIndexDeclarationsFor,
   systemIndexName,
 } from "../src/indexes/system";
 import { renderSqlInline, sql } from "../src/query/sql-fragment";
@@ -54,6 +55,7 @@ type ExtractedIndex = Readonly<{
   table: string;
   columns: string;
   unique: boolean;
+  where: string | undefined;
 }>;
 
 /**
@@ -64,7 +66,7 @@ type ExtractedIndex = Readonly<{
  */
 function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
   const pattern =
-    /CREATE (UNIQUE )?INDEX IF NOT EXISTS "([^"]+)" ON "([^"]+)" \(([^;]*)\)(?: WHERE .*)?;/u;
+    /CREATE (UNIQUE )?INDEX IF NOT EXISTS "([^"]+)" ON "([^"]+)" \(([^;]*?)\)(?: WHERE (.*))?;/u;
   const extracted: ExtractedIndex[] = [];
   for (const statement of statements) {
     const match = pattern.exec(statement);
@@ -74,25 +76,35 @@ function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
       name: requireDefined(match[2]),
       table: requireDefined(match[3]),
       columns: requireDefined(match[4]),
+      where: match[5],
     });
   }
   return extracted;
 }
 
 /**
- * The one deliberate asymmetry in the index set: PostgreSQL keeps text indexes
- * in the database collation, so the graph id listing's byte-order seeks need
- * `COLLATE "C"` indexes there. SQLite's text indexes are already in byte order.
- * Stated literally rather than derived from the declaration under test.
+ * The deliberate asymmetries in the index set, stated literally rather than
+ * derived from the declarations under test:
+ * - PostgreSQL keeps text indexes in the database collation, so the graph id
+ *   listing's byte-order seeks need `COLLATE "C"` indexes there. SQLite's text
+ *   indexes are already in byte order.
+ * - PostgreSQL does not treat `deleted_at IS NULL` as an ordering equality, so
+ *   the live listing order needs partial `live_created_idx` indexes there.
+ *   SQLite serves it from `kind_created_idx`.
  */
-const POSTGRES_ONLY_BYTE_ORDER_INDEXES = [
+/** The dialects spell a boolean literal differently: `= 1` / `= TRUE`. */
+const BOOLEAN_TRUE_LITERAL = /= TRUE$/u;
+
+const POSTGRES_ONLY_INDEXES = [
   'typegraph_edges.typegraph_edges_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_edges.typegraph_edges_live_created_idx("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL',
   'typegraph_nodes.typegraph_nodes_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_nodes.typegraph_nodes_live_created_idx("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL',
   'typegraph_schema_versions.typegraph_schema_versions_graph_id_bytes_idx("graph_id" COLLATE "C")',
 ] as const;
 
 describe("system-index dialect parity", () => {
-  it("emits the same index set (names, columns, uniqueness) on both dialects, bar PostgreSQL's byte-ordered graph_id indexes", () => {
+  it("emits the same index set (names, columns, uniqueness, predicates) on both dialects, bar PostgreSQL's byte-ordered graph_id and live listing indexes", () => {
     const sqliteIndexes = extractIndexes(
       generateSqliteDDL(createSqliteTables()),
     );
@@ -106,18 +118,24 @@ describe("system-index dialect parity", () => {
         .filter((index) => index.table !== fulltextTable)
         .map(
           (index) =>
-            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.name.includes("_adjacency_") ? index.columns.replaceAll(' COLLATE "C"', "") : index.columns})`,
+            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.name.includes("_adjacency_") ? index.columns.replaceAll(' COLLATE "C"', "") : index.columns})${index.where === undefined ? "" : ` WHERE ${index.where.replace(BOOLEAN_TRUE_LITERAL, "= 1")}`}`,
         )
         .toSorted((a, b) => a.localeCompare(b));
 
     const sqliteSet = normalize(sqliteIndexes);
     const postgresSet = normalize(postgresIndexes);
-    const postgresOnly = postgresSet.filter((entry) =>
-      entry.includes("_graph_id_bytes_idx"),
+    const postgresOnly = postgresSet.filter(
+      (entry) =>
+        entry.includes("_graph_id_bytes_idx") ||
+        entry.includes("_live_created_idx"),
     );
-    expect(postgresOnly).toEqual([...POSTGRES_ONLY_BYTE_ORDER_INDEXES]);
+    expect(postgresOnly).toEqual([...POSTGRES_ONLY_INDEXES]);
     expect(
-      sqliteSet.some((entry) => entry.includes("_graph_id_bytes_idx")),
+      sqliteSet.some(
+        (entry) =>
+          entry.includes("_graph_id_bytes_idx") ||
+          entry.includes("_live_created_idx"),
+      ),
     ).toBe(false);
     expect(
       postgresSet.filter((entry) => !postgresOnly.includes(entry)),
@@ -125,22 +143,33 @@ describe("system-index dialect parity", () => {
     expect(sqliteSet.length).toBeGreaterThan(0);
   });
 
-  it("covers every declaration in both dialects' generated DDL", () => {
-    const scripts = [
-      generateSqliteDDL(createSqliteTables()).join("\n"),
-      generatePostgresDDL(createPostgresTables()).join("\n"),
-    ];
-    for (const [scriptIndex, script] of scripts.entries()) {
+  it("emits each dialect's declarations in its generated DDL byte-for-byte as the runtime DDL, and no other dialect's", () => {
+    const scripts = {
+      sqlite: generateSqliteDDL(createSqliteTables()),
+      postgres: generatePostgresDDL(createPostgresTables()),
+    } as const;
+    for (const [dialect, statements] of Object.entries(scripts) as [
+      keyof typeof scripts,
+      readonly string[],
+    ][]) {
+      const carried = systemIndexDeclarationsFor(dialect);
       for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
-        const columns = declaration.columns
-          .map(
-            (column) =>
-              `"${column}"${scriptIndex === 1 && declaration.binaryOrderColumns?.includes(column) === true ? ' COLLATE "C"' : ""}`,
-          )
-          .join(", ");
-        expect(script).toContain(`(${columns})`);
+        const ddl = generateSystemIndexDDL(
+          declaration,
+          declaration.table === "nodes" ? "typegraph_nodes"
+          : declaration.table === "edges" ? "typegraph_edges"
+          : declaration.table === "recordedNodes" ? "typegraph_recorded_nodes"
+          : "typegraph_recorded_edges",
+          { concurrent: false, dialect },
+        );
+        expect(statements.includes(ddl), `${dialect}: ${ddl}`).toBe(
+          carried.includes(declaration),
+        );
       }
     }
+    expect(systemIndexDeclarationsFor("sqlite").length).toBeLessThan(
+      systemIndexDeclarationsFor("postgres").length,
+    );
   });
 });
 
@@ -317,7 +346,12 @@ describe("materializeSystemIndexes", () => {
       );
 
       const { results } = await store.materializeSystemIndexes();
-      expect(results).toHaveLength(SYSTEM_INDEX_DECLARATIONS.length);
+      expect(results).toHaveLength(systemIndexDeclarationsFor("sqlite").length);
+      expect(
+        results.filter((result) =>
+          result.indexName.includes("_live_created_idx"),
+        ),
+      ).toEqual([]);
       // Every entry either created its index or found the recorded boot
       // materialization; none may fail or be skipped on the bundled backend.
       for (const result of results) {

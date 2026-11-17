@@ -1040,19 +1040,35 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  // Base schema v9 stopped creating `typegraph_nodes_kind_idx` and
-  // `typegraph_edges_kind_idx`: each is a prefix of an index v9 keeps. No
-  // adoption step drops them, so a store upgraded from v8 keeps both and a
-  // fresh v9 store never has them. Both shapes are permanent, and both must
-  // open, verify, materialize system indexes and read and write.
-  describe("redundant kind indexes after base schema v9", () => {
+  // Base schema v9 changed two system-index families without an adoption
+  // step, so each leaves an upgraded store and a fresh store in different,
+  // permanent shapes, and both shapes must open, verify, materialize system
+  // indexes and read and write:
+  // - it stopped creating `typegraph_nodes_kind_idx` and
+  //   `typegraph_edges_kind_idx` (each is a prefix of an index v9 keeps). No
+  //   step drops them, so a store upgraded from v8 keeps both and a fresh
+  //   store never has them;
+  // - it added the PostgreSQL-only partial `live_created_idx` pair. A fresh
+  //   PostgreSQL store creates it in bootstrap DDL and a store upgraded from
+  //   v8 gains it from the boot-time `materializeSystemIndexes` run. SQLite
+  //   never has it.
+  describe("system-index shapes after base schema v9", () => {
     const kindIndexNames = [
       "typegraph_edges_kind_idx",
       "typegraph_nodes_kind_idx",
     ] as const;
+    const liveCreatedIndexNames = [
+      "typegraph_edges_live_created_idx",
+      "typegraph_nodes_live_created_idx",
+    ] as const;
+    const v9IndexNames = [...kindIndexNames, ...liveCreatedIndexNames];
     const v8KindIndexDdl = [
       'CREATE INDEX "typegraph_nodes_kind_idx" ON "typegraph_nodes" ("graph_id", "kind")',
       'CREATE INDEX "typegraph_edges_kind_idx" ON "typegraph_edges" ("graph_id", "kind")',
+    ];
+    const v8LiveCreatedDrops = [
+      'DROP INDEX "typegraph_nodes_live_created_idx"',
+      'DROP INDEX "typegraph_edges_live_created_idx"',
     ];
     const v9RelationDrops = [
       'DROP TABLE "typegraph_identity_transitions"',
@@ -1060,23 +1076,27 @@ describe("deployment-wide base-schema adoption", () => {
       'UPDATE "typegraph_base_schema_versions" SET version = 8 WHERE installation = 1',
     ];
 
-    it("SQLite: a fresh store has neither index", async () => {
+    function presentSqliteIndexes(client: SqliteClient): readonly string[] {
+      const rows = client
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${v9IndexNames.join("', '")}') ORDER BY name`,
+        )
+        .all() as readonly Readonly<{ name: string }>[];
+      return rows.map((row) => row.name);
+    }
+
+    it("SQLite: a fresh store has neither the kind indexes nor the live listing indexes", async () => {
       const { backend, db } = createLocalSqliteBackend();
       const client = sqliteClient(db);
       try {
         await createStoreWithSchema(graph, backend);
-        const present = client
-          .prepare(
-            `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${kindIndexNames.join("', '")}')`,
-          )
-          .all();
-        expect(present).toEqual([]);
+        expect(presentSqliteIndexes(client)).toEqual([]);
       } finally {
         await backend.close();
       }
     });
 
-    it("SQLite: a store upgraded from v8 keeps both indexes and works", async () => {
+    it("SQLite: a store upgraded from v8 keeps both kind indexes, gains no live listing index, and works", async () => {
       const { backend, db } = createLocalSqliteBackend();
       const client = sqliteClient(db);
       try {
@@ -1090,45 +1110,49 @@ describe("deployment-wide base-schema adoption", () => {
         );
         await expectStoreWorks(backend);
 
-        const present = client
-          .prepare(
-            `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${kindIndexNames.join("', '")}') ORDER BY name`,
-          )
-          .all() as readonly Readonly<{ name: string }>[];
-        expect(present.map((row) => row.name)).toEqual([...kindIndexNames]);
+        expect(presentSqliteIndexes(client)).toEqual([...kindIndexNames]);
       } finally {
         await backend.close();
       }
     });
 
-    async function presentKindIndexes(
+    async function presentPostgresIndexes(
       client: PGlite,
     ): Promise<readonly string[]> {
       const rows = await client.query<{ indexname: string }>(
-        `SELECT indexname FROM pg_indexes WHERE indexname IN ('${kindIndexNames.join("', '")}') ORDER BY indexname`,
+        `SELECT indexname FROM pg_indexes WHERE indexname IN ('${v9IndexNames.join("', '")}') ORDER BY indexname`,
       );
       return rows.rows.map((row) => row.indexname);
     }
 
-    it("PGlite: a fresh store has neither index", async () => {
+    it("PGlite: a fresh store has the live listing indexes and no kind index", async () => {
       const { backend, client } = await createLocalPgliteBackend({
         vector: false,
       });
       try {
         await createStoreWithSchema(graph, backend);
-        expect(await presentKindIndexes(client)).toEqual([]);
+        expect(await presentPostgresIndexes(client)).toEqual([
+          ...liveCreatedIndexNames,
+        ]);
       } finally {
         await backend.close();
       }
     });
 
-    it("PGlite: a store upgraded from v8 keeps both indexes and works", async () => {
+    it("PGlite: a store upgraded from v8 keeps both kind indexes, gains the live listing indexes on open, and works", async () => {
       const { backend, client } = await createLocalPgliteBackend({
         vector: false,
       });
       try {
         await createStoreWithSchema(graph, backend);
-        await client.exec([...v8KindIndexDdl, ...v9RelationDrops].join(";\n"));
+        await client.exec(
+          [...v8KindIndexDdl, ...v8LiveCreatedDrops, ...v9RelationDrops].join(
+            ";\n",
+          ),
+        );
+        expect(await presentPostgresIndexes(client)).toEqual([
+          ...kindIndexNames,
+        ]);
 
         const [, adoption] = await createStoreWithSchema(graph, backend);
         expect(adoption.status).toBe("unchanged");
@@ -1136,9 +1160,18 @@ describe("deployment-wide base-schema adoption", () => {
           'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
         );
         expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
-        await expectStoreWorks(backend);
+        expect(await presentPostgresIndexes(client)).toEqual(
+          v9IndexNames.toSorted(),
+        );
+        const definitions = await client.query<{ indexdef: string }>(
+          `SELECT indexdef FROM pg_indexes WHERE indexname IN ('${liveCreatedIndexNames.join("', '")}') ORDER BY indexname`,
+        );
+        expect(definitions.rows.map((row) => row.indexdef)).toEqual([
+          "CREATE INDEX typegraph_edges_live_created_idx ON public.typegraph_edges USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+          "CREATE INDEX typegraph_nodes_live_created_idx ON public.typegraph_nodes USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+        ]);
 
-        expect(await presentKindIndexes(client)).toEqual([...kindIndexNames]);
+        await expectStoreWorks(backend);
       } finally {
         await backend.close();
       }

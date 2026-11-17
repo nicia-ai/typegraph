@@ -59,8 +59,8 @@ import {
   generateSystemIndexDDL,
   resolveSystemIndexNames,
   resolveSystemIndexTableName,
-  SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
+  systemIndexDeclarationsFor,
   systemIndexName,
 } from "../indexes/system";
 import {
@@ -1321,7 +1321,8 @@ type SystemIndexCandidate = Readonly<{
 
 /**
  * Materializes TypeGraph's own base-relation indexes
- * (`SYSTEM_INDEX_DECLARATIONS`) against the live database.
+ * (`SYSTEM_INDEX_DECLARATIONS` scoped to the backend's dialect) against the
+ * live database.
  *
  * Bootstrap DDL runs only on first boot, so a system index added in a new
  * library version never reaches an already-initialized database on its
@@ -1405,7 +1406,7 @@ export async function materializeSystemIndexes(
   const catalog = requireCatalog(backend, "store.materializeSystemIndexes()");
   const concurrent = catalog.indexBehavior.concurrentBuilds;
   const candidates: readonly SystemIndexCandidate[] =
-    SYSTEM_INDEX_DECLARATIONS.map((declaration) => {
+    systemIndexDeclarationsFor(backend.dialect).map((declaration) => {
       const physicalTable = resolveSystemIndexTableName(
         declaration.table,
         backend.tableNames,
@@ -1538,11 +1539,12 @@ export async function materializeSystemIndexes(
 /**
  * Canonical hash of `{ dialect, targetTableName, declaration }` for a
  * system-index declaration — same drift contract as
- * `computeIndexSignature`: changing a declaration's shape under the same
- * suffix mismatches the recorded signature and surfaces as a `failed`
- * entry until the operator drops the old physical index (rename instead).
+ * `computeIndexSignature`: changing a declaration's shape (columns,
+ * predicate, collations) under the same suffix mismatches the recorded
+ * signature and surfaces as a `failed` entry until the operator drops the old
+ * physical index (rename instead).
  */
-async function computeSystemIndexSignature(
+export async function computeSystemIndexSignature(
   dialect: SqlDialect,
   targetTableName: string,
   declaration: SystemIndexDeclaration,

@@ -507,8 +507,9 @@ const profiler = new QueryProfiler({
 TypeGraph ships a set of **system indexes** on its own relations (nodes, edges, and the recorded
 history tables) — the traversal, listing, temporal-validity, and bare-id access paths every
 compiled query relies on. They are declared once (`SYSTEM_INDEX_DECLARATIONS`, exported for
-inspection), and both dialects' schemas derive from that single list, so SQLite and PostgreSQL
-always carry the same set.
+inspection), and both dialects' schemas derive from that single list. A declaration can be scoped
+to one dialect; today the only such indexes are PostgreSQL's
+[live listing indexes](#live-listing-indexes-on-postgresql).
 
 The `acyclic: true` reachability probe is one of the paths these
 system indexes cover: its recursive term seeks `(graph_id, from_kind,
@@ -537,6 +538,58 @@ version's set on boot (with `CREATE INDEX CONCURRENTLY` on PostgreSQL). Deployme
 without `createStoreWithSchema` can run `store.materializeSystemIndexes()` once after a library
 upgrade; it shares `materializeIndexes()`'s status tracking, drift signatures, and concurrent-build
 claim protocol, and settles with no DDL when everything already exists.
+
+### Live listing indexes on PostgreSQL
+
+On PostgreSQL, TypeGraph keeps a partial index on each of the nodes and edges tables:
+
+```sql
+CREATE INDEX "typegraph_nodes_live_created_idx" ON "typegraph_nodes"
+  ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+CREATE INDEX "typegraph_edges_live_created_idx" ON "typegraph_edges"
+  ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+```
+
+They serve reads of a kind's live rows in creation order: `store.nodes[kind].find()` and
+`store.edges[kind].find()`, which order by `created_at DESC, id DESC`, the query builder's
+`orderBy(alias, "meta.createdAt")`, and `paginate()`. PostgreSQL does not treat
+`deleted_at IS NULL` as an equality for ordering, so `kind_created_idx` cannot return those rows
+in order, and every page sorted the kind's whole live set. With the partial index, the first page
+reads 50 rows in index order.
+
+Measured on PostgreSQL 18, with a 2M-row kind in a table of 3.6M live and 0.4M soft-deleted rows:
+
+| read | without | with |
+| --- | --- | --- |
+| `nodes.find`, first page | 285 ms | 0.31 ms |
+| `nodes.find`, `offset: 10000` | 521 ms | 4.8 ms |
+| `edges.find`, first page | 263 ms | 0.30 ms |
+| query builder `paginate()`, first page | 236 ms | 0.97 ms |
+
+The costs, measured the same way:
+
+- **Size:** 233 MB for that table's 3.6M live rows, about 65 MB per million live rows, on each of
+  the two tables. The index ends in `id`, so PostgreSQL cannot deduplicate its keys.
+- **Writes:** a single `INSERT ... SELECT` of 20,000 nodes is 43% slower. Store-API writes
+  (`create`, `update`, soft and hard `delete`, `bulkCreate` in batches of 500) stayed within run-to-run
+  noise, about ±15%.
+
+SQLite does not get these indexes. SQLite treats `deleted_at IS NULL` as an equality, so
+`kind_created_idx` already returns live rows in order there, and a second ordering index changed
+unrelated SQLite plans for the worse.
+
+Existing PostgreSQL databases gain the two indexes the next time `createStoreWithSchema()` opens
+them, built with `CREATE INDEX CONCURRENTLY`, so writes continue during the build (4 to 5 seconds per
+table at the size above). Deployments that skip that boot step build them with
+`store.materializeSystemIndexes()`.
+
+If you manage the schema with drizzle-kit, the next `drizzle-kit generate` emits the two indexes as
+plain `CREATE INDEX` statements. On PostgreSQL a plain build blocks writes to the table for as long as
+it runs, which takes seconds on a large table. Edit the generated migration to
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and run those two statements outside a transaction:
+`CONCURRENTLY` cannot run inside one, and most migration runners wrap each migration in a
+transaction. If TypeGraph has already built the indexes on open, the `IF NOT EXISTS` form makes the
+migration a no-op.
 
 ### Redundant kind indexes on upgraded databases
 
