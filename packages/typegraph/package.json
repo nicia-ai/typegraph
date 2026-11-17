@@ -1,6 +1,6 @@
 {
   "name": "@nicia-ai/typegraph",
-  "version": "0.74.0",
+  "version": "0.75.0",
   "description": "TypeScript embedded knowledge graph on SQLite and PostgreSQL: Zod schemas, type-safe queries, ontology, hybrid vector + fulltext search, bitemporal history.",
   "type": "module",
   "main": "./dist/index.cjs",
