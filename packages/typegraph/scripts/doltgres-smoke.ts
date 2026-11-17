@@ -5,6 +5,27 @@
 // Not wired into CI: it needs that server, and the spike is exploratory.
 // DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
 //
+// RE-MEASURED 2026-11-17 on TypeGraph main f4bb59ce (0.75.0) against 1.5.1, still the
+// latest release, and doltgresql main 9595e046, 52 commits past it.
+//   - Both score 64 passed, 0 failed, 2 skipped. Nothing on main changes a pin: it adds
+//     partial-index merge fixes, foreign-key planning, canonical hashing of intervals,
+//     numeric arrays and timestamptz, unknown-typed parameter conversion and the table
+//     privilege functions. PR #3634 and Dolt #12145 have not moved since October 27.
+//   - Every typed string predicate fails. TypeGraph declares the escape character on each
+//     LIKE and ILIKE it compiles, and Doltgres has neither `like_escape` nor
+//     `ilike_escape` (both listed in doltgresql#3099). That takes out `contains`,
+//     `startsWith`, `endsWith`, `like` and `ilike`. The open ILIKE fix (#3829) excludes
+//     the ESCAPE form, so it will not change this. The bare-ILIKE pin is replaced by the
+//     two forms TypeGraph emits; it was wrongly recorded as unfiled.
+//   - Fixes open upstream but unmerged: #3848 for the expression-index upsert (#3789),
+//     #3829 for bare ILIKE. `INSERT INTO ... AS` and `ANALYZE (SKIP_LOCKED)` remain unfiled.
+//   - doltgresql#3877, a 1.5.1 regression still on main: a write to a table with a partial
+//     index panics ("pending edits ... were read while being materialized") and the
+//     transaction's rows are lost. It reproduced only with a `varchar(n)` predicate column
+//     after writes to about 70 other tables in the transaction; `text`, `boolean` and
+//     `IS NULL` predicates, and 30 tables, did not. TypeGraph's partial indexes use the
+//     latter predicate types, so it is not pinned.
+//
 // RE-MEASURED 2026-11-12 on TypeGraph main 33cd294a against 1.5.1 (released 2026-11-11).
 //   - TypeGraph #807 is merged, so the walk is green on main without a patch: 1.5.1 scores
 //     63 passed, 0 failed, 2 skipped. doltgresql main is four Dolt dependency bumps past
@@ -1250,10 +1271,18 @@ async function runDeviationBattery(): Promise<void> {
        ON CONFLICT ("id") DO UPDATE SET "version" = "stored"."version" + 1`,
     ],
   );
+  // Every compiled LIKE and ILIKE declares its escape character, so `contains`,
+  // `startsWith`, `endsWith`, `like` and `ilike` all fail. Bare `ILIKE` is refused too,
+  // but TypeGraph never emits that form.
   await probe(
-    "queries: ILIKE (case-insensitive string predicates)",
-    unsupported("ILIKE is not yet supported", UNFILED),
-    [`SELECT 'Alice' ILIKE 'a%' AS matched`],
+    "queries: LIKE ... ESCAPE (like)",
+    unsupported("function: 'like_escape' not found", "doltgresql#3099"),
+    [String.raw`SELECT 'Alice' LIKE 'A%' ESCAPE '\' AS matched`],
+  );
+  await probe(
+    "queries: ILIKE ... ESCAPE (contains, startsWith, endsWith, ilike)",
+    unsupported("function: 'ilike_escape' not found", "doltgresql#3099"),
+    [String.raw`SELECT 'Alice' ILIKE 'a%' ESCAPE '\' AS matched`],
   );
   // `materializeIndexes()` refreshes statistics this way after it creates an index, and
   // degrades to a warning when the statement fails. Plain `ANALYZE t` is accepted.
