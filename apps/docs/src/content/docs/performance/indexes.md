@@ -578,10 +578,53 @@ SQLite does not get these indexes. SQLite treats `deleted_at IS NULL` as an equa
 `kind_created_idx` already returns live rows in order there, and a second ordering index changed
 unrelated SQLite plans for the worse.
 
-Existing PostgreSQL databases gain the two indexes the next time `createStoreWithSchema()` opens
-them, built with `CREATE INDEX CONCURRENTLY`, so writes continue during the build (4 to 5 seconds per
-table at the size above). Deployments that skip that boot step build them with
-`store.materializeSystemIndexes()`.
+#### Upgrading an existing PostgreSQL database
+
+Existing databases gain the two indexes the next time `createStoreWithSchema()` opens them, built
+with `CREATE INDEX CONCURRENTLY`, so reads and writes continue during the build. **The open waits for
+the builds to finish** before it resolves. On a database with 4M nodes and 4M edges the first open
+took 6 seconds, against 0.02 seconds for a normal open, and the build time grows with table size, at
+roughly 0.75 seconds per million rows per table. When several instances boot at once, they share the
+work: each waits for the index another instance is building, none of them fails, and all of them
+resolve when the builds finish. If a build is interrupted, PostgreSQL leaves an `INVALID` index
+behind; the next open drops it and builds it again.
+
+For a large database, build the indexes before you deploy the new version, so no application boot
+waits on them. Run each statement on its own, outside a transaction (`CONCURRENTLY` cannot run inside
+one):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_live_created_idx"
+  ON "typegraph_nodes" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_live_created_idx"
+  ON "typegraph_edges" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+```
+
+The first open of the new version then finds both indexes and issues no DDL. With custom table names,
+the index is named `<table>_live_created_idx`, shortened with a hash suffix when that exceeds
+PostgreSQL's 63-character limit. Generate the exact statements rather than writing them by hand:
+
+```typescript
+import {
+  generateSystemIndexDDL,
+  SYSTEM_INDEX_DECLARATIONS,
+} from "@nicia-ai/typegraph/indexes";
+
+for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
+  if (declaration.suffix !== "live_created_idx") continue;
+  const table = declaration.table === "nodes" ? "my_nodes" : "my_edges";
+  console.log(
+    generateSystemIndexDDL(declaration, table, {
+      concurrent: true,
+      dialect: "postgres",
+    }),
+  );
+}
+```
+
+Alternatively, open with `createStoreWithSchema(graph, backend, { systemIndexes: "skip" })` (or
+`schemaManagement: { systemIndexes: "skip" }` on the managed store factories) and run
+`store.materializeSystemIndexes()` from a separate maintenance job.
 
 If you manage the schema with drizzle-kit, the next `drizzle-kit generate` emits the two indexes as
 plain `CREATE INDEX` statements. On PostgreSQL a plain build blocks writes to the table for as long as

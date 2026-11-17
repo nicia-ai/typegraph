@@ -15,7 +15,8 @@
  *
  * The predicate is part of the index's shape, so it is part of its drift
  * signature: the last case holds that an index recorded without it surfaces
- * as drift rather than as already materialized.
+ * as drift rather than as already materialized, while an index an operator
+ * built by hand with the declared definition is adopted with no DDL.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -26,6 +27,7 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { type GraphBackend } from "../../../src/backend/types";
 import { SYSTEM_INDEX_DECLARATIONS } from "../../../src/indexes";
@@ -199,6 +201,42 @@ describe("PostgreSQL live listing order from the partial live_created_idx", () =
       orderedRead(captured, "typegraph_nodes"),
       "typegraph_nodes_live_created_idx",
     );
+  });
+
+  it("adopts indexes an operator built by hand before the upgrade, with no DDL", async () => {
+    for (const name of LIVE_LISTING_INDEXES) {
+      await client.exec(`DROP INDEX "${name}"`);
+    }
+    // The statements the upgrade notes give operators of large databases.
+    await client.exec(`
+      CREATE INDEX IF NOT EXISTS "typegraph_nodes_live_created_idx" ON "typegraph_nodes" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+      CREATE INDEX IF NOT EXISTS "typegraph_edges_live_created_idx" ON "typegraph_edges" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+    `);
+
+    const ddl: string[] = [];
+    const observed = deriveBackend(backend, {
+      executeDdl: async (text: string) => {
+        ddl.push(text);
+        return requireDefined(backend.executeDdl)(text);
+      },
+    });
+    const [store] = await createStoreWithSchema(graph, observed);
+    expect(ddl.filter((text) => text.includes("_live_created_idx"))).toEqual(
+      [],
+    );
+
+    const { results } = await store.materializeSystemIndexes();
+    expect(
+      results
+        .filter((result) => result.indexName.includes("_live_created_idx"))
+        .map((result) => [result.indexName, result.status])
+        .toSorted(([left], [right]) =>
+          String(left).localeCompare(String(right)),
+        ),
+    ).toEqual([
+      ["typegraph_edges_live_created_idx", "alreadyMaterialized"],
+      ["typegraph_nodes_live_created_idx", "alreadyMaterialized"],
+    ]);
   });
 
   it("reports a partial index recorded under its predicate-less signature as drift", async () => {

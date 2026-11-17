@@ -567,6 +567,44 @@ describe("Postgres materialize build claim", () => {
     expect(validAfter.rows[0]?.indisvalid).toBe(true);
   });
 
+  it("rebuilds an INVALID system-index leftover on the next open, with the declared definition", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const graph = buildGraph();
+    const backend = createPostgresBackend(drizzle(pool));
+    const [store] = await createStoreWithSchema(graph, backend);
+    const indexName = "typegraph_nodes_live_created_idx";
+
+    // The state an interrupted `CREATE INDEX CONCURRENTLY` leaves behind: an
+    // INVALID index under the system index's name. Manufactured with a
+    // UNIQUE build that fails on two live rows of one graph.
+    await pool.query(`DROP INDEX "${indexName}"`);
+    await store.nodes.Person.create({ email: "a@example.com", name: "a" });
+    await store.nodes.Person.create({ email: "b@example.com", name: "b" });
+    await expect(
+      pool.query(
+        `CREATE UNIQUE INDEX CONCURRENTLY "${indexName}" ON typegraph_nodes (graph_id) WHERE deleted_at IS NULL`,
+      ),
+    ).rejects.toThrow();
+    const invalidBefore = await pool.query<{ indisvalid: boolean }>(
+      `SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(invalidBefore.rows[0]?.indisvalid).toBe(false);
+
+    await createStoreWithSchema(graph, backend);
+
+    const after = await pool.query<{ indisvalid: boolean; indexdef: string }>(
+      `SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS indexdef FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [indexName],
+    );
+    expect(after.rows).toEqual([
+      {
+        indisvalid: true,
+        indexdef: `CREATE INDEX ${indexName} ON public.typegraph_nodes USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)`,
+      },
+    ]);
+  });
+
   it("rebuilds a poisoned success: valid status row over an INVALID index", async (ctx) => {
     // The older failure mode: a recorded SUCCESS whose physical index is
     // invalid (a run interrupted after IF NOT EXISTS silently kept a
