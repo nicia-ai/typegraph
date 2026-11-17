@@ -492,6 +492,14 @@ not a second copy of membership. The transition log carries no members of its
 own; it is an explanation layer over the one reconstruction path every
 historical read already goes through.
 
+A step's `before` and `after` can be equal. A class is structural: a node whose
+validity window has already ended can still be asserted into one, and it then
+connects the class without being a visible member of it. The assertion that
+joins such a node, and the delete or retraction that later removes it, each
+record a transition, because the class changed, while the members a read
+returns stay the same. `transitionsOf` lists those transitions too. Compare a
+step's `before` and `after` when only visible changes matter.
+
 Two consequences of sharing that coordinate:
 
 - **Each step is read from the valid instant its own commit was recorded
