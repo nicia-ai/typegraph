@@ -101,23 +101,24 @@ async function seededWithoutSavepoints(
     const open = await setup.edges.cmsPartOf.find({});
     return open.map((edge) => edge.toId);
   };
-  /** The move, with its attach naming a whole that does not exist `times` times. */
-  const moveToMissingWhole = (times: number): GraphData => {
+  /** The move's end, then one attach under each of `ids` naming a whole that does not exist. */
+  const moveToMissingWhole = (ids: readonly string[]): GraphData => {
     const [end, attach] = move(MOVED_AT).edges;
-    const missing = {
-      ...requireDefined(attach),
-      to: { kind: "CmsWhole", id: "no-such-whole" },
-    };
     return {
       ...move(MOVED_AT),
       edges: [
         requireDefined(end),
-        ...Array.from({ length: times }, () => missing),
+        ...ids.map((id) => ({
+          ...requireDefined(attach),
+          id,
+          to: { kind: "CmsWhole", id: "no-such-whole" },
+        })),
       ],
     };
   };
   return {
     backend,
+    incumbentId: requireDefined(incumbent).id,
     store,
     move,
     moveToMissingWhole,
@@ -145,17 +146,22 @@ describe("composition move import without savepoints", () => {
     }
   });
 
-  it("refuses an optional part's end without a savepoint when its attach is refused before anything is written", async () => {
+  it("refuses an optional part's end without a savepoint when every attach is refused before anything is written", async () => {
+    // Two distinct attach rows, neither of which can land: the classification
+    // alone settles that no row attaches the part again.
     const seeded = await seededWithoutSavepoints("optional");
     try {
       const result = await importGraph(
         seeded.store,
-        seeded.moveToMissingWhole(1),
+        seeded.moveToMissingWhole(["cms-first", "cms-second"]),
         { onConflict: "update", batchSize: 1 },
       );
-      expect(result.errors.map((entry) => entry.error.split(":")[0])).toEqual([
-        "To node not found",
-        "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+      expect(
+        result.errors.map((entry) => [entry.id, entry.error.split(":")[0]]),
+      ).toEqual([
+        ["cms-first", "To node not found"],
+        ["cms-second", "To node not found"],
+        [seeded.incumbentId, "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE"],
       ]);
       expect(await seeded.openAttachments()).toEqual([seeded.oldWhole.id]);
     } finally {
@@ -168,10 +174,14 @@ describe("composition move import without savepoints", () => {
     // is the end known to stand alone.
     const seeded = await seededWithoutSavepoints("optional");
     try {
-      const attempt = importGraph(seeded.store, seeded.moveToMissingWhole(2), {
-        onConflict: "update",
-        batchSize: 1,
-      });
+      const attempt = importGraph(
+        seeded.store,
+        seeded.moveToMissingWhole(["cms-moved", "cms-moved"]),
+        {
+          onConflict: "update",
+          batchSize: 1,
+        },
+      );
       await expect(attempt).rejects.toMatchObject({
         details: { code: "IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT" },
       });
