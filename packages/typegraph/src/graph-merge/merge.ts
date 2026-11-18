@@ -2970,6 +2970,11 @@ export async function commitPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
+          await lockMergeCommitFence(
+            transactionBackend(tx),
+            target,
+            expectedBaseVersion,
+          );
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
           // precondition and this commit. Revision-anchored stores check their
@@ -3054,33 +3059,66 @@ function mergeCommitTransactionOptions<G extends GraphDef>(
 }
 
 /**
+ * The fences a live merge commit takes as the FIRST statements of its
+ * transaction, through the store's one prelude ({@link lockStoreWriteFence}):
+ * the schema-version fence, then the per-graph write lock wherever this commit
+ * needs it up front.
+ *
+ * Every later graph-lock acquisition in the apply (the composition orphan
+ * re-verification, the composition window decision, a write frame) then
+ * re-enters a lock taken behind the schema fence, so no read or decision of
+ * the commit can take the graph lock first. Taking it first is the inverted
+ * order: a concurrent schema commit holds the schema row `FOR UPDATE` and then
+ * waits for the graph lock, and PostgreSQL aborts one side as a deadlock.
+ *
+ * The graph lock is taken here when the store's writers all take it, or when
+ * the base version is revision-anchored: tracked writers advance that clock
+ * under this lock, so holding it around the read→apply sequence makes the
+ * O(1) anchor check a TOCTOU guard without relying on the transaction's
+ * snapshot being the latest committed state. Otherwise only the apply sites
+ * that need it take it, and a backend without a keyed fence can still commit
+ * a merge that needs none.
+ *
+ * A target handle whose schema another handle has advanced is refused here,
+ * as `BaseVersionMismatchError` with the `StaleVersionError` as its cause,
+ * before any read of the commit.
+ */
+async function lockMergeCommitFence<G extends GraphDef>(
+  txBackend: TransactionBackend,
+  target: Store<G>,
+  expectedBaseVersion: BaseVersion | undefined,
+): Promise<void> {
+  const graphLockRequired =
+    (expectedBaseVersion !== undefined &&
+      hasRevisionAnchor(expectedBaseVersion)) ||
+    storeWritersTakeGraphWriteFence({
+      historyEnabled: storeCaptureEnabled(target),
+      revisionTrackingEnabled: target.revisionTrackingEnabled,
+    });
+  await lockStoreWriteFence(txBackend, {
+    graphId: target.graphId,
+    schemaVersion: target.introspect().schemaVersion,
+    graphLock: graphLockRequired ? "required" : "not-required",
+    staleSchemaError: (cause) =>
+      new BaseVersionMismatchError(
+        "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
+        { cause },
+      ),
+  });
+}
+
+/**
  * The in-transaction half of the base@V guard: revision-anchored targets read
- * their durable clock under the graph lock. Untracked targets recompute the
- * complete content fingerprint through the transaction-scoped backend, which
- * includes current identity assertions and establishes read dependencies on
- * the graph state used by the plan.
+ * their durable clock under the graph lock {@link lockMergeCommitFence} took.
+ * Untracked targets recompute the complete content fingerprint through the
+ * transaction-scoped backend, which includes current identity assertions and
+ * establishes read dependencies on the graph state used by the plan.
  */
 async function assertTargetUnchanged<G extends GraphDef>(
   txBackend: TransactionBackend,
   target: Store<G>,
   expectedBaseVersion: BaseVersion,
 ): Promise<void> {
-  if (hasRevisionAnchor(expectedBaseVersion)) {
-    // All tracked writers acquire this lock before touching graph rows and
-    // advance the same clock before committing. Holding it around the
-    // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
-    // relying on the transaction's snapshot being the latest committed state.
-    await lockStoreWriteFence(txBackend, {
-      graphId: target.graphId,
-      schemaVersion: target.introspect().schemaVersion,
-      graphLock: "required",
-      staleSchemaError: (cause) =>
-        new BaseVersionMismatchError(
-          "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
-          { cause },
-        ),
-    });
-  }
   const comparison = await compareBaseVersionAtTarget(
     target,
     txBackend,
@@ -7493,24 +7531,8 @@ async function commitIncrementalPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
-          await lockStoreWriteFence(transactionBackend(tx), {
-            graphId: target.graphId,
-            schemaVersion: target.introspect().schemaVersion,
-            graphLock:
-              (
-                storeWritersTakeGraphWriteFence({
-                  historyEnabled: storeCaptureEnabled(target),
-                  revisionTrackingEnabled: target.revisionTrackingEnabled,
-                })
-              ) ?
-                "required"
-              : "not-required",
-            staleSchemaError: (cause) =>
-              new BaseVersionMismatchError(
-                "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
-                { cause },
-              ),
-          });
+          // The fork point carries no target base version to anchor on.
+          await lockMergeCommitFence(transactionBackend(tx), target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
           // against is re-read here, so a write to it in the plan→commit window
           // refuses the merge instead of committing diffs against a fork point
