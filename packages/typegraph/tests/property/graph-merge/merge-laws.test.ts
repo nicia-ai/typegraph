@@ -47,6 +47,7 @@ import type {
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { requireDefined } from "../../../src/utils/presence";
+import { assertProperty } from "../../graph-merge/assert-property";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
@@ -288,7 +289,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDENTITY — an unchanged branch merges as a no-op",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {
@@ -333,7 +334,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "DIFF-COHERENCE — a single branch's non-colliding diff is applied faithfully",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {
@@ -382,7 +383,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDEMPOTENCE — merging an identical twin branch adds nothing",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {

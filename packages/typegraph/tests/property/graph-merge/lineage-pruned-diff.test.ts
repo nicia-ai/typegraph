@@ -32,6 +32,7 @@ import { asBranchId } from "../../../src/graph-merge/types";
 import { resolveLineage } from "../../../src/store/recorded-capture";
 import { storeBackend } from "../../../src/store/runtime-port";
 import type { Store } from "../../../src/store/store";
+import { assertProperty } from "../../graph-merge/assert-property";
 import {
   backendMatrix,
   type MergeBackendFixture,
@@ -505,7 +506,7 @@ describe.each(backendMatrix())(
       "diffAgainstBase(pruned) deep-equals diffAgainstBase(full) for random post-fork writes",
       { timeout: 300_000 },
       async () => {
-        await fc.assert(
+        await assertProperty(
           fc.asyncProperty(scenarioArb, async (scenario) => {
             const { baseStore, forkStore, branch, dispose } =
               await makeForkedPair(entry.make);

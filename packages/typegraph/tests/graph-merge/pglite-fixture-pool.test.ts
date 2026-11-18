@@ -111,4 +111,29 @@ describe("PGlite fixture pool", () => {
     await nextStore.nodes.Item.create({ name: "new" }, { id: "same-id" });
     await next.cleanup();
   });
+
+  it("refuses a statement issued after its lease was released instead of running it on the engine's next occupant", async () => {
+    const stale = await pool.makeFixture();
+    const [staleStore] = await createStoreWithSchema(graph, stale.backend);
+    await stale.cleanup();
+
+    // The engine is idle now: `RESET ALL` put the search path back on
+    // `public`, where this graph's relations do not exist. A statement that
+    // reaches the engine here reports a missing relation, the symptom in #860.
+    await expect(
+      staleStore.nodes.Item.create({ name: "stale" }, { id: "stale-id" }),
+    ).rejects.toThrow(/released/i);
+
+    // Once the engine is re-leased, the same stale statement must not land in
+    // the new occupant's schema.
+    const next = await pool.makeFixture();
+    const [nextStore] = await createStoreWithSchema(graph, next.backend);
+    await expect(
+      staleStore.nodes.Item.create({ name: "stale" }, { id: "stale-id" }),
+    ).rejects.toThrow(/released/i);
+    expect(
+      await nextStore.nodes.Item.getById(asNodeId("stale-id")),
+    ).toBeUndefined();
+    await next.cleanup();
+  });
 });
