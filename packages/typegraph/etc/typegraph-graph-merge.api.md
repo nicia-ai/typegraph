@@ -7646,6 +7646,9 @@ type ReadInstantMode = "literal" | "placeholder";
 export function readProvenance(store: Store<ProvenanceGraph>, query?: ProvenanceQuery): Promise<readonly ProvenanceNode[]>;
 
 // @public
+export function readProvenanceStore(backend: GraphBackend, targetGraphId: string): Promise<Store<ProvenanceGraph> | undefined>;
+
+// @public
 type ReadSetEdgeDirection = "out" | "in" | "both";
 
 // @public

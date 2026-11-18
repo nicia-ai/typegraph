@@ -88,6 +88,8 @@ import {
   persistProvenanceRecords,
   provenanceGraphId,
   provenanceNodeId,
+  readProvenance,
+  readProvenanceStore,
 } from "../../src/graph-merge/provenance-store";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
@@ -2145,6 +2147,98 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
     await expect(
       legacyStore.nodes.Provenance.getById(rowId as never),
     ).resolves.toMatchObject({ id: rowId });
+  });
+
+  describe("readProvenanceStore", () => {
+    const WRITE_ATTEMPT = "readProvenanceStore attempted a write";
+
+    /** A backend on which every write path the claim or a schema commit uses throws. */
+    function backendRefusingWrites(backend: GraphBackend): GraphBackend {
+      const refuse = (): never => {
+        throw new Error(WRITE_ATTEMPT);
+      };
+      return deriveBackend(backend, {
+        insertNode: refuse,
+        schemaWriteTransaction: refuse,
+        commitSchemaVersion: refuse,
+      });
+    }
+
+    it("returns undefined for a free id and leaves the database unchanged", async () => {
+      const backend = await makeBackend();
+      const sidecarId = provenanceGraphId(careGraph.id);
+
+      await expect(
+        readProvenanceStore(backendRefusingWrites(backend), careGraph.id),
+      ).resolves.toBeUndefined();
+
+      await expect(backend.getActiveSchema(sidecarId)).resolves.toBeUndefined();
+      await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+      await expect(
+        backend.findNodesByKind({ graphId: sidecarId, kind: "Provenance" }),
+      ).resolves.toHaveLength(0);
+    });
+
+    it("returns a usable store for an owned id, without writing", async () => {
+      const backend = await makeBackend();
+      const owned = await openProvenanceStore(backend, careGraph.id);
+      await persistProvenanceRecords(owned, careGraph.id, [SIDECAR_RECORD]);
+
+      const store = requireDefined(
+        await readProvenanceStore(backendRefusingWrites(backend), careGraph.id),
+      );
+
+      await expect(readProvenance(store)).resolves.toMatchObject([
+        { canonicalId: SIDECAR_RECORD.canonicalId },
+      ]);
+    });
+
+    it("returns the store of an interrupted open without completing it", async () => {
+      const backend = await makeBackend();
+      await backend.insertNode({
+        graphId: provenanceGraphId(careGraph.id),
+        kind: "ProvenanceOwner",
+        id: PROVENANCE_OWNER_ROW_ID,
+        props: OWNER_MARKER_PROPS,
+      });
+
+      const store = await readProvenanceStore(
+        backendRefusingWrites(backend),
+        careGraph.id,
+      );
+
+      expect(store).toBeDefined();
+      await expect(
+        backend.getActiveSchema(provenanceGraphId(careGraph.id)),
+      ).resolves.toBeUndefined();
+    });
+
+    it("throws the collision error for an id occupied by an application graph", async () => {
+      const backend = await makeBackend();
+      const applicationStore = createStore(
+        defineGraph({
+          id: provenanceGraphId(careGraph.id),
+          nodes: { Patient: { type: Patient } },
+          edges: {},
+        }),
+        backend,
+      );
+      await applicationStore.nodes.Patient.create(
+        { name: "Existing", birthDate: "1970-01-01" },
+        { id: "existing" },
+      );
+
+      await expect(
+        readProvenanceStore(backend, careGraph.id),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "GRAPH_MERGE_PROVENANCE_ID_COLLISION",
+          reason: "application-graph",
+        },
+      });
+      await expect(readOwnerMarker(backend)).resolves.toBeUndefined();
+    });
   });
 });
 
