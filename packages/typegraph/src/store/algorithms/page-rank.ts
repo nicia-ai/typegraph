@@ -111,8 +111,9 @@ function executePageRankOperation<G extends GraphDef>(
     algorithm,
     maxIterations: resolved.maxIterations,
     createWorkingTable,
-    initialize: (context) =>
-      initializeWorkingTable(context, resolved.nodeKinds, seeds),
+    populate: (context) => populateWorkingTable(context, resolved.nodeKinds),
+    initialize: (context, populatedRowCount) =>
+      initializeWorkingTable(context, populatedRowCount, seeds),
     runRound: (context, state) =>
       runPowerIterationRound(context, state, resolved.dampingFactor),
     hasConverged(state) {
@@ -247,20 +248,25 @@ function createWorkingTable(context: IterativeGraphRunContext): SqlFragment {
   `;
 }
 
-async function initializeWorkingTable(
+async function populateWorkingTable(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
-  seeds: readonly NormalizedSeed[] | undefined,
-): Promise<IterationState> {
-  const { operation, workingTable, graphId, runId } = context;
+): Promise<number> {
   await seedWorkingTableFromNodes(context, nodeKinds, [
     { name: "score", value: sql.raw("0.0") },
     { name: "next_score", value: sql.raw("0.0") },
     { name: "personalization", value: sql.raw("0.0") },
     { name: "out_weight", value: sql.raw("0.0") },
   ]);
+  return countWorkingTableRows(context);
+}
 
-  const workingTableSize = await countWorkingTableRows(context);
+async function initializeWorkingTable(
+  context: IterativeGraphRunContext,
+  workingTableSize: number,
+  seeds: readonly NormalizedSeed[] | undefined,
+): Promise<IterationState> {
+  const { operation, workingTable, graphId, runId } = context;
   if (workingTableSize === 0) {
     if (seeds !== undefined) {
       throw missingSeedError(seeds);
