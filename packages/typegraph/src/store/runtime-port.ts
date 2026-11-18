@@ -1,5 +1,6 @@
 import {
   type BATCH_POINT_READ,
+  type ENDPOINT_SET_READ,
   type UNIQUE_SIDECAR_BATCH,
 } from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
@@ -123,6 +124,14 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * the per-id read the bundle declares.
    */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /**
+   * @internal The `endpointSetRead` bundle's verdict, minted once at store
+   * construction and exposed for the same reason `batchPointRead` is: a
+   * Store-owned view (provenance's backward support closure, which reads the
+   * edges arriving at a set of nodes) must not re-resolve a second verdict for
+   * the same backend. Bound per read against the object that read runs on.
+   */
+  endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
   /**
    * @internal The backend this Store's queries actually execute through for
    * `target` — the Store's own backend when `target` is omitted.
@@ -699,32 +708,50 @@ export function bindEvolvedTransactionStore<TStore extends object>(
   evolvedTransactionStores.set(runtime, evolvedStore);
 }
 
+/**
+ * THE ownership decision for a transaction context handed to something built
+ * on `store`: the Store whose graph owns the context's callback, or
+ * `undefined` when the context is not one of `store`'s.
+ *
+ * A context belongs to `store` only while the callback that received it is
+ * still running — a context retained past its callback, or one from a
+ * transaction TypeGraph never opened a callback for, answers `undefined`. A
+ * `measure` scope is its callback's context. An evolved callback answers its
+ * temporary evolved view, not `store`: that view's graph and schema version
+ * are the ones the transaction writes against.
+ *
+ * One owner, so every consumer that accepts a caller's transaction — merge
+ * apply, provenance's commit-time assert — refuses the same contexts.
+ */
+export function activeTransactionStore<TStore extends object>(
+  transaction: TransactionRuntimePort,
+  store: TStore,
+): TStore | undefined {
+  const scopeRuntime = transaction[TRANSACTION_RUNTIME];
+  if (scopeRuntime === undefined) return undefined;
+  const runtime = callbackRuntimeOf(scopeRuntime);
+  if (!activeTransactionContexts.has(runtime)) return undefined;
+  const ownerRuntime = storeRuntime(store);
+  if (transactionStoreOwners.get(runtime) === ownerRuntime) return store;
+  if (evolvedTransactionOriginalOwners.get(runtime) !== ownerRuntime) {
+    return undefined;
+  }
+  return evolvedTransactionStores.get(runtime) as TStore | undefined;
+}
+
 /** Resolves the Store whose graph actually owns an active callback context. */
 export function resolveEvolvedTransactionStore<TStore extends object>(
   transaction: TransactionRuntimePort,
   originalStore: TStore,
 ): TStore {
-  const scopeRuntime = transaction[TRANSACTION_RUNTIME];
-  const runtime =
-    scopeRuntime === undefined ? undefined : callbackRuntimeOf(scopeRuntime);
-  if (runtime === undefined || !activeTransactionContexts.has(runtime)) {
+  const owner = activeTransactionStore(transaction, originalStore);
+  if (owner === undefined) {
     throw new ConfigurationError(
       "The merge transaction must belong to an active callback of the target Store.",
       { capability: "mergeTransactionStore" },
     );
   }
-  const originalRuntime = storeRuntime(originalStore);
-  if (transactionStoreOwners.get(runtime) === originalRuntime) {
-    return originalStore;
-  }
-  if (evolvedTransactionOriginalOwners.get(runtime) === originalRuntime) {
-    const evolvedStore = evolvedTransactionStores.get(runtime);
-    if (evolvedStore !== undefined) return evolvedStore as TStore;
-  }
-  throw new ConfigurationError(
-    "The merge transaction must belong to an active callback of the target Store.",
-    { capability: "mergeTransactionStore" },
-  );
+  return owner;
 }
 
 /** The callback boundary owns the lifetime of every measurable context overlay. */
@@ -800,4 +827,20 @@ export function transactionReviveNode(
   work: Readonly<{ kind: string; id: string }>,
 ): Promise<void> {
   return requireTransactionRuntime(transaction).reviveNode(work);
+}
+
+/**
+ * Takes this transaction's write fences without writing — the schema-version
+ * fence, then the per-graph write lock — through THIS transaction's own
+ * node-operation context, so the acquisition is the managed write path's and
+ * not a second spelling of its order. A read-only transaction is refused
+ * before any statement, naming `refusal.operation`. Today's callers are
+ * provenance's retraction transitions and its commit-time assert, which read
+ * under those fences before, or without, a write of their own.
+ */
+export function transactionAcquireWriteFences(
+  transaction: TransactionRuntimePort,
+  refusal: Readonly<{ operation: string; suggestion: string }>,
+): Promise<void> {
+  return requireTransactionRuntime(transaction).acquireWriteFences(refusal);
 }

@@ -1912,8 +1912,8 @@ async function readPageAttachmentCandidateEdges(
  *
  * One owner, two consumers: `verifyConstraintFences`' `compositionExistence`
  * family ({@link readCompositionUnattachedParts}) and provenance's support
- * computation (`src/provenance/index.ts`), which would otherwise re-spell the
- * batched-then-confirmed shape over its own fact rows.
+ * computation (`src/provenance/support-read.ts`), which would otherwise
+ * re-spell the batched-then-confirmed shape over its own fact rows.
  */
 export async function readCompositionAttachmentsForPage(
   registry: KindRegistry,

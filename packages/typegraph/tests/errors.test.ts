@@ -16,6 +16,8 @@ import type {
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
   EndpointPairErrorDetails,
+  FactNotHoldingErrorDetails,
+  FactNotHoldingFailure,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
   MigrationFailureReason,
@@ -46,6 +48,7 @@ import {
   EndpointError,
   EndpointNotFoundError,
   EndpointPairError,
+  FactNotHoldingError,
   getErrorSuggestion,
   isConstraintError,
   isSystemError,
@@ -345,6 +348,58 @@ describe("CompositionCycleError", () => {
     expectTypeOf(error.details).toEqualTypeOf<CompositionCycleErrorDetails>();
     expectTypeOf(error.details.wholeKind).toBeString();
     expectTypeOf(error.details.revisitedId).toBeString();
+  });
+});
+
+function notCurrentFactFailure(id: string): FactNotHoldingFailure {
+  return {
+    fact: { kind: "Fact", id },
+    reason: "not-current",
+    justifications: [],
+  };
+}
+
+describe("FactNotHoldingError", () => {
+  it("carries every failure, on the error and in its details", () => {
+    const failures: readonly FactNotHoldingFailure[] = [
+      notCurrentFactFailure("a"),
+      {
+        fact: { kind: "Fact", id: "b" },
+        reason: "no-firing-justification",
+        justifications: [
+          {
+            justification: { kind: "Justification", id: "j" },
+            premises: [
+              { premise: { kind: "Source", id: "s" }, reason: "retracted" },
+            ],
+          },
+        ],
+      },
+    ];
+    const error = new FactNotHoldingError({ failures });
+
+    expect(error.name).toBe("FactNotHoldingError");
+    expect(error.code).toBe("FACT_NOT_HOLDING");
+    expect(error.category).toBe("constraint");
+    expect(error.failures).toBe(failures);
+    expect(error.details.failures).toBe(failures);
+    expect(error.message).toBe(
+      "2 fact(s) do not hold: Fact/a (not-current), Fact/b (no-firing-justification).",
+    );
+    expect(isConstraintError(error)).toBe(true);
+    expectTypeOf(error.details).toEqualTypeOf<FactNotHoldingErrorDetails>();
+  });
+
+  it("names the first five failing facts in the message and counts the rest", () => {
+    const failures = ["a", "b", "c", "d", "e", "f", "g"].map((id) =>
+      notCurrentFactFailure(id),
+    );
+    const error = new FactNotHoldingError({ failures });
+
+    expect(error.message).toBe(
+      "7 fact(s) do not hold: Fact/a (not-current), Fact/b (not-current), Fact/c (not-current), Fact/d (not-current), Fact/e (not-current) and 2 more.",
+    );
+    expect(error.failures).toHaveLength(failures.length);
   });
 });
 
@@ -1326,6 +1381,7 @@ describe("error inheritance chain", () => {
         incomingHash: "b",
       }),
       new StoreNotInitializedError("g", "missing"),
+      new FactNotHoldingError({ failures: [] }),
     ];
 
     for (const error of errors) {

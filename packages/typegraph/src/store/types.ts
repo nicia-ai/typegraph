@@ -3048,6 +3048,22 @@ export type TransactionRuntime = Readonly<{
    * {@link file://./runtime-port.ts transactionReviveNode}.
    */
   reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
+  /**
+   * Takes the fences a managed write on this transaction takes, in the write
+   * path's own order and through its own frame, without writing: the
+   * schema-version fence, then the per-graph write lock. For a caller that
+   * must read under those fences BEFORE its first write, or that reads and
+   * never writes — today, provenance's retraction transitions and its
+   * commit-time assert. Taking the graph lock alone and writing afterwards
+   * would acquire the two in the reverse order.
+   *
+   * A transaction opened with `accessMode: "read_only"` cannot hold the schema
+   * fence, so it is refused before any statement, naming `refusal.operation`
+   * and offering `refusal.suggestion`.
+   */
+  acquireWriteFences: (
+    refusal: Readonly<{ operation: string; suggestion: string }>,
+  ) => Promise<void>;
 }>;
 
 /**

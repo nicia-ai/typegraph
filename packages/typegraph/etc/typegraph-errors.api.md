@@ -675,6 +675,55 @@ type ExtensionChange = Readonly<{
 }>;
 
 // @public
+export class FactNotHoldingError extends TypeGraphError {
+    constructor(details: FactNotHoldingErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: FactNotHoldingErrorDetails;
+    readonly failures: readonly FactNotHoldingFailure[];
+}
+
+// @public
+export type FactNotHoldingErrorDetails = Readonly<{
+    failures: readonly FactNotHoldingFailure[];
+}>;
+
+// @public
+export type FactNotHoldingFailure = Readonly<{
+    fact: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    reason: FactNotHoldingReason;
+    justifications: readonly FactNotHoldingJustification[];
+}>;
+
+// @public
+export type FactNotHoldingJustification = Readonly<{
+    justification: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    premises: readonly FactNotHoldingPremise[];
+}>;
+
+// @public
+export type FactNotHoldingPremise = Readonly<{
+    premise: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    reason: FactNotHoldingPremiseReason;
+}>;
+
+// @public
+export type FactNotHoldingPremiseReason = "retracted" | "not-current" | "unsupported";
+
+// @public
+export type FactNotHoldingReason = "not-current" | "tombstoned" | "no-justification" | "no-firing-justification" | "composition-whole-unsupported";
+
+// @public
 export function getErrorSuggestion(error: unknown): string | undefined;
 
 // @public

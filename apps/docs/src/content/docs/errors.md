@@ -1058,6 +1058,77 @@ Thrown when a direct edge create collides with the edge kind's declared
 `matchIdentity`. Use `getOrCreateByEndpoints()` when the intended behavior is
 to return the existing identity owner.
 
+### `FactNotHoldingError`
+
+Thrown by a provenance capability's `assertHolds(tx, facts)` when a named fact
+is not believed. It lists every failing fact in one error, sorted by fact kind
+and then id, and the throw aborts the caller's transaction; nothing is
+reconciled or closed. `error.failures` and `error.details.failures` are the
+same list. The class is exported from `@nicia-ai/typegraph/errors` and from
+`@nicia-ai/typegraph/provenance`.
+
+```typescript
+import { FactNotHoldingError } from "@nicia-ai/typegraph/provenance";
+
+try {
+  await store.transaction(async (tx) => {
+    // ... write the justification, premise edges and fact ...
+    await provenance.assertHolds(tx, [summary]);
+  });
+} catch (error) {
+  if (error instanceof FactNotHoldingError) {
+    for (const failure of error.failures) {
+      console.log(failure.fact, failure.reason);
+      for (const { justification, premises } of failure.justifications) {
+        console.log(justification, premises);
+      }
+    }
+  }
+}
+```
+
+Each entry of `failures` has this shape:
+
+```typescript
+{
+  fact: { kind, id },
+  reason: "not-current" | "tombstoned" | "no-justification" | "no-firing-justification" | "composition-whole-unsupported",
+  justifications: [{
+    justification: { kind, id },
+    premises: [{ premise: { kind, id }, reason: "retracted" | "not-current" | "unsupported" }],
+  }],
+}
+```
+
+Exactly one `reason` applies to a fact. They are tested in the order of this
+table, so a tombstoned fact that is also unsupported reports why it is
+unsupported, and a required part with no justification reports
+`no-justification`.
+
+| `reason` | The fact |
+| --- | --- |
+| `not-current` | is absent from the support snapshot: never written, or outside its validity window at the read instant (for example a future `validFrom`) |
+| `tombstoned` | is supported but its row is tombstoned |
+| `no-justification` | has no current justification deriving it; a tombstoned justification does not count |
+| `no-firing-justification` | has current justifications, but none fires; `justifications` lists each with the premises that stop it |
+| `composition-whole-unsupported` | has a firing justification but is a required part whose whole is missing, is an unsupported fact, or is a tombstoned node of another kind |
+
+`justifications` is empty for every reason except `no-firing-justification`.
+There it lists every current justification deriving the fact, sorted by kind
+and then id, each with only the premises that fail.
+
+A premise's `reason` explains why its justification does not fire:
+
+| Premise `reason` | The premise |
+| --- | --- |
+| `retracted` | is a source whose `retracted` flag is set |
+| `not-current` | is a source that is missing, tombstoned or outside its validity window; these are not distinguished |
+| `unsupported` | is a fact that is not in the support set; the error does not say why |
+
+Every reason comes from the snapshot the verdict used, so a failure never
+contradicts the check that raised it. A premise-less justification fires, so it
+never appears as a failure.
+
 ## Not Found Errors
 
 ### `NodeNotFoundError`
@@ -2507,6 +2578,7 @@ try {
 | `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level composition cycle survives from rows that bypassed the write-time acyclicity fence |
 | `CONFIGURATION_ERROR` | `ConfigurationError` | user | Invalid configuration |
 | `PROVENANCE_REQUIRED_PART_NOT_A_FACT` | `ConfigurationError` | user | A `createRetractionCapability` fact kind is the whole of an `existence: "required"` composition pair whose part kind is not itself a fact kind |
+| `FACT_NOT_HOLDING` | `FactNotHoldingError` | constraint | `assertHolds` named a fact that is not believed: not current, tombstoned, or without a firing justification |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |

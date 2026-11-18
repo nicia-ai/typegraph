@@ -30,6 +30,9 @@ Full source on GitHub:
 - `store.asOfRecorded(T)` replays the fact currency before and after the
   retraction.
 - `unRetract()` clears a source's retraction flag and reopens supported facts.
+- `assertHolds(tx, facts)` guards a derivation inside its own write
+  transaction: it commits while the premise stands and is refused with
+  `FactNotHoldingError`, and rolled back, once the premise is retracted.
 
 ## Run It
 

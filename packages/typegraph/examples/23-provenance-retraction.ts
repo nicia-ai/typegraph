@@ -19,11 +19,13 @@
  *   [3] Retract the other source — facts lose all support and die
  *   [4] Un-retract — belief currency returns
  *   [5] Recorded time keeps the audit trail, even across the un-retract
+ *   [6] Guard a derivation with assertHolds — refused once its support is gone
  *
  * Run with:
  *   npx tsx examples/23-provenance-retraction.ts
  */
 import {
+  asNodeId,
   createAdapterStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -32,6 +34,7 @@ import {
 } from "@nicia-ai/typegraph";
 import {
   createRetractionCapability,
+  FactNotHoldingError,
   type ProvenanceFactRef,
   type RetractionCapability,
   type RetractionReport,
@@ -341,6 +344,65 @@ export async function main(): Promise<void> {
       "  taken while it was dead still reads as not current — the dead",
     );
     console.log("  interval stays replayable; history is never rewritten.");
+
+    // ----------------------------------------------------------
+    // [6] Guard a derivation with assertHolds
+    // ----------------------------------------------------------
+
+    console.log("\n" + "━".repeat(70));
+    console.log(" [6] Guard a derivation — refused once support is gone");
+    console.log("━".repeat(70));
+
+    async function deriveGuardedDecision(
+      id: string,
+      action: string,
+    ): Promise<void> {
+      await store.transaction(async (tx) => {
+        const decision = await tx.nodes.DeployDecision.create(
+          { action },
+          { id },
+        );
+        const justification = await tx.nodes.Justification.create(
+          { text: `${action}, because the scanner finding stands` },
+          { id: `justification-${id}` },
+        );
+        await tx.edges.premiseOf.create(scanner, justification, {}, {
+          id: `${id}-premise-1`,
+        });
+        await tx.edges.derives.create(justification, decision, {}, {
+          id: `${id}-derives`,
+        });
+        await provenance.assertHolds(tx, [decision]);
+      });
+    }
+
+    console.log("\nThe scanner stands, so a derivation from it commits:");
+    await deriveGuardedDecision("decision-page-oncall", "Page the on-call");
+    await printHolding("  holding()", provenance);
+
+    console.log("\nRetract the scanner again, then repeat the derivation:");
+    await provenance.retract(scanner);
+    try {
+      await deriveGuardedDecision("decision-open-ticket", "Open a ticket");
+    } catch (error) {
+      if (!(error instanceof FactNotHoldingError)) throw error;
+      for (const failure of error.failures) {
+        const unsupported = failure.justifications.flatMap((entry) =>
+          entry.premises.map(
+            (premise) => `${premise.premise.id} (${premise.reason})`,
+          ),
+        );
+        console.log(
+          `  refused: ${failure.fact.id} — ${failure.reason}; ${unsupported.join(", ")}`,
+        );
+      }
+    }
+    const rolledBack = await store.nodes.DeployDecision.getById(
+      asNodeId<typeof DeployDecision>("decision-open-ticket"),
+    );
+    console.log(
+      `  The refusal rolled the transaction back: ${formatDecisionAction(rolledBack)}`,
+    );
 
     console.log("\n" + "━".repeat(70));
     console.log(
