@@ -402,6 +402,7 @@ import {
 } from "./operations";
 import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
 import {
+  acquireManagedWriteFences,
   batchRefusalDetails,
   batchRefusalSuffix,
   diagnoseFusedSchemaFenceNoRow,
@@ -1688,6 +1689,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       recordedReadBinding: this.#recordedReadBinding,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       batchPointRead: this.#batchPointRead,
+      endpointSetRead: this.#endpointSetRead,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
@@ -5458,6 +5460,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               work.id,
               txBackend,
             ),
+          acquireWriteFences: async (refusal) => {
+            if (readOnly) {
+              refuseReadOnlyTransactionWrite(
+                refusal.operation,
+                this.graphId,
+                refusal.suggestion,
+              );
+            }
+            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
+          acquireReadFences: async () => {
+            if (readOnly) {
+              await lockRecordedGraphWrite(txBackend, this.graphId);
+              return;
+            }
+            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,

@@ -28,10 +28,9 @@ import {
 } from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
-import { groupBy } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { getEdgeRowsByIds } from "../edge-fetch";
+import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
 import {
   assertEdgeIdentityMatches,
   type EdgeIdentity,
@@ -367,24 +366,6 @@ function buildUpsertUpdateEdgeInput(
  */
 function endpointKey(endpointKind: string, id: string): string {
   return encodeTupleKey([endpointKind, id]);
-}
-
-/**
- * Buckets endpoint refs into one id list per kind, preserving input order.
- * Repeated ids are left in place — the backend dedupes an endpoint set before
- * splitting it into bind-budget chunks, which is the only place duplicates
- * could do harm.
- */
-function groupEndpointIdsByKind(
-  references: readonly NodeRef[],
-): Map<string, string[]> {
-  const referencesByKind = groupBy(references, (ref) => ref.kind);
-  return new Map(
-    [...referencesByKind].map(([endpointKind, group]) => [
-      endpointKind,
-      group.map((ref) => ref.id),
-    ]),
-  );
 }
 
 /**

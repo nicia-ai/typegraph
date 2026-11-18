@@ -493,6 +493,11 @@ export const BATCH_POINT_READ = {
  * this operation: the collection API promises one set-oriented read per
  * bind-budget chunk and therefore refuses instead of silently issuing an
  * unbounded singleton loop.
+ *
+ * The shared endpoint edge fetch is the one consumer that falls back instead:
+ * its callers need the rows on every port and take the set read as an
+ * optimization, so it reads one endpoint at a time where the member is
+ * unreachable.
  */
 export const ENDPOINT_SET_READ = {
   id: "endpointSetRead",
@@ -523,6 +528,19 @@ export const ENDPOINT_SET_READ = {
           member: "findEdgesByEndpointSet",
         },
       ],
+    },
+    {
+      operation: "endpoint edge fetch",
+      disposition: {
+        kind: "fallback",
+        fallback: "per-endpoint findEdgesByKind",
+      },
+      requires: ["findEdgesByEndpointSet"],
+      // Bound from its first line (`store/edge-fetch.ts`), so it never was a
+      // raw port read and owns no key of the checked-in access baseline,
+      // which attributions must resolve against. Its fallback is exercised
+      // by the "per-endpoint fallback" case of the shared provenance suite.
+      sites: [],
     },
   ],
 } as const satisfies CapabilityBundleDefinition;

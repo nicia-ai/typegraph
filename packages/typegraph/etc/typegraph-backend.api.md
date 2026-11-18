@@ -1250,6 +1250,14 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly file: "store/collections/edge-collection.ts";
             readonly member: "findEdgesByEndpointSet";
         }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
     }];
 }];
 
@@ -2189,6 +2197,14 @@ export const ENDPOINT_SET_READ: {
             readonly file: "store/collections/edge-collection.ts";
             readonly member: "findEdgesByEndpointSet";
         }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
     }];
 };
 

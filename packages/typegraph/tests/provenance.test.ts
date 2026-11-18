@@ -570,7 +570,7 @@ describe("provenance retraction contract", () => {
     await expect(store.nodes.Fact.getById(fact.id)).resolves.toBeUndefined();
   });
   // MUTATION CHECK: restore the `believedBefore` filter in `buildReport`
-  // (src/provenance/index.ts) so `died` keeps only facts believed before the
+  // (src/provenance/transition.ts) so `died` keeps only facts believed before the
   // transition. The fact is still tombstoned and `died` comes back empty.
 
   it("supports no-premise justifications as axioms", async () => {

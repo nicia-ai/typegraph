@@ -1192,6 +1192,38 @@ function runInWriteTransactionAttempt<T>(
 }
 
 /**
+ * Takes a managed write's fences on a transaction the caller already holds,
+ * and writes nothing: the schema-version fence, then the per-graph write lock,
+ * exactly as the frame of a real write takes them. It IS such a frame, with an
+ * empty body that reports `didWrite: false` — so the acquisition order, the
+ * schema-fence lease, the session's remembered lock and the combined
+ * schema-and-graph statement all have the one owner they have for a write,
+ * and the frame allocates no revision.
+ *
+ * For a caller whose own reads must be serialized against graph writes before
+ * its first write, or with no write at all. The frame takes the graph lock
+ * only where this store's writes need it, and hands back evidence of no keyed
+ * fence otherwise — a serialized engine, or a store whose history the engine
+ * owns. The caller's reads need the exclusion either way, so in that case the
+ * lock is taken here, behind the schema fence the frame has just taken; on a
+ * serialized engine that is no statement.
+ */
+export function acquireManagedWriteFences(
+  ctx: WriteTransactionContext,
+  backend: TransactionBackend,
+): Promise<void> {
+  return runInWriteTransaction(
+    ctx,
+    backend,
+    async (target, lock) => {
+      if (lock.coordination !== undefined) return;
+      await lockRecordedGraphWrite(target, ctx.graphId);
+    },
+    { didWrite: () => false },
+  );
+}
+
+/**
  * The slice of an operation context {@link runHookedWriteOperation} needs:
  * the {@link WriteTransactionContext} plus the hook wrapper. Both
  * `NodeOperationContext` and `EdgeOperationContext` satisfy it.

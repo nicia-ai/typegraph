@@ -1716,6 +1716,114 @@ export class CompositionExistenceError extends TypeGraphError {
   }
 }
 
+/** Why a fact named to a provenance `assertHolds` call does not hold. */
+export type FactNotHoldingReason =
+  | "not-current"
+  | "tombstoned"
+  | "no-justification"
+  | "no-firing-justification"
+  | "composition-whole-unsupported";
+
+/** Why one premise keeps its justification from firing. */
+export type FactNotHoldingPremiseReason =
+  "retracted" | "not-current" | "unsupported";
+
+/** One premise that keeps a justification from firing. */
+export type FactNotHoldingPremise = Readonly<{
+  premise: Readonly<{ kind: string; id: string }>;
+  reason: FactNotHoldingPremiseReason;
+}>;
+
+/** One justification that derives a failing fact and does not fire. */
+export type FactNotHoldingJustification = Readonly<{
+  justification: Readonly<{ kind: string; id: string }>;
+  premises: readonly FactNotHoldingPremise[];
+}>;
+
+/**
+ * One fact that does not hold, and why.
+ *
+ * Exactly one `reason` applies, chosen in this order:
+ *
+ * - `"not-current"`: the fact has no row at the read instant — never written,
+ *   or outside its validity window.
+ * - `"tombstoned"`: the fact is supported, but its row is soft-deleted.
+ * - `"no-justification"`: no current justification derives the fact.
+ * - `"no-firing-justification"`: justifications derive the fact and none
+ *   fires. `justifications` lists each with the premises that stop it.
+ * - `"composition-whole-unsupported"`: a justification fires, but the fact is
+ *   a required composition part whose whole is missing or unsupported.
+ *
+ * `justifications` is empty for every reason but `"no-firing-justification"`.
+ * A source premise is `"retracted"` when it is current with its retracted
+ * flag set and `"not-current"` when it is missing, soft-deleted or outside its
+ * validity window; a fact premise is `"unsupported"`, without saying why.
+ */
+export type FactNotHoldingFailure = Readonly<{
+  fact: Readonly<{ kind: string; id: string }>;
+  reason: FactNotHoldingReason;
+  justifications: readonly FactNotHoldingJustification[];
+}>;
+
+/**
+ * Details for FactNotHoldingError.
+ */
+export type FactNotHoldingErrorDetails = Readonly<{
+  failures: readonly FactNotHoldingFailure[];
+}>;
+
+const FACT_NOT_HOLDING_MESSAGE_FACT_LIMIT = 5;
+
+function describeFactNotHoldingFailures(
+  failures: readonly FactNotHoldingFailure[],
+): string {
+  const named = failures
+    .slice(0, FACT_NOT_HOLDING_MESSAGE_FACT_LIMIT)
+    .map(
+      (failure) =>
+        `${failure.fact.kind}/${failure.fact.id} (${failure.reason})`,
+    );
+  const unnamed = failures.length - named.length;
+  return unnamed === 0 ?
+      named.join(", ")
+    : `${named.join(", ")} and ${unnamed} more`;
+}
+
+/**
+ * Thrown by a provenance capability's `assertHolds(tx, facts)` when a named
+ * fact is not believed: one error naming EVERY failing fact, sorted by kind
+ * and id, each with the reason it does not hold.
+ *
+ * Nothing is closed or reconciled on the caller's behalf. The throw rejects
+ * the caller's transaction callback, so the writes that produced the
+ * unsupported fact roll back with it.
+ */
+export class FactNotHoldingError extends TypeGraphError {
+  declare readonly details: FactNotHoldingErrorDetails;
+
+  /** Every fact that does not hold; the same list as `details.failures`. */
+  readonly failures: readonly FactNotHoldingFailure[];
+
+  constructor(
+    details: FactNotHoldingErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `${details.failures.length} fact(s) do not hold: ${describeFactNotHoldingFailures(details.failures)}.`,
+      "FACT_NOT_HOLDING",
+      {
+        details,
+        category: "constraint",
+        suggestion:
+          "Derive the fact from premises that currently hold: un-retract or replace the premises named in `failures`, attach a required part to a supported whole, or do not write the fact.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "FactNotHoldingError";
+    this.failures = details.failures;
+  }
+}
+
 // ============================================================
 // Concurrency Errors (category: "system")
 // ============================================================

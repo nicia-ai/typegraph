@@ -432,8 +432,10 @@ Consequences of the row being a real write:
   writes, does not.
 - **Reads write nothing.** A read that takes the fence to keep a
   multi-statement view from tearing, such as a provenance capability's
-  `holding()`, takes the advisory lock alone, so it runs in a read-only
-  transaction or under a `SELECT`-only role.
+  `holding()`, or its `holding(tx)` in a transaction opened read-only, takes
+  the advisory lock alone, so it runs under a `SELECT`-only role. In a
+  read-write transaction `holding(tx)` also takes the schema-version fence,
+  which a `SELECT`-only role cannot.
 - **A long-lived snapshot slows those deciding writes.** The row is updated
   once per deciding transaction (once per deciding write in a transaction you
   adopted with `withTransaction`, or in a `store.transaction` whose
@@ -801,6 +803,28 @@ For these use cases, export your data via `.query().traverse()` or
 `store.subgraph()` and use a specialized library such as
 [graphology](https://graphology.github.io/) in memory, or move to a
 dedicated graph database.
+
+## Provenance Writes Are Not Checked Against Premise State
+
+Ordinary node and edge writes know nothing about the roles a
+[provenance](/provenance) capability maps onto your graph, so they do not check
+a derived fact against its premises. A write can derive a fact from a source
+that is already retracted, or from a live fact that is unsupported, and it
+commits as a live row. `holding()` excludes it and a later `retract` that names
+its source closes it, but plain reads return it until then.
+
+For a commit-time guarantee, call `provenance.assertHolds(tx, facts)` inside the
+write transaction, after the writes. It refuses the commit with
+`FactNotHoldingError` when a named fact is not believed. See
+[Guarding a derivation at commit time](/provenance#guarding-a-derivation-at-commit-time).
+
+- `assertHolds` needs a read-write transaction and refuses a read-only one
+  with `UnsupportedBackendCapabilityError`. In a read-only transaction use
+  `provenance.holding(tx)`, which is a read.
+- The guarantee covers only transactions that call `assertHolds`.
+- It checks the current state. A run that read its premises earlier is not
+  protected from a premise that was retracted and then restored, or edited in
+  place.
 
 ## Single Database Deployment
 

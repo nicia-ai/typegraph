@@ -14,7 +14,7 @@
  * publishes is the SEAM — {@link runWritePlan}, {@link WritePlan},
  * {@link WriteSession} — and the operations built on it. The step modules keep
  * the exports their own consumers need (the session, plus the two reasoned
- * carve-outs: `provenance/index.ts`'s read-compute-write preludes and
+ * carve-outs: `provenance/locks.ts`'s read-compute-write preludes and
  * `recorded-capture.ts`'s insert dispatch), and nothing reaches them here.
  */
 

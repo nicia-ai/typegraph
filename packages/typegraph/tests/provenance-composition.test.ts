@@ -398,7 +398,7 @@ describe("provenance composition existence", () => {
     ).toEqual([]);
   });
   // MUTATION CHECK: make `compositionExistenceSupported`
-  // (src/provenance/index.ts) return `true` unconditionally. The section and
+  // (src/provenance/support.ts) return `true` unconditionally. The section and
   // paragraph stay believed and both the `died` list and the two `getById`
   // assertions fail.
 

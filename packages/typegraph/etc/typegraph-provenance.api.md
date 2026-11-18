@@ -2065,6 +2065,42 @@ type EncodeSlash<S extends string> = S extends `${infer Head}/${infer Tail}` ? `
 type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}` : S;
 
 // @public
+const ENDPOINT_SET_READ: {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
+    }];
+};
+
+// @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
@@ -2747,6 +2783,55 @@ type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 
 // @public (undocumented)
 type FactKindsFromConfig<G extends GraphDef, C extends ProvenanceRetractionConfig<G>> = KindsFromRef<G, C["fact"]>;
+
+// @public
+export class FactNotHoldingError extends TypeGraphError {
+    constructor(details: FactNotHoldingErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: FactNotHoldingErrorDetails;
+    readonly failures: readonly FactNotHoldingFailure[];
+}
+
+// @public
+export type FactNotHoldingErrorDetails = Readonly<{
+    failures: readonly FactNotHoldingFailure[];
+}>;
+
+// @public
+export type FactNotHoldingFailure = Readonly<{
+    fact: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    reason: FactNotHoldingReason;
+    justifications: readonly FactNotHoldingJustification[];
+}>;
+
+// @public
+export type FactNotHoldingJustification = Readonly<{
+    justification: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    premises: readonly FactNotHoldingPremise[];
+}>;
+
+// @public
+export type FactNotHoldingPremise = Readonly<{
+    premise: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    reason: FactNotHoldingPremiseReason;
+}>;
+
+// @public
+export type FactNotHoldingPremiseReason = "retracted" | "not-current" | "unsupported";
+
+// @public
+export type FactNotHoldingReason = "not-current" | "tombstoned" | "no-justification" | "no-firing-justification" | "composition-whole-unsupported";
 
 // @public
 type FenceSql = Readonly<{
@@ -5347,6 +5432,9 @@ type PropsAccessor<N extends NodeType> = Readonly<{
     [K in CommonPropertyKeys<NodePropsFor<N>>]-?: FieldAccessor<NodePropsFor<N>[K]>;
 }>;
 
+// @public
+export type ProvenanceFactInput<G extends GraphDef = GraphDef, K extends NodeKind<G> = NodeKind<G>> = ProvenanceNodeRef<G, K> | PolymorphicNodeReference<G["nodes"][K]["type"]>;
+
 // @public (undocumented)
 export type ProvenanceFactRef<G extends GraphDef = GraphDef, K extends NodeKind<G> = NodeKind<G>> = ProvenanceNodeRef<G, K>;
 
@@ -6175,7 +6263,8 @@ export type RetractionCapability<G extends GraphDef = GraphDef, SourceKind exten
     retractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[]) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
     unRetract: (source: ProvenanceSourceInput<G, SourceKind>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
     unRetractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[]) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
-    holding: () => Promise<readonly ProvenanceFactRef<G, FactKind>[]>;
+    holding: (tx?: TransactionContext<G>) => Promise<readonly ProvenanceFactRef<G, FactKind>[]>;
+    assertHolds: (tx: TransactionContext<G>, facts: readonly ProvenanceFactInput<G, FactKind>[]) => Promise<readonly SurvivedVia<G, FactKind, JustificationKind>[]>;
 }>;
 
 // @public (undocumented)
@@ -6862,6 +6951,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+    endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
@@ -7627,6 +7717,11 @@ type TransactionRuntime = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    acquireWriteFences: (refusal: Readonly<{
+        operation: string;
+        suggestion: string;
+    }>) => Promise<void>;
+    acquireReadFences: () => Promise<void>;
 }>;
 
 // @public (undocumented)

@@ -2214,6 +2214,42 @@ type EncodeSlash<S extends string> = S extends `${infer Head}/${infer Tail}` ? `
 type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}` : S;
 
 // @public
+const ENDPOINT_SET_READ: {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
+    }];
+};
+
+// @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
@@ -7030,6 +7066,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     captureEnabled?: boolean;
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+    endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
@@ -7840,6 +7877,11 @@ type TransactionRuntime = Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
+    acquireWriteFences: (refusal: Readonly<{
+        operation: string;
+        suggestion: string;
+    }>) => Promise<void>;
+    acquireReadFences: () => Promise<void>;
 }>;
 
 // @public (undocumented)
