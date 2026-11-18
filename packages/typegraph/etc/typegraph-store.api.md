@@ -2295,12 +2295,12 @@ type EngineRecordedTimeMembers = Readonly<{
 }>;
 
 // @public
-type EngineRevision = string & Readonly<{
+export type EngineRevision = string & Readonly<{
     [ENGINE_REVISION_BRAND]: "EngineRevision";
 }>;
 
 // @public
-type EntityKey = Readonly<{
+export type EntityKey = Readonly<{
     kind: string;
     id: string;
 }>;
@@ -3134,7 +3134,7 @@ type FulltextMatchPredicate = Readonly<{
 type FulltextOperationBackend = Pick<GraphBackend, "upsertFulltext" | "deleteFulltext" | "upsertFulltextBatch" | "deleteFulltextBatch" | "fulltextSearch">;
 
 // @public
-type FulltextQueryMode = "websearch" | "phrase" | "plain" | "raw";
+export type FulltextQueryMode = "websearch" | "phrase" | "plain" | "raw";
 
 // @public
 export type FulltextSearchHit<N = Node> = Readonly<{
@@ -4507,7 +4507,7 @@ export type LabelPropagationOptions<G extends GraphDef> = TemporalAlgorithmOptio
 type LineageBackend = Pick<GraphBackend, "lineage">;
 
 // @public
-type LineageDelta = Readonly<{
+export type LineageDelta = Readonly<{
     kind: "keys";
     nodes: readonly EntityKey[];
     edges: readonly EntityKey[];
@@ -4695,7 +4695,7 @@ type MetaEdgeProperties = Readonly<{
 }>;
 
 // @public
-type MisassignedEdgeEndpointRow = Readonly<{
+export type MisassignedEdgeEndpointRow = Readonly<{
     edgeKind: string;
     edgeId: string;
     fromKind: string;
@@ -7840,7 +7840,7 @@ type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readon
 }>;
 
 // @public
-type TransactionOptions = Readonly<{
+export type TransactionOptions = Readonly<{
     isolationLevel?: "read_uncommitted" | "read_committed" | "repeatable_read" | "serializable";
     accessMode?: "read_only" | "read_write";
 }>;
@@ -8458,10 +8458,10 @@ type VectorIndexParams = Readonly<{
 }>;
 
 // @public
-type VectorIndexType = "hnsw" | "ivfflat" | "none";
+export type VectorIndexType = "hnsw" | "ivfflat" | "none";
 
 // @public
-type VectorMetric = "cosine" | "l2" | "inner_product";
+export type VectorMetric = "cosine" | "l2" | "inner_product";
 
 // @public
 type VectorMetricType = "cosine" | "l2" | "inner_product";

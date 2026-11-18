@@ -126,6 +126,7 @@ export {
   type EquivalentToCheck,
   isMetaEdge,
   type MetaEdge,
+  type MetaEdgeName,
   type MetaEdgeProperties,
   type OntologyRelation,
   type PolymorphicNodeType,
@@ -133,6 +134,9 @@ export {
   type SubClassOfCheck,
   type TypedOntologyRelation,
 } from "../ontology";
+// Type-only: `MetaEdgeName` is spelled `(typeof ALL_META_EDGE_NAMES)[number]`,
+// so naming it needs the constant's type, not a runtime export.
+export type { ALL_META_EDGE_NAMES } from "../ontology/constants";
 
 // ID generation
 export { generateId } from "../utils/id";

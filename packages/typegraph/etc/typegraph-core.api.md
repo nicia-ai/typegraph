@@ -13,7 +13,7 @@ const __edgeId: unique symbol;
 const __nodeId: unique symbol;
 
 // @public (undocumented)
-const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
+export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
 export type AllEdgeTypes<G extends GraphDef> = {
@@ -795,7 +795,7 @@ export type MetaEdge<K extends string = string> = Readonly<{
 }>;
 
 // @public (undocumented)
-type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
+export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
 export type MetaEdgeProperties = Readonly<{

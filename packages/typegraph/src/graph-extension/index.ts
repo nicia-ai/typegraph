@@ -40,6 +40,7 @@ export {
   type ExtensionObjectProperty,
   type ExtensionObjectSchema,
   type ExtensionOntologyRelation,
+  type ExtensionPropertyModifiers,
   type ExtensionPropertyOutput,
   type ExtensionPropertyType,
   type ExtensionSearchableModifier,

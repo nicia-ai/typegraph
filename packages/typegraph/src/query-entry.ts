@@ -99,7 +99,7 @@ export {
   type TraversalFragment,
   UnionableQuery,
 } from "./query";
-export type { ParameterRef } from "./query/ast";
+export type { ParameterRef, ValueType } from "./query/ast";
 export {
   type DatabaseProjection,
   ExecutableProjectionQuery,
@@ -128,7 +128,9 @@ export {
   type RecordedReadSource,
   recordedRelation,
   type RecordedRelationOptions,
+  type SqlTableNames,
 } from "./query/compiler/schema";
+export type { SqlDialect } from "./query/dialect/types";
 export type {
   CollectedRecord,
   CollectOptions,
@@ -137,3 +139,4 @@ export type {
   CollectRecordOperand,
   DatabaseExpression,
 } from "./query/expressions";
+export type { JsonPointer } from "./query/json-pointer";
