@@ -197,27 +197,52 @@ export async function seedWorkingTableFromNodes(
   }
 }
 
+/**
+ * How a plan builds its initial state. A plan whose initialization joins
+ * against the freshly populated working table splits it in two: `populate`
+ * fills the table and returns its row count, the runner then refreshes the
+ * table's statistics, and only then does `initialize` run the joining
+ * statements (PageRank's out-weights, label propagation's neighbor
+ * materialization). Without that boundary PostgreSQL plans those joins
+ * against its one-row guess for an un-analyzed temporary table. A plan whose
+ * initialization never joins the working table populates inside
+ * `initialize` and leaves the first refresh to the runner's post-initialize
+ * step.
+ */
+type IterativeGraphInitialization<State extends IterativeGraphState> =
+  | Readonly<{
+      populate: (context: IterativeGraphRunContext) => Promise<number>;
+      initialize: (
+        context: IterativeGraphRunContext,
+        populatedRowCount: number,
+      ) => Promise<State>;
+    }>
+  | Readonly<{
+      populate?: undefined;
+      initialize: (context: IterativeGraphRunContext) => Promise<State>;
+    }>;
+
 export type IterativeGraphPlan<
   State extends IterativeGraphState,
   Result,
-> = Readonly<{
-  algorithm: string;
-  maxIterations: number;
-  createWorkingTable: (context: IterativeGraphRunContext) => SqlFragment;
-  initialize: (context: IterativeGraphRunContext) => Promise<State>;
-  runRound: (
-    context: IterativeGraphRunContext,
-    state: State,
-    iteration: number,
-  ) => Promise<State>;
-  hasConverged: (state: State) => boolean;
-  extractResult: (
-    context: IterativeGraphRunContext,
-    state: State,
-  ) => Promise<Result>;
-  /** Drops any plan-owned temporary relations before the working table. */
-  cleanup?: (context: IterativeGraphRunContext) => Promise<void>;
-}>;
+> = IterativeGraphInitialization<State> &
+  Readonly<{
+    algorithm: string;
+    maxIterations: number;
+    createWorkingTable: (context: IterativeGraphRunContext) => SqlFragment;
+    runRound: (
+      context: IterativeGraphRunContext,
+      state: State,
+      iteration: number,
+    ) => Promise<State>;
+    hasConverged: (state: State) => boolean;
+    extractResult: (
+      context: IterativeGraphRunContext,
+      state: State,
+    ) => Promise<Result>;
+    /** Drops any plan-owned temporary relations before the working table. */
+    cleanup?: (context: IterativeGraphRunContext) => Promise<void>;
+  }>;
 
 type ExpansionRow = Readonly<{
   source_id: string;
@@ -458,10 +483,12 @@ async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
   }
   let operationFailure: CapturedFailure | undefined;
   try {
-    let state = await plan.initialize(context);
+    const initialized = await runInitialization(context, plan);
+    let state = initialized.state;
     let analyzedRowCount = await refreshWorkingTableStatistics(
       context,
       state.workingTableSize,
+      initialized.analyzedRowCount,
     );
     for (
       let iteration = 1;
@@ -493,6 +520,33 @@ async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
   } finally {
     await cleanupWorkingTables(context, plan.cleanup, operationFailure);
   }
+}
+
+/**
+ * Runs the plan's initialization. A plan with a population phase gets its
+ * working table's statistics refreshed between `populate` and `initialize`,
+ * through the same gated refresh the rounds use, so no statement that joins
+ * the populated table is planned without them.
+ */
+async function runInitialization<State extends IterativeGraphState>(
+  context: IterativeGraphRunContext,
+  initialization: IterativeGraphInitialization<State>,
+): Promise<Readonly<{ state: State; analyzedRowCount: number | undefined }>> {
+  if (initialization.populate === undefined) {
+    return {
+      state: await initialization.initialize(context),
+      analyzedRowCount: undefined,
+    };
+  }
+  const populatedRowCount = await initialization.populate(context);
+  const analyzedRowCount = await refreshWorkingTableStatistics(
+    context,
+    populatedRowCount,
+  );
+  return {
+    state: await initialization.initialize(context, populatedRowCount),
+    analyzedRowCount,
+  };
 }
 
 export function shouldRefreshWorkingTableStatistics(
