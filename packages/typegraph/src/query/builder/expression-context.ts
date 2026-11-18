@@ -2,12 +2,17 @@ import type { z } from "zod";
 
 import type { GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import { isInteropProbeKey } from "../../utils/object";
 import type { FieldRef } from "../ast";
 import { createFieldExpression, type DatabaseExpression } from "../expressions";
 import { jsonPointer } from "../json-pointer";
 import type { FieldTypeInfo } from "../schema-introspector";
 import { getExpressionScope } from "./expression-scope";
 import type { ExpressionSubqueryHelpers } from "./expression-subqueries";
+import {
+  refuseUnknownMetadataField,
+  resolveSystemMetadataField,
+} from "./order-by-field";
 import type { QueryBuilder } from "./query-builder";
 import type {
   AliasMap,
@@ -105,7 +110,16 @@ export type ExpressionAliasContext<
   readonly [Alias in keyof Aliases & string]: AliasExpressions<
     Aliases[Alias],
     Scope
-  >;
+  > &
+    Readonly<{
+      // Nodes store a version; edges do not.
+      $meta: Readonly<{
+        version: DatabaseExpression<
+          number | UndefinedWhenOptional<Aliases[Alias]["optional"]>,
+          Scope
+        >;
+      }>;
+    }>;
 } & {
   readonly [Alias in keyof Edges & string]: AliasExpressions<
     Edges[Alias],
@@ -121,14 +135,6 @@ export type ExpressionAliasContext<
         Scope
       >;
     }>;
-};
-
-const METADATA_COLUMNS: Readonly<Record<string, string>> = {
-  validFrom: "valid_from",
-  validTo: "valid_to",
-  createdAt: "created_at",
-  updatedAt: "updated_at",
-  deletedAt: "deleted_at",
 };
 
 const DATABASE_EXPRESSION_KEYS: ReadonlySet<PropertyKey> = new Set([
@@ -244,16 +250,19 @@ export function createExpressionAliasContext<
               {
                 get(_metadata, property) {
                   if (
-                    typeof property !== "string" ||
-                    METADATA_COLUMNS[property] === undefined
+                    typeof property === "symbol" ||
+                    isInteropProbeKey(property)
                   )
                     return;
+                  const isEdge = edge !== undefined;
+                  const metadata = resolveSystemMetadataField(property, isEdge);
+                  if (metadata === undefined)
+                    refuseUnknownMetadataField(alias, property, isEdge);
                   return makeField(
                     alias,
-                    [METADATA_COLUMNS[property]],
-                    { valueType: "string" },
-                    optional ||
-                      (property !== "createdAt" && property !== "updatedAt"),
+                    [metadata.column],
+                    { valueType: metadata.valueType },
+                    optional || metadata.nullable,
                     false,
                   );
                 },

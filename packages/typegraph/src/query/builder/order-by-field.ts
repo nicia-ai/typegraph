@@ -26,14 +26,20 @@ type SystemOrderField = Readonly<{
    * system name before (`meta.version`) or kept its name (`id`, `kind`).
    */
   removedName?: string;
+  /**
+   * Present on the timestamp metadata fields. A selected row carries them as
+   * ISO-8601 strings, but a predicate compares them as instants, so it
+   * accepts a `Date` operand.
+   */
+  timestamp?: true;
 }>;
 
 /**
- * The one table of orderable system fields: each one's order name, its
- * location in a selected row, and its physical column. Every consumer — the
- * alias-form `orderBy`, cursor extraction from mapped and selective rows,
- * and the native tuple-comparison check — reads it, so the three cannot name
- * a field differently.
+ * The one table of system fields: each one's order name, its location in a
+ * selected row, and its physical column. Every consumer — the alias-form
+ * `orderBy`, cursor extraction from mapped and selective rows, the native
+ * tuple-comparison check, and the `$meta` namespace of predicate accessors
+ * and expression contexts — reads it, so none can name a field differently.
  */
 const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
@@ -77,6 +83,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
     selectedPath: ["meta", "validFrom"],
     column: "valid_from",
     removedName: "valid_from",
+    timestamp: true,
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -85,6 +92,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
     selectedPath: ["meta", "validTo"],
     column: "valid_to",
     removedName: "valid_to",
+    timestamp: true,
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -93,6 +101,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
     selectedPath: ["meta", "createdAt"],
     column: "created_at",
     removedName: "created_at",
+    timestamp: true,
     nullable: false,
     owner: "both",
     valueType: "string",
@@ -101,6 +110,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
     selectedPath: ["meta", "updatedAt"],
     column: "updated_at",
     removedName: "updated_at",
+    timestamp: true,
     nullable: false,
     owner: "both",
     valueType: "string",
@@ -109,6 +119,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
     selectedPath: ["meta", "deletedAt"],
     column: "deleted_at",
     removedName: "deleted_at",
+    timestamp: true,
     nullable: true,
     owner: "both",
     valueType: "string",
@@ -138,6 +149,78 @@ const SYSTEM_ORDER_FIELDS_BY_COLUMN: ReadonlyMap<string, SystemOrderField> =
 
 function ownedBy(field: SystemOrderField, isEdge: boolean): boolean {
   return field.owner === "both" || field.owner === (isEdge ? "edge" : "node");
+}
+
+/**
+ * A metadata field an alias stores, named by its key under `meta` in a
+ * selected row (`createdAt`), which is also its key under `$meta` in
+ * predicate accessors and expression contexts.
+ */
+export type SystemMetadataField = Readonly<{
+  name: string;
+  column: string;
+  nullable: boolean;
+  valueType: NonNullable<FieldRef["valueType"]>;
+  timestamp: boolean;
+}>;
+
+function metadataFields(
+  isEdge: boolean,
+): ReadonlyMap<string, SystemMetadataField> {
+  return new Map(
+    SYSTEM_ORDER_FIELDS.flatMap((field) => {
+      const [namespace, name] = field.selectedPath;
+      if (namespace !== "meta" || name === undefined || !ownedBy(field, isEdge))
+        return [];
+      const metadata: SystemMetadataField = {
+        name,
+        column: field.column,
+        nullable: field.nullable,
+        valueType: field.valueType,
+        timestamp: field.timestamp === true,
+      };
+      return [[name, metadata] as const];
+    }),
+  );
+}
+
+const NODE_METADATA_FIELDS = metadataFields(false);
+const EDGE_METADATA_FIELDS = metadataFields(true);
+
+/** The metadata fields a node or edge alias stores, in table order. */
+export function systemMetadataFields(
+  isEdge: boolean,
+): readonly SystemMetadataField[] {
+  return [...(isEdge ? EDGE_METADATA_FIELDS : NODE_METADATA_FIELDS).values()];
+}
+
+/**
+ * Resolves a metadata field by its key under `meta` / `$meta`, or
+ * `undefined` when this alias stores no such field (`version` on an edge).
+ */
+export function resolveSystemMetadataField(
+  name: string,
+  isEdge: boolean,
+): SystemMetadataField | undefined {
+  return (isEdge ? EDGE_METADATA_FIELDS : NODE_METADATA_FIELDS).get(name);
+}
+
+/**
+ * Refuses `$meta.<name>` for a name this alias stores no metadata field for,
+ * listing the ones it does. The typed accessors make the same name a compile
+ * error; this is the refusal an untyped caller reaches.
+ */
+export function refuseUnknownMetadataField(
+  alias: string,
+  name: string,
+  isEdge: boolean,
+): never {
+  const available = systemMetadataFields(isEdge).map((field) => field.name);
+  throw new ConfigurationError(
+    `"${alias}.$meta.${name}" is not a metadata field of this ${isEdge ? "edge" : "node"} alias.`,
+    { code: "METADATA_FIELD_UNKNOWN", alias, field: name, available },
+    { suggestion: `Use one of: ${available.join(", ")}.` },
+  );
 }
 
 /** Identifies physical system columns whose row-value comparisons are unsafe. */

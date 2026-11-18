@@ -540,19 +540,16 @@ async function compareVersions(
   version1: number,
   version2: number
 ): Promise<{ before: Node<typeof Document>; after: Node<typeof Document> } | undefined> {
-  const versions = await store
+  const [before, after] = await store
     .query()
     .from("Document", "d")
     .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(documentId))
+    .whereNode("d", (d) =>
+      d.id.eq(documentId).and(d.$meta.version.in([version1, version2])),
+    )
     .orderBy("d", "meta.version", "asc")
     .select((ctx) => ctx.d)
     .execute();
-
-  // The version is system metadata, so it is matched on the selected rows.
-  const [before, after] = versions.filter(
-    (row) => row.meta.version === version1 || row.meta.version === version2,
-  );
   if (before === undefined || after === undefined) return undefined;
 
   return { before, after };

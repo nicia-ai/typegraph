@@ -1,0 +1,9 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+`whereNode` and `whereEdge` predicate accessors expose system metadata under `$meta`, named as a selected row carries it under `meta` and as `orderBy(alias, "meta.<name>")` and the expression context's `$meta` name it. A node accessor has `$meta.version`, `$meta.createdAt`, `$meta.updatedAt`, `$meta.validFrom`, `$meta.validTo` and `$meta.deletedAt`; an edge accessor has the same fields except `version`, which edges do not store, so `e.$meta.version` is a compile error. Timestamps take the date operators (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `between`, `in`, `notIn`, `isNull`, `isNotNull`) and `version` the number operators, including `param()` bindings in prepared queries. A predicate such as `d.$meta.version.in([3, 5])` compiles against the alias's own scan, so a query no longer fetches every row to filter on metadata in JavaScript. Because `$` is a reserved property prefix, a property a schema declares as `version` or `createdAt` stays `d.version` / `d.createdAt`. The same accessors reach `find({ where })`, `updateWhere({ where })` and the other collection predicates. The new types are exported as `NodeMetadataAccessor` and `EdgeMetadataAccessor`.
+
+A metadata predicate narrows the rows the query's temporal mode admits and never widens them, the same as the `$meta` expression form: under the default `"current"` mode deleted and ended rows are already excluded, so `d.$meta.deletedAt.isNotNull()` matches nothing there; use `temporal("includeTombstones")` or `temporal("includeEnded")` to filter on them.
+
+The expression context's `$meta` gains `version` on node aliases. Reading a `$meta` name an alias does not store, such as `version` on an edge alias from untyped code, now throws `ConfigurationError` with `details.code` `METADATA_FIELD_UNKNOWN` in both the predicate accessor and the expression context, where the expression context used to return `undefined`.

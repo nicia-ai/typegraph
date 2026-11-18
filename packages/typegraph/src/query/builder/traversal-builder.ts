@@ -48,6 +48,7 @@ import {
   type DynamicNodeType,
 } from "./dynamic";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import { createMetadataAccessor } from "./metadata-accessor";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
@@ -488,6 +489,7 @@ export class TraversalBuilder<
     const toIdAccessor = stringField(
       fieldRef(alias, ["to_id"], { valueType: "string" }),
     );
+    const metadataAccessor = createMetadataAccessor(alias, true);
 
     // Build field accessor for a schema property
     const buildFieldAccessor = (propertyName: string): BaseFieldAccessor => {
@@ -540,6 +542,7 @@ export class TraversalBuilder<
         kind: kindAccessor,
         fromId: fromIdAccessor,
         toId: toIdAccessor,
+        $meta: metadataAccessor,
         field: (name: string) =>
           createDynamicFieldBuilder(
             this.#config.schemaIntrospector,
@@ -562,6 +565,7 @@ export class TraversalBuilder<
         if (property === "kind") return kindAccessor;
         if (property === "fromId") return fromIdAccessor;
         if (property === "toId") return toIdAccessor;
+        if (property === "$meta") return metadataAccessor;
 
         // A DECLARED field wins over the interop exemption: `then` and `toJSON`
         // are legal schema field names, so only an UNDECLARED probe resolves to

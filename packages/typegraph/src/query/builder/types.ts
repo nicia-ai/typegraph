@@ -981,11 +981,41 @@ export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> &
   }>;
 
 /**
+ * `n.$meta` in a node predicate: `version`, `validFrom`, `validTo`,
+ * `createdAt`, `updatedAt` and `deletedAt`, keyed as a selected row carries
+ * them under `meta` and as the expression context exposes them under `$meta`.
+ * Timestamps compare as dates; `version` compares as a number.
+ *
+ * A metadata predicate narrows the rows the query's temporal mode admits; it
+ * never widens them. Under the default `"current"` mode a deleted row is
+ * already excluded, so `n.$meta.deletedAt.isNotNull()` matches nothing there;
+ * query `temporal("includeTombstones")` to reach deleted rows.
+ */
+export type NodeMetadataAccessor = Readonly<{
+  [Field in keyof SelectableNodeMeta]-?: [
+    NonNullable<SelectableNodeMeta[Field]>,
+  ] extends [number] ?
+    NumberFieldAccessor
+  : DateFieldAccessor;
+}>;
+
+/**
+ * `e.$meta` in an edge predicate: the node metadata fields except `version`,
+ * which edges do not store.
+ */
+export type EdgeMetadataAccessor = Readonly<{
+  [Field in keyof SelectableEdgeMeta]-?: NodeMetadataAccessor[Field];
+}>;
+
+/**
  * Node accessor for predicate building.
  *
  * Properties are available at the top level for ergonomic access:
  * - `n.name` instead of `n.props.name`
  * - System fields: `n.id`, `n.kind`
+ * - Metadata: `n.$meta.createdAt`, `n.$meta.version`, … under the reserved
+ *   `$` prefix, so a declared property named `version` or `createdAt` stays
+ *   `n.version` / `n.createdAt`.
  * - Fulltext: `n.$fulltext.matches(...)` — throws at query build time if
  *   the node kind has no `searchable()` fields. Exposed at the type
  *   level on every accessor so refinements like
@@ -1001,6 +1031,7 @@ export type NodeAccessor<N extends NodeType> =
       id: StringFieldAccessor;
       kind: StringFieldAccessor;
       $fulltext: FulltextAccessor;
+      $meta: NodeMetadataAccessor;
     }> &
       PropsAccessor<N>;
 
@@ -1018,6 +1049,7 @@ type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
  * Properties are available at the top level for ergonomic access:
  * - `e.role` instead of `e.props.role`
  * - System fields: `e.id`, `e.kind`, `e.fromId`, `e.toId`
+ * - Metadata: `e.$meta.createdAt`, `e.$meta.validTo`, … (no `version`)
  *
  * Dynamic-mode counterpart: see `NodeAccessor` for the brand-detection
  * pattern.
@@ -1029,6 +1061,7 @@ export type EdgeAccessor<E extends AnyEdgeType> =
       kind: StringFieldAccessor;
       fromId: StringFieldAccessor;
       toId: StringFieldAccessor;
+      $meta: EdgeMetadataAccessor;
     }> &
       EdgePropsAccessor<E>;
 

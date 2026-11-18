@@ -171,7 +171,8 @@ function evaluateNodePredicate<N extends NodeType>(
         if (
           property === "id" ||
           property === "kind" ||
-          property === "$fulltext"
+          property === "$fulltext" ||
+          property === "$meta"
         ) {
           return accessor[property];
         }

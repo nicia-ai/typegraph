@@ -71,6 +71,7 @@ export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
 export { registerLineageConformanceIntegrationTests } from "./lineage-conformance";
 export { registerMatchResultFilteringIntegrationTests } from "./match-result-filtering";
 export { registerMatchResultRankingIntegrationTests } from "./match-result-ranking";
+export { registerMetadataPredicateIntegrationTests } from "./metadata-predicates";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
 export { registerMultiKindQueryIntegrationTests } from "./multi-kind-queries";
 export { registerMultiRecursiveTraversalIntegrationTests } from "./multi-recursive-traversals";

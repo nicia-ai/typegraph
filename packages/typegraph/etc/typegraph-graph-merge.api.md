@@ -2191,6 +2191,7 @@ type DynamicEdgeAccessor = Readonly<{
     kind: StringFieldAccessor;
     fromId: StringFieldAccessor;
     toId: StringFieldAccessor;
+    $meta: EdgeMetadataAccessor;
     field: (name: string) => DynamicFieldBuilder;
 }>;
 
@@ -2228,6 +2229,7 @@ type DynamicNodeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
     $fulltext: FulltextAccessor;
+    $meta: NodeMetadataAccessor;
     field: (name: string) => DynamicFieldBuilder;
 }>;
 
@@ -2302,6 +2304,7 @@ type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? D
     kind: StringFieldAccessor;
     fromId: StringFieldAccessor;
     toId: StringFieldAccessor;
+    $meta: EdgeMetadataAccessor;
 }> & EdgePropsAccessor<E>;
 
 // @public
@@ -2688,6 +2691,11 @@ type EdgeMatchIdentityStorage = Readonly<{
 
 // @public
 type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
+
+// @public
+type EdgeMetadataAccessor = Readonly<{
+    [Field in keyof SelectableEdgeMeta]-?: NodeMetadataAccessor[Field];
+}>;
 
 // @public
 type EdgeOrderField<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? string : "id" | "kind" | "fromId" | "toId" | `meta.${keyof SelectableEdgeMeta}` | (keyof z.infer<E["schema"]> & string);
@@ -3265,7 +3273,11 @@ Extract<Axes, undefined>
 
 // @public (undocumented)
 type ExpressionAliasContext<Aliases extends AliasMap, Edges extends EdgeAliasMap, Scope extends string = (keyof Aliases | keyof Edges) & string> = {
-    readonly [Alias in keyof Aliases & string]: AliasExpressions<Aliases[Alias], Scope>;
+    readonly [Alias in keyof Aliases & string]: AliasExpressions<Aliases[Alias], Scope> & Readonly<{
+        $meta: Readonly<{
+            version: DatabaseExpression<number | UndefinedWhenOptional<Aliases[Alias]["optional"]>, Scope>;
+        }>;
+    }>;
 } & {
     readonly [Alias in keyof Edges & string]: AliasExpressions<Edges[Alias], Scope> & Readonly<{
         fromId: DatabaseExpression<string | (Edges[Alias]["optional"] extends true ? undefined : never), Scope>;
@@ -6399,6 +6411,7 @@ type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? Dyna
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
     $fulltext: FulltextAccessor;
+    $meta: NodeMetadataAccessor;
 }> & PropsAccessor<N>;
 
 // @public
@@ -6674,6 +6687,13 @@ type NodeKinds<G extends GraphDef> = keyof G["nodes"] & string;
 // @public
 type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> & Readonly<{
     version: NodeRow["version"];
+}>;
+
+// @public
+type NodeMetadataAccessor = Readonly<{
+    [Field in keyof SelectableNodeMeta]-?: [
+    NonNullable<SelectableNodeMeta[Field]>
+    ] extends [number] ? NumberFieldAccessor : DateFieldAccessor;
 }>;
 
 // @public

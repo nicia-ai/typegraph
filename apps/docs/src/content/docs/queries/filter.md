@@ -62,6 +62,40 @@ const highPaying = await store
 | `alias`             | `string`                  | The edge alias to filter (must exist in query) |
 | `predicateFunction` | `(accessor) => Predicate` | Function that returns a predicate              |
 
+## Metadata
+
+System metadata is under `$meta` on the accessor, with the names a selected row uses under `meta`
+and `orderBy(alias, "meta.<name>")` accepts. A metadata predicate filters the alias's own scan, like
+a property predicate:
+
+```typescript
+const recentRevisions = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) =>
+    d.$meta.version.gte(3).and(d.$meta.updatedAt.gte(new Date("2025-01-01"))),
+  )
+  .select((ctx) => ctx.d)
+  .execute();
+```
+
+| Field | On | Operators |
+| --- | --- | --- |
+| `$meta.version` | nodes | number: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `between`, `in`, `notIn`, null checks |
+| `$meta.createdAt`, `$meta.updatedAt` | nodes, edges | date: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `between`, `in`, `notIn`, null checks |
+| `$meta.validFrom`, `$meta.validTo`, `$meta.deletedAt` | nodes, edges | date, as above |
+
+Timestamp operators take a `Date`; the range operators also take an ISO-8601 UTC string in the
+stored form, such as `"2025-01-01T00:00:00.000Z"`. Edges store no
+version, so `e.$meta.version` is a compile error. The `$` prefix is reserved, so a property your
+schema declares as `version` or `createdAt` stays `d.version` / `d.createdAt`.
+
+A metadata predicate narrows the rows the query's [temporal mode](/queries/temporal) admits; it never
+widens them. The default `"current"` mode already excludes deleted and ended rows, so
+`d.$meta.deletedAt.isNotNull()` matches nothing there. Query `temporal("includeTombstones")` to
+filter deleted rows, or `temporal("includeEnded")` to filter on an ended `validTo`. The expression
+form, `where((ctx) => expr.isNotNull(ctx.d.$meta.deletedAt))`, behaves the same way.
+
 ## Combining Predicates
 
 ### AND

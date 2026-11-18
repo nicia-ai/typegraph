@@ -568,14 +568,12 @@ await store.nodes.Document.upsertById(documentId, {
 ### Find Deleted Nodes
 
 ```typescript
-import { expr } from "@nicia-ai/typegraph";
-
 // Soft-deleted nodes are tombstones: include them, then keep only those
 const deletedDocs = await store
   .query()
   .from("Document", "d")
   .temporal("includeTombstones")
-  .where((ctx) => expr.isNotNull(ctx.d.$meta.deletedAt))
+  .whereNode("d", (d) => d.$meta.deletedAt.isNotNull())
   .select((ctx) => ({
     id: ctx.d.id,
     title: ctx.d.title,
