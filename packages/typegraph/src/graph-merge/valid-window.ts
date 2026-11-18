@@ -63,14 +63,17 @@
  * "the merge wrote this end" and "the target already held this end" distinguishable.
  * A row NO branch claimed produces no entry at all: there was nothing to discard.
  *
- * DELETION ABSORBS AN ENDING
+ * DELETION ABSORBS AN ENDING, NOT A REOPEN
  *
- * A window-only change is not a "modification" (it is staged in its own bucket),
- * so it never reaches delete/modify resolution. A row one branch deleted and
- * another merely re-windowed is therefore deleted, with no `DeleteModifyConflict`
- * — deleting and ending are both "no longer true", and the stronger statement
- * wins. The callers pass the finally-deleted identity sets so the ending is
- * dropped with the row.
+ * A window change is staged in its own bucket, not as a property modification.
+ * A row one branch deleted and another merely ENDED is therefore deleted, with
+ * no `DeleteModifyConflict` — deleting and ending are both "no longer true", and
+ * the stronger statement wins. A REOPEN is the opposite statement ("true
+ * again"), so delete/modify resolution counts it as a modification
+ * ({@link reopensValidity}, issue #789): the row's fate is then the
+ * `onDeleteModifyConflict` decision, recorded as a conflict. Either way the
+ * callers pass the finally-deleted identity sets, so a claim on a row the merge
+ * deletes is dropped with the row.
  *
  * WHO GETS PROVENANCE CREDIT
  *
@@ -250,6 +253,17 @@ function classifyDelta(
   };
 }
 
+/**
+ * Whether ONE branch's observed window delta reopens the row: an authored
+ * clear of an ended `validTo`, exactly the delta {@link classifyDelta} stages
+ * as `{ kind: "clear" }`. A reopen asserts the fact is true again, the opposite
+ * of a deletion, so delete/modify resolution treats it as a modification
+ * (issue #789) while an ending stays absorbed by a concurrent deletion.
+ */
+export function reopensValidity(base: ValidWindow, fork: ValidWindow): boolean {
+  return classifyDelta(base, fork).applicableEnd?.kind === "clear";
+}
+
 /** A staged window delta reduced to the fields reconciliation needs. */
 type WindowDelta = Readonly<{
   branchId: BranchId;
@@ -261,7 +275,8 @@ type WindowDelta = Readonly<{
 
 /**
  * Reconciles one entity population (nodes or edges), skipping identities the
- * merge finally deletes — deletion absorbs an ending, with no conflict recorded.
+ * merge finally deletes. Deletion absorbs an ending with no conflict recorded; a
+ * reopen on such a row was already recorded by delete/modify resolution.
  *
  * `ends` and `credits` cover only the rows the commit must WRITE; `resolutions`
  * additionally reports the rows target precedence decided, so a discarded claim is

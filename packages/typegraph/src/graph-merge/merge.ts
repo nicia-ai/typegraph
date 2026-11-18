@@ -1683,7 +1683,8 @@ function buildInternalMergePlan<G extends GraphDef>(
   // (6-window) reconcile the inherited valid-time windows the branches moved.
   // Runs AFTER both delete/modify resolutions because a finally-deleted row
   // absorbs its own ending: deleting and ending are both "no longer true", and
-  // the stronger statement wins without recording a conflict.
+  // the stronger statement wins without recording a conflict. A reopen was
+  // already weighed against any deletion there, as a DeleteModifyConflict.
   const validWindows = resolveValidWindows(
     staging,
     new Set(nodeDeletions.keys()),

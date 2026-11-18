@@ -13,8 +13,8 @@
  *
  * Moving a part back under a whole by reopening an ENDED `oneActive` row
  * (`clearValidTo`) is an attachment too. That row existed at the fork point,
- * so another branch's deletion absorbs it without even a drop; it gets the
- * same refusal.
+ * so it is lost either to a deletion of the row itself or to the endpoint
+ * drop; it gets the same refusal.
  *
  * When the plan deletes BOTH ends, or the edge does not realize a composition
  * pair, the edge is an ordinary `edge:endpoint-deleted` drop and the merge
