@@ -101,6 +101,7 @@ import { importGraph } from "../../../src/interchange";
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
+import { assertProperty } from "../../graph-merge/assert-property";
 import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
 import { backendMatrix } from "../../graph-merge/test-utils";
 import { propertyRuns } from "../run-budget";
@@ -1719,7 +1720,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
 
   for (const lane of SNAPSHOT_LANES) {
     it(`merges random ${lane.name}-profile histories lawfully`, async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(snapshotScenarioArb(lane.ops), async (scenario) => {
           const cleanups: (() => Promise<void>)[] = [];
           async function makeBackend(): Promise<GraphBackend> {
@@ -1793,7 +1794,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
 
   it("merges random target-advanced incremental histories lawfully", async () => {
     const graph = defineLawGraph("identity-law-incremental", "ignore");
-    await fc.assert(
+    await assertProperty(
       fc.asyncProperty(incrementalScenarioArb, async (scenario) => {
         const cleanups: (() => Promise<void>)[] = [];
         async function makeBackend(): Promise<GraphBackend> {
@@ -1937,7 +1938,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
   for (const lane of MODEL_LANES) {
     it(`merges random identity and deletion ${lane.name} histories as the reference model predicts, whatever the branch order`, async () => {
       const tally: ModelTally = { merged: 0, refused: 0, undetermined: 0 };
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(
           modelScenarioArb(lane.incremental),
           async (scenario) => {

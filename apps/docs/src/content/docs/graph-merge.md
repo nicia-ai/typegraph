@@ -1567,6 +1567,29 @@ Inspection tools that have a backend and graph id but not the target's
 const store = await openProvenanceStore(backend, targetGraphId);
 ```
 
+`openProvenanceStore` opens **or creates**: on a free id it claims the marker and
+registers the sidecar schema. To ask "does this target have persisted
+provenance?" without creating anything, use `readProvenanceStore`. It runs the
+same ownership inspection but never writes — no marker, no schema registration,
+no DDL — so it works under a role that can only `SELECT`:
+
+```typescript
+import { readProvenanceStore } from "@nicia-ai/typegraph/graph-merge";
+
+const store = await readProvenanceStore(backend, targetGraphId);
+if (store === undefined) {
+  // No sidecar exists for this target; nothing was created.
+} else {
+  const rows = await readProvenance(store, { canonicalId: "patient-123" });
+}
+```
+
+It resolves to `undefined` for a free id, to the store when TypeGraph owns the
+id, and throws the same `GRAPH_MERGE_PROVENANCE_ID_COLLISION` as
+`openProvenanceStore` when the id is occupied by something else. A sidecar left
+half-created by an interrupted open, or still on the pre-marker schema, is
+returned as is for reading; finishing that work is `openProvenanceStore`'s job.
+
 ## Snapshot vs incremental
 
 A branch is forked from a `base@V` — a token combining the base's schema hash
