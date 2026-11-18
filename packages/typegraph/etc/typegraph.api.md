@@ -2131,6 +2131,7 @@ export type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeTy
     bulkUpsertById: (items: readonly EdgeBulkUpsertItem<E, Pairs, InputId, G>[]) => Promise<EdgeInGraph<G, E, From, To>[]>;
     bulkInsert: (items: readonly EdgeBulkInsertItem<Pairs, E["schema"], G>[]) => Promise<void>;
     bulkDelete: (ids: readonly InputId[]) => Promise<void>;
+    bulkHardDelete: (ids: readonly InputId[]) => Promise<void>;
     findByEndpoints: (...args: EdgeFindByEndpointsArguments<E, Pairs, G>) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
     getOrCreateByEndpoints: (...args: EdgeGetOrCreateByEndpointsArguments<E, Pairs, G>) => Promise<EdgeGetOrCreateByEndpointsResult<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>>;
     bulkGetOrCreateByEndpoints: (items: readonly EdgeBulkGetOrCreateItem<E, Pairs, G>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>[]>;

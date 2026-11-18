@@ -162,6 +162,7 @@ const EDGE_WRITE_INTENT_COUNTERS = {
   bulkUpsertById: countBulkInputAt(0),
   bulkInsert: countBulkInputAt(0),
   bulkDelete: countBulkInputAt(0),
+  bulkHardDelete: countBulkInputAt(0),
   getOrCreateByEndpoints: countSingleWrite,
   bulkGetOrCreateByEndpoints: countBulkInputAt(0),
 } as const satisfies Record<EdgeWriteMethodName, WriteIntentCounter>;

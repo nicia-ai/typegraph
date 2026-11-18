@@ -218,3 +218,74 @@ export async function applyEdgeHardDelete(
     await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, [work.id]);
   }
 }
+
+/** Whether an edge delete tombstones the row or removes it. */
+export type EdgeRowDeleteMode = "soft" | "hard";
+
+/**
+ * Deletes a set of edge rows in `mode`: one statement per bind-budget chunk
+ * through the backend's optional batch port, or one statement per edge without
+ * it. When `kind` is stated, every statement asserts it (see
+ * {@link UpdateEdgeParams.kind}), so an id re-pointed at another kind's edge
+ * matches zero rows; the node delete cascade states none, because it removes
+ * every connected edge whatever its kind.
+ *
+ * The one owner of "how does an edge-delete set reach the backend", for the
+ * collection's batch hard delete and the node cascade alike. It writes rows
+ * only: which removed edges owe a claim release is the caller's decision.
+ */
+export async function deleteEdgeRows(
+  graphId: string,
+  backend: Backend,
+  mode: EdgeRowDeleteMode,
+  ids: readonly string[],
+  kind?: string,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const asserted = kind === undefined ? {} : { kind };
+  const batchDelete =
+    mode === "hard" ? backend.hardDeleteEdgesBatch : backend.deleteEdgesBatch;
+  if (batchDelete === undefined) {
+    for (const id of ids) {
+      const params = { graphId, id, ...asserted };
+      await (mode === "hard" ?
+        backend.hardDeleteEdge(params)
+      : backend.deleteEdge(params));
+    }
+    return;
+  }
+  await batchDelete({ graphId, ids: [...ids], ...asserted });
+}
+
+/**
+ * Applies one resolved hard-delete set: the rows of each kind through
+ * {@link deleteEdgeRows}, asserting that kind, then ONE claim release for
+ * every member whose kind holds a claim.
+ *
+ * Each member removes exactly the row {@link applyEdgeHardDelete} would, so a
+ * set and the same members applied one by one leave identical state.
+ */
+export async function applyEdgeHardDeleteBatch(
+  ctx: EdgeWriteContext,
+  work: readonly EdgeHardDeleteWork[],
+  backend: Backend,
+): Promise<void> {
+  const idsByKind = new Map<string, string[]>();
+  for (const item of work) {
+    const ids = idsByKind.get(item.kind);
+    if (ids === undefined) idsByKind.set(item.kind, [item.id]);
+    else ids.push(item.id);
+  }
+  for (const [kind, ids] of idsByKind) {
+    await deleteEdgeRows(ctx.graphId, backend, "hard", ids, kind);
+  }
+  const claimHolderIds = work
+    .filter((item) => item.holdsCardinalityClaim)
+    .map((item) => item.id);
+  await purgeEdgeClaims(
+    backend,
+    ctx.claimsVerdict(),
+    ctx.graphId,
+    claimHolderIds,
+  );
+}

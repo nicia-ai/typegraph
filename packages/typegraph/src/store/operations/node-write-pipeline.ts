@@ -85,6 +85,7 @@ import {
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeDeletePlan } from "../types";
+import { deleteEdgeRows } from "./edge-write-pipeline";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -382,11 +383,11 @@ export async function judgeNodeDeleteBehavior(
 }
 
 /**
- * Deletes a set of edges by id, in the given mode. One batched statement per
- * bind-budget chunk instead of one statement per edge; the per-edge loop
- * remains for backends without the batch members.
+ * Deletes a set of edges by id, in the given mode, through
+ * {@link deleteEdgeRows} (one batched statement per bind-budget chunk, stating
+ * no kind), and releases the claims of hard-deleted ones.
  *
- * The one owner of "how does a delete remove an edge row" for both
+ * The one owner of "how does a node delete remove an edge" for both
  * {@link enforceNodeDeleteBehavior}'s cascade/disconnect arm (unconsumed
  * edges) and the composition cascade's explicit cleanup of the edges it
  * consumed (`node-operations.ts`) — a composition edge is deliberately
@@ -399,18 +400,7 @@ export async function deleteEdgesById(
   mode: NodeDeleteMode,
   edgeIds: readonly string[],
 ): Promise<void> {
-  if (edgeIds.length === 0) return;
-  const batchDelete =
-    mode === "hard" ? backend.hardDeleteEdgesBatch : backend.deleteEdgesBatch;
-  if (batchDelete === undefined) {
-    for (const edgeId of edgeIds) {
-      await (mode === "hard" ?
-        backend.hardDeleteEdge({ graphId: ctx.graphId, id: edgeId })
-      : backend.deleteEdge({ graphId: ctx.graphId, id: edgeId }));
-    }
-  } else {
-    await batchDelete({ graphId: ctx.graphId, ids: [...edgeIds] });
-  }
+  await deleteEdgeRows(ctx.graphId, backend, mode, edgeIds);
   // Hard-deleted holders are already takeable through the liveness probe;
   // this is housekeeping so node cascades do not grow edgeClaims forever.
   // Soft-deleted edges retain their rows for resurrection and are not

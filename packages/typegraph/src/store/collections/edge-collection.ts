@@ -159,6 +159,11 @@ export type EdgeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeHardDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByEndpoints: (
@@ -437,6 +442,7 @@ export function createEdgeCollection<
     executeDelete: executeEdgeDelete,
     executeDeleteBatch: executeEdgeDeleteBatch,
     executeHardDelete: executeEdgeHardDelete,
+    executeHardDeleteBatch: executeEdgeHardDeleteBatch,
     temporalRowMatcher,
   } = config;
 
@@ -1167,6 +1173,11 @@ export function createEdgeCollection<
     async bulkDelete(ids: readonly string[]): Promise<void> {
       if (ids.length === 0) return;
       await executeEdgeDeleteBatch(kind, ids, backend);
+    },
+
+    async bulkHardDelete(ids: readonly string[]): Promise<void> {
+      if (ids.length === 0) return;
+      await executeEdgeHardDeleteBatch(kind, ids, backend);
     },
 
     async findByEndpoints(

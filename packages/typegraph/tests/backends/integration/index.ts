@@ -35,6 +35,7 @@ export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
+export { registerEdgeBulkHardDeleteIntegrationTests } from "./edge-bulk-hard-delete";
 export { registerEdgeCardinalityTighteningIntegrationTests } from "./edge-cardinality-tightening";
 export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeClaimSelfHealIntegrationTests } from "./edge-claim-self-heal";

@@ -879,6 +879,44 @@ const CASES: Record<keyof WriteSession, Case> = {
     postRowClaims: ["purgeEdgeClaims"],
     plan: EDGE_PLAN,
   },
+  purgeEdges: {
+    run: async (raw) => {
+      await seed(raw, "s-batch-1");
+      await seed(raw, "s-batch-2");
+      // A CONSTRAINED kind, as `purgeEdge`'s fixture: the set's ONE claim
+      // release is a statement this case can observe.
+      for (const suffix of ["s-batch-1", "s-batch-2"]) {
+        await raw.insertEdge({
+          graphId: GRAPH_ID,
+          kind: "owns",
+          id: `edge-owns-${suffix}`,
+          fromKind: "Doc",
+          fromId: suffix,
+          toKind: "Doc",
+          toId: `${suffix}-b`,
+          props: {},
+        });
+      }
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work beside the fixture it closes over.
+      return (session) =>
+        session.purgeEdges([
+          {
+            id: "edge-owns-s-batch-1",
+            kind: "owns",
+            holdsCardinalityClaim: true,
+          },
+          {
+            id: "edge-owns-s-batch-2",
+            kind: "owns",
+            holdsCardinalityClaim: true,
+          },
+        ]);
+    },
+    sidecars: ["purgeEdgeClaims"],
+    row: "hardDeleteEdgesBatch",
+    postRowClaims: ["purgeEdgeClaims"],
+    plan: EDGE_PLAN,
+  },
 };
 
 describe("write session sidecar completeness", () => {

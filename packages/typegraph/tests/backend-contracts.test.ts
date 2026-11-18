@@ -1493,6 +1493,11 @@ describe("hook contract: success is reported only after COMMIT", () => {
       run: (store: Awaited<ReturnType<typeof buildStore>>["store"]) =>
         store.edges.knows.bulkDelete(["knows-1" as never]),
     },
+    {
+      name: "edge bulkHardDelete",
+      run: (store: Awaited<ReturnType<typeof buildStore>>["store"]) =>
+        store.edges.knows.bulkHardDelete(["knows-1" as never]),
+    },
   ] as const) {
     it(`${batchDelete.name}: remains hookless and rolls back on commit failure`, async () => {
       const { store, failing, events } = await buildStore();
@@ -1581,10 +1586,8 @@ const KIND_PREDICATED_EDGE_WRITES = new Set([
   "deleteEdge",
   "deleteEdgesBatch",
   "hardDeleteEdge",
+  "hardDeleteEdgesBatch",
 ]);
-
-/** Edge write members that are deliberately kind-blind. */
-const KIND_BLIND_EDGE_WRITES = new Set(["hardDeleteEdgesBatch"]);
 
 /**
  * Records the params the store hands each edge write, on the TRANSACTION
@@ -1596,9 +1599,7 @@ const KIND_BLIND_EDGE_WRITES = new Set(["hardDeleteEdgesBatch"]);
  */
 function isRecordedEdgeWrite(property: string | symbol): property is string {
   return (
-    typeof property === "string" &&
-    (KIND_PREDICATED_EDGE_WRITES.has(property) ||
-      KIND_BLIND_EDGE_WRITES.has(property))
+    typeof property === "string" && KIND_PREDICATED_EDGE_WRITES.has(property)
   );
 }
 
@@ -1706,6 +1707,15 @@ describe("edge-identity contract: kind-scoped writes state their expected kind",
     expect(paramsFor(calls, "deleteEdgesBatch")["kind"]).toBe("knows");
   });
 
+  it("passes the collection's kind on the batch hard delete path", async () => {
+    // The batch member is graph-wide by itself; only the kind the collection
+    // states keeps `bulkHardDelete` from removing an id a concurrent
+    // hard-delete + recreate re-pointed at another kind.
+    const { calls, store, edgeId } = await seedEdge();
+    await store.edges.knows.bulkHardDelete([edgeId]);
+    expect(paramsFor(calls, "hardDeleteEdgesBatch")["kind"]).toBe("knows");
+  });
+
   it("states NO kind on the node delete cascade", async () => {
     const { calls, store } = await seedEdge();
     // `Person` is `onDelete: "cascade"`, so this removes the connected edge by
@@ -1713,10 +1723,8 @@ describe("edge-identity contract: kind-scoped writes state their expected kind",
     // strand edges of the kinds the cascade did not name.
     await store.nodes.Person.delete("person-a" as never);
 
-    const cascadeCalls = calls.filter(
-      (call) =>
-        KIND_BLIND_EDGE_WRITES.has(call.method) ||
-        KIND_PREDICATED_EDGE_WRITES.has(call.method),
+    const cascadeCalls = calls.filter((call) =>
+      KIND_PREDICATED_EDGE_WRITES.has(call.method),
     );
     expect(cascadeCalls.length).toBeGreaterThan(0);
     for (const call of cascadeCalls) {

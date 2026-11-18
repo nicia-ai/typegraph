@@ -324,6 +324,7 @@ export function registerTransactionReceiptIntegrationTests(
         await edges.delete(edge1.id);
         await edges.hardDelete(edge3.id);
         await edges.bulkDelete([edge4.id, linkId("be1")]);
+        await edges.bulkHardDelete([edge4.id, linkId("be2")]);
       });
 
       // Node intents: create 1 + createFromRecord 1 + update 1 + upsertById 1
@@ -335,9 +336,9 @@ export function registerTransactionReceiptIntegrationTests(
       // Edge intents: create 1 + update 1 + getOrCreateByEndpoints 1
       // + bulkCreate 2 + bulkUpsertById 2 + bulkInsert 2
       // + bulkGetOrCreateByEndpoints 2 + delete 1 + hardDelete 1
-      // + bulkDelete 2 = 15.
-      expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 15 });
-      expect(outcome.receipt.writes.total).toBe(33);
+      // + bulkDelete 2 + bulkHardDelete 2 = 17.
+      expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 17 });
+      expect(outcome.receipt.writes.total).toBe(35);
     });
 
     it("does not count cascade-removed edges", async () => {

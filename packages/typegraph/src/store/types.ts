@@ -622,7 +622,7 @@ export type OperationHookContext = HookContext &
  * Context for one set-based collection mutation. The `operation` union is the
  * exhaustive list of what `onBulkOperationStart` / `onBulkOperationEnd`
  * observe, so a batch method absent from it (every `bulk*`, including
- * `bulkDelete`) emits no bulk event.
+ * `bulkDelete` and `bulkHardDelete`) emits no bulk event.
  */
 export type BulkOperationHookContext = HookContext &
   Readonly<{
@@ -635,7 +635,8 @@ export type BulkOperationHookContext = HookContext &
  * Observability hooks for monitoring store operations.
  *
  * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
- * `bulkDelete`) skip per-item operation hooks for throughput, and the bulk
+ * `bulkDelete`, `bulkHardDelete`) skip per-item operation hooks for
+ * throughput, and the bulk
  * hooks below do not stand in for them — those fire only for node
  * `compareAndSet` and `updateWhere`. A batch method emits no hook events at all,
  * neither per-item nor bulk. Query hooks still fire normally.
@@ -2487,6 +2488,30 @@ export type EdgeCollection<
    * every delete already applied for an earlier id in the same batch.
    */
   bulkDelete: (ids: readonly InputId[]) => Promise<void>;
+
+  /**
+   * Permanently delete multiple edges by ID.
+   *
+   * Leaves exactly the state that calling `hardDelete()` once per id inside
+   * one transaction leaves: live and soft-deleted edges are removed, absent
+   * ids and repeated ids are ignored, cardinality claims are released, and a
+   * history store captures each removed edge's pre-image without recording a
+   * delete row. An id owned by another edge kind refuses the whole batch with
+   * `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`, and a delete
+   * that would leave a live required composition part without its whole
+   * refuses with `CompositionExistenceError`; every id is resolved and judged
+   * before the first row is removed, so either refusal deletes nothing.
+   *
+   * Runs as one write transaction (atomic when the backend supports
+   * transactions) whose delete issues one kind-asserting statement per
+   * bind-budget chunk when the backend implements `hardDeleteEdgesBatch`, and
+   * one per edge otherwise. Like every batch method it fires no operation
+   * hooks.
+   *
+   * **Warning:** This operation is irreversible. Consider `bulkDelete()` for
+   * most use cases.
+   */
+  bulkHardDelete: (ids: readonly InputId[]) => Promise<void>;
 
   /**
    * Find an edge by endpoints and optional property fields.

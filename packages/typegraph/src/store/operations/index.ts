@@ -31,6 +31,7 @@ export {
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
+  executeEdgeHardDeleteBatch,
   executeEdgeResolvedMutationSet,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
