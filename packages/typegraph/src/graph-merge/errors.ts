@@ -1,3 +1,4 @@
+import type { GraphCommandIsolation } from "../backend/types";
 import type { EdgeCycleWitness } from "../errors";
 import { requireDefined } from "../utils/presence";
 import type { MergePlanCompositionOrphan } from "./plan-schema";
@@ -559,6 +560,25 @@ export class MergePlanCapabilityError extends MergeError {
     super(message, options);
     this.name = "MergePlanCapabilityError";
   }
+}
+
+/**
+ * The refusal a merge commit raises when its transaction cannot prove that
+ * reads after the target's graph lock observe every earlier writer: the
+ * `freshSnapshotError` every merge caller hands `lockStoreWriteFence`.
+ */
+export function mergeCallbackIsolationError(
+  isolation: GraphCommandIsolation | undefined,
+): MergePlanCapabilityError {
+  return new MergePlanCapabilityError(
+    "Composed merge application requires observed read-committed isolation so reads observe the target after acquiring its graph lock.",
+    {
+      details: {
+        capability: "mergeCallbackIsolation",
+        isolation,
+      },
+    },
+  );
 }
 
 /** Raised when a serialized plan is structurally or semantically malformed. */

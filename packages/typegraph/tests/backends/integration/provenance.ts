@@ -253,7 +253,9 @@ async function captureNotHolding(
   return error as FactNotHoldingError;
 }
 
-interface EndpointFilteredReadCount { value: number }
+interface EndpointFilteredReadCount {
+  value: number;
+}
 
 function isEndpointFiltered(
   params: Parameters<GraphBackend["findEdgesByKind"]>[0],

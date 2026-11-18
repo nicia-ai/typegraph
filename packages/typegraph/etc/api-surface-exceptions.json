@@ -9,6 +9,14 @@
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
     "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
@@ -22,6 +30,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
@@ -38,6 +54,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-identity.api.md",
@@ -54,6 +78,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
@@ -70,6 +102,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-maintenance.api.md",
@@ -86,6 +126,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
@@ -102,6 +150,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
@@ -118,6 +174,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -134,6 +198,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-schema.api.md",
@@ -150,6 +222,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
@@ -166,6 +246,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph-store.api.md",
@@ -182,6 +270,14 @@
     "kind": "required-member-added",
     "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
   },
   {
     "entrypoint": "typegraph.api.md",

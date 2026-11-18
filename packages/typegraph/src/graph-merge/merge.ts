@@ -8,6 +8,8 @@ import { recordedInstantOwner } from "../core/temporal";
 import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
+import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
+import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import type { TransactionContext } from "../store/types";
@@ -127,6 +129,7 @@ import {
   InvalidMergeOptionsError,
   InvalidMergePlanError,
   MERGE_ERROR_CODES,
+  mergeCallbackIsolationError,
   MergeCompositionOrphanError,
   MergeError,
   MergePlanCapabilityError,
@@ -344,7 +347,6 @@ import type {
 } from "./types";
 import type { ValidToChange } from "./valid-window";
 import { resolveValidWindows } from "./valid-window";
-import { lockMergeTargetWrite } from "./write-fence";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -3068,7 +3070,7 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // advance the same clock before committing. Holding it around the
     // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
     // relying on the transaction's snapshot being the latest committed state.
-    await lockMergeTargetWrite(txBackend, {
+    await lockStoreWriteFence(txBackend, {
       graphId: target.graphId,
       schemaVersion: target.introspect().schemaVersion,
       graphLock: "required",
@@ -5785,14 +5787,19 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   artifact: MergePlanArtifactV3,
   requireFreshSnapshot: boolean,
 ): Promise<void> {
-  await lockMergeTargetWrite(txBackend, {
+  await lockStoreWriteFence(txBackend, {
     graphId: target.graphId,
     schemaVersion:
       artifact.target.schema.managed ?
         artifact.target.schema.version
       : undefined,
     graphLock: "required",
-    requireFreshSnapshot,
+    ...(requireFreshSnapshot ?
+      {
+        requireFreshSnapshot: true,
+        freshSnapshotError: mergeCallbackIsolationError,
+      }
+    : {}),
     staleSchemaError: (cause) =>
       new MergePlanSchemaMismatchError(
         "The target's active schema no longer matches the merge plan.",
@@ -7486,11 +7493,18 @@ async function commitIncrementalPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
-          await lockMergeTargetWrite(transactionBackend(tx), {
+          await lockStoreWriteFence(transactionBackend(tx), {
             graphId: target.graphId,
             schemaVersion: target.introspect().schemaVersion,
             graphLock:
-              target.revisionTrackingEnabled ? "required" : "not-required",
+              (
+                storeWritersTakeGraphWriteFence({
+                  historyEnabled: storeCaptureEnabled(target),
+                  revisionTrackingEnabled: target.revisionTrackingEnabled,
+                })
+              ) ?
+                "required"
+              : "not-required",
             staleSchemaError: (cause) =>
               new BaseVersionMismatchError(
                 "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",

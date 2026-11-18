@@ -154,6 +154,11 @@ export type {
   EdgeCardinalityDirection,
 } from "./store/claims/edge-claims";
 export type {
+  ReadSetEdgeDirection,
+  ReadSetEdgeReference,
+  ReadSetScope,
+} from "./store/read-set";
+export type {
   PruneRecordedInstantsOptions,
   PruneRecordedInstantsResult,
 } from "./store/recorded-anchor-log";

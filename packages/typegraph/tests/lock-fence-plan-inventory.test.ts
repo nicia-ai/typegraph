@@ -254,11 +254,11 @@ const CALL_SITES: readonly InventoryEntry[] = [
       "Adopted merge application acquires the engine writer slot before plan decision reads, using the same writer-slot helper as constrained writes.",
   },
   {
-    file: "graph-merge/write-fence.ts",
-    line: 'resolveWriteFencePlan(txBackend).kind !== "engine-serialized"',
+    file: "store/operations/write-fence-prelude.ts",
+    line: 'if (resolveWriteFencePlan(txBackend).kind === "engine-serialized") return;',
     site: "J21",
     reason:
-      "Composed merge application requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
+      "The store write-fence prelude (composed merge application, durable store operations, the read-set fence) requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
   },
   {
     file: "backend/drizzle/sqlite.ts",

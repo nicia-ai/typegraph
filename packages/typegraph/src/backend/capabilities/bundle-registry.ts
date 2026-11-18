@@ -1146,8 +1146,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   lineage: {
     kind: "reasoned",
     reason:
-      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.",
-    accesses: 3,
+      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's lineage source selection reads backend lineage once to prefer it over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.",
+    accesses: 2,
   },
   recordedTime: {
     kind: "reasoned",

@@ -4620,8 +4620,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's recorded-relations derivation selects backend lineage over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
-        readonly accesses: 3;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's lineage source selection reads backend lineage once to prefer it over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
+        readonly accesses: 2;
     };
     readonly recordedTime: {
         readonly kind: "reasoned";

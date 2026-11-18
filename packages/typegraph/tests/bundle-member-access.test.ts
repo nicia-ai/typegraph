@@ -53,7 +53,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // calls adoptBaseSchema (+2), and the tightening probe reads its acyclic and
 // composition relations through one table-name read (-1): 131 -> 132.
 // Recorded pruning requires one backend-owned base-schema assertion: 132 -> 133.
-const REASONED_FLOOR = 133;
+// Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
+const REASONED_FLOOR = 132;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -81,7 +82,9 @@ const REASONED_FLOOR = 133;
 const DEFERRED_LIVE_TOTAL = 240;
 const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 387;
+// Lineage source selection reads the backend's own `lineage` once instead of
+// twice (the read-set fence binds it for its key-delta filter): 387 -> 386.
+const TOTAL_ROW_COUNT = 386;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",

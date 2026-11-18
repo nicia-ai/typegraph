@@ -2366,6 +2366,25 @@ races two queries on that connection (the overlap `pg@9` removes), and the
 boundary cannot drain a raw statement it never saw. Await each `tx.sql`
 statement before the next write.
 
+### `ReadSetChangedError`
+
+Thrown by `tx.assertUnchangedSince()` when a declared read-set scope changed
+after the anchor. `details.graphId` and `details.anchor` identify the check, and
+`details.changes` lists one entry per changed scope: its `index` in the list you
+passed, the `scope` as the fence resolved it (kinds and ids only, never the
+objects you passed in, such as `{ target: "node", kind, id }`), and the changed
+`nodes` and `edges` keys. Each key list holds at most the first 100 changed keys
+in `(kind, id)` order; `nodesTruncated` and `edgesTruncated` are `true` when more
+changed, and a truncated scope should be treated as "re-read everything in it".
+Re-read the inputs and retry with a new anchor. See [Refusing a Write Whose Inputs Changed](/read-set-fence/).
+
+### `ReadSetUnverifiableError`
+
+Thrown by `tx.assertUnchangedSince()` when the lineage source cannot prove what
+changed since the anchor: an unknown anchor, one from before `store.clear()`, or
+a span containing a revision that left no evidence. Retrying with the same anchor
+cannot succeed; take a new anchor and re-read.
+
 ## Error Handling Patterns
 
 ### Using Error Utilities
@@ -2586,6 +2605,8 @@ try {
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation, or `clearGraphPreservingContributionMaterializations` for `store.clear({ preserveContributionMaterializations: true })` on a custom backend without that member (refused before anything is deleted) |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
+| `READ_SET_CHANGED` | `ReadSetChangedError` | system | A scope declared to `tx.assertUnchangedSince()` changed after the anchor. `details.changes` lists each changed scope and its keys |
+| `READ_SET_UNVERIFIABLE` | `ReadSetUnverifiableError` | system | The lineage source could not prove the span since the anchor, so "unchanged" cannot be established |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
 
 `recordedReadOwner()` on an external source without an owner raises `ConfigurationError`

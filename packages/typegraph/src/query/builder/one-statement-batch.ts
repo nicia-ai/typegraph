@@ -3,7 +3,11 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
-import { sql, type SqlFragment } from "../sql-fragment";
+import {
+  PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
+  sql,
+  type SqlFragment,
+} from "../sql-fragment";
 import { asCompiledRowsSql, recursivePlanCount } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
 import type {
@@ -21,8 +25,7 @@ export type BatchOnceOptions = Readonly<{
 const ORDER_COLUMN = "typegraphbatchordinal";
 const ORDER_KEY_PREFIX = "typegraphbatchorder";
 
-/** SQLite's default compound-select ceiling; kept as the portable request cap. */
-const MAX_ONE_STATEMENT_BATCH_READS = 500;
+const MAX_ONE_STATEMENT_BATCH_READS = PORTABLE_COMPOUND_SELECT_TERMS_LIMIT;
 
 export function oneStatementBatchOrderColumn(index: number): string {
   return `${ORDER_KEY_PREFIX}${index}`;
