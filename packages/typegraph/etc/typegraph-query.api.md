@@ -9,6 +9,11 @@ import { z } from 'zod';
 // @public
 const __nodeId: unique symbol;
 
+// @public
+type AddedEntries<Out, Base> = Readonly<{
+    [K in Exclude<keyof Out, keyof Base>]: Out[K];
+}>;
+
 // @public (undocumented)
 type AggregateAliasMap = Readonly<Record<string, Readonly<{
     type: Readonly<{
@@ -89,6 +94,9 @@ type AliasExpressions<Entry extends Readonly<{
 }>;
 
 // @public
+type AliasKindIdentity<Alias> = Alias extends NodeAlias<infer N, boolean> ? NonNullable<N["__nodeKind"]> : never;
+
+// @public
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
 
 // @public
@@ -114,6 +122,14 @@ type AndPredicate = Readonly<{
 
 // @public
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
+
+// @public (undocumented)
+type AnyFragmentShape = FragmentShape<GraphDef, FragmentRequirements<GraphDef>, AliasMap, EdgeAliasMap, RecursiveAliasMap>;
+
+// @public (undocumented)
+type AnyQueryFragment = Readonly<{
+    [FRAGMENT_SHAPE]: AnyFragmentShape;
+}>;
 
 // @public (undocumented)
 type ArithmeticExpressionNode = Readonly<{
@@ -372,6 +388,9 @@ export type CollectRecordOperand = Readonly<{
     fields: Readonly<Record<string, DatabaseExpression>>;
 }>;
 
+// @public (undocumented)
+type CollisionErrors<AddedKeys, ExistingKeys> = Extract<AddedKeys, ExistingKeys> extends infer Collision extends string ? Collision extends unknown ? `Error: fragment adds alias '${Collision}', which this query already uses` : never : never;
+
 // @public
 type CommitSchemaVersionExpected = Readonly<{
     kind: "initial";
@@ -478,16 +497,25 @@ type CompileQueryOptions = Readonly<{
 type ComposableQuery = QueryAst | SetOperation;
 
 // @public
-export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>): QueryFragment<G, A1, A2, E1, E2, R1, R2>;
+type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<FragmentRequiredAliases<Shape["graph"], Shape["requires"]>> & Shape["added"];
 
 // @public (undocumented)
-export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>): QueryFragment<G, A1, A3, E1, E3, R1, R3>;
+type ComposedShape<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentShape<First["graph"], Readonly<First["requires"] & AddedEntries<Second["requires"], ComposedNodeAliases<First>>>, MergeMaps<First["added"], Second["added"]>, MergeMaps<First["addedEdges"], Second["addedEdges"]>, MergeMaps<First["addedRecursive"], Second["addedRecursive"]>>;
+
+// @public
+type ComposeFit<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentFit<Second, ComposedNodeAliases<First>, First["addedEdges"], First["addedRecursive"], false>;
+
+// @public
+export function composeFragments<F1 extends AnyQueryFragment>(f1: F1): ShapeFragment<ShapeOf<F1>>;
 
 // @public (undocumented)
-export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>): QueryFragment<G, A1, A4, E1, E4, R1, R4>;
+export function composeFragments<F1 extends AnyQueryFragment, F2 extends AnyQueryFragment>(f1: F1, f2: F2 & ComposeFit<ShapeOf<F1>, ShapeOf<F2>>): ShapeFragment<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>>;
 
 // @public (undocumented)
-export function composeFragments<G extends GraphDef, A1 extends AliasMap, A2 extends AliasMap, A3 extends AliasMap, A4 extends AliasMap, A5 extends AliasMap, E1 extends EdgeAliasMap, E2 extends EdgeAliasMap, E3 extends EdgeAliasMap, E4 extends EdgeAliasMap, E5 extends EdgeAliasMap, R1 extends RecursiveAliasMap, R2 extends RecursiveAliasMap, R3 extends RecursiveAliasMap, R4 extends RecursiveAliasMap, R5 extends RecursiveAliasMap>(f1: QueryFragment<G, A1, A2, E1, E2, R1, R2>, f2: QueryFragment<G, A2, A3, E2, E3, R2, R3>, f3: QueryFragment<G, A3, A4, E3, E4, R3, R4>, f4: QueryFragment<G, A4, A5, E4, E5, R4, R5>): QueryFragment<G, A1, A5, E1, E5, R1, R5>;
+export function composeFragments<F1 extends AnyQueryFragment, F2 extends AnyQueryFragment, F3 extends AnyQueryFragment>(f1: F1, f2: F2 & ComposeFit<ShapeOf<F1>, ShapeOf<F2>>, f3: F3 & ComposeFit<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>, ShapeOf<F3>>): ShapeFragment<ComposedShape<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>, ShapeOf<F3>>>;
+
+// @public (undocumented)
+export function composeFragments<F1 extends AnyQueryFragment, F2 extends AnyQueryFragment, F3 extends AnyQueryFragment, F4 extends AnyQueryFragment>(f1: F1, f2: F2 & ComposeFit<ShapeOf<F1>, ShapeOf<F2>>, f3: F3 & ComposeFit<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>, ShapeOf<F3>>, f4: F4 & ComposeFit<ComposedShape<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>, ShapeOf<F3>>, ShapeOf<F4>>): ShapeFragment<ComposedShape<ComposedShape<ComposedShape<ShapeOf<F1>, ShapeOf<F2>>, ShapeOf<F3>>, ShapeOf<F4>>>;
 
 // @public
 type CompositionClaimScope = Readonly<{
@@ -756,8 +784,8 @@ type CountNodesByKindParams = Readonly<{
     limit?: number;
 }>;
 
-// @public (undocumented)
-export function createFragment<G extends GraphDef>(): <InAliases extends AliasMap, OutAliases extends AliasMap, InEdgeAliases extends EdgeAliasMap, OutEdgeAliases extends EdgeAliasMap, InRecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, OutRecursiveAliases extends RecursiveAliasMap = InRecursiveAliases>(fn: QueryFragment<G, InAliases, OutAliases, InEdgeAliases, OutEdgeAliases, InRecursiveAliases, OutRecursiveAliases>) => QueryFragment<G, InAliases, OutAliases, InEdgeAliases, OutEdgeAliases, InRecursiveAliases, OutRecursiveAliases>;
+// @public
+export function createFragment<G extends GraphDef>(): QueryFragmentFactory<G>;
 
 // @public
 export function createSqlSchema(names?: Partial<SqlTableNames>): SqlSchema;
@@ -1294,6 +1322,9 @@ export type EmptyAliasMap = Readonly<Record<never, never>>;
 
 // @public (undocumented)
 export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
+
+// @public (undocumented)
+type EmptyFragmentRequirements = Readonly<Record<never, never>>;
 
 // @public (undocumented)
 export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
@@ -2024,7 +2055,9 @@ type FindRowsAcrossKindsParams = Readonly<{
 }>;
 
 // @public
-export type FlexibleQueryFragment<G extends GraphDef, RequiredAliases extends AliasMap = AliasMap, AddedAliases extends AliasMap = EmptyAliasMap, RequiredEdgeAliases extends EdgeAliasMap = EdgeAliasMap, AddedEdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap> = <Aliases extends RequiredAliases, EdgeAliases extends RequiredEdgeAliases, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState>(builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>) => QueryBuilder<G, MergeAliasMaps<Aliases, AddedAliases>, MergeEdgeAliasMaps<EdgeAliases, AddedEdgeAliases>, RecursiveAliases, CoordinateState>;
+type FitReport<Errors extends string> = [
+Errors
+] extends [never] ? unknown : Readonly<Record<Errors, never>>;
 
 // @public
 export type ForwardedExpansionAxes<O> = O extends Readonly<{
@@ -2032,6 +2065,29 @@ export type ForwardedExpansionAxes<O> = O extends Readonly<{
 }> ? Axis : O extends Readonly<{
     expansion?: infer Axis;
 }> ? unknown extends Axis ? undefined : Axis | undefined : undefined;
+
+// @public (undocumented)
+const FRAGMENT_SHAPE: unique symbol;
+
+// @public (undocumented)
+type FragmentFit<Shape extends AnyFragmentShape, Aliases, EdgeAliases, RecursiveAliases, ReportMissing extends boolean> = FitReport<RequirementErrors<Shape["requires"], Aliases, ReportMissing> | CollisionErrors<keyof Shape["added"] | keyof Shape["addedEdges"] | keyof Shape["addedRecursive"], keyof Aliases | keyof EdgeAliases | keyof RecursiveAliases>>;
+
+// @public
+export type FragmentRequiredAliases<G extends GraphDef, Requires extends FragmentRequirements<G>> = Readonly<{
+    [A in keyof Requires & string]: NodeAlias<AliasNodeType<G, Requires[A]>>;
+}>;
+
+// @public
+export type FragmentRequirements<G extends GraphDef> = Readonly<Record<string, keyof G["nodes"] & string>>;
+
+// @public (undocumented)
+type FragmentShape<G extends GraphDef, Requires extends FragmentRequirements<G>, Added extends AliasMap, AddedEdges extends EdgeAliasMap, AddedRecursive extends RecursiveAliasMap> = Readonly<{
+    graph: G;
+    requires: Requires;
+    added: Added;
+    addedEdges: AddedEdges;
+    addedRecursive: AddedRecursive;
+}>;
 
 // @public
 type FulltextAccessor = Readonly<{
@@ -2888,7 +2944,7 @@ type KindRemovalRow = Readonly<{
 }>;
 
 // @public
-export function limitFragment<G extends GraphDef>(n: number): FlexibleQueryFragment<G>;
+export function limitFragment<G extends GraphDef>(n: number): QueryFragment<G>;
 
 // @public
 type LineageBackend = Pick<GraphBackend, "lineage">;
@@ -2981,11 +3037,8 @@ export const MAX_RECURSIVE_DEPTH = 10;
 // @public
 type MembershipOperand<T> = readonly T[] | ParameterRef;
 
-// @public
-type MergeAliasMaps<Existing extends AliasMap, Added extends AliasMap> = keyof Added extends never ? Existing : Existing & Added;
-
 // @public (undocumented)
-type MergeEdgeAliasMaps<Existing extends EdgeAliasMap, Added extends EdgeAliasMap> = keyof Added extends never ? Existing : Existing & Added;
+type MergeMaps<Existing, Added> = keyof Added extends never ? Existing : Existing & Added;
 
 // @public
 const META_EDGE_BRAND: "__metaEdge";
@@ -3287,7 +3340,7 @@ type ObjectPredicate = Readonly<{
 }>;
 
 // @public
-export function offsetFragment<G extends GraphDef>(n: number): FlexibleQueryFragment<G>;
+export function offsetFragment<G extends GraphDef>(n: number): QueryFragment<G>;
 
 // @public
 export type OneStatementBatchableQuery<R = unknown> = Readonly<{
@@ -3328,7 +3381,7 @@ type OntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
-export function orderByFragment<G extends GraphDef, A extends string>(alias: A, field: GraphOrderField<G>, direction?: "asc" | "desc"): FlexibleQueryFragment<G>;
+export function orderByFragment<G extends GraphDef, A extends string>(alias: A, field: GraphOrderField<G>, direction?: "asc" | "desc"): QueryFragment<G>;
 
 // @public
 export type OrderSpec = Readonly<{
@@ -3547,6 +3600,8 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
     aggregate<const Fields extends Readonly<Record<string, DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>>>>(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Fields): ExecutableProjectionQuery<Fields, QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>>;
     // (undocumented)
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
+    // @internal
+    assertFragmentRequirements(requires: Readonly<Record<string, string>>): void;
     count(): Promise<number>;
     exists(): Promise<boolean>;
     from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options?: {
@@ -3691,7 +3746,20 @@ type QueryExecutionBackend = Pick<GraphBackend, "execute">;
 export type QueryExpressionContext<G extends GraphDef, Aliases extends AliasMap, Edges extends EdgeAliasMap, Coordinate extends QueryCoordinateState> = ExpressionAliasContext<Aliases, Edges> & ExpressionSubqueryHelpers<QueryBuilder<G, EmptyAliasMap, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, Coordinate>, ExpressionAliasContext<Aliases, Edges, never>, (keyof Aliases | keyof Edges) & string>;
 
 // @public
-export type QueryFragment<G extends GraphDef, InAliases extends AliasMap = AliasMap, OutAliases extends AliasMap = InAliases, InEdgeAliases extends EdgeAliasMap = EdgeAliasMap, OutEdgeAliases extends EdgeAliasMap = InEdgeAliases, InRecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, OutRecursiveAliases extends RecursiveAliasMap = InRecursiveAliases> = <CoordinateState extends QueryCoordinateState>(builder: QueryBuilder<G, InAliases, InEdgeAliases, InRecursiveAliases, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecursiveAliases, CoordinateState>;
+export interface QueryFragment<G extends GraphDef, Requires extends FragmentRequirements<G> = EmptyFragmentRequirements, Added extends AliasMap = EmptyAliasMap, AddedEdges extends EdgeAliasMap = EmptyEdgeAliasMap, AddedRecursive extends RecursiveAliasMap = EmptyRecursiveAliasMap> {
+    readonly [FRAGMENT_SHAPE]: FragmentShape<G, Requires, Added, AddedEdges, AddedRecursive>;
+    // (undocumented)
+    <Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState>(builder: QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> & FragmentFit<FragmentShape<G, Requires, Added, AddedEdges, AddedRecursive>, Aliases, EdgeAliases, RecursiveAliases, true>): QueryBuilder<G, MergeMaps<Aliases, Added>, MergeMaps<EdgeAliases, AddedEdges>, MergeMaps<RecursiveAliases, AddedRecursive>, CoordinateState>;
+}
+
+// @public
+export type QueryFragmentBody<G extends GraphDef, Requires extends FragmentRequirements<G>, OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap, OutRecursiveAliases extends RecursiveAliasMap> = <CoordinateState extends QueryCoordinateState>(builder: QueryBuilder<G, FragmentRequiredAliases<G, Requires>, EmptyEdgeAliasMap, EmptyRecursiveAliasMap, CoordinateState>) => QueryBuilder<G, OutAliases, OutEdgeAliases, OutRecursiveAliases, CoordinateState>;
+
+// @public
+export interface QueryFragmentFactory<G extends GraphDef> {
+    <OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap, OutRecursiveAliases extends RecursiveAliasMap>(body: QueryFragmentBody<G, EmptyFragmentRequirements, OutAliases, OutEdgeAliases, OutRecursiveAliases>): QueryFragment<G, EmptyFragmentRequirements, OutAliases, OutEdgeAliases, OutRecursiveAliases>;
+    <const Requires extends FragmentRequirements<G>, OutAliases extends AliasMap, OutEdgeAliases extends EdgeAliasMap, OutRecursiveAliases extends RecursiveAliasMap>(requires: Requires, body: QueryFragmentBody<G, Requires, OutAliases, OutEdgeAliases, OutRecursiveAliases>): QueryFragment<G, Requires, AddedEntries<OutAliases, Requires>, OutEdgeAliases, OutRecursiveAliases>;
+}
 
 // @public
 type QueryStart = Readonly<{
@@ -3961,6 +4029,13 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 
 // @public
 type RequiredRecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number : RA extends RecursiveAlias<"path", "qualified", boolean> ? QualifiedRecursivePath : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[] : never;
+
+// @public
+type RequirementErrors<Requires, Aliases, ReportMissing extends boolean> = {
+    [A in keyof Requires & string]: A extends keyof Aliases ? [
+    AliasKindIdentity<Aliases[A]>
+    ] extends [Requires[A]] ? never : `Error: fragment requires alias '${A}' to be a '${Requires[A] & string}' node` : ReportMissing extends true ? `Error: fragment requires alias '${A}' (a '${Requires[A] & string}' node), which this query does not have` : never;
+}[keyof Requires & string];
 
 // @public
 type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
@@ -4279,6 +4354,14 @@ type SetRelation = Readonly<{
     right: RelationAst;
     columns: readonly RelationColumn[];
 }>;
+
+// @public (undocumented)
+type ShapeFragment<Shape extends AnyFragmentShape> = QueryFragment<Shape["graph"], Shape["requires"], Shape["added"], Shape["addedEdges"], Shape["addedRecursive"]>;
+
+// @public (undocumented)
+type ShapeOf<Fragment> = Fragment extends (Readonly<{
+    [FRAGMENT_SHAPE]: infer Shape extends AnyFragmentShape;
+}>) ? Shape : never;
 
 // @public
 type SimilarToOptions = Readonly<{

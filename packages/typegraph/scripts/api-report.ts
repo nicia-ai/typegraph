@@ -1358,9 +1358,18 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 988,
     sha256: "92fb73162fc688f3ec16f6ef9d748ed1c14afcc639a62a52365da5ffcf2e8cfe",
   },
+  // Declared-alias fragments (#863): `QueryFragment`'s call signature and
+  // brand, and `composeFragments`' overloads, are typed by private helpers in
+  // `query/builder/fragment.ts` (`AddedEntries`, `AliasKindIdentity`,
+  // `AnyFragmentShape`, `AnyQueryFragment`, `CollisionErrors`, `ComposeFit`,
+  // `ComposedNodeAliases`, `ComposedShape`, `EmptyFragmentRequirements`,
+  // `FitReport`, `FragmentFit`, `FragmentShape`, `MergeMaps`,
+  // `RequirementErrors`, `ShapeFragment`, `ShapeOf`): +16. Removing
+  // `FlexibleQueryFragment` drops `MergeAliasMaps` and `MergeEdgeAliasMaps`
+  // (-2). Delta: `./query` 520→534; no other entrypoint moved.
   "./query": {
-    count: 520,
-    sha256: "e658d6069c098aa647a4fcbd6210b3fd9cdafd31bbee2dc3253a021df4558b55",
+    count: 534,
+    sha256: "9d5c103e2ec4b89d87eba87daff4d658bb4e473fd256c78e0a14e7ebb79b29b1",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)

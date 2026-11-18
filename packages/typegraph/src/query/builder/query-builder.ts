@@ -73,6 +73,7 @@ import {
 import {
   type AliasExpansionOptions,
   aliasOverloadTyping,
+  expandKindsForAxis,
   INDEPENDENT_ALIAS_TYPING,
   resolveAliasKinds,
 } from "./alias-expansion";
@@ -1738,6 +1739,47 @@ export class QueryBuilder<
     return getExpressionScope(this.#config);
   }
 
+  /**
+   * @internal Refuses this builder for a `createFragment()` fragment whose
+   * required aliases it does not hold: each must be a node alias here whose
+   * every bound kind is the declared kind or one of its subclasses, the kinds
+   * the fragment body was typed against.
+   *
+   * @throws ConfigurationError (`QUERY_FRAGMENT_REQUIREMENT_UNMET`)
+   */
+  assertFragmentRequirements(requires: Readonly<Record<string, string>>): void {
+    for (const [alias, requiredKind] of Object.entries(requires)) {
+      const boundKinds = this.#getKindNamesForAlias(alias);
+      const admittedKinds = expandKindsForAxis(
+        "subclasses",
+        requiredKind,
+        this.#config.registry,
+      );
+      if (
+        boundKinds?.every((boundKind) => admittedKinds.includes(boundKind)) ===
+        true
+      ) {
+        continue;
+      }
+      const bound =
+        boundKinds === undefined ?
+          `this query has no node alias "${alias}"`
+        : `this query binds it to ${boundKinds.map((kind) => `"${kind}"`).join(", ")}`;
+      throw new ConfigurationError(
+        `A fragment requires alias "${alias}" to be a "${requiredKind}" node, but ${bound}.`,
+        {
+          code: "QUERY_FRAGMENT_REQUIREMENT_UNMET",
+          alias,
+          requiredKind,
+          boundKinds,
+        },
+        {
+          suggestion: `Pipe the fragment into a query whose "${alias}" alias is a "${requiredKind}" node.`,
+        },
+      );
+    }
+  }
+
   #expressionPredicate(
     predicate: Predicate | DatabaseExpression<boolean | undefined>,
   ): PredicateExpression {
@@ -2326,10 +2368,15 @@ export class QueryBuilder<
    * traversals, ordering, and other query operations. Use this for
    * composing complex queries from simpler, reusable parts.
    *
+   * An inline function is typed by this builder. A `createFragment()`
+   * fragment keeps every alias this builder carries and adds its own; piping
+   * one into a builder that lacks an alias it requires, binds that alias at
+   * another kind, or already uses an alias it adds is a compile error here.
+   *
    * @example
    * ```typescript
-   * // Define a reusable fragment
-   * const activeUsers = createFragment<MyGraph>()((q) =>
+   * // Define a reusable fragment that requires a `User` alias `u`
+   * const activeUsers = createFragment<MyGraph>()({ u: "User" }, (q) =>
    *   q.whereNode("u", ({ status }) => status.eq("active"))
    * );
    *
