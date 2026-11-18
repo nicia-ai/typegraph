@@ -108,6 +108,7 @@ export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";
+export { registerSetUpdateConcurrencyTests } from "./set-update-concurrency";
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";
