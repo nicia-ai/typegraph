@@ -3386,11 +3386,12 @@ async function readLiveImportEndpoints(
  *    {@link assertImportedRequiredPartsAttached}).
  * 7. Judge the state phases 2–6 left ({@link settleEdgeRounds}): every moved
  *    part ({@link judgeMovedParts}), and every part whose attachment a row
- *    ends while another row attaches it again outside a move
- *    ({@link compositionReattachments}, {@link judgeReattachments}). A move
- *    that failed is taken out of the set, and an end whose part no row
- *    attached again is refused rather than written alone; phases 2–6 then run
- *    again behind a savepoint until the judgement passes.
+ *    can end while another row attaches it again outside a move, from the
+ *    writes phases 2 and 5 applied ({@link compositionReattachments},
+ *    {@link judgeReattachments}). A move that failed is taken out of the set,
+ *    and the last applied end whose part no row attached again is refused
+ *    rather than written alone; phases 2–6 then run again behind a savepoint
+ *    until the judgement passes.
  *
  * `result.errors` lists refusals in that phase order, so a create refused
  * because of an update is reported after the update.
@@ -3442,14 +3443,10 @@ async function processEdges(
   // The rows ending a part's attachment that this import refuses because no
   // row attaching the part again is applied, by document position. What the
   // classification already settles is refused before anything is written;
-  // the rest is judged on the state each round leaves.
+  // the rest is judged from the writes each round applies.
   const strandedEnds = new Map<number, ProcessResult>();
-  const stranded = new Set<CompositionReattachment>();
-  const strand = (reattachment: CompositionReattachment): void => {
-    stranded.add(reattachment);
-    for (const end of reattachment.ends) {
-      strandedEnds.set(end.index, strandedEndRefusal(reattachment, end));
-    }
+  const refuseEnd = (stranded: StrandedEnd): void => {
+    strandedEnds.set(stranded.end.index, strandedEndRefusal(stranded));
   };
   const undecided: CompositionReattachment[] = [];
   for (const reattachment of compositionReattachments(
@@ -3458,38 +3455,70 @@ async function processEdges(
     options,
     moves,
   )) {
-    const verdict = partReattached(
-      reattachment.attaches.map((attach) => attach.attachesBeforeWrites),
-    );
-    if (verdict === false) strand(reattachment);
-    if (verdict === undefined) undecided.push(reattachment);
+    switch (judgeReattachmentBeforeWrites(registry, classified, reattachment)) {
+      case "stranded": {
+        const { part, ends, attaches } = reattachment;
+        const reattaching = reattachingRowsBesides(
+          attaches,
+          new Set(ends.map((end) => end.edge.id)),
+        );
+        for (const end of ends) {
+          refuseEnd({ part, end, attaches: reattaching });
+        }
+        break;
+      }
+      case "undecided": {
+        undecided.push(reattachment);
+        break;
+      }
+      case "reattached": {
+        break;
+      }
+    }
   }
 
   const failedMoves = new Map<CompositionMove, CompositionMoveFailure>();
   const writeRound = async (): Promise<EdgeRoundRefusals> => {
+    // Every write of a row naming an id that may already be written, in
+    // write order, for the judgement of what each one did.
+    const writes = new Map<number, AppliedEdgeWrite>();
+    const apply = (write: AppliedEdgeWrite): void => {
+      writes.set(write.row.index, write);
+      record(write.row.edge, write.outcome);
+    };
     for (const row of existingRows) {
-      record(
-        row.edge,
-        strandedEnds.get(row.index) ??
-          ("existing" in row ?
-            await applyExistingEdgeDisposition(
-              frame,
-              graphId,
-              registry,
-              row,
-              requireDefined(row.existing),
-              options,
-            )
-          : await processEdge(
-              frame,
-              graphId,
-              registry,
-              row.edge,
-              edgeSchemas,
-              nodeSchemas,
-              options,
-              importedNodeIds,
-            )),
+      const refusal = strandedEnds.get(row.index);
+      if (refusal !== undefined) {
+        apply({ row, outcome: refusal, before: undefined });
+        continue;
+      }
+      if ("existing" in row) {
+        const existing = requireDefined(row.existing);
+        apply({
+          row,
+          outcome: await applyExistingEdgeDisposition(
+            frame,
+            graphId,
+            registry,
+            row,
+            existing,
+            options,
+          ),
+          before: existing,
+        });
+        continue;
+      }
+      apply(
+        await processEdge(
+          frame,
+          graphId,
+          registry,
+          row,
+          edgeSchemas,
+          nodeSchemas,
+          options,
+          importedNodeIds,
+        ),
       );
     }
     const landedMoves = await applyCompositionMoveSet(
@@ -3518,19 +3547,20 @@ async function processEdges(
       );
     }
     for (const repeat of classified.repeatsOfCreated) {
-      record(
-        repeat.edge,
-        strandedEnds.get(repeat.index) ??
-          (await processEdge(
+      const refusal = strandedEnds.get(repeat.index);
+      apply(
+        refusal === undefined ?
+          await processEdge(
             frame,
             graphId,
             registry,
-            repeat.edge,
+            repeat,
             edgeSchemas,
             nodeSchemas,
             options,
             importedNodeIds,
-          )),
+          )
+        : { row: repeat, outcome: refusal, before: undefined },
       );
     }
     await settleRequiredParts();
@@ -3540,7 +3570,8 @@ async function processEdges(
         frame,
         graphId,
         registry,
-        undecided.filter((reattachment) => !stranded.has(reattachment)),
+        undecided,
+        writes,
       ),
     };
   };
@@ -3566,7 +3597,7 @@ async function processEdges(
       for (const [move, failure] of refusals.moves) {
         failedMoves.set(move, failure);
       }
-      for (const reattachment of refusals.strandedEnds) strand(reattachment);
+      for (const stranded of refusals.strandedEnds) refuseEnd(stranded);
     },
   );
 }
@@ -4463,8 +4494,8 @@ function pairCompositionMoves(
 }
 
 /**
- * The window a row's write lands on: the row stored under its id, or — for a
- * repeat of an id this import creates — the row its first occurrence creates.
+ * A window a row's write can land on: the row stored under its id, or a row
+ * another row of the document writes under that id.
  */
 type WindowBeforeWrite = StoredEdgeIdentity &
   Pick<EdgeRow, "deleted_at" | "valid_to">;
@@ -4475,8 +4506,9 @@ type WindowBeforeWrite = StoredEdgeIdentity &
  * the same edge ({@link edgeIdentityConflict}), the write ends an open window
  * ({@link edgeWriteEndsOpenWindow}), and the row attaches its part before the
  * write and not after it ({@link compositionEdgeAttachesPart}). The one owner
- * of "this row ends the part's attachment" for the move pairs and for
- * {@link compositionReattachments}.
+ * of "this row ends the part's attachment" for the move pairs, for the rows
+ * that can end one ({@link compositionReattachments}) and for the writes that
+ * did ({@link writeEndedAttachment}).
  */
 function rowEndsAttachment(
   registry: KindRegistry,
@@ -4497,16 +4529,20 @@ function rowEndsAttachment(
 }
 
 /**
- * A part whose attachment some row of the document ends outside a move pair,
- * and the rows that would attach it again. Writing an end while none of those
- * rows lands would leave an optional part with no whole, which import could
- * never repair, since it never clears an end.
+ * A part some row of the document can stop attaching, outside a move pair,
+ * and the rows that would attach it. Writing an end while none of the rows
+ * meant to attach the part again lands would leave an optional part with no
+ * whole, which import could never repair, since it never clears an end.
  */
 type CompositionReattachment = Readonly<{
   part: CompositionNodeRef;
-  /** Every row whose write ends the part's attachment, in document order. */
+  /**
+   * Every row whose write can end the part's attachment, in document order:
+   * a superset of the rows that do, which only the applied writes settle
+   * ({@link judgeReattachments}).
+   */
   ends: readonly DocumentEdgeRow[];
-  /** Every row that would attach the part again, in document order. */
+  /** Every row that would attach the part, in document order. */
   attaches: readonly ReattachingRow[];
 }>;
 
@@ -4524,17 +4560,47 @@ type ReattachingRow = DocumentEdgeRow &
   }>;
 
 /**
- * Every part some row of the document stops attaching, outside a move pair,
- * that another row of the document attaches again
+ * One row's write in a round of edge writes, with the row stored under its
+ * id that the write itself read and was applied over — the evidence of what
+ * the row did, rather than what the document planned for it.
+ */
+type AppliedEdgeWrite = Readonly<{
+  row: DocumentEdgeRow;
+  outcome: ProcessResult;
+  /**
+   * The row the write read under its id: `undefined` when none was stored
+   * there, or when the row was refused before its write read anything.
+   */
+  before: EdgeRow | undefined;
+}>;
+
+/**
+ * An end refused because no row attached its part again: the end row, and
+ * the rows that were meant to attach the part again, which name it in the
+ * refusal ({@link strandedEndRefusal}).
+ */
+type StrandedEnd = Readonly<{
+  part: CompositionNodeRef;
+  end: DocumentEdgeRow;
+  attaches: readonly ReattachingRow[];
+}>;
+
+/**
+ * Every part some row of the document can stop attaching, outside a move
+ * pair, that a row of the document would attach
  * ({@link CompositionReattachment}). Every row counts, whatever stage applies
  * or refuses it — a first occurrence, a repeat, or a row the classification
  * refused — so a refusal at any stage feeds the same verdict
  * ({@link partReattached}).
  *
- * A row naming the edge being ended is that edge, not a row attaching the part
- * anywhere else, so it is never one of the attaching rows; nor is a row whose
- * window is already ended. A paired part is the move set's to judge
- * ({@link judgeMovedParts}).
+ * A row can end the part's attachment when it writes over an id whose window
+ * can attach the part when it lands ({@link rowEndsAttachment}): the stored
+ * row under the id, or, for an id nothing stores, the window any other row the
+ * document writes under that id opens. That is every window the id can hold,
+ * whichever of its rows the classification or a later stage refuses, so no
+ * end is missed; whether one did end the attachment is judged from the
+ * applied writes ({@link judgeReattachments}). A paired part is the move
+ * set's to judge ({@link judgeMovedParts}).
  */
 function compositionReattachments(
   registry: KindRegistry,
@@ -4547,33 +4613,11 @@ function compositionReattachments(
     moves.map((move) => makeNodeKey(move.part.kind, move.part.id)),
   );
   const refusedIndexes = new Set(classified.refused.map((row) => row.index));
-  const repeatOfCreatedIndexes = new Set(
-    classified.repeatsOfCreated.map((row) => row.index),
-  );
-  const createdEdges = new Map(
+  const createIndexes = new Set(
     classified.rows
       .filter((row) => row.existing === undefined)
-      .map((row) => [row.edge.id, row.edge] as const),
+      .map((row) => row.index),
   );
-  const windowBeforeWrite = (
-    row: DocumentEdgeRow,
-  ): WindowBeforeWrite | undefined => {
-    if (!repeatOfCreatedIndexes.has(row.index)) {
-      return classified.stored.get(row.edge.id);
-    }
-    const created = createdEdges.get(row.edge.id);
-    return created === undefined ? undefined : (
-        {
-          kind: created.kind,
-          from_kind: created.from.kind,
-          from_id: created.from.id,
-          to_kind: created.to.kind,
-          to_id: created.to.id,
-          deleted_at: undefined,
-          valid_to: created.validTo,
-        }
-      );
-  };
 
   const oriented = [
     ...classified.rows,
@@ -4590,26 +4634,50 @@ function compositionReattachments(
         row.edge.from,
         row.edge.to,
       );
+      const partKey = makeNodeKey(part.kind, part.id);
+      if (movedParts.has(partKey)) return [];
       return [
-        {
-          row: { index: row.index, edge: row.edge },
-          part,
-          whole,
-          partKey: makeNodeKey(part.kind, part.id),
-        },
+        { row: { index: row.index, edge: row.edge }, part, whole, partKey },
       ];
     });
+
+  const writtenById = new Map<string, DocumentEdgeRow[]>();
+  for (const { row } of oriented) {
+    if (refusedIndexes.has(row.index)) continue;
+    writtenById.set(row.edge.id, [
+      ...(writtenById.get(row.edge.id) ?? []),
+      row,
+    ]);
+  }
+  // Import never reopens a stored row, so a stored id only ever holds the
+  // stored window or one it ended; an id nothing stores holds what one of
+  // its rows creates.
+  const windowsUnder = (id: string): readonly WindowBeforeWrite[] => {
+    const stored = classified.stored.get(id);
+    if (stored !== undefined) return [stored];
+    return (writtenById.get(id) ?? []).map(({ edge }) => ({
+      kind: edge.kind,
+      from_kind: edge.from.kind,
+      from_id: edge.from.id,
+      to_kind: edge.to.kind,
+      to_id: edge.to.id,
+      deleted_at: undefined,
+      valid_to: edge.validTo,
+    }));
+  };
 
   const ends = new Map<
     string,
     Readonly<{ part: CompositionNodeRef; rows: DocumentEdgeRow[] }>
   >();
   for (const { row, part, partKey } of oriented) {
-    if (refusedIndexes.has(row.index) || movedParts.has(partKey)) continue;
-    const before = windowBeforeWrite(row);
+    if (refusedIndexes.has(row.index) || createIndexes.has(row.index)) {
+      continue;
+    }
     if (
-      before === undefined ||
-      !rowEndsAttachment(registry, part, row.edge, before)
+      !windowsUnder(row.edge.id).some((before) =>
+        rowEndsAttachment(registry, part, row.edge, before),
+      )
     ) {
       continue;
     }
@@ -4620,12 +4688,10 @@ function compositionReattachments(
 
   const attaches = new Map<string, ReattachingRow[]>();
   for (const { row, part, whole, partKey } of oriented) {
-    const ended = ends.get(partKey);
     // Only a part some row ends is a known composition part, the one kind
     // `importedRowAttachesPart` can judge.
     if (
-      ended === undefined ||
-      ended.rows.some((end) => end.edge.id === row.edge.id) ||
+      !ends.has(partKey) ||
       !importedRowAttachesPart(registry, part, row.edge)
     ) {
       continue;
@@ -4656,8 +4722,8 @@ function compositionReattachments(
  * none of them can, and `undefined` while one is still to be written. An end
  * whose part is not attached again is refused rather than written alone
  * ({@link strandedEndRefusal}) — before any write when the classification
- * already settles every attaching row, and otherwise once the state a round of
- * writes leaves is read ({@link judgeReattachments}).
+ * already settles it ({@link judgeReattachmentBeforeWrites}), and otherwise
+ * once the writes a round applied are known ({@link judgeReattachments}).
  */
 function partReattached(
   attaches: readonly (boolean | undefined)[],
@@ -4667,46 +4733,122 @@ function partReattached(
 }
 
 /**
- * The reattachments, among `reattachments`, whose end the state this round
- * left holds written while no row attached the part again ({@link
- * partReattached}), read in one batched point read of every row they name. A
- * part whose end was refused on its own (a required part's detach, say) has
- * nothing written alone and is not returned.
+ * The rows meant to attach the part AGAIN once the edges under `endedIds` are
+ * ended: every attaching row but those naming an ended edge, which are that
+ * edge, not a row attaching the part anywhere else. The one owner of that
+ * exclusion for the judgement before writes and the one after them.
+ */
+function reattachingRowsBesides(
+  attaches: readonly ReattachingRow[],
+  endedIds: ReadonlySet<string>,
+): readonly ReattachingRow[] {
+  return attaches.filter((attach) => !endedIds.has(attach.edge.id));
+}
+
+/**
+ * What the classification alone settles about a reattachment, before
+ * anything is written: `"stranded"` when every row that can end the part's
+ * attachment ends the one stored edge attaching it and none of the rows
+ * meant to attach it again can be applied, so every end the writes would
+ * apply is one no row repairs; `"reattached"` when one of those rows names a
+ * stored edge that attaches the part, which no row can end since its id is
+ * not among the ends; and `"undecided"` otherwise, left to the applied writes
+ * ({@link judgeReattachments}).
+ */
+function judgeReattachmentBeforeWrites(
+  registry: KindRegistry,
+  classified: ClassifiedEdges,
+  reattachment: CompositionReattachment,
+): "stranded" | "reattached" | "undecided" {
+  const { part, ends, attaches } = reattachment;
+  const endedIds = new Set(ends.map((end) => end.edge.id));
+  const reattaching = reattachingRowsBesides(attaches, endedIds);
+  if (reattaching.length === 0) return "undecided";
+  const verdict = partReattached(
+    reattaching.map((attach) => attach.attachesBeforeWrites),
+  );
+  if (verdict === true) return "reattached";
+  const [endedId, ...otherIds] = endedIds;
+  const endsOneStoredAttachment =
+    endedId !== undefined &&
+    otherIds.length === 0 &&
+    storedRowAttachesPart(registry, part, classified.stored.get(endedId));
+  return verdict === false && endsOneStoredAttachment ?
+      "stranded"
+    : "undecided";
+}
+
+/**
+ * Whether `write` ended the window attaching `part`: the write was applied
+ * as an update, over a row it read that attached the part, and the row's
+ * window no longer does ({@link rowEndsAttachment}). A refused row, a create
+ * — history or not — and an update of a window already ended end nothing.
+ */
+function writeEndedAttachment(
+  registry: KindRegistry,
+  part: CompositionNodeRef,
+  write: AppliedEdgeWrite,
+): boolean {
+  return (
+    write.outcome.status === "updated" &&
+    write.before !== undefined &&
+    rowEndsAttachment(registry, part, write.row.edge, write.before)
+  );
+}
+
+/**
+ * The ends, among `reattachments`, that this round wrote while no row
+ * attached the part again ({@link partReattached}), judged from the writes
+ * the round applied (`writes`, by document position, in write order) and the
+ * state it left, read in one batched point read of every row they name.
+ *
+ * For each part: the ends that were applied ({@link writeEndedAttachment});
+ * the rows meant to attach the part again once those edges are ended
+ * ({@link reattachingRowsBesides}); and, when there are some and none of
+ * them attaches the part, the end applied LAST, which left the part with no
+ * whole. Refusing it and running the round again judges the part anew, so an
+ * earlier end the part is still not attached after is refused in turn. A part
+ * whose end was refused on its own (a required part's detach, say), or whose
+ * applied ends the document states alone, is not returned.
  */
 async function judgeReattachments(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
   reattachments: readonly CompositionReattachment[],
-): Promise<readonly CompositionReattachment[]> {
-  if (reattachments.length === 0) return [];
+  writes: ReadonlyMap<number, AppliedEdgeWrite>,
+): Promise<readonly StrandedEnd[]> {
+  const judged = reattachments.flatMap((reattachment) => {
+    const endIndexes = new Set(reattachment.ends.map((end) => end.index));
+    const applied = [...writes.values()].filter(
+      (write) =>
+        endIndexes.has(write.row.index) &&
+        writeEndedAttachment(registry, reattachment.part, write),
+    );
+    const last = applied.at(-1);
+    if (last === undefined) return [];
+    const reattaching = reattachingRowsBesides(
+      reattachment.attaches,
+      new Set(applied.map((write) => write.row.edge.id)),
+    );
+    return reattaching.length === 0 ?
+        []
+      : [{ part: reattachment.part, end: last.row, attaches: reattaching }];
+  });
+  if (judged.length === 0) return [];
   const written = await readEdgesById(frame, graphId, [
     ...new Set(
-      reattachments.flatMap((reattachment) =>
-        [...reattachment.ends, ...reattachment.attaches].map(
-          (row) => row.edge.id,
-        ),
-      ),
+      judged.flatMap(({ attaches }) => attaches.map((row) => row.edge.id)),
     ),
   ]);
-  return reattachments.filter(({ part, ends, attaches }) => {
-    const endWritten = ends.some((end) => {
-      const row = written.get(end.edge.id);
-      return (
-        row !== undefined &&
-        isLivePartRow(registry, part, row) &&
-        !compositionEdgeAttachesPart(registry, part.kind, row)
-      );
-    });
-    return (
-      endWritten &&
+  return judged.filter(
+    ({ part, attaches }) =>
       partReattached(
         attaches.map((attach) =>
           storedRowAttachesPart(registry, part, written.get(attach.edge.id)),
         ),
-      ) === false
-    );
-  });
+      ) === false,
+  );
 }
 
 /** Whether `row` is a live composition row whose part endpoint is `part`. */
@@ -4738,11 +4880,8 @@ function storedRowAttachesPart(
  * The per-row refusal of an end whose part no row attached again
  * ({@link partReattached}).
  */
-function strandedEndRefusal(
-  reattachment: CompositionReattachment,
-  end: DocumentEdgeRow,
-): ProcessResult {
-  const { part, attaches } = reattachment;
+function strandedEndRefusal(stranded: StrandedEnd): ProcessResult {
+  const { part, end, attaches } = stranded;
   const attach = requireDefined(attaches[0]);
   const attachIds = [...new Set(attaches.map((row) => row.edge.id))];
   const named = attachIds.map((id) => `"${id}"`).join(", ");
@@ -4883,12 +5022,12 @@ function snapshotEdgeAttemptState(
 /**
  * What the judgement of one round of edge writes refuses
  * ({@link settleEdgeRounds}): the moves that left their part without the
- * whole they gave it, and the parts whose end was written while no row
- * attached them again.
+ * whole they gave it, and the ends written while no row attached their part
+ * again.
  */
 type EdgeRoundRefusals = Readonly<{
   moves: ReadonlyMap<CompositionMove, CompositionMoveFailure>;
-  strandedEnds: readonly CompositionReattachment[];
+  strandedEnds: readonly StrandedEnd[];
 }>;
 
 function refusesAnything(refusals: EdgeRoundRefusals): boolean {
@@ -4937,7 +5076,7 @@ async function settleEdgeRounds(
               action: "rollback",
               value: judged,
               cause: new Error(
-                `${judged.moves.size} composition move(s) of this import left a part without the whole they gave it, and ${judged.strandedEnds.length} part(s) had their attachment ended while no row attached them again.`,
+                `${judged.moves.size} composition move(s) of this import left a part without the whole they gave it, and ${judged.strandedEnds.length} end(s) of a part's attachment were written while no row attached the part again.`,
               ),
             }
           : { action: "release", value: judged };
@@ -5621,18 +5760,25 @@ async function createEdgeRow(
 
 /**
  * Applies one row on its own, from validation through its write — the path a
- * repeated id takes, so the repeat observes whatever the row before it left.
+ * repeated id takes, so the repeat observes whatever the row before it left —
+ * and returns the write with the row it read under the id.
  */
 async function processEdge(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
-  edge: InterchangeEdge,
+  documentRow: DocumentEdgeRow,
   edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>,
   nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>,
   options: ResolvedImportOptions,
   importedNodeIds: ImportedNodes,
-): Promise<ProcessResult> {
+): Promise<AppliedEdgeWrite> {
+  const { edge } = documentRow;
+  const refused = (error: string): AppliedEdgeWrite => ({
+    row: documentRow,
+    outcome: { status: "error", error },
+    before: undefined,
+  });
   const validation = validateEdgeRow(
     registry,
     edge,
@@ -5640,7 +5786,7 @@ async function processEdge(
     nodeSchemas,
     options,
   );
-  if (!validation.ok) return { status: "error", error: validation.error };
+  if (!validation.ok) return refused(validation.error);
   const row = {
     edge,
     props: validation.props,
@@ -5657,23 +5803,25 @@ async function processEdge(
         importedNodeIds,
       ),
     );
-    if (endpointError !== undefined) {
-      return { status: "error", error: endpointError };
-    }
+    if (endpointError !== undefined) return refused(endpointError);
   }
 
   const existing = await frame.target.getEdge(graphId, edge.id);
-  if (existing) {
-    return applyExistingEdgeDisposition(
-      frame,
-      graphId,
-      registry,
-      row,
-      existing,
-      options,
-    );
-  }
-  return createClassifiedEdge(frame, graphId, registry, row);
+  return {
+    row: documentRow,
+    outcome:
+      existing === undefined ?
+        await createClassifiedEdge(frame, graphId, registry, row)
+      : await applyExistingEdgeDisposition(
+          frame,
+          graphId,
+          registry,
+          row,
+          existing,
+          options,
+        ),
+    before: existing,
+  };
 }
 
 /**

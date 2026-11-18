@@ -832,17 +832,23 @@ row is created, or an id that names a stored edge import cannot write as a new
 attachment (an ended edge, which import never reopens; a deleted edge, which
 it skips without an error; or another part's edge). The row ending the part's
 attachment is then refused with the same prefix rather than written alone, and
-the part keeps its current whole. A row restating the edge being ended, or a
-row whose own window is already ended, does not attach the part again, so it
-leaves a lone end in place. A required part's lone end is refused as
+the part keeps the whole it held before that end. Whether a row ended the
+attachment is decided from what its write did: only a row applied as an update
+over an open window attaching the part ends it, so a refused row, or a repeat
+that creates ended history, ends nothing. When rows end the part's attachment
+in turn, the end written last is refused first, so the part keeps the last
+whole a row of the document actually gave it. A row restating the edge being
+ended, or a row whose own window is already ended, does not attach the part
+again, so it leaves a lone end in place. A required part's lone end is refused as
 `COMPOSITION_DETACH_REFUSED` when nothing else refuses it first.
 
 A refused row costs one more pass over the moves (not over the rest of the
 import) when its move had already written its other half. A moved part found
 without its whole costs one more pass over the import's edge writes, and so
-does an end found written alone because its attaching row was refused only
-when that row was created or repeated; an attaching row refused while the
-document is classified, or one naming a stored edge, costs no extra pass. A
+does each end found written alone. None is needed when every row ending the
+attachment ends the stored edge attaching the part and every other attaching
+row is refused while the document is classified or names a stored edge: those
+ends are refused before anything is written. A
 backend whose transaction offers no savepoint cannot take such a pass back, so
 the import aborts with `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` instead.
 Failures that depend on each other — a chain of moves, each into the slot the
