@@ -448,10 +448,8 @@ export async function applyNodeInsertSyncFans(
 ): Promise<void> {
   const syncContext = nodeSyncContext(ctx, args.kind, args.id, backend);
   if (args.projectionsFused === true) return;
-  await Promise.all([
-    syncEmbeddings(syncContext, args.schema, args.props),
-    syncFulltext(syncContext, args.schema, args.props),
-  ]);
+  await syncEmbeddings(syncContext, args.schema, args.props);
+  await syncFulltext(syncContext, args.schema, args.props);
 }
 
 /**
@@ -477,15 +475,11 @@ export async function applyNodeInsertSyncFansBatch(
     byKind.set(item.kind, group);
   }
 
-  await Promise.all(
-    [...byKind.entries()].flatMap(([kind, group]) => {
-      const syncArguments = { graphId: ctx.graphId, nodeKind: kind, backend };
-      return [
-        syncEmbeddingsBatchForKind(syncArguments, group.schema, group.rows),
-        syncFulltextBatchForKind(syncArguments, group.schema, group.rows),
-      ];
-    }),
-  );
+  for (const [kind, group] of byKind) {
+    const syncArguments = { graphId: ctx.graphId, nodeKind: kind, backend };
+    await syncEmbeddingsBatchForKind(syncArguments, group.schema, group.rows);
+    await syncFulltextBatchForKind(syncArguments, group.schema, group.rows);
+  }
 }
 
 function parseRowProps(row: NodeRow): Record<string, unknown> {
@@ -636,18 +630,9 @@ export async function applyNodeUpdate(
       }),
   );
 
-  await Promise.all([
-    syncEmbeddings(
-      nodeSyncContext(ctx, kind, id, backend),
-      args.schema,
-      args.validatedProps,
-    ),
-    syncFulltext(
-      nodeSyncContext(ctx, kind, id, backend),
-      args.schema,
-      args.validatedProps,
-    ),
-  ]);
+  const syncContext = nodeSyncContext(ctx, kind, id, backend);
+  await syncEmbeddings(syncContext, args.schema, args.validatedProps);
+  await syncFulltext(syncContext, args.schema, args.validatedProps);
 
   return row;
 }
@@ -903,10 +888,9 @@ export async function applyNodeResurrect(
         clearDeleted: true,
       }),
   );
-  await Promise.all([
-    syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
-    syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
-  ]);
+  const syncContext = nodeSyncContext(ctx, kind, id, backend);
+  await syncEmbeddings(syncContext, args.schema, props);
+  await syncFulltext(syncContext, args.schema, props);
   return row;
 }
 
