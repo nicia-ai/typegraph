@@ -4761,6 +4761,29 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [
+      "doc-1",
+      "engine_profile_parity_script",
+    ],
+    "sql": "
+        DELETE FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
+        WHERE "node_id" = ? AND "graph_id" = ?
+      ",
+  },
+  {
+    "params": [
+      "doc-1",
+      "engine_profile_parity_script",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+      "[1,0,0]",
+    ],
+    "sql": "
+        INSERT INTO "tg_vec_engine_profile_parity_script_document_embedding_74fd603b" ("node_id", "graph_id", "created_at", "updated_at", "embedding")
+        VALUES (?, ?, ?, ?, vec_f32(?))
+      ",
+  },
+  {
+    "params": [
       "engine_profile_parity_script",
       "Document",
       "doc-1",
@@ -4770,16 +4793,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         WHERE "graph_id" = ?
           AND "node_kind" = ?
           AND "node_id" = ?
-      ",
-  },
-  {
-    "params": [
-      "doc-1",
-      "engine_profile_parity_script",
-    ],
-    "sql": "
-        DELETE FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-        WHERE "node_id" = ? AND "graph_id" = ?
       ",
   },
   {
@@ -4794,19 +4807,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
     "sql": "
         INSERT INTO "typegraph_node_fulltext" (graph_id, node_kind, node_id, content, language, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      ",
-  },
-  {
-    "params": [
-      "doc-1",
-      "engine_profile_parity_script",
-      "<<TIMESTAMP>>",
-      "<<TIMESTAMP>>",
-      "[1,0,0]",
-    ],
-    "sql": "
-        INSERT INTO "tg_vec_engine_profile_parity_script_document_embedding_74fd603b" ("node_id", "graph_id", "created_at", "updated_at", "embedding")
-        VALUES (?, ?, ?, ?, vec_f32(?))
       ",
   },
   {
