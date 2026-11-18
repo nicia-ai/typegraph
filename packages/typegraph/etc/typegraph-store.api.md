@@ -5812,6 +5812,32 @@ type ReadCoordinate = Readonly<{
 type ReadInstantMode = "literal" | "placeholder";
 
 // @public
+export type ReadSetEdgeDirection = "out" | "in" | "both";
+
+// @public
+export type ReadSetEdgeReference<G extends GraphDef> = Readonly<{
+    kind: EdgeKinds<G>;
+    id: string;
+}>;
+
+// @public
+export type ReadSetScope<G extends GraphDef> = Readonly<{
+    node: GraphNodeReferenceInput<G>;
+}> | Readonly<{
+    edge: ReadSetEdgeReference<G>;
+}> | Readonly<{
+    edgesAt: GraphNodeReferenceInput<G>;
+    direction: ReadSetEdgeDirection;
+    kind?: EdgeKinds<G>;
+}> | Readonly<{
+    nodeKind: NodeKinds<G>;
+}> | Readonly<{
+    edgeKind: EdgeKinds<G>;
+}> | Readonly<{
+    graph: true;
+}>;
+
+// @public
 export type RebuildContributionOptions = Readonly<{
     pageSize?: number;
 }>;
@@ -7773,6 +7799,7 @@ type TransactionContext<G extends GraphDef> = TransactionCollections<G> & Readon
     neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(root: GraphNodeReferenceInput<G>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    assertUnchangedSince: (anchor: EngineRevision, scopes: readonly ReadSetScope<G>[]) => Promise<void>;
 }>;
 
 // @public

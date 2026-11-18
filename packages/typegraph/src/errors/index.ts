@@ -1757,6 +1757,112 @@ export class TransactionConflictError extends TypeGraphError {
   }
 }
 
+/** One node or edge row a read-set fence names, as `{ kind, id }`. */
+export type ReadSetChangedKey = Readonly<{ kind: string; id: string }>;
+
+/** Which edges at a node a read-set neighbourhood covers, relative to that node. */
+export type ReadSetEdgeDirection = "out" | "in" | "both";
+
+/**
+ * A read-set scope as the fence resolved it: the kinds and ids it covers,
+ * never the objects the caller passed in, so a refusal carries no row
+ * properties.
+ */
+export type ReadSetScopeDescriptor =
+  | Readonly<{ target: "node"; kind: string; id: string }>
+  | Readonly<{ target: "edge"; kind: string; id: string }>
+  | Readonly<{
+      target: "edgesAt";
+      nodeKind: string;
+      nodeId: string;
+      direction: ReadSetEdgeDirection;
+      edgeKind: string | undefined;
+    }>
+  | Readonly<{ target: "nodeKind"; kind: string }>
+  | Readonly<{ target: "edgeKind"; kind: string }>
+  | Readonly<{ target: "graph" }>;
+
+/**
+ * One declared read-set scope that changed after the anchor, with the node
+ * and edge keys that changed inside it. `index` is the scope's position in
+ * the list passed to `tx.assertUnchangedSince()`.
+ *
+ * Each key list is bounded: it holds at most the first 100 changed keys in
+ * `(kind, id)` code-point order, and its `*Truncated` flag is `true` exactly
+ * when more keys changed than it lists. Treat a truncated scope as "re-read
+ * everything in it".
+ */
+export type ReadSetScopeChange = Readonly<{
+  index: number;
+  scope: ReadSetScopeDescriptor;
+  nodes: readonly ReadSetChangedKey[];
+  edges: readonly ReadSetChangedKey[];
+  nodesTruncated: boolean;
+  edgesTruncated: boolean;
+}>;
+
+/** Details for {@link ReadSetChangedError}. */
+export type ReadSetChangedErrorDetails = Readonly<{
+  graphId: string;
+  anchor: string;
+  changes: readonly ReadSetScopeChange[];
+}>;
+
+/**
+ * Thrown by `tx.assertUnchangedSince()` when a row inside a declared read-set
+ * scope changed after the anchor revision. Every changed scope is listed with
+ * the keys that changed in it, up to a bounded number per scope (see
+ * {@link ReadSetScopeChange}). The caller re-reads its inputs under a fresh
+ * anchor and retries.
+ */
+export class ReadSetChangedError extends TypeGraphError {
+  declare readonly details: ReadSetChangedErrorDetails;
+
+  constructor(details: ReadSetChangedErrorDetails) {
+    super(
+      `${details.changes.length} declared read-set scope(s) changed after the anchor revision; the write was refused.`,
+      "READ_SET_CHANGED",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Capture a new anchor with store.lineageRevisionNow(), re-read the inputs, recompute, and retry the transaction.",
+      },
+    );
+    this.name = "ReadSetChangedError";
+  }
+}
+
+/** Details for {@link ReadSetUnverifiableError}. */
+export type ReadSetUnverifiableErrorDetails = Readonly<{
+  graphId: string;
+  anchor: string;
+}>;
+
+/**
+ * Thrown by `tx.assertUnchangedSince()` when the store's lineage source cannot
+ * bound the changes since the anchor: the anchor is unknown or was minted
+ * before `store.clear()`, or a revision in the span left no evidence. Retrying
+ * with the same anchor cannot succeed.
+ */
+export class ReadSetUnverifiableError extends TypeGraphError {
+  declare readonly details: ReadSetUnverifiableErrorDetails;
+
+  constructor(details: ReadSetUnverifiableErrorDetails) {
+    super(
+      "The store cannot prove which rows changed since the anchor revision, so it cannot prove the read set is unchanged; the write was refused.",
+      "READ_SET_UNVERIFIABLE",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Capture a new anchor with store.lineageRevisionNow() from this store, re-read the inputs, and retry. Route every write to the graph through a revision-tracked or history Store.",
+      },
+    );
+    this.name = "ReadSetUnverifiableError";
+  }
+}
+
 // ============================================================
 // Schema Errors (category: "system")
 // ============================================================

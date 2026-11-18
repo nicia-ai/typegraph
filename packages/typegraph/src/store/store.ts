@@ -412,6 +412,11 @@ import {
   withWriteTransactionSession,
   type WriteTransactionContext,
 } from "./operations/write-transaction";
+import { type ReadSetScope } from "./read-set";
+import {
+  assertReadSetUnchangedSince,
+  type ReadSetFenceContext,
+} from "./read-set-fence";
 import {
   lookupRecordedAnchor,
   pruneRecordedAnchors,
@@ -5150,6 +5155,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return overlayPropertyDescriptors(context, { measure });
   }
 
+  /** What `tx.assertUnchangedSince()` needs to know about this store. */
+  #readSetFenceContext(readOnly: boolean): ReadSetFenceContext<G> {
+    return {
+      graph: this.#graph,
+      lineageStore: this,
+      writers: {
+        historyEnabled: this.#captureEnabled,
+        revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      },
+      schemaVersion: this.#schemaMetadata.schemaVersion,
+      readOnly,
+    };
+  }
+
   /** Builds graph reads that execute through one already-open transaction. */
   #createTransactionReadSurface(
     txBackend: TransactionBackend,
@@ -5486,6 +5505,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         entries: Entries,
       ) => this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
       ...this.#createTransactionReadSurface(txBackend, attempt),
+      assertUnchangedSince: (
+        anchor: EngineRevision,
+        scopes: readonly ReadSetScope<G>[],
+      ) =>
+        assertReadSetUnchangedSince(
+          this.#readSetFenceContext(readOnly),
+          txBackend,
+          anchor,
+          scopes,
+        ),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
       [TRANSACTION_RUNTIME]: outerSurface.runtime,

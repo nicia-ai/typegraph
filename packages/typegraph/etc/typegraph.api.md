@@ -6683,6 +6683,100 @@ type ReadCoordinate = Readonly<{
 type ReadInstantMode = "literal" | "placeholder";
 
 // @public
+export class ReadSetChangedError extends TypeGraphError {
+    constructor(details: ReadSetChangedErrorDetails);
+    // (undocumented)
+    readonly details: ReadSetChangedErrorDetails;
+}
+
+// @public
+type ReadSetChangedErrorDetails = Readonly<{
+    graphId: string;
+    anchor: string;
+    changes: readonly ReadSetScopeChange[];
+}>;
+
+// @public
+type ReadSetChangedKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public
+type ReadSetEdgeDirection = "out" | "in" | "both";
+
+// @public
+type ReadSetEdgeReference<G extends GraphDef> = Readonly<{
+    kind: EdgeKinds<G>;
+    id: string;
+}>;
+
+// @public
+export type ReadSetScope<G extends GraphDef> = Readonly<{
+    node: GraphNodeReferenceInput<G>;
+}> | Readonly<{
+    edge: ReadSetEdgeReference<G>;
+}> | Readonly<{
+    edgesAt: GraphNodeReferenceInput<G>;
+    direction: ReadSetEdgeDirection;
+    kind?: EdgeKinds<G>;
+}> | Readonly<{
+    nodeKind: NodeKinds<G>;
+}> | Readonly<{
+    edgeKind: EdgeKinds<G>;
+}> | Readonly<{
+    graph: true;
+}>;
+
+// @public
+type ReadSetScopeChange = Readonly<{
+    index: number;
+    scope: ReadSetScopeDescriptor;
+    nodes: readonly ReadSetChangedKey[];
+    edges: readonly ReadSetChangedKey[];
+    nodesTruncated: boolean;
+    edgesTruncated: boolean;
+}>;
+
+// @public
+type ReadSetScopeDescriptor = Readonly<{
+    target: "node";
+    kind: string;
+    id: string;
+}> | Readonly<{
+    target: "edge";
+    kind: string;
+    id: string;
+}> | Readonly<{
+    target: "edgesAt";
+    nodeKind: string;
+    nodeId: string;
+    direction: ReadSetEdgeDirection;
+    edgeKind: string | undefined;
+}> | Readonly<{
+    target: "nodeKind";
+    kind: string;
+}> | Readonly<{
+    target: "edgeKind";
+    kind: string;
+}> | Readonly<{
+    target: "graph";
+}>;
+
+// @public
+export class ReadSetUnverifiableError extends TypeGraphError {
+    constructor(details: ReadSetUnverifiableErrorDetails);
+    // (undocumented)
+    readonly details: ReadSetUnverifiableErrorDetails;
+}
+
+// @public
+type ReadSetUnverifiableErrorDetails = Readonly<{
+    graphId: string;
+    anchor: string;
+}>;
+
+// @public
 type RebuildContributionOptions = Readonly<{
     pageSize?: number;
 }>;
@@ -8782,6 +8876,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
     neighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: NeighborReadOptions<G, K>) => Promise<readonly NeighborResult<G, K>[]>;
     countNeighbors: <const K extends EdgeKinds<G>>(source: GraphNodeReferenceInput<G>, options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">) => Promise<number>;
     subgraph: <const EK extends EdgeKinds<G>, const NK extends NodeKinds<G> = NodeKinds<G>, const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, const C extends SubgraphCompositionSelection | undefined = undefined>(root: GraphNodeReferenceInput<G>, options: SubgraphOptions<G, EK, NK, P, C>) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    assertUnchangedSince: (anchor: EngineRevision, scopes: readonly ReadSetScope<G>[]) => Promise<void>;
 }>;
 
 // @public

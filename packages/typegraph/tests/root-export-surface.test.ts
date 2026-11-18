@@ -69,6 +69,8 @@ const ROOT_VALUE_EXPORTS = [
   "notInSubquery",
   "param",
   "partOf",
+  "ReadSetChangedError",
+  "ReadSetUnverifiableError",
   "relatedTo",
   "RestrictedDeleteError",
   "SchemaMismatchError",
@@ -102,12 +104,13 @@ const ROOT_TYPE_EXPORTS = [
   "NodeType",
   "PaginatedResult",
   "Predicate",
+  "ReadSetScope",
   "Store",
   "StoreOptions",
   "TransactionContext",
 ] as const;
 
-const EXPECTED_ROOT_EXPORT_COUNT = 86;
+const EXPECTED_ROOT_EXPORT_COUNT = 89;
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const ROOT_ENTRY = path.join(PACKAGE_ROOT, "src/index.ts");

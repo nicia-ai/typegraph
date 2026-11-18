@@ -6,6 +6,7 @@ import { type z } from "zod";
 import {
   type BackendValidityEndMutation,
   type EdgeRow,
+  type EngineRevision,
   type NodeRow,
   type TransactionBackend,
   type TransactionReadBackend,
@@ -76,6 +77,7 @@ import type {
 } from "./collection-surface";
 import type { NeighborReadOptions, NeighborResult } from "./neighbors";
 import type { NodeDeletePolicy } from "./operations/node-write-pipeline";
+import type { ReadSetScope } from "./read-set";
 import type {
   BatchReadBuilder,
   EdgeCollectionLookup,
@@ -3128,6 +3130,105 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
       root: GraphNodeReferenceInput<G>,
       options: SubgraphOptions<G, EK, NK, P, C>,
     ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    /**
+     * Refuses this transaction when anything the caller read changed after
+     * `anchor`: optimistic concurrency with a declared read set, validated
+     * inside the transaction that writes the result. Writes nothing.
+     *
+     * `anchor` is the {@link EngineRevision} `store.lineageRevisionNow()`
+     * minted before the reads; `scopes` declares what was read (see
+     * {@link ReadSetScope}). The method takes the store's canonical write
+     * fence (schema-version fence, then the graph write lock, with evidence
+     * that this session's reads observe every earlier writer), then asks the
+     * store's lineage source, on this transaction's session, which declared
+     * scopes changed since `anchor`. Any recorded change counts, including
+     * one a later write reversed. Holding the graph write lock until commit,
+     * no other store writer can commit between the check and this
+     * transaction's own writes.
+     *
+     * ## Caller contract
+     *
+     * - Capture the anchor BEFORE reading. An anchor captured after a read
+     *   misses a change that landed in between; one captured before can only
+     *   cause a false refusal.
+     * - Call this before the transaction's own writes. On a revision-tracked
+     *   store without history, earlier writes made by this same transaction
+     *   can read as changes and refuse it falsely.
+     * - On {@link ReadSetChangedError}, re-read under a fresh anchor and
+     *   retry. On {@link ReadSetUnverifiableError}, retrying with the same
+     *   anchor cannot succeed.
+     *
+     * ## Limits
+     *
+     * - Writes that bypass the store (a raw backend write, an engine-side
+     *   mutation, or a second Store over the same graph opened without
+     *   history or revisionTracking) take no fence, allocate no revision and
+     *   leave no evidence, so they are not seen. Every writer of the graph
+     *   must be a history or revision-tracked Store.
+     * - Identity assertions are not covered: an assertion that changes class
+     *   membership without changing a node or edge row is not a change here,
+     *   and an identity write in the span does not refuse the fence.
+     * - Validity expiry is not covered: a row whose validity window closes
+     *   between the read and the commit changes what a current read returns
+     *   without any write.
+     * - Edge neighbourhoods off the history path: a revision-tracked store
+     *   records a changed edge's kind and id, not its endpoints, and an edge
+     *   id can be hard-deleted and reused at other endpoints. An `edgesAt`
+     *   scope there counts every changed edge of its kind, wherever it is.
+     *   Sound, but it refuses when an edge of that kind changed at another
+     *   node. History stores answer neighbourhoods exactly.
+     * - A revision-tracked store's journal triggers are verified when its
+     *   `lineageRevisionNow()` mints the anchor, not again inside this
+     *   transaction; an anchor minted by another Store over the same graph
+     *   is not verified against this one's journal. Dropping, disabling or
+     *   partially installing the triggers is a change made outside the
+     *   store, like a write that bypasses it.
+     * - Cost under the graph write lock: on a history store, row and
+     *   neighbourhood scopes are index seeks, while a kind scope reads that
+     *   kind's recorded versions and a whole-graph scope the graph's, so
+     *   their cost grows with that history. Off the history path, the fence
+     *   reads every change since the anchor, so its cost grows with the span,
+     *   not with the read set.
+     *
+     * @example
+     * ```typescript
+     * const anchor = await store.lineageRevisionNow();
+     * if (anchor === undefined) throw new Error("this store has no lineage");
+     * const source = await store.nodes.Source.getById(sourceId);
+     * if (source === undefined) throw new Error("source not found");
+     * // ... long computation ...
+     * await store.transaction(async (tx) => {
+     *   await tx.assertUnchangedSince(anchor, [
+     *     { node: source },
+     *     { edgesAt: source, direction: "out", kind: "premiseOf" },
+     *   ]);
+     *   await tx.nodes.Summary.create(summarize(source));
+     * });
+     * ```
+     *
+     * @throws KindNotFoundError when a scope names a kind the graph does not
+     *   register.
+     * @throws ConfigurationError (`details.code` `READ_SET_SCOPE_INVALID`)
+     *   when a scope is not an object, names no target or several, carries a key its target
+     *   does not define, or has a malformed reference or direction.
+     * @throws UnsupportedBackendCapabilityError when the transaction is
+     *   `accessMode: "read_only"`, or the store has no lineage source
+     *   (`lineage`), or its writers do not take the graph write fence
+     *   (`graphWriteFence`: neither TypeGraph-owned history nor
+     *   `revisionTracking`), or the session cannot prove its reads observe
+     *   every earlier writer (`observedReadCommittedIsolation`).
+     * @throws ReadSetUnverifiableError when the lineage source cannot bound
+     *   the changes since `anchor` (an unknown or pre-`clear()` anchor, or a
+     *   revision in the span that left no evidence).
+     * @throws ReadSetChangedError listing every changed scope with the node
+     *   and edge keys that changed in it: at most the first 100 of each in
+     *   `(kind, id)` order, with `nodesTruncated` / `edgesTruncated` set when
+     *   more changed.
+     */
+    assertUnchangedSince: (
+      anchor: EngineRevision,
+      scopes: readonly ReadSetScope<G>[],
+    ) => Promise<void>;
   }>;
 
 /**

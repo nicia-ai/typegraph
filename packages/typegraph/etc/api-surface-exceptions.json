@@ -1,1 +1,98 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  }
+]

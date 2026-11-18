@@ -164,13 +164,17 @@
  * durable `typegraph_revision_origins` row.
  */
 import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
-import { assertRevisionChangesJournalReady } from "../../backend/revision-journal";
+import {
+  assertRevisionChangesJournalReady,
+  REVISION_JOURNAL_ENTITY,
+} from "../../backend/revision-journal";
 import {
   type EngineRevision,
   type EntityKey,
   type LineageDelta,
   type LineageMembers,
   type LineageSession,
+  type TransactionBackend,
 } from "../../backend/types";
 import { type GraphAllocationOwner } from "../../core/allocation-owner";
 import { type GraphDef } from "../../core/define-graph";
@@ -179,13 +183,29 @@ import {
   RECORDED_MAX_REVISION,
   recordedInstantRevision,
 } from "../../core/temporal";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  type ReadSetChangedKey,
+  type ReadSetEdgeDirection,
+  type ReadSetScopeChange,
+  type ReadSetScopeDescriptor,
+} from "../../errors";
 import {
   resolveRevisionChangesTableName,
   type SqlSchema,
 } from "../../query/compiler/schema";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { getDialect } from "../../query/dialect";
+import { type DialectAdapter } from "../../query/dialect/types";
+import {
+  countSqlParameters,
+  PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
+  sql,
+  type SqlFragment,
+} from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
+import { groupBy } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
+import { type ReadSetDelta } from "../read-set";
 import {
   type STORE_RUNTIME,
   storeBackend,
@@ -193,6 +213,7 @@ import {
   type StoreRuntime,
 } from "../runtime-port";
 import { readRecordedClock, readRevisionOrigin } from "./clock";
+import { recordedBindParamBudget } from "./relations";
 
 /**
  * The minimal store surface {@link recordedRelationsLineage} and
@@ -272,6 +293,9 @@ const GENESIS_REVISION_NUMBER = 0;
 const LINEAGE_REVISION_SEPARATOR = ":";
 
 const UNBOUNDED_DELTA: LineageDelta = Object.freeze({ kind: "unbounded" });
+const UNBOUNDED_READ_SET_DELTA: ReadSetDelta = Object.freeze({
+  kind: "unbounded",
+});
 
 /**
  * THE one owner of the bundled `EngineRevision` grammar: `<origin>` then
@@ -403,6 +427,27 @@ function changedAfterRevision(sinceRevision: number): SqlFragment {
 }
 
 /**
+ * The distinct `(kind, id)` keys of one recorded relation's rows of
+ * `graphId` that changed strictly after `sinceRevision`, narrowed by
+ * `filter` when given. The changed-since predicate is
+ * {@link changedAfterRevision}, never re-spelled.
+ */
+function changedKeysSelect(
+  table: SqlFragment,
+  graphId: string,
+  sinceRevision: number,
+  filter?: SqlFragment,
+): SqlFragment {
+  return sql`
+    SELECT DISTINCT kind, id
+    FROM ${table}
+    WHERE graph_id = ${graphId}
+      ${filter === undefined ? sql.empty() : sql`AND ${filter}`}
+      AND ${changedAfterRevision(sinceRevision)}
+  `;
+}
+
+/**
  * Every `(kind, id)` in one recorded relation with a change strictly after
  * `sinceRevision` — the shared query behind both the node and edge halves
  * of a `"keys"` delta. See the module doc for why the two-armed predicate
@@ -417,10 +462,7 @@ async function changedEntityKeys(
 ): Promise<readonly EntityKey[]> {
   const rows = await session.execute<Readonly<{ kind: string; id: string }>>(
     asCompiledRowsSql(sql`
-      SELECT DISTINCT kind, id
-      FROM ${table}
-      WHERE graph_id = ${graphId}
-        AND ${changedAfterRevision(sinceRevision)}
+      ${changedKeysSelect(table, graphId, sinceRevision)}
       ORDER BY kind, id
     `),
   );
@@ -460,6 +502,392 @@ async function recordedIdentityChangedSince<G extends GraphDef>(
 }
 
 /**
+ * One declared read-set scope after the store validated it, in the terms a
+ * lineage source answers: which rows the scope covers, and the scope's
+ * position in the caller's list.
+ */
+export type ReadSetRegion = Readonly<{ index: number }> &
+  ReadSetScopeDescriptor;
+
+/**
+ * The session a read-set delta is read on: the write transaction's own
+ * backend, whose capabilities bound each statement's parameters and whose
+ * dialect orders keys by code point.
+ */
+export type ReadSetSession = LineageSession &
+  Pick<TransactionBackend, "capabilities" | "dialect">;
+
+/**
+ * The most keys a read-set refusal reports per changed scope, for its nodes
+ * and its edges separately. Every source reports the first keys in
+ * {@link compareChangedKeys} order and flags a list that had more.
+ */
+const READ_SET_REPORTED_KEYS_LIMIT = 100;
+
+/** One reported key list of a changed scope and whether more keys changed. */
+type ReportedKeys = Readonly<{
+  keys: readonly ReadSetChangedKey[];
+  truncated: boolean;
+}>;
+
+/**
+ * THE order reported keys follow: by kind, then id, in code-point order —
+ * the order the dialect's `binaryText` imposes in SQL, so a scope reports
+ * the same first keys whichever source answers it.
+ */
+function compareChangedKeys(
+  left: ReadSetChangedKey,
+  right: ReadSetChangedKey,
+): number {
+  const byKind = compareCodePoints(left.kind, right.kind);
+  return byKind === 0 ? compareCodePoints(left.id, right.id) : byKind;
+}
+
+/**
+ * THE bound on a reported key list: from keys already in
+ * {@link compareChangedKeys} order — all of them, or the first
+ * {@link READ_SET_REPORTED_KEYS_LIMIT} + 1 — keeps the first
+ * {@link READ_SET_REPORTED_KEYS_LIMIT} and says whether more existed.
+ */
+function reportedKeys(orderedKeys: readonly ReadSetChangedKey[]): ReportedKeys {
+  return {
+    keys: orderedKeys.slice(0, READ_SET_REPORTED_KEYS_LIMIT),
+    truncated: orderedKeys.length > READ_SET_REPORTED_KEYS_LIMIT,
+  };
+}
+
+/** How a region is reported: its position, its descriptor and its keys. */
+function scopeChange(
+  region: ReadSetRegion,
+  nodes: ReportedKeys,
+  edges: ReportedKeys,
+): ReadSetScopeChange {
+  const { index, ...scope } = region;
+  return {
+    index,
+    scope,
+    nodes: nodes.keys,
+    edges: edges.keys,
+    nodesTruncated: nodes.truncated,
+    edgesTruncated: edges.truncated,
+  };
+}
+
+/** Whether a scope's report names at least one changed key. */
+function scopeChanged(change: ReadSetScopeChange): boolean {
+  return change.nodes.length > 0 || change.edges.length > 0;
+}
+
+/** The recorded-edges filter selecting the edges at one endpoint of a node. */
+function recordedEdgeEndpointFilter(
+  endpoint: "from" | "to",
+  nodeKind: string,
+  nodeId: string,
+  edgeKind: string | undefined,
+): SqlFragment {
+  const endpointMatch =
+    endpoint === "from" ?
+      sql`from_kind = ${nodeKind} AND from_id = ${nodeId}`
+    : sql`to_kind = ${nodeKind} AND to_id = ${nodeId}`;
+  return edgeKind === undefined ? endpointMatch : (
+      sql`${endpointMatch} AND kind = ${edgeKind}`
+    );
+}
+
+const EDGE_ENDPOINTS_BY_DIRECTION: Readonly<
+  Record<ReadSetEdgeDirection, readonly ("from" | "to")[]>
+> = {
+  out: ["from"],
+  in: ["to"],
+  both: ["from", "to"],
+};
+
+type RecordedRelation = "nodes" | "edges";
+
+/**
+ * The filters selecting one region's rows in one recorded relation, as a
+ * union; empty when the region covers no row of that relation. A row is an
+ * index seek by `(graph_id, kind, id)` (`entity_idx`) and a neighbourhood by
+ * its endpoint (`from_idx` / `to_idx`, both directions as two filters). A kind
+ * reads every recorded version of that kind, and the whole graph (`undefined`)
+ * every recorded version of the graph, so their cost grows with that history.
+ */
+function recordedRegionFilters(
+  region: ReadSetRegion,
+  relation: RecordedRelation,
+): readonly (SqlFragment | undefined)[] {
+  switch (region.target) {
+    case "node": {
+      return relation === "nodes" ?
+          [sql`kind = ${region.kind} AND id = ${region.id}`]
+        : [];
+    }
+    case "edge": {
+      return relation === "edges" ?
+          [sql`kind = ${region.kind} AND id = ${region.id}`]
+        : [];
+    }
+    case "edgesAt": {
+      return relation === "edges" ?
+          EDGE_ENDPOINTS_BY_DIRECTION[region.direction].map((endpoint) =>
+            recordedEdgeEndpointFilter(
+              endpoint,
+              region.nodeKind,
+              region.nodeId,
+              region.edgeKind,
+            ),
+          )
+        : [];
+    }
+    case "nodeKind": {
+      return relation === "nodes" ? [sql`kind = ${region.kind}`] : [];
+    }
+    case "edgeKind": {
+      return relation === "edges" ? [sql`kind = ${region.kind}`] : [];
+    }
+    case "graph": {
+      return [undefined];
+    }
+  }
+}
+
+/** `ORDER BY` terms putting `kind, id` rows in {@link compareChangedKeys} order. */
+function changedKeyOrder(dialect: DialectAdapter): SqlFragment {
+  return sql`${dialect.binaryText(sql.identifier("kind"))}, ${dialect.binaryText(sql.identifier("id"))}`;
+}
+
+/**
+ * One region's first changed keys in one recorded relation, tagged with the
+ * region's index: the union of its filters' changed keys
+ * ({@link changedKeysSelect}), in {@link compareChangedKeys} order, limited to
+ * one more than {@link READ_SET_REPORTED_KEYS_LIMIT} so a truncated list is
+ * visible. A derived table, so its `ORDER BY` and `LIMIT` stay legal inside
+ * the `UNION ALL` that batches regions.
+ */
+function recordedRegionKeysSelect(
+  table: SqlFragment,
+  graphId: string,
+  sinceRevision: number,
+  dialect: DialectAdapter,
+  index: number,
+  filters: readonly (SqlFragment | undefined)[],
+): SqlFragment {
+  const changedKeys = filters.map((filter) =>
+    changedKeysSelect(table, graphId, sinceRevision, filter),
+  );
+  return sql`
+    SELECT CAST(${index} AS INTEGER) AS scope_index, kind, id FROM (
+      SELECT kind, id FROM (${sql.join(changedKeys, sql` UNION `)}) AS region_changed_keys
+      ORDER BY ${changedKeyOrder(dialect)}
+      LIMIT ${READ_SET_REPORTED_KEYS_LIMIT + 1}
+    ) AS region_reported_keys
+  `;
+}
+
+/**
+ * Splits `selects` into consecutive `UNION ALL` batches whose bound
+ * parameters fit `budget` and whose terms fit
+ * {@link PORTABLE_COMPOUND_SELECT_TERMS_LIMIT}. A select that alone exceeds
+ * the parameter budget is refused rather than sent to an engine that would
+ * reject it.
+ */
+function compoundBatchesWithinLimits(
+  selects: readonly SqlFragment[],
+  budget: number,
+): readonly (readonly SqlFragment[])[] {
+  const batches: SqlFragment[][] = [];
+  let current: SqlFragment[] = [];
+  let currentParameters = 0;
+  for (const select of selects) {
+    const parameters = countSqlParameters(select);
+    if (parameters > budget) {
+      throw new ConfigurationError(
+        "A read-set scope's query needs more bound parameters than the backend allows in one statement.",
+        {
+          code: "INVALID_BACKEND_CAPABILITY",
+          capability: "maxBindParameters",
+          value: budget,
+          required: parameters,
+        },
+      );
+    }
+    if (
+      currentParameters + parameters > budget ||
+      current.length === PORTABLE_COMPOUND_SELECT_TERMS_LIMIT
+    ) {
+      batches.push(current);
+      current = [];
+      currentParameters = 0;
+    }
+    current.push(select);
+    currentParameters += parameters;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+/**
+ * Every region's first changed keys in one recorded relation, by region
+ * index, each list in {@link compareChangedKeys} order. Regions are batched
+ * as a `UNION ALL` of {@link recordedRegionKeysSelect}, as few statements as
+ * the session's bound-parameter budget and the compound-term cap allow, read one after another: the
+ * session is a transaction, and a driver may refuse overlapping queries on
+ * one connection.
+ */
+async function recordedRelationRegionKeys(
+  session: ReadSetSession,
+  table: SqlFragment,
+  graphId: string,
+  sinceRevision: number,
+  relation: RecordedRelation,
+  regions: readonly ReadSetRegion[],
+): Promise<ReadonlyMap<number, readonly ReadSetChangedKey[]>> {
+  const dialect = getDialect(session.dialect);
+  const selects = regions.flatMap((region) => {
+    const filters = recordedRegionFilters(region, relation);
+    return filters.length === 0 ?
+        []
+      : [
+          recordedRegionKeysSelect(
+            table,
+            graphId,
+            sinceRevision,
+            dialect,
+            region.index,
+            filters,
+          ),
+        ];
+  });
+  const rows: Readonly<{ index: number; key: ReadSetChangedKey }>[] = [];
+  for (const batch of compoundBatchesWithinLimits(
+    selects,
+    recordedBindParamBudget(session),
+  )) {
+    const batchRows = await session.execute<
+      Readonly<{ scope_index: number | string; kind: string; id: string }>
+    >(
+      asCompiledRowsSql(sql`
+        SELECT scope_index, kind, id FROM (
+          ${sql.join(batch, sql` UNION ALL `)}
+        ) AS read_set_changed_keys
+        ORDER BY scope_index, ${changedKeyOrder(dialect)}
+      `),
+    );
+    for (const row of batchRows) {
+      rows.push({
+        index: Number(row.scope_index),
+        key: { kind: row.kind, id: row.id },
+      });
+    }
+  }
+  const keysByIndex = groupBy(rows, (row) => row.index);
+  return new Map(
+    [...keysByIndex].map(([index, indexRows]) => [
+      index,
+      indexRows.map((row) => row.key),
+    ]),
+  );
+}
+
+/** One changed row of a key delta, as {@link readSetRegionContains} tests it. */
+type ChangedRow = Readonly<{ entity: "node" | "edge"; key: EntityKey }>;
+
+/** Whether an `edgesAt` region names an edge of `edgeKind`. */
+function neighbourhoodCoversEdgeKind(
+  region: Readonly<{ edgeKind: string | undefined }>,
+  edgeKind: string,
+): boolean {
+  return region.edgeKind === undefined || region.edgeKind === edgeKind;
+}
+
+/**
+ * THE one predicate deciding whether a changed row of a key delta falls
+ * inside a declared region — the answer every non-recorded source gives by
+ * filtering.
+ *
+ * A key delta names an edge by kind and id only, never by the endpoints it
+ * had. Reading its endpoints now would not help: an edge can be hard deleted
+ * and recreated under the same id at other endpoints, so its current row
+ * cannot prove where it was during the span. A neighbourhood therefore
+ * counts every changed edge of its kind — sound, at the price of refusing
+ * when an edge of that kind changed elsewhere. The recorded relations keep
+ * every version's endpoints and answer a neighbourhood exactly.
+ */
+function readSetRegionContains(
+  region: ReadSetRegion,
+  row: ChangedRow,
+): boolean {
+  switch (region.target) {
+    case "node": {
+      return (
+        row.entity === "node" &&
+        row.key.kind === region.kind &&
+        row.key.id === region.id
+      );
+    }
+    case "edge": {
+      return (
+        row.entity === "edge" &&
+        row.key.kind === region.kind &&
+        row.key.id === region.id
+      );
+    }
+    case "edgesAt": {
+      return (
+        row.entity === "edge" &&
+        neighbourhoodCoversEdgeKind(region, row.key.kind)
+      );
+    }
+    case "nodeKind": {
+      return row.entity === "node" && row.key.kind === region.kind;
+    }
+    case "edgeKind": {
+      return row.entity === "edge" && row.key.kind === region.kind;
+    }
+    case "graph": {
+      return true;
+    }
+  }
+}
+
+/**
+ * A key delta filtered region by region with {@link readSetRegionContains}:
+ * the answer of every source without a scoped read of its own. The delta is
+ * put in {@link compareChangedKeys} order first, whatever order its source
+ * returned, so each region reports the same first keys a recorded read would.
+ */
+function regionChangesFromKeyDelta(
+  delta: LineageDelta,
+  regions: readonly ReadSetRegion[],
+): ReadSetDelta {
+  if (delta.kind === "unbounded") return UNBOUNDED_READ_SET_DELTA;
+  const nodes = delta.nodes.toSorted((left, right) =>
+    compareChangedKeys(left, right),
+  );
+  const edges = delta.edges.toSorted((left, right) =>
+    compareChangedKeys(left, right),
+  );
+  const changes = regions
+    .map((region) =>
+      scopeChange(
+        region,
+        reportedKeys(
+          nodes.filter((key) =>
+            readSetRegionContains(region, { entity: "node", key }),
+          ),
+        ),
+        reportedKeys(
+          edges.filter((key) =>
+            readSetRegionContains(region, { entity: "edge", key }),
+          ),
+        ),
+      ),
+    )
+    .filter((change) => scopeChanged(change));
+  return { kind: "changes", changes };
+}
+
+/**
  * Builds a `lineage` capability sourced from `store`'s own recorded
  * relations. Callers get this indirectly through {@link resolveLineage};
  * call it directly only to consult the recorded-relations source even when
@@ -493,6 +921,19 @@ async function recordedIdentityChangedSince<G extends GraphDef>(
 export function recordedRelationsLineage<G extends GraphDef>(
   store: RecordedLineageStore<G>,
 ): LineageMembers {
+  return recordedRelationsSource(store).lineage;
+}
+
+/**
+ * The recorded-relations source behind {@link recordedRelationsLineage}: its
+ * `lineage` members and the scoped read-set answer only this source can give
+ * from each version's own columns ({@link LineageSource}'s `readSetDelta`). Both prove the
+ * span through one helper, `provenSpanStart`, so the whole-graph delta and
+ * the scoped one can never disagree about which anchors they can answer.
+ */
+function recordedRelationsSource<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+): Pick<LineageSource, "lineage" | "readSetDelta"> {
   if (!storeCaptureEnabled(store)) {
     throw new ConfigurationError(
       "recordedRelationsLineage requires a store constructed with `history: true` — a non-capturing store never populates the recorded relations this lineage reads, so every changesSince would silently report an empty delta instead of the truth.",
@@ -548,14 +989,18 @@ export function recordedRelationsLineage<G extends GraphDef>(
     return encodeRecordedLineageRevision(origin, instant);
   }
 
-  async function changesSince(
+  /**
+   * The numeric revision `since` names when this source can prove the span
+   * from it to the graph's current clock, else `undefined` (`unbounded`):
+   * the token parses, its origin is the graph's LIVE origin, it is not newer
+   * than the clock, and every revision in the span left recorded evidence.
+   */
+  async function provenSpanStart(
     session: LineageSession,
     since: EngineRevision,
-    requestedGraphId: string,
-  ): Promise<LineageDelta> {
-    refuseForeignGraph(requestedGraphId);
+  ): Promise<number | undefined> {
     const parsed = parseLineageRevision(since);
-    if (parsed === undefined) return UNBOUNDED_DELTA;
+    if (parsed === undefined) return undefined;
 
     // Token identity (see the module doc): a revision minted before this
     // graph's origin last rotated (a `clear()`), or by a different physical
@@ -567,7 +1012,7 @@ export function recordedRelationsLineage<G extends GraphDef>(
     // `store.allocationOwner()` has ensured the origins relation exists.
     const liveOrigin = await readRevisionOrigin(session, schema, graphId);
     if (liveOrigin === undefined || liveOrigin !== parsed.origin) {
-      return UNBOUNDED_DELTA;
+      return undefined;
     }
 
     const requested = parsed.revision;
@@ -576,7 +1021,7 @@ export function recordedRelationsLineage<G extends GraphDef>(
       currentInstant === undefined ?
         GENESIS_REVISION_NUMBER
       : recordedInstantRevision(currentInstant);
-    if (requested > currentRevision) return UNBOUNDED_DELTA;
+    if (requested > currentRevision) return undefined;
 
     if (requested < currentRevision) {
       // Completeness evidence (see the module doc): the span is trustworthy
@@ -588,8 +1033,19 @@ export function recordedRelationsLineage<G extends GraphDef>(
         requested,
         currentRevision,
       );
-      if (evidenced < currentRevision - requested) return UNBOUNDED_DELTA;
+      if (evidenced < currentRevision - requested) return undefined;
     }
+    return requested;
+  }
+
+  async function changesSince(
+    session: LineageSession,
+    since: EngineRevision,
+    requestedGraphId: string,
+  ): Promise<LineageDelta> {
+    refuseForeignGraph(requestedGraphId);
+    const requested = await provenSpanStart(session, since);
+    if (requested === undefined) return UNBOUNDED_DELTA;
 
     const [nodes, edges] = await Promise.all([
       changedEntityKeys(session, schema.recordedNodesTable, graphId, requested),
@@ -598,22 +1054,159 @@ export function recordedRelationsLineage<G extends GraphDef>(
     return { kind: "keys", nodes, edges };
   }
 
-  return Object.freeze({ revision, changesSince });
+  /**
+   * Answers every region from the recorded relations, one batched read per
+   * relation ({@link recordedRelationRegionKeys}), each region's keys bounded
+   * in the query.
+   */
+  async function readSetDelta(
+    session: ReadSetSession,
+    since: EngineRevision,
+    regions: readonly ReadSetRegion[],
+  ): Promise<ReadSetDelta> {
+    const requested = await provenSpanStart(session, since);
+    if (requested === undefined) return UNBOUNDED_READ_SET_DELTA;
+    const nodeKeys = await recordedRelationRegionKeys(
+      session,
+      schema.recordedNodesTable,
+      graphId,
+      requested,
+      "nodes",
+      regions,
+    );
+    const edgeKeys = await recordedRelationRegionKeys(
+      session,
+      schema.recordedEdgesTable,
+      graphId,
+      requested,
+      "edges",
+      regions,
+    );
+    const changes = regions
+      .map((region) =>
+        scopeChange(
+          region,
+          reportedKeys(nodeKeys.get(region.index) ?? []),
+          reportedKeys(edgeKeys.get(region.index) ?? []),
+        ),
+      )
+      .filter((change) => scopeChanged(change));
+    return { kind: "changes", changes };
+  }
+
+  return {
+    lineage: Object.freeze({ revision, changesSince }),
+    readSetDelta,
+  };
 }
+
+/**
+ * How the journal's completeness check treats an identity-assertion entry,
+ * which records no key (see {@link revisionJournalSource}).
+ *
+ * - `"unbounded"`: the entry is incomplete evidence, so the span is
+ *   `unbounded`. Every key-delta consumer (`changesSince`, merge pruning)
+ *   reads this way: its delta cannot name the change.
+ * - `"ignored"`: the entry is complete evidence of a change outside node and
+ *   edge rows. Only the read-set fence reads this way, because identity is a
+ *   documented limit of what it covers.
+ */
+type JournalIdentityEntries = "unbounded" | "ignored";
 
 /**
  * Journal-backed lineage for live revision-tracked Stores. Bundled SQL
  * backends use row triggers installed by a privileged schema owner to write
- * every node/edge key into the same transaction as its mutation. A non-entity
- * sidecar write leaves an incomplete journal row, so this source refuses to
- * claim a complete delta.
+ * every node/edge key into the same transaction as its mutation. An
+ * identity-assertion write leaves an incomplete journal row with no key, so
+ * the key delta refuses to claim completeness across one; only the read-set
+ * fence, which does not cover identity, accepts it (see
+ * {@link JournalIdentityEntries}).
  */
-function revisionJournalLineage<G extends GraphDef>(
+function revisionJournalSource<G extends GraphDef>(
   store: RecordedLineageStore<G>,
-): LineageMembers {
+): Pick<LineageSource, "lineage" | "readSetDelta"> {
   const schema = store.revisionSchema;
   const graphId = store.graphId;
-  return Object.freeze({
+
+  /**
+   * The journal's key delta read on `session` alone. Journal readiness is
+   * checked by the callers below, on the store's own backend, which is a
+   * second connection: inside a transaction on an engine that admits one
+   * connection at a time, that check would wait on the very transaction
+   * that asked.
+   */
+  async function journalKeyDelta(
+    session: LineageSession,
+    since: EngineRevision,
+    identityEntries: JournalIdentityEntries,
+  ): Promise<LineageDelta> {
+    const parsed = parseLineageRevision(since);
+    if (parsed === undefined) return UNBOUNDED_DELTA;
+    const liveOrigin = await readRevisionOrigin(session, schema, graphId);
+    if (liveOrigin === undefined || liveOrigin !== parsed.origin) {
+      return UNBOUNDED_DELTA;
+    }
+    const currentInstant = await readRecordedClock(session, schema, graphId);
+    const current =
+      currentInstant === undefined ? 0 : (
+        recordedInstantRevision(currentInstant)
+      );
+    if (parsed.revision > current) return UNBOUNDED_DELTA;
+    if (parsed.revision === current) {
+      return { kind: "keys", nodes: [], edges: [] };
+    }
+
+    const rows = await session.execute<
+      Readonly<{
+        revision_count: string;
+        all_complete: number;
+        entity: unknown;
+        kind: unknown;
+        id: unknown;
+      }>
+    >(
+      asCompiledRowsSql(sql`
+        WITH changes AS (
+          SELECT revision, entity, kind, id, complete
+          FROM ${sql.identifier(resolveRevisionChangesTableName(schema.tables))}
+          WHERE graph_id = ${graphId} AND revision > ${parsed.revision}
+            AND revision <= ${current}
+        ), summary AS (
+          SELECT CAST(count(DISTINCT revision) AS text) AS revision_count,
+            COALESCE(min(CASE WHEN ${journalEntryComplete(identityEntries)}
+              THEN 1 ELSE 0 END), 1) AS all_complete
+          FROM changes
+        )
+        SELECT summary.revision_count, summary.all_complete,
+          keys.entity, keys.kind, keys.id
+        FROM summary LEFT JOIN (
+          SELECT DISTINCT entity, kind, id FROM changes
+          WHERE entity IN ('node', 'edge')
+        ) AS keys ON TRUE
+        ORDER BY keys.entity, keys.kind, keys.id
+      `),
+    );
+    const summary = rows[0];
+    if (
+      summary === undefined ||
+      Number(summary.revision_count) !== current - parsed.revision ||
+      summary.all_complete !== 1
+    ) {
+      return UNBOUNDED_DELTA;
+    }
+    const nodes: EntityKey[] = [];
+    const edges: EntityKey[] = [];
+    for (const row of rows) {
+      if (typeof row.entity !== "string") continue;
+      if (typeof row.kind !== "string" || typeof row.id !== "string")
+        return UNBOUNDED_DELTA;
+      if (row.entity === "node") nodes.push({ kind: row.kind, id: row.id });
+      if (row.entity === "edge") edges.push({ kind: row.kind, id: row.id });
+    }
+    return { kind: "keys", nodes, edges };
+  }
+
+  const lineage: LineageMembers = Object.freeze({
     async revision(session: LineageSession): Promise<EngineRevision> {
       await assertRevisionChangesJournalReady(storeBackend(store));
       const [origin, instant] = await Promise.all([
@@ -634,72 +1227,43 @@ function revisionJournalLineage<G extends GraphDef>(
           { expectedGraphId: graphId, actualGraphId: requestedGraphId },
         );
       }
-      const parsed = parseLineageRevision(since);
-      if (parsed === undefined) return UNBOUNDED_DELTA;
-      const liveOrigin = await readRevisionOrigin(session, schema, graphId);
-      if (liveOrigin === undefined || liveOrigin !== parsed.origin) {
-        return UNBOUNDED_DELTA;
-      }
-      const currentInstant = await readRecordedClock(session, schema, graphId);
-      const current =
-        currentInstant === undefined ? 0 : (
-          recordedInstantRevision(currentInstant)
-        );
-      if (parsed.revision > current) return UNBOUNDED_DELTA;
-      if (parsed.revision === current) {
-        return { kind: "keys", nodes: [], edges: [] };
-      }
-
-      const rows = await session.execute<
-        Readonly<{
-          revision_count: string;
-          all_complete: number;
-          entity: unknown;
-          kind: unknown;
-          id: unknown;
-        }>
-      >(
-        asCompiledRowsSql(sql`
-          WITH changes AS (
-            SELECT revision, entity, kind, id, complete
-            FROM ${sql.identifier(resolveRevisionChangesTableName(schema.tables))}
-            WHERE graph_id = ${graphId} AND revision > ${parsed.revision}
-              AND revision <= ${current}
-          ), summary AS (
-            SELECT CAST(count(DISTINCT revision) AS text) AS revision_count,
-              COALESCE(min(CASE WHEN complete AND entity IN ('node', 'edge')
-                THEN 1 ELSE 0 END), 1) AS all_complete
-            FROM changes
-          )
-          SELECT summary.revision_count, summary.all_complete,
-            keys.entity, keys.kind, keys.id
-          FROM summary LEFT JOIN (
-            SELECT DISTINCT entity, kind, id FROM changes
-            WHERE entity IN ('node', 'edge')
-          ) AS keys ON TRUE
-          ORDER BY keys.entity, keys.kind, keys.id
-        `),
-      );
-      const summary = rows[0];
-      if (
-        summary === undefined ||
-        Number(summary.revision_count) !== current - parsed.revision ||
-        summary.all_complete !== 1
-      ) {
-        return UNBOUNDED_DELTA;
-      }
-      const nodes: EntityKey[] = [];
-      const edges: EntityKey[] = [];
-      for (const row of rows) {
-        if (typeof row.entity !== "string") continue;
-        if (typeof row.kind !== "string" || typeof row.id !== "string")
-          return UNBOUNDED_DELTA;
-        if (row.entity === "node") nodes.push({ kind: row.kind, id: row.id });
-        if (row.entity === "edge") edges.push({ kind: row.kind, id: row.id });
-      }
-      return { kind: "keys", nodes, edges };
+      return journalKeyDelta(session, since, "unbounded");
     },
   });
+
+  /**
+   * Runs inside the caller's write transaction, so it relies on the
+   * readiness check `revision()` ran when it minted the anchor rather than
+   * repeating it on a second connection. A trigger dropped or disabled
+   * between the anchor and this check is a change made outside the store, the
+   * same class as a write that bypasses it.
+   */
+  async function readSetDelta(
+    session: ReadSetSession,
+    since: EngineRevision,
+    regions: readonly ReadSetRegion[],
+  ): Promise<ReadSetDelta> {
+    return regionChangesFromKeyDelta(
+      await journalKeyDelta(session, since, "ignored"),
+      regions,
+    );
+  }
+
+  return { lineage, readSetDelta };
+}
+
+/**
+ * THE journal completeness predicate over one entry: a keyed node or edge
+ * entry the trigger marked complete, plus, when the caller ignores identity,
+ * an identity-assertion entry.
+ */
+function journalEntryComplete(
+  identityEntries: JournalIdentityEntries,
+): SqlFragment {
+  const keyedEntry = sql`(complete AND entity IN (${REVISION_JOURNAL_ENTITY.node}, ${REVISION_JOURNAL_ENTITY.edge}))`;
+  return identityEntries === "ignored" ?
+      sql`(${keyedEntry} OR entity = ${REVISION_JOURNAL_ENTITY.identity})`
+    : keyedEntry;
 }
 
 /**
@@ -730,6 +1294,17 @@ type LineageSource = Readonly<{
     session: LineageSession,
     since: EngineRevision,
   ) => Promise<boolean>;
+  /**
+   * The read-set delta `tx.assertUnchangedSince()` decides from, read on
+   * `session`. The recorded relations answer each region with a scoped read;
+   * every other source filters its key delta with
+   * {@link readSetRegionContains}.
+   */
+  readSetDelta: (
+    session: ReadSetSession,
+    since: EngineRevision,
+    regions: readonly ReadSetRegion[],
+  ) => Promise<ReadSetDelta>;
 }>;
 
 /**
@@ -744,10 +1319,20 @@ function resolveLineageSource<G extends GraphDef>(
   store: RecordedLineageStore<G>,
 ): LineageSource | undefined {
   const backend = storeBackend(store);
-  if (backend.lineage !== undefined) return { lineage: backend.lineage };
+  const engineLineage = backend.lineage;
+  if (engineLineage !== undefined) {
+    return {
+      lineage: engineLineage,
+      readSetDelta: async (session, since, regions) =>
+        regionChangesFromKeyDelta(
+          await engineLineage.changesSince(session, since, store.graphId),
+          regions,
+        ),
+    };
+  }
   if (storeCaptureEnabled(store)) {
     return {
-      lineage: recordedRelationsLineage(store),
+      ...recordedRelationsSource(store),
       identityChangedSince: (session, since) =>
         recordedIdentityChangedSince(store, session, since),
     };
@@ -757,7 +1342,7 @@ function resolveLineageSource<G extends GraphDef>(
     store.revisionJournalEnabled !== false &&
     isFirstPartyFactory(backend)
   ) {
-    return { lineage: revisionJournalLineage(store) };
+    return revisionJournalSource(store);
   }
   return undefined;
 }
@@ -801,4 +1386,29 @@ export async function changesSinceIncludingIdentity<G extends GraphDef>(
   return (await source.identityChangedSince(session, since)) ?
       UNBOUNDED_DELTA
     : delta;
+}
+
+/**
+ * The read-set delta `tx.assertUnchangedSince()` decides from: for each
+ * declared region, the node and edge keys that changed in it since `since`,
+ * or `unbounded` when the selected source cannot prove the span.
+ *
+ * Built on the node-and-edge delta graph merge reads, not
+ * {@link changesSinceIncludingIdentity}: an identity write in the span must
+ * not make every read set unverifiable. The recorded relations read nodes and
+ * edges only, and the journal reads with identity entries ignored (see
+ * {@link JournalIdentityEntries}). Each source answers through its own
+ * `readSetDelta` (see {@link LineageSource}), each scope's keys bounded by
+ * {@link READ_SET_REPORTED_KEYS_LIMIT}. Any recorded change counts,
+ * including one a later write reversed.
+ */
+export async function changesInReadSet<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+  session: ReadSetSession,
+  since: EngineRevision,
+  regions: readonly ReadSetRegion[],
+): Promise<ReadSetDelta> {
+  const source = resolveLineageSource(store);
+  if (source === undefined) return UNBOUNDED_READ_SET_DELTA;
+  return source.readSetDelta(session, since, regions);
 }

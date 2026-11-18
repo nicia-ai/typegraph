@@ -109,6 +109,7 @@ export {
   createStoreWithSchema,
   type Store,
 } from "./store";
+export type { ReadSetScope } from "./store/read-set";
 export type {
   Edge,
   EdgeCollection,
@@ -168,6 +169,8 @@ export {
   KindNotFoundError,
   MigrationError,
   NodeNotFoundError,
+  ReadSetChangedError,
+  ReadSetUnverifiableError,
   RestrictedDeleteError,
   SchemaMismatchError,
   StaleVersionError,

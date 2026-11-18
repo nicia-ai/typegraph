@@ -888,19 +888,32 @@ export function runInWriteTransaction<T>(
 }
 
 /**
- * Whether this store needs the per-graph write fence for a write: it captures
- * (history or revision tracking, whose clocks must serialize) or the write
- * declared a constraint only the fence protects.
+ * Whether every ordinary write of this store takes the per-graph write fence:
+ * the store captures (TypeGraph-owned history or revision tracking, whose
+ * clocks must serialize). THE one owner of that decision, shared by the write
+ * pipeline ({@link writeNeedsGraphWriteFence}) and by every caller whose
+ * guarantee rests on writers serializing behind the fence
+ * (`tx.assertUnchangedSince()`).
+ */
+export function storeWritersTakeGraphWriteFence(
+  ctx: Pick<
+    WriteTransactionContext,
+    "historyEnabled" | "revisionTrackingEnabled"
+  >,
+): boolean {
+  return ctx.historyEnabled || ctx.revisionTrackingEnabled;
+}
+
+/**
+ * Whether this store needs the per-graph write fence for a write: every write
+ * of this store takes it ({@link storeWritersTakeGraphWriteFence}), or the
+ * write declared a constraint only the fence protects.
  */
 function writeNeedsGraphWriteFence(
   ctx: WriteTransactionContext,
   fenceReason: ConstraintFenceReason | undefined,
 ): boolean {
-  return (
-    ctx.historyEnabled ||
-    ctx.revisionTrackingEnabled ||
-    fenceReason !== undefined
-  );
+  return storeWritersTakeGraphWriteFence(ctx) || fenceReason !== undefined;
 }
 
 /**

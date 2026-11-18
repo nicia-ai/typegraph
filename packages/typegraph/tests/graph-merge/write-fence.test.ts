@@ -4,7 +4,7 @@ import { postgresFenceSql } from "../../src/backend/drizzle/postgres-fence-sql";
 import { type TransactionBackend } from "../../src/backend/types";
 import { StaleVersionError } from "../../src/errors";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
-import { lockMergeTargetWrite } from "../../src/graph-merge/write-fence";
+import { lockStoreWriteFence } from "../../src/store/operations/write-fence-prelude";
 
 function makeBackend(
   events: string[],
@@ -41,7 +41,7 @@ function makeBackend(
 describe("graph-merge write fences", () => {
   it("acquires the schema fence before the graph lock", async () => {
     const events: string[] = [];
-    await lockMergeTargetWrite(makeBackend(events), {
+    await lockStoreWriteFence(makeBackend(events), {
       graphId: "merge-fence",
       schemaVersion: 3,
       graphLock: "required",
@@ -56,7 +56,7 @@ describe("graph-merge write fences", () => {
     const backend = makeBackend(events, true);
 
     await expect(
-      lockMergeTargetWrite(backend, {
+      lockStoreWriteFence(backend, {
         graphId: "merge-fence",
         schemaVersion: 3,
         graphLock: "required",
@@ -69,7 +69,7 @@ describe("graph-merge write fences", () => {
 
   it("can fence schema-managed writes without taking the revision graph lock", async () => {
     const events: string[] = [];
-    await lockMergeTargetWrite(makeBackend(events), {
+    await lockStoreWriteFence(makeBackend(events), {
       graphId: "merge-fence",
       schemaVersion: 3,
       graphLock: "not-required",
