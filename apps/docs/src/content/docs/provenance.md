@@ -256,7 +256,9 @@ defined as "every named fact is in `holding(tx)`".
 
 The call:
 
-- dedupes the named facts; an empty list returns an empty result and takes no lock
+- dedupes the named facts; an empty list is checked for transaction ownership
+  only, then returns an empty result without a lock or a read, so it is not
+  refused in a read-only transaction
 - reads rows written earlier in the same transaction
 - returns one `{ fact, via }` entry per distinct fact, in the order each was
   first named, where `via` is the justifications firing for it, the same shape
@@ -313,18 +315,22 @@ reads in its own transaction.
   after your first write. A `retract` that overlaps the transaction either is
   seen by the assert, which refuses, or commits after it and closes the new
   fact and names it in `died`; the fact never ends up live and unsupported.
-- `holding(tx)` takes the graph write lock only and writes nothing, so it runs
-  in a read-only transaction or under a `SELECT`-only role. In a read-only
-  transaction at a snapshot isolation level it answers as of that transaction's
-  snapshot. In a read-only transaction, use `holding(tx)` rather than
-  `assertHolds`.
+- `holding(tx)` writes nothing. In a read-write transaction it takes the same
+  locks as `assertHolds`, the schema-version fence and then the graph write
+  lock, so it is safe to call before or after your writes and `assertHolds`.
+  Two consequences: on a store handle whose schema version is no longer the
+  active one it throws `StaleVersionError`, and a role that may only `SELECT`
+  gets the database's own permission error, because the schema fence is a row
+  lock.
+- In a transaction opened with `accessMode: "read_only"`, `holding(tx)` takes
+  the graph write lock alone, so it runs under a `SELECT`-only role. At a
+  snapshot isolation level it answers as of that transaction's snapshot. In a
+  read-only transaction, use `holding(tx)` rather than `assertHolds`.
+- A `SELECT`-only role reads the believed set with `holding()`, or with
+  `holding(tx)` in a transaction opened read-only.
 - `holding(tx)` holds the graph write lock until your transaction ends, so a
   long transaction that calls it early blocks every other writer of that graph
   for as long as it runs. Call it late, or keep the transaction short.
-- In a read-write transaction, call `holding(tx)` after the transaction's first
-  write or after `assertHolds`. Taking it first acquires the graph lock ahead
-  of the schema-version fence, the reverse of the order writes use, and can
-  stall against a concurrent schema commit.
 - Inside a transaction, use `holding(tx)`, not `holding()`. The no-argument
   form opens its own transaction and waits for a graph lock that yours already
   holds.

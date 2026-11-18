@@ -5470,6 +5470,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             }
             await acquireManagedWriteFences(nodeOperationContext, txBackend);
           },
+          acquireReadFences: async () => {
+            if (readOnly) {
+              await lockRecordedGraphWrite(txBackend, this.graphId);
+              return;
+            }
+            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,

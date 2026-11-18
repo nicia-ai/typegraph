@@ -1,9 +1,10 @@
 /**
  * "Holds", in its two forms: the believed set of the whole graph
- * ({@link believedFacts}) and the commit-time assert that named facts are in
- * it ({@link assertFactsHold}). Both judge with `computeSupportSnapshot`, so
- * there is one support predicate; they differ only in how much of the graph
- * they load.
+ * ({@link believedFactsInOwnTransaction},
+ * {@link believedFactsInCallerTransaction}) and the commit-time assert that
+ * named facts are in it ({@link assertFactsHold}). Both judge with
+ * `computeSupportSnapshot`, so there is one support predicate; they differ
+ * only in how much of the graph they load.
  */
 import type { GraphDef } from "../core/define-graph";
 import {
@@ -26,6 +27,7 @@ import {
   uniqueNodeReferences,
 } from "./keys";
 import {
+  acquireCallerTransactionReadLocks,
   acquireCapabilityReadLock,
   acquireCapabilityWriteLocks,
 } from "./locks";
@@ -48,10 +50,10 @@ import {
 const ASSERT_HOLDS_OPERATION = "provenance.assertHolds()";
 
 /**
- * Every believed fact of the graph, read on `tx` under the per-graph write
- * lock alone — so it runs in a read-only transaction.
+ * Every believed fact of the graph, read in a transaction the capability
+ * opened for this read alone, under the per-graph write lock alone.
  */
-export async function believedFacts<
+export async function believedFactsInOwnTransaction<
   G extends GraphDef,
   FactKind extends NodeKind<G>,
 >(
@@ -59,6 +61,33 @@ export async function believedFacts<
   tx: TransactionContext<G>,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
   await acquireCapabilityReadLock(tx, scope.graphId);
+  return readBelievedFacts<G, FactKind>(scope, tx);
+}
+
+/**
+ * Every believed fact of the graph, read in the caller's transaction: under
+ * the schema-version fence and the per-graph write lock when that transaction
+ * can write, so a write after the read keeps the canonical lock order, or
+ * under the graph lock alone when it is read-only.
+ */
+export async function believedFactsInCallerTransaction<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
+  await acquireCallerTransactionReadLocks(tx);
+  return readBelievedFacts<G, FactKind>(scope, tx);
+}
+
+async function readBelievedFacts<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
   const graph = await loadSupportGraph(
     transactionBackend(tx),
     scope.registry,
@@ -83,6 +112,11 @@ export async function believedFacts<
  * first read, so the verdict cannot be invalidated by a concurrent retraction
  * and the caller's own writes take their locks in the canonical order whether
  * they come before or after this call.
+ *
+ * An empty list is checked for ownership only and returns `[]`: there is
+ * nothing to judge, so it takes no lock, reads nothing, and is not refused in
+ * a read-only transaction, whose refusal is a property of the write locks it
+ * does not take.
  */
 export async function assertFactsHold<
   G extends GraphDef,
@@ -93,9 +127,9 @@ export async function assertFactsHold<
   tx: TransactionContext<G>,
   facts: readonly ProvenanceNodeRef[],
 ): Promise<readonly SurvivedVia<G, FactKind, JustificationKind>[]> {
+  const scope = resolveScope(tx, ASSERT_HOLDS_OPERATION);
   const named = uniqueNodeReferences(facts);
   if (named.length === 0) return [];
-  const scope = resolveScope(tx, ASSERT_HOLDS_OPERATION);
   assertFactKinds(scope.config, named);
 
   await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);

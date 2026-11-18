@@ -1,6 +1,10 @@
 import type { GraphDef } from "../core/define-graph";
 import type { HistoryStore } from "../store/store";
-import { assertFactsHold, believedFacts } from "./holds";
+import {
+  assertFactsHold,
+  believedFactsInCallerTransaction,
+  believedFactsInOwnTransaction,
+} from "./holds";
 import { createCapabilityScope, createTransactionScopeResolver } from "./scope";
 import { runTransition } from "./transition";
 import {
@@ -84,10 +88,13 @@ export function createRetractionCapability<
     async holding(tx) {
       if (tx === undefined) {
         return store.transaction((ownTransaction) =>
-          believedFacts<G, FactKindsFromConfig<G, C>>(scope, ownTransaction),
+          believedFactsInOwnTransaction<G, FactKindsFromConfig<G, C>>(
+            scope,
+            ownTransaction,
+          ),
         );
       }
-      return believedFacts<G, FactKindsFromConfig<G, C>>(
+      return believedFactsInCallerTransaction<G, FactKindsFromConfig<G, C>>(
         resolveTransactionScope(tx, HOLDING_IN_TRANSACTION_OPERATION),
         tx,
       );

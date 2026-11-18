@@ -844,3 +844,16 @@ export function transactionAcquireWriteFences(
 ): Promise<void> {
   return requireTransactionRuntime(transaction).acquireWriteFences(refusal);
 }
+
+/**
+ * Takes the fences a multi-statement read on THIS transaction needs, without
+ * writing: {@link transactionAcquireWriteFences}'s schema-version fence and
+ * per-graph write lock in a transaction that can write, or the per-graph write
+ * lock alone in one opened with `accessMode: "read_only"`. The transaction's
+ * own read-only flag decides. Today's caller is provenance's `holding(tx)`.
+ */
+export function transactionAcquireReadFences(
+  transaction: TransactionRuntimePort,
+): Promise<void> {
+  return requireTransactionRuntime(transaction).acquireReadFences();
+}

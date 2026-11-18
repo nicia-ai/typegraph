@@ -7,8 +7,11 @@
  *   ever live while absent from `holding()`.
  * - `assertHolds` takes the schema fence and graph write lock BEFORE the
  *   transaction's first write, so a concurrent retraction waits for it.
- * - `holding()` / `holding(tx)` never write and run read-only, including under a
- *   SELECT-only role; `assertHolds` refuses a read-only transaction.
+ * - `holding()` and `holding(tx)` in a read-only transaction take the graph
+ *   lock alone and answer under a SELECT-only role; `holding(tx)` in a
+ *   read-write transaction takes the schema fence too, so that role meets the
+ *   database's own permission error there; `assertHolds` refuses a read-only
+ *   transaction.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -214,6 +217,17 @@ async function expectNoLiveFactOutsideHolding(
     .map((fact) => fact.id)
     .filter((id) => !holdingIds.has(id));
   expect(liveUnsupported).toEqual([]);
+}
+
+/** Every message on `error`'s cause chain, so a wrapped driver error is visible. */
+function errorChainMessages(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  while (current instanceof Error) {
+    messages.push(current.message);
+    current = current.cause;
+  }
+  return messages.join(" <- ");
 }
 
 /** Cleanup paths must not mask the failure that brought them here. */
@@ -435,7 +449,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       expect(believed).toEqual([fact]);
     });
 
-    it("holding() and holding(tx) answer for a SELECT-only role", async () => {
+    it("holding() and read-only holding(tx) answer for a SELECT-only role; read-write holding(tx) meets the database's permission error", async () => {
       const store = await createGraphStore(requirePool());
       const { fact } = await seedHeldFact(store, "seed");
       const adminPool = requirePool();
@@ -472,6 +486,14 @@ describe.runIf(process.env["POSTGRES_URL"])(
             accessMode: "read_only",
           }),
         ).resolves.toEqual([fact]);
+
+        // The schema fence is a `FOR SHARE` row lock, which needs more than
+        // SELECT; the refusal is the database's, not TypeGraph's.
+        const readWrite = await readerStore
+          .transaction((tx) => reader.holding(tx))
+          .then(ignoreRejection, (error: unknown) => error);
+        expect(readWrite).toBeInstanceOf(Error);
+        expect(errorChainMessages(readWrite)).toMatch(/permission denied/u);
       } finally {
         await rolePool.end();
       }

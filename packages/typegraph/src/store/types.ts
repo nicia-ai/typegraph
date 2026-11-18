@@ -3066,6 +3066,18 @@ export type TransactionRuntime = Readonly<{
   acquireWriteFences: (
     refusal: Readonly<{ operation: string; suggestion: string }>,
   ) => Promise<void>;
+  /**
+   * Takes the fences a multi-statement read on this transaction needs so no
+   * graph write commits between its statements, without writing. In a
+   * transaction that can write, these are {@link acquireWriteFences}'s
+   * fences, in their order, so a write that follows the read cannot take the
+   * schema-version fence after the graph lock. In a transaction opened with
+   * `accessMode: "read_only"`, which never writes and cannot hold the schema
+   * fence, it is the per-graph write lock alone. The transaction's own
+   * read-only flag decides, so no caller re-derives it — today's caller is
+   * provenance's `holding(tx)`.
+   */
+  acquireReadFences: () => Promise<void>;
 }>;
 
 /**

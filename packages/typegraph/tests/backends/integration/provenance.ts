@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   ConfigurationError,
+  createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -20,11 +21,16 @@ import type {
   GraphBackend,
   TransactionBackend,
 } from "../../../src/backend/types";
-import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import {
+  StaleVersionError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import {
   createRetractionCapability,
   FactNotHoldingError,
 } from "../../../src/provenance";
+import type { HistoryStore } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -152,7 +158,17 @@ const compositionGraph = defineGraph({
   ],
 });
 
-type ProvenanceStore = Awaited<ReturnType<typeof createHistoryStore>>;
+// An unrelated kind: evolving the provenance graph with it leaves every role
+// the capability maps in place, so the evolved graph still validates.
+const noteExtension = defineGraphExtension({
+  nodes: {
+    ProvenanceNote: {
+      properties: { label: { type: "string", optional: true } },
+    },
+  },
+});
+
+type ProvenanceStore = HistoryStore<typeof provenanceGraph>;
 type SourceRef = Node<typeof Source>;
 type FactRef = Node<typeof Fact>;
 type DecisionRef = Node<typeof Decision>;
@@ -233,7 +249,10 @@ async function captureRejection(work: Promise<unknown>): Promise<unknown> {
 
 /** `retracted-source` is retracted; `live-source` and `live-fact` hold. */
 async function seedStore(context: IntegrationTestContext) {
-  const store = await createHistoryStore(context);
+  return seedProvenance(await createHistoryStore(context));
+}
+
+async function seedProvenance<S extends ProvenanceStore>(store: S) {
   const retractedSource = await createSource(store, "retracted-source");
   const liveSource = await createSource(store, "live-source");
   const dying = await createFact(store, "dying-fact");
@@ -243,6 +262,13 @@ async function seedStore(context: IntegrationTestContext) {
   const provenance = createRetractionCapability(store, config);
   await provenance.retract(retractedSource);
   return { store, provenance };
+}
+
+/** A backend that cannot adopt a schema write refuses the evolved transaction. */
+async function expectUnsupportedAdoption(
+  run: () => Promise<unknown>,
+): Promise<void> {
+  await expect(run()).rejects.toThrow(UnsupportedBackendCapabilityError);
 }
 
 async function captureNotHolding(
@@ -1267,6 +1293,247 @@ export function registerProvenanceIntegrationTests(
         ["expired", "no-firing-justification"],
         ["part-of-dead", "composition-whole-unsupported"],
       ]);
+    });
+
+    it("checks ownership for an empty list: returns [] for an owned transaction, read-only included, and refuses a foreign or retained one", async () => {
+      const { store, provenance } = await seedStore(context);
+      const otherStore = await createHistoryStore(context);
+
+      await expect(
+        store.transaction((tx) => provenance.assertHolds(tx, [])),
+      ).resolves.toEqual([]);
+      await expect(
+        store.transaction((tx) => provenance.assertHolds(tx, []), {
+          accessMode: "read_only",
+        }),
+      ).resolves.toEqual([]);
+
+      const foreign = await captureRejection(
+        otherStore.transaction((tx) => provenance.assertHolds(tx, [])),
+      );
+      const retained = await store.transaction((tx) => Promise.resolve(tx));
+      const pastCallback = await captureRejection(
+        provenance.assertHolds(retained, []),
+      );
+      for (const refusal of [foreign, pastCallback]) {
+        expect(refusal).toBeInstanceOf(ConfigurationError);
+        expect((refusal as ConfigurationError).details).toMatchObject({
+          code: "PROVENANCE_TRANSACTION_NOT_OWNED",
+          operation: "provenance.assertHolds()",
+        });
+      }
+    });
+
+    it("holding(tx) on a stale store handle refuses a read-write transaction with StaleVersionError and still answers read-only and with no argument", async () => {
+      const { store, provenance } = await seedStore(context);
+      await store.evolve(noteExtension);
+
+      const stale = await captureRejection(
+        store.transaction((tx) => provenance.holding(tx)),
+      );
+      expect(stale).toBeInstanceOf(StaleVersionError);
+
+      await expect(
+        store.transaction((tx) => provenance.holding(tx), {
+          accessMode: "read_only",
+        }),
+      ).resolves.toEqual([fact("live-fact")]);
+      await expect(provenance.holding()).resolves.toEqual([fact("live-fact")]);
+    });
+
+    it("judges inside withEvolvedTransaction against the evolved graph: refuses and rolls the evolution back, or passes and commits it", async () => {
+      const backend = context.getBackend();
+      const [adapterStore] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        backend,
+        { history: true },
+      );
+      const { store, provenance } = await seedProvenance(adapterStore);
+      const plan = await store.planEvolution(noteExtension);
+      if (plan.status !== "change") throw new Error("Expected change plan.");
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        await expectUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            store.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+
+      const refusal = await captureNotHolding(
+        backend.transactionWithNative(async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            await deriveInTransaction(
+              tx,
+              [{ kind: "Source", id: "retracted-source" }],
+              "evolved-dead-j",
+              "evolved-dead",
+            );
+            await provenance.assertHolds(tx, [fact("evolved-dead")]);
+          }),
+        ),
+      );
+      expect(refusal.failures).toEqual([
+        {
+          fact: fact("evolved-dead"),
+          reason: "no-firing-justification",
+          justifications: [
+            {
+              justification: { kind: "Justification", id: "evolved-dead-j" },
+              premises: [
+                {
+                  premise: { kind: "Source", id: "retracted-source" },
+                  reason: "retracted",
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+      await expect(backend.getActiveSchema(store.graphId)).resolves.toEqual(
+        expect.objectContaining({ version: plan.baseline.version }),
+      );
+      await expect(
+        store.nodes.Fact.getById(asNodeId<typeof Fact>("evolved-dead")),
+      ).resolves.toBeUndefined();
+
+      const outcome = await backend.transactionWithNative(
+        async (_target, nativeTx) =>
+          store.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            await deriveInTransaction(
+              tx,
+              [{ kind: "Source", id: "live-source" }],
+              "evolved-held-j",
+              "evolved-held",
+            );
+            const held = await provenance.assertHolds(tx, [
+              fact("evolved-held"),
+            ]);
+            return { held, believed: await provenance.holding(tx) };
+          }),
+      );
+      expect(outcome.result.held).toEqual([
+        {
+          fact: fact("evolved-held"),
+          via: [{ kind: "Justification", id: "evolved-held-j" }],
+        },
+      ]);
+      expect(outcome.result.believed).toEqual([
+        fact("evolved-held"),
+        fact("live-fact"),
+      ]);
+      await expect(backend.getActiveSchema(store.graphId)).resolves.toEqual(
+        expect.objectContaining({ version: plan.result.version }),
+      );
+    });
+
+    it("judges inside withRecordedTransaction: refuses and leaves no rows, or passes and sees the transaction's writes in holding(tx)", async () => {
+      const backend = context.getBackend();
+      const [adapterStore] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        backend,
+        { history: true },
+      );
+      const { store, provenance } = await seedProvenance(adapterStore);
+
+      const refusal = await captureNotHolding(
+        backend.transactionWithNative(async (_target, nativeTx) =>
+          store.withRecordedTransaction(nativeTx, async (tx) => {
+            await deriveInTransaction(
+              tx,
+              [{ kind: "Source", id: "retracted-source" }],
+              "recorded-dead-j",
+              "recorded-dead",
+            );
+            await provenance.assertHolds(tx, [fact("recorded-dead")]);
+          }),
+        ),
+      );
+      expect(refusal.failures.map((failure) => failure.reason)).toEqual([
+        "no-firing-justification",
+      ]);
+      await expect(
+        store.nodes.Fact.getById(asNodeId<typeof Fact>("recorded-dead")),
+      ).resolves.toBeUndefined();
+
+      const outcome = await backend.transactionWithNative(
+        async (_target, nativeTx) =>
+          store.withRecordedTransaction(nativeTx, async (tx) => {
+            await deriveInTransaction(
+              tx,
+              [{ kind: "Source", id: "live-source" }],
+              "recorded-held-j",
+              "recorded-held",
+            );
+            const held = await provenance.assertHolds(tx, [
+              fact("recorded-held"),
+            ]);
+            return { held, believed: await provenance.holding(tx) };
+          }),
+      );
+      expect(outcome.result.held).toEqual([
+        {
+          fact: fact("recorded-held"),
+          via: [{ kind: "Justification", id: "recorded-held-j" }],
+        },
+      ]);
+      expect(outcome.result.believed).toEqual([
+        fact("live-fact"),
+        fact("recorded-held"),
+      ]);
+      expect(outcome.receipt.recorded).toBeDefined();
+    });
+
+    it("judges on a tx.measure scope: refuses, or passes with the scope's writes counted in its receipt", async () => {
+      const { store, provenance } = await seedStore(context);
+
+      const refusal = await captureNotHolding(
+        store.transactionWithReceipt((tx) =>
+          tx.measure(async (scoped) => {
+            await deriveInTransaction(
+              scoped,
+              [{ kind: "Source", id: "retracted-source" }],
+              "scoped-dead-j",
+              "scoped-dead",
+            );
+            await provenance.assertHolds(scoped, [fact("scoped-dead")]);
+          }),
+        ),
+      );
+      expect(refusal.failures.map((failure) => failure.reason)).toEqual([
+        "no-firing-justification",
+      ]);
+      await expect(
+        store.nodes.Fact.getById(asNodeId<typeof Fact>("scoped-dead")),
+      ).resolves.toBeUndefined();
+
+      const outcome = await store.transactionWithReceipt((tx) =>
+        tx.measure(async (scoped) => {
+          await deriveInTransaction(
+            scoped,
+            [{ kind: "Source", id: "live-source" }],
+            "scoped-held-j",
+            "scoped-held",
+          );
+          const held = await provenance.assertHolds(scoped, [
+            fact("scoped-held"),
+          ]);
+          return { held, believed: await provenance.holding(scoped) };
+        }),
+      );
+      expect(outcome.result.result.held).toEqual([
+        {
+          fact: fact("scoped-held"),
+          via: [{ kind: "Justification", id: "scoped-held-j" }],
+        },
+      ]);
+      expect(outcome.result.result.believed).toEqual([
+        fact("live-fact"),
+        fact("scoped-held"),
+      ]);
+      expect(outcome.result.receipt.writes.total).toBe(4);
     });
   });
 }

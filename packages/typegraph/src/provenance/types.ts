@@ -136,13 +136,18 @@ export type RetractionCapability<
    *
    * With no argument it reads in a transaction of its own, so the answer is a
    * point-in-time one that can stop being true before the caller's next
-   * statement — not a write guard. With `tx` it runs the same whole-graph
-   * computation on that transaction and sees the rows it has written. Either
-   * way it takes the per-graph write lock and nothing else, so it runs in a
-   * read-only transaction.
+   * statement — not a write guard. That transaction never writes, so it takes
+   * the per-graph write lock alone. With `tx` it runs the same whole-graph
+   * computation on that transaction and sees the rows it has written. In a
+   * read-write `tx` it takes the store's write locks in their canonical order
+   * — the schema-version fence, then the per-graph write lock — so the
+   * transaction's later writes cannot invert them; in a `tx` opened with
+   * `accessMode: "read_only"` it takes the per-graph write lock alone.
    *
    * @throws {ConfigurationError} when `tx` does not belong to an active
    *   callback of the capability's store.
+   * @throws {StaleVersionError} in a read-write `tx` on a store handle whose
+   *   schema version is no longer the active one.
    */
   holding: (
     tx?: TransactionContext<G>,
@@ -160,7 +165,9 @@ export type RetractionCapability<
    * schema-version fence, then the per-graph write lock — before its first
    * read, so it needs a read-write transaction and may be called before or
    * after the transaction's own writes. It reads only what is behind the named
-   * facts. An empty list returns an empty result and takes no lock.
+   * facts. An empty list is checked for transaction ownership only: it
+   * returns an empty result, takes no lock, reads nothing, and is not refused
+   * in a read-only transaction.
    *
    * @throws {FactNotHoldingError} naming every fact that does not hold; the
    *   rejection aborts the caller's transaction, and nothing is closed or

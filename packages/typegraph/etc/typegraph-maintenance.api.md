@@ -7664,6 +7664,7 @@ type TransactionRuntime = Readonly<{
         operation: string;
         suggestion: string;
     }>) => Promise<void>;
+    acquireReadFences: () => Promise<void>;
 }>;
 
 // @public (undocumented)

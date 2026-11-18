@@ -432,8 +432,10 @@ Consequences of the row being a real write:
   writes, does not.
 - **Reads write nothing.** A read that takes the fence to keep a
   multi-statement view from tearing, such as a provenance capability's
-  `holding()`, takes the advisory lock alone, so it runs in a read-only
-  transaction or under a `SELECT`-only role.
+  `holding()`, or its `holding(tx)` in a transaction opened read-only, takes
+  the advisory lock alone, so it runs under a `SELECT`-only role. In a
+  read-write transaction `holding(tx)` also takes the schema-version fence,
+  which a `SELECT`-only role cannot.
 - **A long-lived snapshot slows those deciding writes.** The row is updated
   once per deciding transaction (once per deciding write in a transaction you
   adopted with `withTransaction`, or in a `store.transaction` whose
