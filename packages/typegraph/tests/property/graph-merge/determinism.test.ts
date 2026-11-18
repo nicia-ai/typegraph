@@ -55,6 +55,7 @@ import type {
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { requireDefined } from "../../../src/utils/presence";
+import { assertProperty } from "../../graph-merge/assert-property";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
@@ -431,7 +432,7 @@ describe.each(backendMatrix())(
       "yields a deep-equal normalized report + graph for any branch ordering",
       { timeout: 300_000 },
       async () => {
-        await fc.assert(
+        await assertProperty(
           fc.asyncProperty(
             determinismScenarioArb,
             fc.boolean(),
