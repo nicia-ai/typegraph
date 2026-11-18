@@ -821,13 +821,30 @@ could not attach, or one that is not live under `validateReferences: false`)
 — is taken out of the set and the rest is applied again without it: its
 refused row reports its own error, and its other rows a per-row error prefixed
 `INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`. The part keeps its current whole.
-That holds when the attach is refused before anything is written, too — an
-invalid property, or a whole that does not exist or whose own row this import
-refuses: the row ending the part's attachment is then refused with the same
-prefix rather than written alone.
+
+The same holds for a part whose rows do not pair as one move: two rows
+attaching it, a row ending it twice, or a row whose id the document repeats.
+Whenever a row ends a part's attachment and another row of the document
+attaches the part again, the end is not written unless one of those rows
+attaches the part, whatever stage refuses them: an invalid property, a whole
+that does not exist or whose own row this import refuses, a refusal when the
+row is created, or an id that names a stored edge import cannot write as a new
+attachment (an ended edge, which import never reopens; a deleted edge, which
+it skips without an error; or another part's edge). The row ending the part's
+attachment is then refused with the same prefix rather than written alone, and
+the part keeps its current whole. A row restating the edge being ended, or a
+row whose own window is already ended, does not attach the part again, so it
+leaves a lone end in place. A required part's lone end is refused as
+`COMPOSITION_DETACH_REFUSED` when nothing else refuses it first.
+
 A refused row costs one more pass over the moves (not over the rest of the
-import) when its move had already written its other half; a moved part found
-without its whole costs one more pass over everything written after the moves.
+import) when its move had already written its other half. A moved part found
+without its whole costs one more pass over the import's edge writes, and so
+does an end found written alone because its attaching row was refused only
+when that row was created or repeated; an attaching row refused while the
+document is classified, or one naming a stored edge, costs no extra pass. A
+backend whose transaction offers no savepoint cannot take such a pass back, so
+the import aborts with `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` instead.
 Failures that depend on each other — a chain of moves, each into the slot the
 one before it frees, whose first link is refused — are found one link per pass,
 so such a chain costs passes in proportion to its length and move writes in

@@ -33,25 +33,30 @@ const Part = defineNode("CmsPart", { schema: z.object({}) });
 const Whole = defineNode("CmsWhole", { schema: z.object({}) });
 const partOfWhole = defineEdge("cmsPartOf", { schema: z.object({}) });
 
-const graph = defineGraph({
-  id: "composition_move_import_savepoint",
-  nodes: { CmsPart: { type: Part }, CmsWhole: { type: Whole } },
-  edges: {
-    cmsPartOf: {
-      type: partOfWhole,
-      from: [Part],
-      to: [Whole],
-      cardinality: "oneActive",
+function moveGraph(existence: "optional" | "required") {
+  return defineGraph({
+    id: `composition_move_import_savepoint_${existence}`,
+    nodes: { CmsPart: { type: Part }, CmsWhole: { type: Whole } },
+    edges: {
+      cmsPartOf: {
+        type: partOfWhole,
+        from: [Part],
+        to: [Whole],
+        cardinality: "oneActive",
+      },
     },
-  },
-  ontology: [partOf(Part, Whole, { via: partOfWhole, existence: "required" })],
-});
+    ontology: [partOf(Part, Whole, { via: partOfWhole, existence })],
+  });
+}
 
 const ATTACHED_AT = "2020-01-01T00:00:00.000Z";
 const MOVED_AT = "2021-01-01T00:00:00.000Z";
 const INSIDE_INCUMBENT = "2020-06-01T00:00:00.000Z";
 
-async function seededWithoutSavepoints() {
+async function seededWithoutSavepoints(
+  existence: "optional" | "required" = "required",
+) {
+  const graph = moveGraph(existence);
   const { backend } = createLocalSqliteBackend();
   const [setup] = await createStoreWithSchema(graph, backend);
   const oldWhole = await setup.nodes.CmsWhole.create({});
@@ -96,7 +101,30 @@ async function seededWithoutSavepoints() {
     const open = await setup.edges.cmsPartOf.find({});
     return open.map((edge) => edge.toId);
   };
-  return { backend, store, move, openAttachments, oldWhole, newWhole };
+  /** The move, with its attach naming a whole that does not exist `times` times. */
+  const moveToMissingWhole = (times: number): GraphData => {
+    const [end, attach] = move(MOVED_AT).edges;
+    const missing = {
+      ...requireDefined(attach),
+      to: { kind: "CmsWhole", id: "no-such-whole" },
+    };
+    return {
+      ...move(MOVED_AT),
+      edges: [
+        requireDefined(end),
+        ...Array.from({ length: times }, () => missing),
+      ],
+    };
+  };
+  return {
+    backend,
+    store,
+    move,
+    moveToMissingWhole,
+    openAttachments,
+    oldWhole,
+    newWhole,
+  };
 }
 
 describe("composition move import without savepoints", () => {
@@ -108,6 +136,42 @@ describe("composition move import without savepoints", () => {
         batchSize: 1,
       });
       await expect(attempt).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(attempt).rejects.toMatchObject({
+        details: { code: "IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT" },
+      });
+      expect(await seeded.openAttachments()).toEqual([seeded.oldWhole.id]);
+    } finally {
+      await seeded.backend.close();
+    }
+  });
+
+  it("refuses an optional part's end without a savepoint when its attach is refused before anything is written", async () => {
+    const seeded = await seededWithoutSavepoints("optional");
+    try {
+      const result = await importGraph(
+        seeded.store,
+        seeded.moveToMissingWhole(1),
+        { onConflict: "update", batchSize: 1 },
+      );
+      expect(result.errors.map((entry) => entry.error.split(":")[0])).toEqual([
+        "To node not found",
+        "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE",
+      ]);
+      expect(await seeded.openAttachments()).toEqual([seeded.oldWhole.id]);
+    } finally {
+      await seeded.backend.close();
+    }
+  });
+
+  it("aborts the import rather than commit an optional part's end whose attach is refused after the end is written", async () => {
+    // The repeat of the refused attach is applied after the end, so only then
+    // is the end known to stand alone.
+    const seeded = await seededWithoutSavepoints("optional");
+    try {
+      const attempt = importGraph(seeded.store, seeded.moveToMissingWhole(2), {
+        onConflict: "update",
+        batchSize: 1,
+      });
       await expect(attempt).rejects.toMatchObject({
         details: { code: "IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT" },
       });
