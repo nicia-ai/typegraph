@@ -19,6 +19,7 @@ import { canonicalMergePlanJson } from "../../../src/graph-merge/plan-canonical"
 import { isErr, unwrap } from "../../../src/graph-merge/result";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { importGraph } from "../../../src/interchange";
+import { assertProperty } from "../../graph-merge/assert-property";
 import { createSqliteMergeBackend } from "../../graph-merge/test-utils";
 
 const Person = defineNode("Person", {
@@ -59,7 +60,7 @@ const END = "2028-01-01T00:00:00.000Z";
 
 describe("bounded candidate planning", () => {
   it("matches full-clone unique decisions across temporal peers and unrelated growth", async () => {
-    await fc.assert(
+    await assertProperty(
       fc.asyncProperty(
         fc.record({
           unrelatedCount: fc.integer({ min: 0, max: 5 }),
@@ -188,7 +189,7 @@ describe("bounded candidate planning", () => {
 
   it("matches full-clone identity planning across classes, folded ids, and unrelated assertions", async () => {
     let successfulPlans = 0;
-    await fc.assert(
+    await assertProperty(
       fc.asyncProperty(
         fc.record({
           unrelatedCount: fc.integer({ min: 0, max: 8 }),
@@ -323,7 +324,7 @@ describe("bounded candidate planning", () => {
   });
   it("matches full-clone planning across unrelated rows, overlaps, windows, tombstones, and edge updates", async () => {
     let successfulPlans = 0;
-    await fc.assert(
+    await assertProperty(
       fc.asyncProperty(
         fc.record({
           unrelatedCount: fc.integer({ min: 0, max: 12 }),
