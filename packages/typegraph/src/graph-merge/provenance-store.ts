@@ -153,6 +153,7 @@ import {
   computeSchemaHash,
   ConfigurationError,
   createSqlSchema,
+  createStore,
   createStoreWithSchema,
   defineInternalGraph,
   defineNode,
@@ -249,10 +250,8 @@ export type ProvenanceNode = Node<typeof Provenance>;
 /**
  * Opens the provenance store for a target — OPENING OR CREATING, never merely
  * reading. On a free graph id this claims the ownership marker and registers the
- * sidecar schema; on an occupied one it throws. There is no read-only entry
- * point: a tool that wants to inspect an existing sidecar without creating one
- * must decide for itself (e.g. by checking `backend.getActiveSchema` for
- * {@link provenanceGraphId}) before calling this.
+ * sidecar schema; on an occupied one it throws. To inspect a sidecar without
+ * creating one, use {@link readProvenanceStore}.
  *
  * Pass the target Store in ordinary application code; callers that do not have
  * its GraphDef may instead pass the backend and target graph id.
@@ -302,6 +301,43 @@ export async function openProvenanceStore<G extends GraphDef>(
   // migrating a pre-marker one) now writes into a graph this module has claimed.
   const [store] = await createStoreWithSchema(graph, backend);
   return store as unknown as Store<ProvenanceGraph>;
+}
+
+/**
+ * Opens the provenance store for a target WITHOUT ever writing: no ownership
+ * marker, no schema registration, no DDL. Runs the same inspection
+ * {@link openProvenanceStore} runs, so a role that can only SELECT can use it.
+ *
+ * Resolves to `undefined` when the sidecar graph id is free (the target has no
+ * persisted provenance), to the store when this module owns the id, and throws
+ * the same `GRAPH_MERGE_PROVENANCE_ID_COLLISION` {@link openProvenanceStore}
+ * throws when the id is occupied by something else.
+ *
+ * An owned sidecar whose schema registration has not landed yet (an interrupted
+ * open) or that still carries the pre-marker schema is returned as is: reading
+ * it needs no migration, and finishing that work is {@link openProvenanceStore}'s
+ * job. Like `openProvenanceStore`, it shares the target's backend, so the caller
+ * must NOT close it separately.
+ */
+export async function readProvenanceStore(
+  backend: GraphBackend,
+  targetGraphId: string,
+): Promise<Store<ProvenanceGraph> | undefined> {
+  const graph = buildOwnedProvenanceGraph(targetGraphId);
+  const disposition = await inspectSidecarGraphId(
+    backend,
+    graph,
+    targetGraphId,
+  );
+  if (disposition.state === "refuse") {
+    throw provenanceGraphIdCollision(
+      graph.id,
+      targetGraphId,
+      disposition.reason,
+    );
+  }
+  if (disposition.state === "create") return undefined;
+  return createStore(graph, backend) as unknown as Store<ProvenanceGraph>;
 }
 
 /**

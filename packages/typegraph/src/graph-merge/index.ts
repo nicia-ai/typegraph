@@ -232,6 +232,7 @@ export {
   persistProvenanceRecords,
   provenanceGraphId,
   readProvenance,
+  readProvenanceStore,
 } from "./provenance-store";
 export type { Result } from "./result";
 export { isErr, isOk, unwrap } from "./result";
