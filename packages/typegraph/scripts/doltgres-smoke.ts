@@ -1,9 +1,41 @@
 // Doltgres spike smoke test — run: pnpm smoke:doltgres
 // Requires a Doltgres on localhost:4132. Either works:
-//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.5.1   (latest release)
+//   docker run -d -p 4132:5432 -e POSTGRES_PASSWORD=password dolthub/doltgresql:1.5.2   (latest release)
 //   a build of doltgresql main                                                           (see below)
 // Not wired into CI: it needs that server, and the spike is exploratory.
 // DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
+//
+// RE-MEASURED 2026-11-19 on TypeGraph main 3e4979b5 against 1.5.2 (released 2026-11-18),
+// doltgresql main ff035fd1 and the open row-level locking PR #3915 at 42cf7ebd.
+//   - 1.5.2 scores 64 passed, 0 failed, 2 skipped and is the floor. It fixes the
+//     expression-index upsert (#3789), now a support check that 1.5.1 fails, and the
+//     1.5.1 partial-index panic (#3877).
+//   - Main carries doltgresql#3887 (closes #3617; PR #3634 and Dolt #12145 were closed in
+//     its favor): a COMMIT fails with 40001 when a concurrent transaction changed the
+//     same column of the same row. A fence acquisition increments one column of one row,
+//     so `row` / `conflict: "commit-time"` is a true declaration on an unpatched main:
+//     with DOLTGRES_EXPECT_ROW_CONFLICT=commit-time it scores 64 / 0 / 2, both fence
+//     probes, the typed retry and the endpoint race included. Without that expectation
+//     main fails the two fence probes, which is the pin reporting the change. The
+//     conflict is per column: two writers of different columns of one row both commit.
+//   - PR #3915, unmerged and one day old, adds FOR UPDATE / NO KEY UPDATE / SHARE /
+//     KEY SHARE with NOWAIT and SKIP LOCKED. Measured on its build: the clauses exclude
+//     with PostgreSQL's compatibility (SHARE with SHARE, KEY SHARE with a non-key
+//     UPDATE), and the bundled `advisory` + table-lock declaration and `advisory` /
+//     `drain: "none"` both construct and walk for the first time. The semantics are
+//     PostgreSQL's REPEATABLE READ, although the server reports `read committed`: a
+//     waiter whose locked row was updated or deleted fails with 40001 ("could not
+//     serialize access due to concurrent update"), and a waiter that does acquire keeps
+//     its transaction-start snapshot, so a read after the lock, or after an advisory
+//     lock, does not see the previous holder's commit. A conflicting plain UPDATE or
+//     fence upsert now blocks and then fails 40001 at the statement instead of at COMMIT.
+//     The default run scores 60 / 4 / 2 there: the row-lock pin turning red, and the two
+//     fence probes and the endpoint race, which assume writers that do not block. Those
+//     probes are left as they are until the PR settles. The two-argument advisory lock
+//     and LOCK TABLE are still missing on that build.
+//   - Unchanged on all three: LIKE and ILIKE with ESCAPE (bare ILIKE is open as #3904),
+//     `INSERT INTO ... AS`, `ANALYZE (SKIP_LOCKED)`, #3335, #3389, #3771, #3772 and the
+//     data-modifying INSERT CTE.
 //
 // RE-MEASURED 2026-11-17 on TypeGraph main f4bb59ce (0.75.0) against 1.5.1, still the
 // latest release, and doltgresql main 9595e046, 52 commits past it.
@@ -371,16 +403,16 @@ const DOLTGRES_CONNECTION = {
 } as const;
 const DEMO_BRANCH = "experiment";
 
-// Only opt into this expectation for a build carrying doltgresql PR #3634.
-// A version string cannot prove that an unmerged change is installed.
+// Only opt into this expectation for a build carrying doltgresql#3887, which is on main
+// and in no release yet. A version string cannot prove that it is installed.
 const ROW_CONFLICT_EXPECTATION = process.env["DOLTGRES_EXPECT_ROW_CONFLICT"];
 const EXPECT_COMMIT_TIME_CONFLICT = ROW_CONFLICT_EXPECTATION === "commit-time";
 if (ROW_CONFLICT_EXPECTATION !== undefined && !EXPECT_COMMIT_TIME_CONFLICT) {
   throw new Error("DOLTGRES_EXPECT_ROW_CONFLICT must be unset or commit-time");
 }
 
-// Main's walk keeps the deliberately unsound row/wait baseline. The explicit
-// PR #3634 expectation switches the walk to row/commit-time and optimistic retry;
+// The default walk keeps the deliberately unsound row/wait baseline the releases need.
+// The explicit commit-time expectation switches it to row/commit-time and optimistic retry;
 // the race and typed-increment probes must prove that expectation on the server.
 // caller-serialized stays in the matrix because a second branch-pinned backend
 // would violate its single-backend deployment promise.
@@ -895,9 +927,9 @@ async function probeRowLocking(): Promise<void> {
 }
 
 /**
- * Pin both acquisition AND commit outcomes. Main and 1.4.0 silently merge the two
- * writes. PR #3634 should instead abort the second committer with 40001, roll back
- * its unrelated payload, and allow a fresh attempt to acquire generation 2.
+ * Pin both acquisition AND commit outcomes. Releases through 1.5.2 silently merge the
+ * two writes. A build with doltgresql#3887 instead aborts the second committer with
+ * 40001, rolls back its unrelated payload, and lets a fresh attempt acquire generation 2.
  */
 async function probeFenceRowRace(seeded: boolean): Promise<void> {
   const name = `write fence: ${seeded ? "existing" : "new"} fence row (commit outcomes + rollback)`;
@@ -999,7 +1031,7 @@ async function probeFenceRowRace(seeded: boolean): Promise<void> {
         step: name,
         outcome: "pass",
         detail:
-          "both acquired generation 1; first COMMIT succeeded, second failed 40001; loser payload rolled back; fresh retry committed generation 2 (PR #3634)",
+          "both acquired generation 1; first COMMIT succeeded, second failed 40001; loser payload rolled back; fresh retry committed generation 2 (doltgresql#3887)",
       });
     } else {
       if (commitFailure !== undefined) {
@@ -1258,7 +1290,22 @@ async function runDeviationBattery(): Promise<void> {
     ],
     [{ rows: 10 }],
   );
-  await probeUpsertBesideExpressionIndex();
+  // Before 1.5.2 this stored `EXCLUDED.u` in `s`, without an error (doltgresql#3789).
+  // A declared index over `props` is such an index.
+  await probe(
+    "upserts: ON CONFLICT DO UPDATE beside an expression index",
+    SUPPORTED,
+    [
+      `DROP TABLE IF EXISTS "probe_upsert_expr"`,
+      `CREATE TABLE "probe_upsert_expr" ("id" INT PRIMARY KEY, "s" TEXT, "u" TEXT)`,
+      `CREATE INDEX "probe_upsert_expr_u" ON "probe_upsert_expr" ((length("u")))`,
+      `INSERT INTO "probe_upsert_expr" VALUES (1, 'a', 'x')`,
+      `INSERT INTO "probe_upsert_expr" VALUES (1, 'named', 'neighbor')
+       ON CONFLICT ("id") DO UPDATE SET "s" = EXCLUDED."s"
+       RETURNING "s", "u"`,
+    ],
+    [{ s: "named", u: "x" }],
+  );
   // The atomic node mutation statement behind `bulkUpsertById` aliases its target so the
   // conflict arm can read the stored row.
   await probe(
@@ -1291,62 +1338,6 @@ async function runDeviationBattery(): Promise<void> {
     unsupported('at or near "(": syntax error', UNFILED),
     [...PROBE_SETUP, `ANALYZE (SKIP_LOCKED) "probe_rows"`],
   );
-}
-
-/**
- * A pin whose symptom is a SUCCESS: with an expression index on the table,
- * `ON CONFLICT DO UPDATE SET s = EXCLUDED.s` stores `EXCLUDED.u` in `s`
- * (doltgresql#3789). No TypeGraph upsert targets a table with an expression index today.
- */
-async function probeUpsertBesideExpressionIndex(): Promise<void> {
-  const name =
-    "upserts: ON CONFLICT DO UPDATE beside an expression index (wrong column)";
-  const issue = "doltgresql#3789";
-  const client = new Client(DOLTGRES_CONNECTION);
-  try {
-    await client.connect();
-    await client.query(`DROP TABLE IF EXISTS "probe_upsert_expr"`);
-    await client.query(
-      `CREATE TABLE "probe_upsert_expr" ("id" INT PRIMARY KEY, "s" TEXT, "u" TEXT)`,
-    );
-    await client.query(
-      `CREATE INDEX "probe_upsert_expr_u" ON "probe_upsert_expr" ((length("u")))`,
-    );
-    await client.query(`INSERT INTO "probe_upsert_expr" VALUES (1, 'a', 'x')`);
-    await client.query(
-      `INSERT INTO "probe_upsert_expr" VALUES (1, 'named', 'neighbor')
-       ON CONFLICT ("id") DO UPDATE SET "s" = EXCLUDED."s"`,
-    );
-    const stored = await client.query<{ s: string; u: string }>(
-      `SELECT "s", "u" FROM "probe_upsert_expr" WHERE "id" = 1`,
-    );
-    const row = stored.rows[0];
-    const observed = JSON.stringify(row);
-    if (row?.s === "neighbor" && row.u === "x") {
-      results.push({
-        step: name,
-        outcome: "pass",
-        detail: `stores the neighboring column's value as pinned (${issue})`,
-      });
-      return;
-    }
-    results.push({
-      step: name,
-      outcome: "fail",
-      detail:
-        row?.s === "named" && row.u === "x" ?
-          `NOW CORRECT — ${issue} looks fixed; promote this to a support check`
-        : `wrong in a DIFFERENT way than ${issue}: ${observed}`,
-    });
-  } catch (error) {
-    results.push({ step: name, outcome: "fail", detail: describeError(error) });
-  } finally {
-    try {
-      await client.end();
-    } catch {
-      // Intentionally ignored: see probeMatchIdentityCheck.
-    }
-  }
 }
 
 /**
@@ -1784,9 +1775,9 @@ async function probeTypedCommitTimeRetry(pool: Pool): Promise<void> {
  * fence row and hide whether the node fences work. Each transaction finishes its write
  * and waits for the other before committing, so neither can see the other's commit.
  *
- * With #3634 the later COMMIT fails 40001 on bob's fence row and the loser replays: a
+ * With doltgresql#3887 the later COMMIT fails 40001 on bob's fence row and the loser replays: a
  * replayed edge create is refused (EndpointNotFoundError), a replayed delete cascades
- * the edge it now sees. On main both commit and the edge dangles; that is the same
+ * the edge it now sees. On releases through 1.5.2 both commit and the edge dangles; that is the same
  * undetected conflict the raw fence races pin, so the default run accepts it.
  */
 async function probeTypedEndpointRace(pool: Pool): Promise<void> {
