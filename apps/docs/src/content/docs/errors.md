@@ -1661,7 +1661,7 @@ ontology checks around it raise these `ConfigurationError` codes:
 | `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
 | `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
 | `COMPOSITION_WINDOW_VERDICT_NESTED` | A second composition-window verdict was opened on a transaction that already has one open. The graph-merge apply decides its whole edge write set once and opens that verdict around its writes, so this signals a nested call from inside such a write. |
-| `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` | An import applies the composition moves a document states as one set, each move whole or not at all, and a move could not land after part of the set was written, on a backend whose transaction offers no savepoint to take that write back. The import aborts and its transaction rolls back rather than committing half a move. Use a backend whose root verdict and transaction port both provide statement execution. |
+| `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` | An import applies the composition moves a document states as one set, each move whole or not at all, and a move could not land after part of the set was written, or a row ending a part's attachment was written while every row that would attach the part again was refused afterwards, on a backend whose transaction offers no savepoint to take that write back. The import aborts and its transaction rolls back rather than committing half a move or a lone end. Use a backend whose root verdict and transaction port both provide statement execution. |
 | `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
 
 `INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE` is not a thrown code: it prefixes the
@@ -1670,7 +1670,9 @@ move the import could not apply whole. A move is applied whole or not at all,
 so when one of its rows is refused, or the part no longer holds the destination
 whole once the import's other rows are written, every row of the move is
 reported with this prefix and the refused row additionally carries its own
-error.
+error. It also prefixes a row ending a part's attachment that was not written
+because no row of the document attaching the part again was applied, at
+whatever stage that row was refused; the error names those rows.
 
 #### Fresh-snapshot guard codes
 

@@ -15,7 +15,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, partOf } from "../../../src";
+import {
+  asEdgeId,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+} from "../../../src";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -274,6 +280,156 @@ const MOVED: readonly CommittedEdge[] = [
 const UNMOVED: readonly CommittedEdge[] = [
   { id: INCUMBENT, whole: "old", validFrom: ATTACHED_AT, validTo: undefined },
 ];
+
+const ENDED: readonly CommittedEdge[] = [
+  { id: INCUMBENT, whole: "old", validFrom: ATTACHED_AT, validTo: MOVED_AT },
+];
+
+// ---------------------------------------------------------------------------
+// An end whose re-attaching row is not applied
+// ---------------------------------------------------------------------------
+
+/** Before the incumbent opened: the part's earlier history on the second whole. */
+const EARLIER = "2019-01-01T00:00:00.000Z";
+const EARLIER_EDGE_ID = "icm-earlier";
+const OTHER_PART_ID = "icm-other-part";
+const OTHER_PART_EDGE_ID = "icm-other-part-edge";
+const MOVE_INCOMPLETE = "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE";
+/** After {@link MOVED_AT}: the end a later row gives an attachment. */
+const LATER = "2022-01-01T00:00:00.000Z";
+const REPLACEMENT_ID = "icm-replacement";
+
+/** The error of a row attaching the part to a whole that does not exist. */
+function missing(id: string): Readonly<{ id: string; code: string }> {
+  return { id, code: "To node not found: IcmWhole:no-such-whole" };
+}
+
+/**
+ * The ways one document reaches the target: `importGraph` at each batch size
+ * and, where the graph allows a streamed import, `importGraphStream` with the
+ * document as one chunk. Each must commit the same rows.
+ */
+const IMPORT_ROUTES = [
+  { name: "importGraph batchSize 1", batchSize: 1, stream: false },
+  { name: "importGraph batchSize 1000", batchSize: 1000, stream: false },
+  { name: "importGraphStream", batchSize: 1000, stream: true },
+] as const;
+
+/** A part not attached to anything, which an import can attach. */
+async function createUnattachedPart(seeded: Seeded): Promise<string> {
+  const part = await seeded.store.nodes.IcmPart.create({});
+  return part.id;
+}
+
+/**
+ * The part's ended attachment to the second whole, before it moved to the
+ * first: the row a caller-assigned id names when the part moves back.
+ */
+async function seedEarlierAttachment(seeded: Seeded): Promise<void> {
+  const result = await importGraph(
+    seeded.store,
+    document([
+      {
+        kind: "icmPartOf",
+        id: EARLIER_EDGE_ID,
+        from: { kind: "IcmPart", id: seeded.partId },
+        to: { kind: "IcmWhole", id: seeded.newWholeId },
+        properties: {},
+        validFrom: EARLIER,
+        validTo: ATTACHED_AT,
+      },
+    ]),
+    options(1000),
+  );
+  expect(result.errors).toEqual([]);
+}
+
+/** Another part attached to the second whole under {@link OTHER_PART_EDGE_ID}. */
+async function seedOtherPart(seeded: Seeded): Promise<void> {
+  const result = await importGraph(
+    seeded.store,
+    {
+      ...document([
+        {
+          kind: "icmPartOf",
+          id: OTHER_PART_EDGE_ID,
+          from: { kind: "IcmPart", id: OTHER_PART_ID },
+          to: { kind: "IcmWhole", id: seeded.newWholeId },
+          properties: {},
+          validFrom: ATTACHED_AT,
+        },
+      ]),
+      nodes: [{ kind: "IcmPart", id: OTHER_PART_ID, properties: {} }],
+    },
+    options(1000),
+  );
+  expect(result.errors).toEqual([]);
+}
+
+/** A row attaching the part to the second whole again, under `id`. */
+function reattachUnder(seeded: Seeded, id: string): EdgeRows[number] {
+  return { ...attachElsewhere(seeded, MOVED_AT), id };
+}
+
+/** A row attaching the part to a whole that does not exist. */
+function attachToMissingWhole(
+  seeded: Seeded,
+  id: string,
+  wholeId: string,
+): EdgeRows[number] {
+  return {
+    ...attachElsewhere(seeded, MOVED_AT),
+    id,
+    to: { kind: "IcmWhole", id: wholeId },
+  };
+}
+
+/**
+ * Runs `rows` against a freshly seeded `oneActive` graph, after `arrange`, by
+ * every import route the existence allows, asserts every route committed the
+ * same thing, and returns that outcome.
+ */
+async function importByEveryRoute<Arranged>(
+  context: IntegrationTestContext,
+  existence: Existence,
+  arrange: (seeded: Seeded) => Promise<Arranged>,
+  rows: (seeded: Seeded, arranged: Arranged) => EdgeRows,
+): Promise<Outcome> {
+  // A streamed import refuses a graph declaring a required part up front.
+  const routes = IMPORT_ROUTES.filter(
+    (route) => !route.stream || existence === "optional",
+  );
+  const outcomes = new Map<string, Outcome>();
+  for (const [index, route] of routes.entries()) {
+    const seeded = await seed(context, "oneActive", existence, `route${index}`);
+    const arranged = await arrange(seeded);
+    const edges = rows(seeded, arranged);
+    const result =
+      route.stream ?
+        await importGraphStream(
+          seeded.store,
+          chunks(edges),
+          // Reported per row, as `importGraph` reports them.
+          options(route.batchSize, { onStreamChunkError: "continue" }),
+        )
+      : await importGraph(
+          seeded.store,
+          document(edges),
+          options(route.batchSize),
+        );
+    outcomes.set(route.name, await outcomeOf(seeded, result));
+  }
+  const first = requireDefined(outcomes.values().next().value);
+  // Compared as a whole, so a mismatch prints every route's outcome.
+  expect(Object.fromEntries(outcomes)).toEqual(
+    Object.fromEntries([...outcomes.keys()].map((name) => [name, first])),
+  );
+  return first;
+}
+
+async function nothingToArrange(): Promise<void> {
+  await Promise.resolve();
+}
 
 // ---------------------------------------------------------------------------
 // Moves that depend on the rest of the document
@@ -1029,6 +1185,453 @@ export function registerImportCompositionMoveIntegrationTests(
         });
       },
     );
+
+    describe("an end whose re-attaching row is not applied", () => {
+      // Each document ends the part's attachment and states a row attaching
+      // it again that is not applied, outside the one shape that pairs as a
+      // move. Writing the end alone would leave an optional part with no
+      // whole; a required part's lone end is refused as a detach.
+      describe.each(EXISTENCES)("oneActive %s", (existence) => {
+        describe.each(ORDERS)("%s", (order) => {
+          // A caller-assigned id that names a stored row is disposed of with
+          // the rows naming existing edges, and import never reopens an ended
+          // row, restores a deleted one or takes over another edge's id.
+          const storedIdCases = [
+            {
+              name: "the part's own ended row, restated from a later validFrom",
+              arrange: seedEarlierAttachment,
+              attachId: EARLIER_EDGE_ID,
+              attachError: "IMMUTABLE_VALIDITY_LOWER_BOUND",
+              committed: [
+                {
+                  id: EARLIER_EDGE_ID,
+                  whole: "new",
+                  validFrom: EARLIER,
+                  validTo: ATTACHED_AT,
+                },
+              ],
+              skipped: 0,
+            },
+            {
+              name: "a deleted row, which import skips without an error",
+              arrange: async (seeded: Seeded): Promise<void> => {
+                await seedEarlierAttachment(seeded);
+                await seeded.store.edges.icmPartOf.delete(
+                  asEdgeId<typeof partOfWhole>(EARLIER_EDGE_ID),
+                );
+              },
+              attachId: EARLIER_EDGE_ID,
+              attachError: undefined,
+              committed: [],
+              skipped: 1,
+            },
+            {
+              name: "another part's edge",
+              arrange: seedOtherPart,
+              attachId: OTHER_PART_EDGE_ID,
+              attachError: "INTERCHANGE_EDGE_KIND_CONFLICT",
+              committed: [
+                {
+                  id: OTHER_PART_EDGE_ID,
+                  whole: "new",
+                  validFrom: ATTACHED_AT,
+                  validTo: undefined,
+                },
+              ],
+              skipped: 0,
+            },
+          ] as const;
+
+          it.each(storedIdCases)(
+            "keeps the old attachment when the attach row's id names $name",
+            async (testCase) => {
+              const outcome = await importByEveryRoute(
+                context,
+                existence,
+                testCase.arrange,
+                (seeded) =>
+                  ordered(
+                    order,
+                    endIncumbent(seeded, MOVED_AT),
+                    reattachUnder(seeded, testCase.attachId),
+                  ),
+              );
+              const endError = { id: INCUMBENT, code: MOVE_INCOMPLETE };
+              const attachErrors =
+                testCase.attachError === undefined ?
+                  []
+                : [{ id: testCase.attachId, code: testCase.attachError }];
+              expect(outcome).toEqual({
+                edges: [...testCase.committed, ...UNMOVED].toSorted(
+                  (left, right) => left.id.localeCompare(right.id),
+                ),
+                counts: { created: 0, updated: 0, skipped: testCase.skipped },
+                errors:
+                  order === "endFirst" ?
+                    [endError, ...attachErrors]
+                  : [...attachErrors, endError],
+                fenceViolations: 0,
+              });
+            },
+          );
+        });
+
+        it("keeps the old attachment when two attach rows are refused", async () => {
+          const outcome = await importByEveryRoute(
+            context,
+            existence,
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              attachToMissingWhole(seeded, "icm-first", "no-such-whole"),
+              attachToMissingWhole(seeded, "icm-second", "no-such-whole"),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [
+              {
+                id: "icm-first",
+                code: "To node not found: IcmWhole:no-such-whole",
+              },
+              {
+                id: "icm-second",
+                code: "To node not found: IcmWhole:no-such-whole",
+              },
+              { id: INCUMBENT, code: MOVE_INCOMPLETE },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("keeps the old attachment when a refused attach row's id is repeated", async () => {
+          // The repeat is applied after every create, so only once the end is
+          // already written is it known to be refused too.
+          const outcome = await importByEveryRoute(
+            context,
+            existence,
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              attachToMissingWhole(seeded, MOVED_EDGE_ID, "no-such-whole"),
+              attachToMissingWhole(seeded, MOVED_EDGE_ID, "no-such-whole"),
+            ],
+          );
+          const missing = {
+            id: MOVED_EDGE_ID,
+            code: "To node not found: IcmWhole:no-such-whole",
+          };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [
+              missing,
+              {
+                id: INCUMBENT,
+                code:
+                  existence === "optional" ? MOVE_INCOMPLETE : (
+                    "COMPOSITION_DETACH_REFUSED"
+                  ),
+              },
+              missing,
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("keeps the old attachment when the end is repeated", async () => {
+          const outcome = await importByEveryRoute(
+            context,
+            existence,
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              endIncumbent(seeded, MOVED_AT),
+              attachToMissingWhole(seeded, MOVED_EDGE_ID, "no-such-whole"),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [
+              {
+                id: MOVED_EDGE_ID,
+                code: "To node not found: IcmWhole:no-such-whole",
+              },
+              { id: INCUMBENT, code: MOVE_INCOMPLETE },
+              { id: INCUMBENT, code: MOVE_INCOMPLETE },
+            ],
+            fenceViolations: 0,
+          });
+        });
+      });
+
+      it("keeps an attachment the document creates when the row moving it on is refused", async () => {
+        // The repeat that ends the created row is applied after every create,
+        // so the move's attach is refused against the still-open row first.
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const attached = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              { kind: "IcmWhole", id: seeded.oldWholeId },
+              { validFrom: ATTACHED_AT },
+            );
+            return [
+              attached,
+              { ...attached, validTo: MOVED_AT },
+              compositionRow(
+                "icmPartOf",
+                "icm-second",
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 1, updated: 0, skipped: 0 },
+          errors: [
+            { id: "icm-second", code: "COMPOSITION_WHOLE_OCCUPIED" },
+            { id: "icm-first", code: MOVE_INCOMPLETE },
+          ],
+          fenceViolations: 0,
+        });
+      });
+
+      describe("judged from the writes each row applied", () => {
+        it("keeps an attachment a repeat creates when a later repeat ends it and the next attach is refused", async () => {
+          // The first row for the id is refused, so the repeat creating the
+          // attachment and the repeat ending it are the only rows writing it.
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            createUnattachedPart,
+            (seeded, partId) => {
+              const part = { kind: "IcmPart", id: partId };
+              const attached = compositionRow(
+                "icmPartOf",
+                REPLACEMENT_ID,
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              );
+              return [
+                { ...attached, to: { kind: "IcmWhole", id: "no-such-whole" } },
+                attached,
+                { ...attached, validTo: LATER },
+                {
+                  ...attached,
+                  id: "icm-next",
+                  to: { kind: "IcmWhole", id: "no-such-whole" },
+                },
+              ];
+            },
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: REPLACEMENT_ID,
+                whole: "new",
+                validFrom: MOVED_AT,
+                validTo: undefined,
+              },
+              ...UNMOVED,
+            ],
+            counts: { created: 1, updated: 0, skipped: 0 },
+            errors: [
+              missing(REPLACEMENT_ID),
+              missing("icm-next"),
+              { id: REPLACEMENT_ID, code: MOVE_INCOMPLETE },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("moves the part and refuses only the end that left it with no whole", async () => {
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              attachToMissingWhole(seeded, REPLACEMENT_ID, "no-such-whole"),
+              reattachUnder(seeded, REPLACEMENT_ID),
+              { ...reattachUnder(seeded, REPLACEMENT_ID), validTo: LATER },
+              attachToMissingWhole(seeded, "icm-next", "no-such-whole"),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: REPLACEMENT_ID,
+                whole: "new",
+                validFrom: MOVED_AT,
+                validTo: undefined,
+              },
+              ...ENDED,
+            ],
+            counts: { created: 1, updated: 1, skipped: 0 },
+            errors: [
+              missing(REPLACEMENT_ID),
+              missing("icm-next"),
+              { id: REPLACEMENT_ID, code: MOVE_INCOMPLETE },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("keeps the history a repeat creates under the id of a refused attachment", async () => {
+          // The open attachment is refused because the part holds its
+          // incumbent; the repeat then creates ended history before it, which
+          // ends nothing.
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            nothingToArrange,
+            (seeded) => [
+              reattachUnder(seeded, REPLACEMENT_ID),
+              {
+                ...reattachUnder(seeded, REPLACEMENT_ID),
+                validFrom: EARLIER,
+                validTo: ATTACHED_AT,
+              },
+              attachToMissingWhole(seeded, "icm-next", "no-such-whole"),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: REPLACEMENT_ID,
+                whole: "new",
+                validFrom: EARLIER,
+                validTo: ATTACHED_AT,
+              },
+              ...UNMOVED,
+            ],
+            counts: { created: 1, updated: 0, skipped: 0 },
+            errors: [
+              missing("icm-next"),
+              { id: REPLACEMENT_ID, code: "COMPOSITION_WHOLE_OCCUPIED" },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("moves the part to a replacement whose refused repeat would have ended it", async () => {
+          // The repeat would end the replacement before it opened, so it is
+          // refused, and the replacement still attaches the part.
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              reattachUnder(seeded, REPLACEMENT_ID),
+              {
+                ...reattachUnder(seeded, REPLACEMENT_ID),
+                validFrom: undefined,
+                validTo: EARLIER,
+              },
+              attachToMissingWhole(seeded, "icm-next", "no-such-whole"),
+              attachToMissingWhole(seeded, "icm-other", "no-such-whole"),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: REPLACEMENT_ID,
+                whole: "new",
+                validFrom: MOVED_AT,
+                validTo: undefined,
+              },
+              ...ENDED,
+            ],
+            counts: { created: 1, updated: 1, skipped: 0 },
+            errors: [
+              missing("icm-next"),
+              missing("icm-other"),
+              { id: REPLACEMENT_ID, code: "INVERTED_VALIDITY_WINDOW" },
+            ],
+            fenceViolations: 0,
+          });
+        });
+      });
+
+      describe("a lone end the document states on purpose is written", () => {
+        it("when a refused row names the ended edge itself", async () => {
+          // The refused row restates the incumbent open; it is the edge being
+          // ended, not a row attaching the part anywhere else.
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            nothingToArrange,
+            (seeded) => [
+              {
+                ...endIncumbent(seeded, MOVED_AT),
+                validTo: undefined,
+                properties: { note: 5 },
+              },
+              endIncumbent(seeded, MOVED_AT),
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: ENDED,
+            counts: { created: 0, updated: 1, skipped: 0 },
+            errors: [
+              {
+                id: INCUMBENT,
+                code: "note: Invalid input: expected string, received number",
+              },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("when the refused row is ended history, not an attachment", async () => {
+          const outcome = await importByEveryRoute(
+            context,
+            "optional",
+            nothingToArrange,
+            (seeded) => [
+              endIncumbent(seeded, MOVED_AT),
+              {
+                ...attachToMissingWhole(seeded, "icm-history", "no-such-whole"),
+                validFrom: EARLIER,
+                validTo: ATTACHED_AT,
+              },
+            ],
+          );
+          expect(outcome).toEqual({
+            edges: ENDED,
+            counts: { created: 0, updated: 1, skipped: 0 },
+            errors: [
+              {
+                id: "icm-history",
+                code: "To node not found: IcmWhole:no-such-whole",
+              },
+            ],
+            fenceViolations: 0,
+          });
+        });
+      });
+    });
 
     describe("importGraphStream", () => {
       it("refuses the first half of a move split across chunks", async () => {
