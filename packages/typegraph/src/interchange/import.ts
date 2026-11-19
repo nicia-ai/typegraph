@@ -124,7 +124,10 @@ import {
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
 import { edgeInsertClaims } from "../store/claims/composition-claims";
-import { assertCompositionWindowsDisjoint } from "../store/claims/composition-windows";
+import {
+  assertCompositionWindowsDisjoint,
+  compositionMoveGapRefusal,
+} from "../store/claims/composition-windows";
 import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
@@ -3477,7 +3480,11 @@ async function processEdges(
     }
   }
 
-  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>();
+  // A required part's move whose windows leave a gap is refused whole before
+  // anything is written; `failed` only grows from here.
+  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>(
+    compositionMoveGaps(registry, moves),
+  );
   const writeRound = async (): Promise<EdgeRoundRefusals> => {
     // Every write of a row naming an id that may already be written, in
     // write order, for the judgement of what each one did.
@@ -4918,8 +4925,10 @@ const COMPOSITION_MOVE_INCOMPLETE_CODE =
 
 /**
  * Why a move was taken out of its move set: one of its rows was refused (with
- * that row's own outcome), or the state the set left behind does not hold the
- * moved part where the move put it.
+ * that row's own outcome), the move as a whole was refused before anything
+ * was written (a required part's move whose windows leave a gap, with the
+ * refusal both rows report), or the state the set left behind does not hold
+ * the moved part where the move put it.
  */
 type CompositionMoveFailure =
   | Readonly<{
@@ -4927,12 +4936,14 @@ type CompositionMoveFailure =
       row: ClassifiedEdgeRow;
       outcome: ProcessResult;
     }>
+  | Readonly<{ cause: "gap"; outcome: ProcessResult }>
   | Readonly<{ cause: "unattached" }>;
 
 /**
  * The per-row outcomes a move that failed is reported with: a refused row
- * carries its own refusal, and every other row of the move names the move and
- * why it could not land.
+ * carries its own refusal, a move refused as a whole reports its refusal on
+ * every row, and every other row of the move names the move and why it could
+ * not land.
  */
 function compositionMoveFailureOutcomes(
   move: CompositionMove,
@@ -4940,6 +4951,7 @@ function compositionMoveFailureOutcomes(
 ): readonly Readonly<{ row: ClassifiedEdgeRow; outcome: ProcessResult }>[] {
   const { part, whole: destination, end, attach } = move;
   return compositionMoveRows(move).map((row) => {
+    if (failure.cause === "gap") return { row, outcome: failure.outcome };
     if (failure.cause === "refused" && row === failure.row) {
       return { row, outcome: failure.outcome };
     }
@@ -4977,6 +4989,53 @@ function compositionMoveIncomplete(
     status: "error",
     error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${edgeId}" was not applied: it is part of a move of ${part.kind} "${part.id}" to ${destination.kind} "${destination.id}" — edge "${endEdgeId}" ends the part's current attachment and edge "${attachEdgeId}" attaches it again, and a move is applied whole or not at all; ${reason}.`,
   };
+}
+
+/**
+ * The moves of required parts whose two rows leave the part with no whole
+ * between the end of the old attachment and the start of the new one, each
+ * with the refusal ({@link compositionMoveGapRefusal}) both of its rows
+ * report. Judged once, before anything is written, so neither row of such a
+ * move is ever applied. An attach that states no `validFrom` is judged by the
+ * lower bound its insert would stamp now, which the written bound can only
+ * follow.
+ */
+function compositionMoveGaps(
+  registry: KindRegistry,
+  moves: readonly CompositionMove[],
+): ReadonlyMap<CompositionMove, CompositionMoveFailure> {
+  const operationInstant = nowIso();
+  const failures = new Map<CompositionMove, CompositionMoveFailure>();
+  for (const move of moves) {
+    const { part, end, attach } = move;
+    const refusal = compositionMoveGapRefusal(
+      registry,
+      {
+        part,
+        ended: { ...end.existing, valid_to: end.edge.validTo },
+        attach: {
+          id: attach.edge.id,
+          kind: attach.edge.kind,
+          from_kind: attach.edge.from.kind,
+          from_id: attach.edge.from.id,
+          to_kind: attach.edge.to.kind,
+          to_id: attach.edge.to.id,
+          valid_to: attach.edge.validTo,
+          statedValidFrom: attach.edge.validFrom,
+        },
+      },
+      operationInstant,
+    );
+    if (refusal === undefined) continue;
+    failures.set(move, {
+      cause: "gap",
+      outcome: {
+        status: "error",
+        error: `${refusal.code}: ${refusal.message}`,
+      },
+    });
+  }
+  return failures;
 }
 
 /**

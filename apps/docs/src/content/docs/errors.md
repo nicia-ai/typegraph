@@ -842,6 +842,7 @@ part's attachment a fact of its row. `details.situation` names which one, and
 | `"boundedAttachment"` | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A stated `partOf.validTo` on a `oneActive` pair, where only an open window is a membership, so the edge would not attach the part |
 | `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
 | `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
+| `"moveGap"` | `COMPOSITION_MOVE_GAP` | An import moves an `existence: "required"` part with an end and an attach that do not abut: the new attachment opens after the old one ends (or states no `validFrom`, so it opens when written), and the part would hold no whole in between. Reported per row on both rows of the move, neither of which is written |
 | `"existing"` | `COMPOSITION_WHOLE_CONFLICT` | A `getOrCreateByConstraint` call states a `partOf` that contradicts the whole (or realizing edge) the existing node already holds |
 | `"props"` | `COMPOSITION_PROPS_CONFLICT` | A `getOrCreateByConstraint` or `reparent` call states `partOf.props` that differ from the already-satisfied attachment's stored props |
 | `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
@@ -2575,6 +2576,7 @@ try {
 | `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
 | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
 | `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
+| `COMPOSITION_MOVE_GAP` | `CompositionError` | constraint | An import moves a required part with an end and an attach that leave a valid-time gap between them; both rows are refused per row |
 | `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
 | `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
 | `COMPOSITION_WHOLE_CONFLICT` | `CompositionError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |

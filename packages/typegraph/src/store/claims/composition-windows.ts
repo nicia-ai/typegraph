@@ -55,8 +55,10 @@ import {
   resolveStampedValidityLowerBound,
   type ValidityWindow,
   validityWindowCovers,
+  validityWindowGap,
   validityWindowsOverlap,
 } from "../../utils/date";
+import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import {
   compositionRowEndpoints,
@@ -753,6 +755,103 @@ function openCompositionWindowVerdict(
     if (verdict !== undefined) return verdict;
   }
   return undefined;
+}
+
+/**
+ * One composition move as its two writes leave it: `ended` is the row whose
+ * window the move ends, with the `valid_to` the end gives it, and `attach` the
+ * row that attaches the part again, before it is stamped — `statedValidFrom`
+ * is the lower bound the write states (`null` for a confirmed open-left
+ * window, `undefined` for none, which the insert stamps with its own instant).
+ */
+export type CompositionMoveWindows = Readonly<{
+  part: CompositionNodeRef;
+  ended: CompositionWindowEdge;
+  attach: Omit<CompositionWindowEdge, "valid_from" | "deleted_at"> &
+    Readonly<{ statedValidFrom: string | null | undefined }>;
+}>;
+
+/**
+ * THE rule that a move of an `existence: "required"` part abuts: the
+ * attachment it ends and the one that replaces it leave no valid-time instant
+ * between them, so the part holds a whole at every instant of the move, as a
+ * `reparent` — which ends the old window and opens the new one at one instant
+ * (`resolveCompositionMoveInstant`) — guarantees by construction. Returns
+ * the refusal (`COMPOSITION_MOVE_GAP`) naming the part, both windows and the
+ * gap, or `undefined` when the move abuts, when the windows overlap (the
+ * disjointness half of this module refuses that), or when the part is
+ * optional, where a gap is legal.
+ *
+ * The other half of {@link firstInFrameConflict}'s "at most one whole at every
+ * instant", judged over the same membership windows
+ * ({@link compositionWindowOf}) and the same stamped lower bound an insert
+ * stores ({@link insertedRow}'s `resolveStampedValidityLowerBound`), with the
+ * gap measured by `validityWindowGap`, the interval reading of touching
+ * windows that `validityWindowsOverlap` shares. It speaks of a move only: a
+ * required part's stored history may hold gaps the store writes on purpose (a
+ * backdated history row), so it is not an audit of stored rows.
+ *
+ * Pure. Interchange import judges every move pair it applies with it, before
+ * the move's first write.
+ */
+export function compositionMoveGapRefusal(
+  registry: KindRegistry,
+  move: CompositionMoveWindows,
+  operationInstant: string,
+): CompositionError | undefined {
+  const { part, ended, attach } = move;
+  if (registry.compositionExistence(part.kind) !== "required") return undefined;
+  const attached: CompositionWindowEdge = {
+    ...attach,
+    valid_from: resolveStampedValidityLowerBound(
+      attach.statedValidFrom,
+      attach.valid_to,
+      operationInstant,
+    ),
+    deleted_at: undefined,
+  };
+  const endedWindow = compositionWindowOf(registry, ended);
+  const attachedWindow = compositionWindowOf(registry, attached);
+  if (endedWindow === undefined || attachedWindow === undefined) {
+    return undefined;
+  }
+  const gap = validityWindowGap(endedWindow, attachedWindow);
+  if (gap === undefined) return undefined;
+  const endedWhole = compositionWholeOf(registry, ended);
+  const attachedWhole = compositionWholeOf(registry, attached);
+  return new CompositionError({
+    situation: "moveGap",
+    partKind: part.kind,
+    partId: part.id,
+    endedEdgeKind: ended.kind,
+    endedEdgeId: ended.id,
+    endedWholeKind: endedWhole.kind,
+    endedWholeId: endedWhole.id,
+    ...(endedWindow.validFrom === undefined ?
+      {}
+    : { endedValidFrom: endedWindow.validFrom }),
+    endedValidTo: gap.validFrom,
+    edgeKind: attached.kind,
+    edgeId: attached.id,
+    wholeKind: attachedWhole.kind,
+    wholeId: attachedWhole.id,
+    validFrom: gap.validTo,
+    validFromStated: typeof attach.statedValidFrom === "string",
+    gapFrom: gap.validFrom,
+    gapTo: gap.validTo,
+  });
+}
+
+/** The whole endpoint of a row of a composition edge kind. */
+function compositionWholeOf(
+  registry: KindRegistry,
+  row: CompositionWindowEdge,
+): CompositionNodeRef {
+  const partSide = requireDefined(
+    registry.compositionPartSide(row.kind),
+    `compositionPartSide(${row.kind}) is undefined for a row whose composition window is defined`,
+  );
+  return compositionRowEndpoints(partSide, row).whole;
 }
 
 /**

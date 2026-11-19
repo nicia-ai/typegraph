@@ -295,6 +295,15 @@ const EARLIER_EDGE_ID = "icm-earlier";
 const OTHER_PART_ID = "icm-other-part";
 const OTHER_PART_EDGE_ID = "icm-other-part-edge";
 const MOVE_INCOMPLETE = "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE";
+const MOVE_GAP = "COMPOSITION_MOVE_GAP";
+/** Later than any clock this suite runs under. */
+const FAR_FUTURE = "2999-01-01T00:00:00.000Z";
+
+/** `row` with no `validFrom`: its insert stamps the instant it is written. */
+function withoutValidFrom(row: EdgeRows[number]): EdgeRows[number] {
+  const { validFrom: _validFrom, ...rest } = row;
+  return rest;
+}
 /** After {@link MOVED_AT}: the end a later row gives an attachment. */
 const LATER = "2022-01-01T00:00:00.000Z";
 const REPLACEMENT_ID = "icm-replacement";
@@ -1630,6 +1639,161 @@ export function registerImportCompositionMoveIntegrationTests(
             fenceViolations: 0,
           });
         });
+      });
+    });
+
+    describe("a required part's move must abut", () => {
+      // `reparent` ends the old attachment and opens the new one at one
+      // instant; an imported move of a required part is held to the same,
+      // both rows or neither. The abutting move and the overlapping one are
+      // pinned above ("ends the old attachment and opens the new one", "keeps
+      // the old attachment when the new one is refused").
+      describe.each(ORDERS)("%s", (order) => {
+        it("refuses both rows when the new attachment opens after the old one ends", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, LATER),
+              ),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_GAP };
+          const attachError = { id: MOVED_EDGE_ID, code: MOVE_GAP };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses both rows when the new attachment states no validFrom", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                withoutValidFrom(attachElsewhere(seeded, MOVED_AT)),
+              ),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_GAP };
+          const attachError = { id: MOVED_EDGE_ID, code: MOVE_GAP };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses an end later than the import's clock as before, and the attach as a second whole", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, FAR_FUTURE),
+                withoutValidFrom(attachElsewhere(seeded, MOVED_AT)),
+              ),
+          );
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [
+              { id: INCUMBENT, code: "COMPOSITION_VALIDITY_FUTURE_END" },
+              { id: MOVED_EDGE_ID, code: "COMPOSITION_WHOLE_OCCUPIED" },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses an attachment with no lower bound as an overlap, as before", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(order, endIncumbent(seeded, MOVED_AT), {
+                ...attachElsewhere(seeded, MOVED_AT),
+                // eslint-disable-next-line unicorn/no-null -- the interchange format's confirmed open-left window
+                validFrom: null,
+              }),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_INCOMPLETE };
+          const attachError = {
+            id: MOVED_EDGE_ID,
+            code: "COMPOSITION_WINDOW_OVERLAP",
+          };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("moves an optional part across the gap", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "optional",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, LATER),
+              ),
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: MOVED_EDGE_ID,
+                whole: "new",
+                validFrom: LATER,
+                validTo: undefined,
+              },
+              ...ENDED,
+            ],
+            counts: { created: 1, updated: 1, skipped: 0 },
+            errors: [],
+            fenceViolations: 0,
+          });
+        });
+      });
+
+      it("names the part, both windows and the gap", async () => {
+        const seeded = await seed(context, "oneActive", "required", "gap_text");
+        const result = await importGraph(
+          seeded.store,
+          document([
+            endIncumbent(seeded, MOVED_AT),
+            attachElsewhere(seeded, LATER),
+          ]),
+          options(1000),
+        );
+        const [endError, attachError] = result.errors;
+        expect(attachError?.error).toBe(endError?.error);
+        expect(endError?.error).toBe(
+          `${MOVE_GAP}: Cannot move IcmPart/${seeded.partId} to IcmWhole/${seeded.newWholeId}: edge "icmPartOf" ${seeded.incumbentId} ends its attachment to IcmWhole/${seeded.oldWholeId}, window [${ATTACHED_AT}, ${MOVED_AT}), and edge "icmPartOf" ${MOVED_EDGE_ID}, which attaches it again, opens at "${LATER}", so the part would hold no whole during [${MOVED_AT}, ${LATER}). This kind requires a whole (\`existence: "required"\`), so a move must open the new attachment at the instant it ends the old one.`,
+        );
       });
     });
 

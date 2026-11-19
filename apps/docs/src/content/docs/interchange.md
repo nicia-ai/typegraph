@@ -807,6 +807,17 @@ A source whose part moved to another whole re-imports with `onConflict:
   was. To replay such a move, `reparent` the part on the target. The same
   refusal applies on a `oneActive` pair whose document omits the ended row.
 
+A required part's move must abut: the new attachment's `validFrom` must be
+the `validTo` that ends the old one, the one instant `reparent` gives both
+halves. A new attachment that opens later, or that states no `validFrom` (so
+it opens when the import writes it, after the end the document states), would
+leave the part with no whole on valid-time reads in between. Both rows of such
+a move are refused before anything is written, each with
+`COMPOSITION_MOVE_GAP`, naming the part, both windows and the gap, and the part
+keeps its current whole. A new attachment that opens before the old one ends
+overlaps it and is refused as `COMPOSITION_WINDOW_OVERLAP`, as before. An
+optional part may move across a gap: it has no whole in between.
+
 Every move a document states is applied together, as `bulkReparent` applies
 its moves: every old attachment is ended before any new one is written. So moves that depend on each other land
 whatever order the document lists them in: two parts exchanging a slot a
