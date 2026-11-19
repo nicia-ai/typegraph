@@ -7950,6 +7950,13 @@ async function planNodeHardDeleteBatch<G extends GraphDef>(
   );
   const onDelete = getNodeRegistration(ctx.graph, kind).onDelete;
   const effects = noPlannedDeleteEffects();
+  // Every plain node is judged against the edges the earlier deletes remove.
+  // The policy reads the accumulated set itself, read-only, as it grows: a
+  // copy per node would make planning quadratic in the batch.
+  const earlierDeletesPolicy: NodeDeletePolicy = {
+    enforceDeleteBehavior: true,
+    consumedEdgeIds: effects.removedEdgeIds,
+  };
   const planned: PlannedNodeHardDelete[] = [];
   for (const id of ids) {
     const node = { kind, id };
@@ -7978,7 +7985,7 @@ async function planNodeHardDeleteBatch<G extends GraphDef>(
       ctx,
       { kind, id, onDelete },
       requireDefined(connectedEdges.get(id)),
-      withCascadeConsumedEdges(undefined, effects.removedEdgeIds),
+      earlierDeletesPolicy,
     );
     for (const edgeId of verdict.removedEdgeIds) {
       effects.removedEdgeIds.add(edgeId);
@@ -8026,9 +8033,9 @@ async function applyPlannedNodeHardDeletes<G extends GraphDef>(
     await session.purgeNodes({
       kind,
       schema,
-      ids: segment.deletes.map((planned_) => planned_.id),
+      ids: segment.deletes.map((batchedDelete) => batchedDelete.id),
       removedEdgeIds: segment.deletes.flatMap(
-        (planned_) => planned_.removedEdgeIds,
+        (batchedDelete) => batchedDelete.removedEdgeIds,
       ),
     });
   }
