@@ -3448,18 +3448,24 @@ async function processEdges(
     ...classified.repeatsOfExisting,
   ].toSorted((left, right) => left.index - right.index);
   const allCreates = unpaired.filter((row) => row.existing === undefined);
-  const slotOrdered = createsAfterSlotRepeat(
+  const firstWaiting = firstCreateAfterSlotRepeat(
     registry,
     allCreates,
     classified.repeatsOfCreated,
   );
-  const creates = allCreates.filter((row) => !slotOrdered.has(row.index));
+  const waits = (row: ClassifiedEdgeRow): boolean =>
+    firstWaiting !== undefined && row.index >= firstWaiting;
+  const creates = allCreates.filter((row) => !waits(row));
   // The repeats of created ids, and the creates that wait for one of them, in
-  // document order.
-  const lastRows: readonly (ClassifiedEdgeRow | DocumentEdgeRow)[] = [
-    ...classified.repeatsOfCreated,
-    ...allCreates.filter((row) => slotOrdered.has(row.index)),
-  ].toSorted((left, right) => left.index - right.index);
+  // document order: each run of consecutive waiting creates is one group,
+  // written in `batchSize` slices as phase 4 writes its creates.
+  const lastRows: readonly (CreateRun | DocumentEdgeRow)[] =
+    groupConsecutiveCreates(
+      [
+        ...classified.repeatsOfCreated,
+        ...allCreates.filter((row) => waits(row)),
+      ].toSorted((left, right) => left.index - right.index),
+    );
 
   // The rows ending a part's attachment that this import refuses because no
   // row attaching the part again is applied, by document position. What the
@@ -3569,17 +3575,19 @@ async function processEdges(
       );
     }
     for (const repeat of lastRows) {
-      if ("registration" in repeat) {
-        // A create waiting for a repeat that touches its part's slot, written
+      if ("creates" in repeat) {
+        // Creates waiting for a repeat that frees a part's slot, written
         // through the same slice path as every other create.
-        await createEdgeSlice(
-          frame,
-          graphId,
-          registry,
-          [repeat],
-          record,
-          pendingMatchIdentityOwners,
-        );
+        for (const slice of chunk(repeat.creates, options.batchSize)) {
+          await createEdgeSlice(
+            frame,
+            graphId,
+            registry,
+            slice,
+            record,
+            pendingMatchIdentityOwners,
+          );
+        }
         continue;
       }
       const refusal = strandedEnds.get(repeat.index);
@@ -4459,47 +4467,105 @@ function compositionMoveRows(
 }
 
 /**
- * The document positions of the creates that must be written after a repeat
- * of an id this import creates: a create of a composition row whose part a
- * repeat EARLIER in the document also writes a composition row for. A part's
- * composition rows share one slot, and a repeat applies after every create
- * (it must observe the row it repeats), so without this a create later in the
- * document than a repeat ending the part's attachment would be judged against
- * the still-open attachment. Such a create is applied with the repeats, in
- * document order, so the rows that touch one part's slot apply in the order
- * the document states them. Every other create keeps its phase.
+ * The document position from which creates are written with the repeats of
+ * ids this import creates, in document order, or `undefined` when every
+ * create keeps its phase.
  *
- * Decided over the whole payload, so it is the same at every `batchSize`.
+ * A repeat applies after every create (it must observe the row it repeats),
+ * so without this a create later in the document than a repeat that ends the
+ * part's attachment would be judged against the still-open attachment. The
+ * first create that must wait is the first create of a composition row whose
+ * part a repeat EARLIER in the document gives a composition row a different
+ * window ({@link repeatChangesWindow}): the part's rows share one slot, and
+ * only such a repeat can free it. A repeat that restates the window it
+ * repeats frees nothing, so it moves no create.
+ *
+ * Every create from that one on waits with it, so the creates keep their
+ * document order among themselves: a create that competes with a waiting one
+ * — for a part's slot, a whole's `targetCardinality` slot, an acyclic
+ * relation or a match identity — cannot take it first by keeping an earlier
+ * phase. Every create before it keeps its phase. Decided over the whole
+ * payload, so it is the same at every `batchSize`.
  */
-function createsAfterSlotRepeat(
+function firstCreateAfterSlotRepeat(
   registry: KindRegistry,
   creates: readonly ClassifiedEdgeRow[],
   repeatsOfCreated: readonly DocumentEdgeRow[],
-): ReadonlySet<number> {
+): number | undefined {
   const partKeyOf = (edge: InterchangeEdge): string | undefined => {
     const partSide = registry.compositionPartSide(edge.kind);
     if (partSide === undefined) return undefined;
     const { part } = orientCompositionEndpoints(partSide, edge.from, edge.to);
     return makeNodeKey(part.kind, part.id);
   };
-  const firstRepeatByPart = new Map<string, number>();
+  const occurrences = [...creates, ...repeatsOfCreated].toSorted(
+    (left, right) => left.index - right.index,
+  );
+  const firstFreeingRepeatByPart = new Map<string, number>();
   for (const repeat of repeatsOfCreated) {
     const partKey = partKeyOf(repeat.edge);
     if (partKey === undefined) continue;
-    const first = firstRepeatByPart.get(partKey);
+    if (!repeatChangesWindow(repeat, occurrences)) continue;
+    const first = firstFreeingRepeatByPart.get(partKey);
     if (first === undefined || repeat.index < first) {
-      firstRepeatByPart.set(partKey, repeat.index);
+      firstFreeingRepeatByPart.set(partKey, repeat.index);
     }
   }
-  const ordered = new Set<number>();
-  if (firstRepeatByPart.size === 0) return ordered;
-  for (const row of creates) {
-    const partKey = partKeyOf(row.edge);
-    if (partKey === undefined) continue;
-    const first = firstRepeatByPart.get(partKey);
-    if (first !== undefined && first < row.index) ordered.add(row.index);
+  return creates
+    .toSorted((left, right) => left.index - right.index)
+    .find((row) => {
+      const partKey = partKeyOf(row.edge);
+      if (partKey === undefined) return false;
+      const firstFreeingRepeat = firstFreeingRepeatByPart.get(partKey);
+      return firstFreeingRepeat !== undefined && firstFreeingRepeat < row.index;
+    })?.index;
+}
+
+/** Consecutive creates of the document, written together in slices. */
+type CreateRun = Readonly<{ creates: readonly ClassifiedEdgeRow[] }>;
+
+/**
+ * `rows`, in their order, with each run of consecutive creates (a row with a
+ * `registration`) gathered into one {@link CreateRun}.
+ */
+function groupConsecutiveCreates(
+  rows: readonly (ClassifiedEdgeRow | DocumentEdgeRow)[],
+): readonly (CreateRun | DocumentEdgeRow)[] {
+  const grouped: (CreateRun | DocumentEdgeRow)[] = [];
+  for (const row of rows) {
+    if (!("registration" in row)) {
+      grouped.push(row);
+      continue;
+    }
+    const last = grouped.at(-1);
+    if (last !== undefined && "creates" in last) {
+      grouped[grouped.length - 1] = { creates: [...last.creates, row] };
+    } else {
+      grouped.push({ creates: [row] });
+    }
   }
-  return ordered;
+  return grouped;
+}
+
+/**
+ * Whether a repeat of an id this import creates writes a different window than
+ * the occurrence of the id it follows in the document. An update applies only
+ * the document's `validTo` (a stated `validFrom` must match the row's), so a
+ * repeat stating the same `validTo` leaves the row's window as it found it. A
+ * repeat whose earlier occurrence is not among `occurrences` (it is a move's
+ * row, or was refused) is taken to change it.
+ */
+function repeatChangesWindow(
+  repeat: DocumentEdgeRow,
+  occurrences: readonly DocumentEdgeRow[],
+): boolean {
+  const previous = occurrences.findLast(
+    (occurrence) =>
+      occurrence.index < repeat.index && occurrence.edge.id === repeat.edge.id,
+  );
+  return (
+    previous === undefined || previous.edge.validTo !== repeat.edge.validTo
+  );
 }
 
 /**

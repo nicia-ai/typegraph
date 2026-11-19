@@ -521,14 +521,18 @@ row repeating an id this import creates. Within each phase rows apply in
 document order, and a later row repeating an id applies after the row it
 repeats, so it observes that row's outcome.
 
-One kind of create waits for that last phase: a create of a composition row
-whose part an earlier row of the document, repeating an id this import
-creates, also writes a composition row for. A part's composition rows share
-one slot, so such a create applies with the repeats, in document order. A
+A create can wait for that last phase: a create of a composition row whose
+part an earlier row of the document, repeating an id this import creates,
+gives a composition row a different `validTo`. A part's composition rows
+share one slot and such a repeat can free it, so that create, and every create
+after it in the document, applies with the repeats, in document order. A
 document that attaches a part, ends that attachment by repeating its id, and
 then attaches the part elsewhere therefore commits all three rows, as the
 source wrote them, instead of refusing the last one against an attachment the
-repeat has not ended yet. Every other create keeps its phase.
+repeat has not ended yet, and creates competing for one claim keep their
+document priority. A repeat that restates the window it repeats frees nothing
+and moves no create. Every create before the first one that waits keeps its
+phase.
 
 The order matters because rows depend on each other. An update that ends a
 `oneActive` window frees the slot a create in the same document takes, so the

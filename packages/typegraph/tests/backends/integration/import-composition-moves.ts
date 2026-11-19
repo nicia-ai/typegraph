@@ -615,6 +615,70 @@ async function sameAtEveryBatchSize<T>(
   return first;
 }
 
+/** Inside the item's history row, before it ends. */
+const EARLIER_END = "2019-06-01T00:00:00.000Z";
+/**
+ * Two items, two slots: the first item's ended history on the first slot, a
+ * repeat of that row ending it at `repeatValidTo`, then both items attached
+ * to the second slot, which holds one item at a time. Returns the open rows
+ * and the rows the target claim refused.
+ */
+async function slotContest(
+  context: IntegrationTestContext,
+  batchSize: number,
+  repeatValidTo: string,
+): Promise<
+  Readonly<{
+    open: readonly string[];
+    refused: readonly string[];
+  }>
+> {
+  const store = await context.createStore(
+    slotGraph(`contest_${repeatValidTo.slice(0, 4)}_b${batchSize}`),
+  );
+  const s1 = await store.nodes.IcmSlot.create({});
+  const s2 = await store.nodes.IcmSlot.create({});
+  const firstItem = await store.nodes.IcmItem.create({});
+  const secondItem = await store.nodes.IcmItem.create({});
+  const history = compositionRow(
+    "icmInSlot",
+    "i1-s1",
+    itemRef(firstItem.id),
+    slotRef(s1.id),
+    { validFrom: EARLIER, validTo: ATTACHED_AT },
+  );
+  const result = await importGraph(
+    store,
+    document([
+      history,
+      { ...history, validTo: repeatValidTo },
+      compositionRow(
+        "icmInSlot",
+        "i1-s2",
+        itemRef(firstItem.id),
+        slotRef(s2.id),
+        { validFrom: MOVED_AT },
+      ),
+      compositionRow(
+        "icmInSlot",
+        "i2-s2",
+        itemRef(secondItem.id),
+        slotRef(s2.id),
+        { validFrom: MOVED_AT },
+      ),
+    ]),
+    options(batchSize),
+  );
+  const open = await store.edges.icmInSlot.find({});
+  return {
+    open: open.map((edge) => edge.id).toSorted(),
+    // The target claim refusal names the slot by its generated id.
+    refused: result.errors.map((entry) =>
+      entry.error.startsWith("Cardinality violation") ? entry.id : entry.error,
+    ),
+  };
+}
+
 export function registerImportCompositionMoveIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -1853,6 +1917,76 @@ export function registerImportCompositionMoveIntegrationTests(
           counts: { created: 1, updated: 1, skipped: 0 },
           errors: [{ id: "icm-second", code: "COMPOSITION_WHOLE_OCCUPIED" }],
           fenceViolations: 0,
+        });
+      });
+
+      describe("creates competing for one slot keep document priority", () => {
+        // The first create in the document takes the second slot, whatever
+        // the repeat before it says.
+        it("when the repeat restates the row's window", async () => {
+          const report = await sameAtEveryBatchSize((batchSize) =>
+            slotContest(context, batchSize, ATTACHED_AT),
+          );
+          expect(report).toEqual({
+            open: ["i1-s2"],
+            refused: ["i2-s2"],
+          });
+        });
+
+        it("keeps a create after a repeat that frees nothing in the create phase", async () => {
+          // The repeat restates the row's window under a validFrom it cannot
+          // apply, so it is refused; the create after it opens inside the
+          // item's history, so it is refused too. A create is refused in its
+          // phase, before the repeats, unless a repeat before it can free its
+          // part's slot.
+          const report = await sameAtEveryBatchSize(async (batchSize) => {
+            const store = await context.createStore(
+              slotGraph(`restated_phase_b${batchSize}`),
+            );
+            const s1 = await store.nodes.IcmSlot.create({});
+            const s2 = await store.nodes.IcmSlot.create({});
+            const item = await store.nodes.IcmItem.create({});
+            const history = compositionRow(
+              "icmInSlot",
+              "i1-s1",
+              itemRef(item.id),
+              slotRef(s1.id),
+              { validFrom: EARLIER, validTo: ATTACHED_AT },
+            );
+            const result = await importGraph(
+              store,
+              document([
+                history,
+                { ...history, validFrom: EARLIER_END },
+                compositionRow(
+                  "icmInSlot",
+                  "i1-s2",
+                  itemRef(item.id),
+                  slotRef(s2.id),
+                  { validFrom: EARLIER_END },
+                ),
+              ]),
+              options(batchSize),
+            );
+            return result.errors.map((entry) => ({
+              id: entry.id,
+              code: errorCode(entry.error),
+            }));
+          });
+          expect(report).toEqual([
+            { id: "i1-s2", code: "COMPOSITION_WINDOW_OVERLAP" },
+            { id: "i1-s1", code: "IMMUTABLE_VALIDITY_LOWER_BOUND" },
+          ]);
+        });
+
+        it("when the repeat changes the row's window", async () => {
+          const report = await sameAtEveryBatchSize((batchSize) =>
+            slotContest(context, batchSize, EARLIER_END),
+          );
+          expect(report).toEqual({
+            open: ["i1-s2"],
+            refused: ["i2-s2"],
+          });
         });
       });
     });
