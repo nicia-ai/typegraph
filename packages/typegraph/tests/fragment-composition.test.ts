@@ -5,9 +5,11 @@
  * written away from the query it is piped into. These tests pin both halves
  * of that contract: the fragment body is typed against the declared aliases,
  * and `pipe()` keeps every alias of the host query while adding the
- * fragment's, refusing (at compile time) a host that cannot take it.
+ * fragment's, refusing (at compile time) a host that cannot take it. The
+ * execution cases run on every backend in the shared integration suite
+ * (`tests/backends/integration/query-fragments.ts`).
  */
-import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -15,7 +17,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type Store,
   subClassOf,
   ValidationError,
 } from "../src";
@@ -31,7 +32,6 @@ import {
 } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlWithParams } from "./sql-test-utils";
-import { createInitializedStore, createTestBackend } from "./test-utils";
 
 const User = defineNode("User", {
   schema: z.object({
@@ -109,6 +109,47 @@ const publishedPosts = fragment({ p: "Post" }, (q) =>
 const byName = fragment({ u: "User" }, (q) => q.orderBy("u", "name", "asc"));
 
 const firstTen = fragment((q) => q.limit(10));
+
+// The same kinds as `graph`, but its `User` has no `status`: a fragment
+// written for `graph` reads a property this graph's users do not have.
+const LegacyUser = defineNode("User", {
+  schema: z.object({
+    name: z.string(),
+    email: z.email(),
+    createdAt: z.string(),
+  }),
+});
+
+const legacyGraph = defineGraph({
+  id: "legacy_fragment_graph",
+  nodes: {
+    User: { type: LegacyUser },
+    Post: { type: Post },
+  },
+  edges: {
+    authored: { type: authored, from: [LegacyUser], to: [Post] },
+  },
+});
+
+type LegacyGraph = typeof legacyGraph;
+
+const legacyRegistry = buildKindRegistry(legacyGraph);
+
+function legacyQuery() {
+  return createQueryBuilder<LegacyGraph>(legacyGraph.id, legacyRegistry);
+}
+
+/** A boolean the type checker cannot narrow, for conditional fragments. */
+const runtimeFlag = Date.now() < 0;
+
+type UnionKindFragment = QueryFragment<Graph, Readonly<{ u: "User" | "Post" }>>;
+
+type LegacyUserFragment = QueryFragment<LegacyGraph, Readonly<{ u: "User" }>>;
+
+/** Checks `fragment` against an annotation, as a variable declaration would. */
+function annotate<Fragment>(fragment: Fragment): Fragment {
+  return fragment;
+}
 
 describe("createFragment()", () => {
   describe("fragment body", () => {
@@ -297,6 +338,63 @@ describe("createFragment()", () => {
       );
     });
 
+    it("refuses a fragment written for another graph", () => {
+      // This graph's users have no `status`, so the fragment's filter reads
+      // a property no row has: it matches nothing rather than failing.
+      const filtered = legacyQuery()
+        .from("User", "u")
+        // @ts-expect-error -- fragment is written for another graph
+        .pipe(activeUsers)
+        .select((ctx) => ctx["u"])
+        .toAst();
+      expect(filtered.predicates).toHaveLength(1);
+      // @ts-expect-error -- a composition is written for its fragments' graph
+      legacyQuery().from("User", "u").pipe(composeFragments(activeUsers));
+      // A fragment written for any graph applies to every graph.
+      const ast = legacyQuery()
+        .from("User", "u")
+        .pipe(limitFragment(5))
+        .select((ctx) => ctx.u.name)
+        .toAst();
+      expect(ast.limit).toBe(5);
+    });
+
+    it("refuses a requirement typed as a union of kinds", () => {
+      const kind: "User" | "Post" = runtimeFlag ? "Post" : "User";
+      // @ts-expect-error -- fragment requirement 'u' must name one node kind
+      fragment({ u: kind }, (q) => q);
+      // The same requirement reached by a cast is refused where it is piped.
+      const cast = activeUsers as unknown as UnionKindFragment;
+      // @ts-expect-error -- fragment requirement 'u' must name one node kind
+      query().from("User", "u").pipe(cast);
+    });
+
+    it("refuses an annotation that misstates what a fragment requires", () => {
+      // @ts-expect-error -- drops the requirement on 'u'
+      annotate<QueryFragment<Graph>>(activeUsers);
+      // @ts-expect-error -- widens 'u' to a union of kinds
+      annotate<UnionKindFragment>(activeUsers);
+      // @ts-expect-error -- moves the fragment to another graph
+      annotate<LegacyUserFragment>(activeUsers);
+    });
+
+    it("refuses, at runtime, a requirement on an unstarted builder's placeholder alias", () => {
+      // An unstarted builder holds `""` as its source alias with no kinds;
+      // that placeholder names no alias, so an untyped declaration of it is
+      // refused before the body runs.
+      let bodyRan = false;
+      const untypedFactory = fragment as unknown as (
+        requires: Readonly<Record<string, string>>,
+        body: (builder: unknown) => unknown,
+      ) => never;
+      const placeholder = untypedFactory({ "": "User" }, (builder) => {
+        bodyRan = true;
+        return builder;
+      });
+      expectRequirementUnmet(() => query().pipe(placeholder), "", undefined);
+      expect(bodyRan).toBe(false);
+    });
+
     it("refuses a host that already uses an alias the fragment adds", () => {
       expect(() =>
         query()
@@ -396,6 +494,74 @@ describe("composeFragments()", () => {
     composeFragments(withPosts, postAsUser);
   });
 
+  it("refuses a union of fragments", () => {
+    const conditional = runtimeFlag ? activeUsers : publishedPosts;
+    // @ts-expect-error -- composeFragments() takes a fragment, not a union of fragments
+    composeFragments(conditional);
+    // @ts-expect-error -- composeFragments() takes a fragment, not a union of fragments
+    composeFragments(firstTen, conditional);
+    expect(() =>
+      // @ts-expect-error -- pipe() refuses one as well
+      query().from("User", "u").pipe(conditional),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("refuses a requirement for an alias an earlier fragment adds as an edge or recursive alias", () => {
+    const edgeAsUser = fragment({ a: "User" }, (q) => q);
+    // @ts-expect-error -- 'a' is the edge alias withPosts adds
+    composeFragments(withPosts, edgeAsUser);
+
+    const withFriends = fragment({ u: "User" }, (q) =>
+      q
+        .traverse("follows", "f", { from: "u" })
+        .recursive({ depth: "hops", maxHops: 2 })
+        .to("User", "friend"),
+    );
+    const hopsAsUser = fragment({ hops: "User" }, (q) => q);
+    // @ts-expect-error -- 'hops' is the recursive alias withFriends adds
+    composeFragments(withFriends, hopsAsUser);
+  });
+
+  it("refuses fragments written for unrelated graphs", () => {
+    const legacyNamed = createFragment<LegacyGraph>()({ u: "User" }, (q) =>
+      q.whereNode("u", ({ name }) => name.eq("x")),
+    );
+    // @ts-expect-error -- fragment is written for another graph
+    composeFragments(activeUsers, legacyNamed);
+  });
+
+  it("composes a graph-agnostic helper placed first", () => {
+    const firstPage = composeFragments(limitFragment(20), activeUsers);
+    const ast = query()
+      .from("User", "u")
+      .pipe(firstPage)
+      .select((ctx) => ctx.u)
+      .toAst();
+    expect(ast.limit).toBe(20);
+    expect(ast.predicates).toHaveLength(1);
+    // The composition is written for activeUsers's graph, not for any graph.
+    // @ts-expect-error -- fragment is written for another graph
+    legacyQuery().from("User", "u").pipe(firstPage);
+  });
+
+  it("composes any number of fragments", () => {
+    const composed = composeFragments(
+      activeUsers,
+      withPosts,
+      publishedPosts,
+      byName,
+      firstTen,
+    );
+    const ast = query()
+      .from("User", "u")
+      .pipe(composed)
+      .select((ctx) => ({ user: ctx.u.name, post: ctx.p.title }))
+      .toAst();
+    expect(ast.predicates).toHaveLength(2);
+    expect(ast.orderBy).toHaveLength(1);
+    expect(ast.limit).toBe(10);
+  });
+
   it("composes the helper fragments", () => {
     const paginated = composeFragments(
       orderByFragment<Graph, "u">("u", "createdAt", "desc"),
@@ -475,109 +641,6 @@ describe("SQL compilation with fragments", () => {
     expect(sql).toContain("LIMIT");
     expect(params).toContain("active");
     expect(params).toContain(10);
-  });
-});
-
-describe("fragments on SQLite", () => {
-  let store: Store<Graph>;
-
-  beforeEach(async () => {
-    store = await createInitializedStore(graph, createTestBackend());
-
-    const alice = await store.nodes.User.create({
-      name: "Alice",
-      email: "alice@example.com",
-      status: "active",
-      createdAt: "2024-01-01",
-    });
-    const bob = await store.nodes.User.create({
-      name: "Bob",
-      email: "bob@example.com",
-      status: "inactive",
-      createdAt: "2024-02-01",
-    });
-    const carol = await store.nodes.Admin.create({
-      name: "Carol",
-      email: "carol@example.com",
-      status: "active",
-      createdAt: "2024-03-01",
-      level: 2,
-    });
-
-    const drafts = await store.nodes.Post.create({
-      title: "Drafts",
-      content: "",
-      published: false,
-    });
-    const graphs = await store.nodes.Post.create({
-      title: "Graphs",
-      content: "",
-      published: true,
-    });
-    const sql = await store.nodes.Post.create({
-      title: "SQL",
-      content: "",
-      published: true,
-    });
-
-    await store.edges.authored.create(alice, graphs, { role: "author" });
-    await store.edges.authored.create(alice, drafts, { role: "author" });
-    await store.edges.authored.create(bob, sql, { role: "author" });
-    await store.edges.authored.create(carol, sql, { role: "editor" });
-    await store.edges.follows.create(bob, alice, {});
-  });
-
-  it("filters with a declared filter fragment, subclasses included", async () => {
-    const rows = await store
-      .query()
-      .from("User", "u")
-      .pipe(activeUsers)
-      .pipe(byName)
-      .select((ctx) => ({ name: ctx.u.name, kind: ctx.u.kind }))
-      .execute();
-
-    expect(rows).toEqual([
-      { name: "Alice", kind: "User" },
-      { name: "Carol", kind: "Admin" },
-    ]);
-  });
-
-  it("returns the aliases an alias-adding fragment adds", async () => {
-    const rows = await store
-      .query()
-      .from("User", "u")
-      .pipe(composeFragments(activeUsers, withPosts, publishedPosts))
-      .select((ctx) => ({
-        user: ctx.u.name,
-        post: ctx.p.title,
-        role: ctx.a.role,
-      }))
-      .orderBy("u", "name", "asc")
-      .execute();
-
-    expect(rows).toEqual([
-      { user: "Alice", post: "Graphs", role: "author" },
-      { user: "Carol", post: "SQL", role: "editor" },
-    ]);
-  });
-
-  it("starts a fragment's traversal at the declared alias, not the host's last node", async () => {
-    // The host's current node is `followed` (Alice); `withPosts` traverses
-    // `from: "u"`, so it reads the follower's (Bob's) posts.
-    const rows = await store
-      .query()
-      .from("User", "u")
-      .traverse("follows", "f")
-      .to("User", "followed")
-      .pipe(withPosts)
-      .select((ctx) => ({
-        follower: ctx.u.name,
-        followed: ctx.followed.name,
-        post: ctx.p.title,
-      }))
-      .execute();
-
-    expect(rows).toEqual([{ follower: "Bob", followed: "Alice", post: "SQL" }]);
   });
 });
 

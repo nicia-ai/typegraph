@@ -114,6 +114,13 @@ compile-time check cannot reach (untyped code, a cast) is refused at runtime ins
 admits a subclass: a host `u` bound to an `Admin` that is a `subClassOf` `User` runs, though the
 compile-time check, which does not follow the ontology, refuses `from("Admin", "u")`.
 
+A fragment is written for the graph its factory names. Piping it into a query over another graph is a
+compile error, `Error: fragment is written for another graph`, because its body is typed against that
+graph's schemas: a filter on a property the other graph's kind lacks would read a property no row has.
+A query over a graph that extends the fragment's graph takes it, and a fragment for any graph
+(`createFragment<GraphDef>()`, or a helper called without a graph type argument) applies to every
+graph. This check is compile-time only: at runtime a fragment does not record its graph.
+
 What a declaration does not express:
 
 - **Edge aliases.** A fragment cannot require an edge alias of the host query. Include the traversal
@@ -122,7 +129,9 @@ What a declaration does not express:
   body only filters, traverses and orders, which an optional alias supports, and the alias keeps its
   optional type after the pipe.
 - **A choice of kinds.** A requirement names one kind; a host alias over a list of kinds does not
-  satisfy it.
+  satisfy it. A requirement typed as a union of kinds, `{ u: kind }` with `kind` typed
+  `"User" | "Post"`, is a compile error at the declaration: the value captured at runtime is one of
+  the kinds, so no check against the union could keep the two in step.
 
 ### Traversals Start Where You Say
 
@@ -173,10 +182,18 @@ const results = await store
   .execute();
 ```
 
-The composed fragment requires what the first fragment requires, plus each alias a later fragment
-requires that no earlier fragment holds. A later fragment that requires an alias an earlier one holds
-at another kind, or adds an alias an earlier one already added, is a compile error at the
-`composeFragments()` call.
+`composeFragments()` takes any number of fragments. The composed fragment requires what the first
+fragment requires, plus each alias a later fragment requires that no earlier fragment holds, and it is
+written for the narrowest of its fragments' graphs, so a helper for any graph composes with a fragment
+for one graph in either order. It is a compile error at the `composeFragments()` call when:
+
+- a later fragment requires an alias an earlier one holds as a node of another kind, or as an edge or
+  recursive alias;
+- a later fragment adds an alias an earlier one already holds;
+- two fragments are written for graphs neither of which extends the other;
+- an argument is a union of fragments, such as `flag ? activeUsers : publishedOnly`. A union keeps only
+  what every branch shares, so it would drop the requirements of whichever branch runs; compose or pipe
+  each branch on its own instead.
 
 ## Helper Fragments
 
@@ -352,7 +369,8 @@ import type {
 - **`QueryFragment<G, Requires, Added, AddedEdges, AddedRecursive>`** - A fragment built by
   `createFragment()`: what it requires (`{ u: "User" }`) and the node, edge and recursive aliases it adds.
   Annotate a fragment as `QueryFragment<typeof graph, { u: "User" }>` to state that it requires `u` and
-  adds nothing
+  adds nothing. The annotation must state the fragment's shape exactly: one that drops a requirement,
+  widens a kind or names another graph is a compile error
 - **`FragmentRequirements<G>`** - The shape of a declaration: alias name to node kind name
 - **`QueryFragmentBody<G, Requires, ...>`** - The function a fragment is written as, typed against the
   declared aliases only
