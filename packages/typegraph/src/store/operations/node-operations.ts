@@ -7920,7 +7920,7 @@ async function planNodeHardDeleteBatch<G extends GraphDef>(
   lock: GraphWriteLock,
 ): Promise<readonly PlannedNodeHardDelete[]> {
   if (ids.length === 0) return [];
-  const isWholeKind = ctx.registry.compositionEdgeKindsUnder(kind).length > 0;
+  const isWholeKind = ctx.registry.isCompositionWhole(kind);
   // The parts closure is a lock-only read, so the connected edges the
   // classification below reads must be a snapshot taken behind the same
   // fence every single-path cascade of this kind takes.
