@@ -87,6 +87,7 @@ export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-prope
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
 export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";

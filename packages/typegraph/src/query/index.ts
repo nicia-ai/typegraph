@@ -184,12 +184,15 @@ export {
 export {
   composeFragments,
   createFragment,
-  type FlexibleQueryFragment,
+  type FragmentRequiredAliases,
+  type FragmentRequirements,
   type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
   type QueryFragment,
+  type QueryFragmentBody,
+  type QueryFragmentFactory,
   type TraversalFragment,
 } from "./builder/fragment";
 

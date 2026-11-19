@@ -5569,6 +5569,8 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     aggregate<const Fields extends Readonly<Record<string, DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>>>>(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Fields): ExecutableProjectionQuery<Fields, QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>>;
     // (undocumented)
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
+    // @internal
+    assertFragmentRequirements(requires: Readonly<Record<string, string>>): void;
     count(): Promise<number>;
     exists(): Promise<boolean>;
     from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options?: {
