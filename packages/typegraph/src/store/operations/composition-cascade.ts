@@ -195,6 +195,26 @@ export function requireCompositionPairVia(
   );
 }
 
+/**
+ * Whether `node` is the WHOLE endpoint of composition row `row`, by the
+ * orientation `row.kind` declares. THE whole-side predicate of the cascade's
+ * walk: a row passes it before anything else is asked of it — in particular
+ * before its endpoint pair is looked up ({@link countedCompositionRow}), so a
+ * stored row with `node` on its part side is never judged as a membership of
+ * `node`'s, however stale its pair.
+ */
+function isWholeEndpointOf(
+  registry: KindRegistry,
+  row: EdgeRow,
+  node: CascadeNode,
+): boolean {
+  const { whole } = compositionRowEndpoints(
+    requirePartSide(registry, row.kind),
+    row,
+  );
+  return whole.kind === node.kind && whole.id === node.id;
+}
+
 /** {@link readWholeSideEdges}'s result: the rows, and whether the set-read port answered. */
 type WholeSideEdgesResult = Readonly<{
   rows: readonly EdgeRow[];
@@ -272,13 +292,7 @@ async function readWholeSideEdges(
     for (const row of rowsPerNode[index] ?? []) {
       if (row.deleted_at !== undefined) continue;
       if (!edgeKindSet.has(row.kind)) continue;
-      const { whole: wholeEndpoint } = compositionRowEndpoints(
-        requirePartSide(ctx.registry, row.kind),
-        row,
-      );
-      if (wholeEndpoint.kind !== node.kind || wholeEndpoint.id !== node.id) {
-        continue;
-      }
+      if (!isWholeEndpointOf(ctx.registry, row, node)) continue;
       if (seenIds.has(row.id)) continue;
       seenIds.add(row.id);
       filtered.push(row);
@@ -457,6 +471,77 @@ function cascadeDeletionOrder(
 }
 
 /**
+ * The part and whole a composition row binds, when the row counts toward its
+ * declared pair's population; `undefined` when it does not. THE per-row
+ * decision of the cascade's walk ({@link planCompositionCascade}), shared with
+ * the node batch hard delete, which asks it of each node's connected edges to
+ * tell a whole the walk would expand from one it would find empty.
+ */
+function countedCompositionRow(
+  registry: KindRegistry,
+  row: EdgeRow,
+): CompositionRowEndpoints | undefined {
+  const endpoints = compositionRowEndpoints(
+    requirePartSide(registry, row.kind),
+    row,
+  );
+  // Population cannot differ between two pairs applicable to one concrete
+  // part kind (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that ontology),
+  // so the verdict below is the same for either; the by-`via` lookup is what
+  // keeps the invariant honest.
+  const pair = requireCompositionPairVia(
+    registry,
+    endpoints.part.kind,
+    endpoints.whole.kind,
+    row.kind,
+  );
+  return compositionEdgeCounts(pair, row) ? endpoints : undefined;
+}
+
+/**
+ * Whether deleting `whole` cascades at all: whether one of its live connected
+ * edges is a composition row of a kind its walk follows, counted, with `whole`
+ * as the whole — the first round of {@link planCompositionCascade}, decided
+ * from edges the caller already read with a kind-blind connected-edge read
+ * taken after {@link fenceCompositionCascadeSnapshot}. `false` is exactly the
+ * case in which that walk returns an empty plan: no member to delete and no
+ * consumed edge to remove.
+ */
+export function wholeCascadesToParts(
+  registry: KindRegistry,
+  whole: CascadeNode,
+  connectedEdges: readonly EdgeRow[],
+): boolean {
+  if (!registry.isCompositionWhole(whole.kind)) return false;
+  const edgeKinds = new Set(registry.compositionEdgeKindsUnder(whole.kind));
+  // The walk's own filters, in the walk's order: live, of a kind it follows,
+  // with `whole` on the whole side — and only then counted.
+  return connectedEdges.some(
+    (row) =>
+      row.deleted_at === undefined &&
+      edgeKinds.has(row.kind) &&
+      isWholeEndpointOf(registry, row, whole) &&
+      countedCompositionRow(registry, row) !== undefined,
+  );
+}
+
+/**
+ * The fence every read of a whole's parts closure sits behind: the closure is
+ * a lock-only read — no claim row records "this whole has these parts" — so a
+ * part attached while this session waited for the fence is found only by a
+ * snapshot taken after the wait.
+ */
+export async function fenceCompositionCascadeSnapshot(
+  ctx: Readonly<{ graphId: string; lock: GraphWriteLock }>,
+  backend: Parameters<typeof fenceLockOnlyDecision>[0],
+): Promise<void> {
+  await fenceLockOnlyDecision(backend, ctx.graphId, ctx.lock, {
+    code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
+    subject: "Deleting a composition whole",
+  });
+}
+
+/**
  * THE parts closure of one whole, under the per-graph write lock.
  *
  * `lock` is compile-time evidence the caller took the per-graph write lock
@@ -505,13 +590,7 @@ export async function planCompositionCascade(
   const edgeKinds = ctx.registry.compositionEdgeKindsUnder(wholeKind);
   if (edgeKinds.length === 0) return EMPTY_COMPOSITION_CASCADE_PLAN;
 
-  // The closure below is a lock-only read: no claim row records "this whole
-  // has these parts", so a part attached while this session waited for the
-  // fence is found only by a snapshot taken after the wait.
-  await fenceLockOnlyDecision(backend, ctx.graphId, ctx.lock, {
-    code: "COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT",
-    subject: "Deleting a composition whole",
-  });
+  await fenceCompositionCascadeSnapshot(ctx, backend);
 
   const root: CascadeNode = { kind: wholeKind, id: wholeId };
   const visited = new Set<string>([nodeRefKey(root)]);
@@ -532,21 +611,9 @@ export async function planCompositionCascade(
     const nextFrontier: CascadeNode[] = [];
     const roundMembers: DiscoveredCascadeMember[] = [];
     for (const row of rows) {
-      const { part, whole: wholeOfRow } = compositionRowEndpoints(
-        requirePartSide(ctx.registry, row.kind),
-        row,
-      );
-      // Population cannot differ between two pairs applicable to one concrete
-      // part kind (`ONTOLOGY_COMPOSITION_POPULATION_MIXED` refuses that
-      // ontology), so the verdict below is the same for either; the by-`via`
-      // lookup is what keeps the invariant honest.
-      const pair = requireCompositionPairVia(
-        ctx.registry,
-        part.kind,
-        wholeOfRow.kind,
-        row.kind,
-      );
-      if (!compositionEdgeCounts(pair, row)) continue;
+      const counted = countedCompositionRow(ctx.registry, row);
+      if (counted === undefined) continue;
+      const { part, whole: wholeOfRow } = counted;
 
       const key = nodeRefKey(part);
       if (visited.has(key)) {

@@ -300,6 +300,13 @@ await store.edges.relatedTo.bulkDelete(edgeIds);
 await store.edges.relatedTo.bulkHardDelete(edgeIds);
 ```
 
+Node collections have `bulkHardDelete(ids)` too. It removes each node with its
+connected edges and derived rows, as `hardDelete()` does, in one call:
+
+```typescript
+await store.nodes.Document.bulkHardDelete(expiredIds);
+```
+
 ## On-Demand Sync
 
 Sync individual records when they're accessed or modified. Best for low-volume

@@ -1415,6 +1415,61 @@ schema-fenced atomic exchange, including owner-side uniqueness and disjointness
 claim cleanup. Kinds that owe search, identity, or capture cleanup, or
 cascade/disconnect work, use the transactional path instead.
 
+#### `bulkHardDelete(ids)`
+
+Permanently deletes multiple nodes. This is irreversible and should be used carefully.
+
+```typescript
+store.nodes.Person.bulkHardDelete(
+  ids: readonly NodeId<Person>[]
+): Promise<void>;
+```
+
+The call leaves exactly the state that calling `hardDelete()` once per ID, in
+the order the IDs first appear, inside one transaction leaves: each node is
+removed with its uniqueness, fulltext and embedding rows and every connected
+edge (live or soft-deleted, of any edge kind), each node's `onDelete` behavior
+applies, a composition whole's parts are deleted with it, and its Operational
+Identity assertions are detached. Absent IDs, IDs that exist only under another
+node kind, and repeated IDs are ignored, and a history store captures each
+removed row's last version without recording a delete row. Every node is judged
+before the first row is removed, so the first refusal the per-ID loop would
+reach (for example `RestrictedDeleteError` from an `onDelete: "restrict"` node
+that still has an edge) refuses the whole call and deletes nothing.
+
+Each node is judged against the graph the earlier IDs' deletes leave, exactly as
+the loop judges it. When two nodes of the call are connected and both are
+`restrict`, the error names whichever comes first in the input; a `cascade`
+node earlier in the input removes the edge a later node would otherwise be
+refused for.
+
+A node whose delete cascades to no composition parts, and that no identity
+assertion or identity class names, is removed set-wise: the call
+reads the batch's rows, connected edges and identity participation with a fixed
+number of statements per bind-budget chunk, and removes such nodes in runs with
+another fixed number per chunk, so 10 and 1,000 of them cost the same
+statements apart from extra chunks. A composition whole with parts and an
+identity participant go through the same path as `hardDelete()` and cost what it
+costs. A backend without the optional `hardDeleteNodesBatch` and
+`findEdgesConnectedToNodes` ports gets one statement set per node instead.
+Like the other batch methods, it fires no operation hooks.
+
+On its own the call is one write transaction. Inside `store.transaction()` it
+runs in the caller's transaction, and its writes sit behind a savepoint: if one
+of them fails and the callback catches the error, the commit keeps none of the
+call's writes. On a raw store over a driver without interactive transactions
+(Cloudflare D1, `drizzle-orm/neon-http`) the statements run separately; every
+refusal still comes before the first delete, but a failure in a later statement
+leaves the earlier ones applied. As in `hardDelete()`, a node's row is removed
+only after its uniqueness, fulltext and connected-edge rows, so repeating the
+call after such a failure finishes the delete and frees the node's unique keys.
+A schema-managed store on those drivers refuses
+the call before it writes, as it refuses every write it cannot fence (see
+[Backend support](#backend-support)).
+
+Claim rows still held by a removed node's soft-deleted edges are left in place,
+as `hardDelete()` leaves them.
+
 #### `getOrCreateByConstraint(constraintName, props, options?)`
 
 Looks up an existing node by a named uniqueness constraint. Returns the match if found, or creates a new node if not.

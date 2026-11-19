@@ -1094,6 +1094,39 @@ export type HardDeleteNodeParams = Readonly<{
 }>;
 
 /**
+ * Parameters for hard deleting a set of one kind's nodes (permanent removal);
+ * see {@link GraphBackend.hardDeleteNodesBatch}.
+ */
+export type HardDeleteNodesBatchParams = Readonly<{
+  graphId: string;
+  kind: string;
+  ids: readonly string[];
+}>;
+
+/**
+ * What {@link GraphBackend.hardDeleteNodesBatch} removed: the node rows its
+ * delete matched, and every edge row (live or tombstoned, of any kind) it
+ * removed at an endpoint named by a listed id of the kind. Neither list names
+ * a row the call left in place.
+ */
+export type HardDeleteNodesBatchResult = Readonly<{
+  removedNodeIds: readonly string[];
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
+ * Parameters for reading the live edges connected to a set of one kind's
+ * nodes; see {@link GraphBackend.findEdgesConnectedToNodes}. `nodeIds`, not
+ * `ids`: in the backend params vocabulary `ids` names the rows a write
+ * removes, and the write-surface assertion classifies params structurally.
+ */
+export type FindEdgesConnectedToNodesParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  nodeIds: readonly string[];
+}>;
+
+/**
  * Parameters for hard deleting an edge (permanent removal).
  */
 export type HardDeleteEdgeParams = Readonly<{
@@ -2435,6 +2468,27 @@ export type GraphBackend = Readonly<{
   ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
+  /**
+   * Batched {@link hardDeleteNode} for one kind, in its order: removes the
+   * uniqueness entries, fulltext rows and every incident edge (either
+   * endpoint, any edge kind, live or tombstoned) of the listed ids of `kind`,
+   * then their node rows last — so a failure part-way leaves each node row in
+   * place for a retry to finish, never an orphaned claim behind a removed
+   * row. A listed id whose node row is already gone still has whatever such
+   * rows it left cleared, as `hardDeleteNode` clears them. One statement set
+   * per bind-budget chunk instead of one per node. Never touches a row of
+   * another kind.
+   *
+   * Like `hardDeleteNode` it cleans no embeddings (the store does, through the
+   * vector members) and releases no edge claims. Not atomic on its own: the
+   * store runs it inside its write frame. Optional — the store falls back to
+   * one `hardDeleteNode` per node when it is absent, deciding so before any
+   * statement runs.
+   */
+  hardDeleteNodesBatch?: (
+    this: void,
+    params: HardDeleteNodesBatchParams,
+  ) => Promise<HardDeleteNodesBatchResult>;
   getNode: (
     this: void,
     graphId: string,
@@ -2543,6 +2597,20 @@ export type GraphBackend = Readonly<{
   findEdgesConnectedTo: (
     this: void,
     params: FindEdgesConnectedToParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Set-wise {@link findEdgesConnectedTo}: every live (not tombstoned) edge,
+   * of ANY edge kind, with either endpoint among `nodeIds` of `nodeKind` —
+   * each edge once, in no particular order. One statement per bind-budget
+   * chunk. Kind-blind on purpose: a store delete judges `onDelete: "restrict"`
+   * against every stored edge, including kinds the current graph no longer
+   * declares, which the kind-licensed
+   * {@link findEdgesByHeterogeneousEndpointSet} cannot see. Optional — the
+   * store falls back to one `findEdgesConnectedTo` per node.
+   */
+  findEdgesConnectedToNodes?: (
+    this: void,
+    params: FindEdgesConnectedToNodesParams,
   ) => Promise<readonly EdgeRow[]>;
 
   // === Collection Query Operations ===
@@ -3893,6 +3961,7 @@ export type NodeEntityWriteBackend = Pick<
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
+  | "hardDeleteNodesBatch"
   // A read, but a locking one, so it belongs to the write surface rather than
   // to the portable read projections built from the read types.
   | "lockNodes"
@@ -3905,6 +3974,7 @@ export type EdgeEntityReadBackend = Pick<
   | "countEdgesAtEndpoint"
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
+  | "findEdgesConnectedToNodes"
   | "findEdgesByKind"
   | "findActiveEdgesBySourceV1"
   | "findEdgesByMatchIdentity"

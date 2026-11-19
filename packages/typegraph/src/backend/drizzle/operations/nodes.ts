@@ -21,6 +21,7 @@ import type {
   CompareAndSetNodeParams,
   DeleteNodeParams,
   HardDeleteNodeParams,
+  HardDeleteNodesBatchParams,
   InsertNodeParams,
   NodePropertyExpectation,
   ResolvedNodeUpdateBatchParams,
@@ -1300,5 +1301,29 @@ export function buildHardDeleteNode(
     WHERE ${nodes.graphId} = ${params.graphId}
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.id} = ${params.id}
+  `;
+}
+
+/**
+ * Builds a hard DELETE for one bind-budget chunk of one kind's nodes, returning
+ * the id of every row it removed — the set the batch's sidecar deletes are
+ * then scoped to. The kind is part of the key, so an id present only under
+ * another kind matches nothing.
+ */
+export function buildHardDeleteNodesBatch(
+  tables: Tables,
+  params: HardDeleteNodesBatchParams,
+): SQL {
+  const { nodes } = tables;
+
+  return sql`
+    DELETE FROM ${nodes}
+    WHERE ${nodes.graphId} = ${params.graphId}
+      AND ${nodes.kind} = ${params.kind}
+      AND ${nodes.id} IN (${sql.join(
+        params.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+    RETURNING ${nodes.id}
   `;
 }

@@ -115,6 +115,7 @@ import {
 } from "./edge-write-pipeline";
 import {
   applyNodeHardDelete,
+  applyNodeHardDeleteBatch,
   applyNodeInsertSyncFans,
   applyNodeInsertSyncFansBatch,
   applyNodeResurrect,
@@ -126,6 +127,7 @@ import {
   deleteEdgesById,
   type NodeDeleteMode,
   type NodeDeletePolicy,
+  type NodeHardDeleteBatchWork,
   type NodeSetUpdateResult,
   type NodeSetUpdateWork,
   type NodeUpdateTarget,
@@ -431,6 +433,13 @@ export type NodeWriteSession = Readonly<{
     work: NodeHardDeleteWork,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
+  /**
+   * Hard-deletes a run of one kind's nodes whose delete-behavior verdicts the
+   * caller already reached, set-wise (`node-operations.ts`'s batch hard
+   * delete). Only for nodes that need no composition cascade and no identity
+   * detach: neither is applied here.
+   */
+  purgeNodes: (work: NodeHardDeleteBatchWork) => Promise<void>;
   reviveNode: (work: NodeResurrectWork) => Promise<NodeRow>;
   /**
    * Deletes a set of composition edges by id, in `mode` — the composition
@@ -749,6 +758,8 @@ export function createWriteSession(
 
     purgeNode: (work, policy) =>
       applyNodeHardDelete(writeContext, work, target, policy),
+
+    purgeNodes: (work) => applyNodeHardDeleteBatch(writeContext, work, target),
 
     reviveNode: (work) => applyNodeResurrect(writeContext, work, target),
 
