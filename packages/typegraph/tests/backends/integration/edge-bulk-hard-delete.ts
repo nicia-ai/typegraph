@@ -42,6 +42,7 @@ import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { readEdgeClaimRows } from "../../edge-claim-rows";
 import { type IntegrationTestContext } from "./test-context";
 
 const BhdPerson = defineNode("BhdPerson", {
@@ -279,10 +280,10 @@ function withoutHardDeleteBatch(
   ): Omit<T, "hardDeleteEdgesBatch"> {
     const stripped = projectBackendWithout(target, ["hardDeleteEdgesBatch"]);
     return deriveBackend(stripped, {
-      async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
+      async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<boolean> {
         calls += 1;
         if (calls === failOnCall) throw new InjectedHardDeleteFailure();
-        await target.hardDeleteEdge(params);
+        return target.hardDeleteEdge(params);
       },
     } as never);
   }
@@ -376,11 +377,25 @@ export function registerEdgeBulkHardDeleteIntegrationTests(
       const p1 = { kind: "BhdPerson" as const, id: "p1" };
       const p4 = { kind: "BhdPerson" as const, id: "p4" };
 
+      const claimHolders = async () => {
+        const claims = await readEdgeClaimRows(store.backend, store.graphId);
+        return claims.map((claim) => claim.edge_id);
+      };
+      expect(await claimHolders()).toContain("m1");
+
       await store.edges.bhdMentors.bulkHardDelete(["m1"] as never);
 
+      // A create can take over a claim whose edge is gone, so the replacement
+      // below would succeed even if the batch left m1's claim behind: the
+      // claim relation is the evidence that the release ran.
+      expect(await claimHolders()).not.toContain("m1");
       const replacement = await store.edges.bhdMentors.create(p1, p4, {});
       expect(replacement.fromId).toBe("p1");
     });
+    // MUTATION CHECK: pass `holdsCardinalityClaim: false` from
+    // `executeEdgeHardDeleteBatch`, or drop the `RETURNING` from
+    // `buildHardDeleteEdgesBatch` so the batch reports no removed row — m1's
+    // claim row survives the batch.
 
     it("refuses an id owned by another edge kind and deletes nothing, inside and outside a transaction", async () => {
       const store = await createSeededStore(context, "live");
@@ -430,9 +445,14 @@ export function registerEdgeBulkHardDeleteIntegrationTests(
       const batch = [edgeIdOf(retired.id), edgeIdOf(live.id)];
       const before = await dumpState(store, { history: false });
 
-      const refusal = await store.edges.bhdSegmentOf
-        .bulkHardDelete(batch)
-        .catch((error: unknown) => error);
+      // Caught inside a transaction that then commits, so a delete issued
+      // before the refusal would survive instead of rolling back with a
+      // store-owned transaction.
+      const refusal = await store.transaction(async (tx) =>
+        tx.edges.bhdSegmentOf
+          .bulkHardDelete(batch)
+          .catch((error: unknown) => error),
+      );
 
       expect(refusal).toBeInstanceOf(CompositionExistenceError);
       expect((refusal as CompositionExistenceError).details).toMatchObject({
@@ -449,7 +469,9 @@ export function registerEdgeBulkHardDeleteIntegrationTests(
     });
     // MUTATION CHECK: drop the per-row `assertCompositionExistencePreserved`
     // call from `executeEdgeHardDeleteBatch` — the batch resolves and orphans
-    // the live segment.
+    // the live segment. Issuing each member's DELETE right after its own
+    // existence check removes the retired part's edge before the refusal, and
+    // the committed transaction keeps that removal.
 
     it("is refused on a read-only view like every other edge write", async () => {
       const graph = buildGraph(nextGraphId());
@@ -517,5 +539,31 @@ export function registerEdgeBulkHardDeleteIntegrationTests(
     // of `executeEdgeHardDelete` calls, each its own transaction — m1 stays
     // removed after the injected failure (and the two refusal cases above
     // fail too).
+
+    it("keeps none of its writes when a failure among them is caught inside a transaction that commits", async () => {
+      const seeded = await createSeededStore(context, "live");
+      const failing = withoutHardDeleteBatch(seeded.backend, 2);
+      const failingStore = createStore(
+        buildGraph(seeded.graphId),
+        failing.backend,
+        { revisionTracking: true },
+      );
+      const before = await dumpState(seeded, { history: false });
+
+      const caught = await failingStore.transaction(async (tx) =>
+        tx.edges.bhdMentors
+          .bulkHardDelete(["m1", "m3"] as never)
+          .catch((error: unknown) => error),
+      );
+
+      expect(caught).toBeInstanceOf(InjectedHardDeleteFailure);
+      // m1's DELETE ran before m3's failed; the commit must not keep it.
+      expect(failing.calls()).toBe(2);
+      expect(await dumpState(seeded, { history: false })).toEqual(before);
+    });
+    // MUTATION CHECK: call `session.purgeEdges(purges)` directly in
+    // `executeEdgeHardDeleteBatch` instead of through
+    // `runFrameWritesAsUnit` — m1 and its claim are gone after the commit
+    // while the revision is unchanged.
   });
 }

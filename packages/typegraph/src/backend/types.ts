@@ -2488,7 +2488,17 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly EdgeRow[]>;
   updateEdge: (this: void, params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (this: void, params: DeleteEdgeParams) => Promise<void>;
-  hardDeleteEdge: (this: void, params: HardDeleteEdgeParams) => Promise<void>;
+  /**
+   * Permanently removes one edge row. Resolves `true` when the statement
+   * removed it and `false` when it matched none — the id is absent, or the
+   * row no longer carries the asserted kind. The store releases a removed
+   * edge's claims only on `true`: a release keyed by id alone would strip the
+   * claims of a different edge a concurrent writer committed under that id.
+   */
+  hardDeleteEdge: (
+    this: void,
+    params: HardDeleteEdgeParams,
+  ) => Promise<boolean>;
   /**
    * Batched {@link deleteEdge}: one soft-delete statement per bind-budget
    * chunk instead of one per edge. Optional — cascade deletes fall back to
@@ -2499,11 +2509,15 @@ export type GraphBackend = Readonly<{
     this: void,
     params: DeleteEdgesBatchParams,
   ) => Promise<void>;
-  /** Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. */
+  /**
+   * Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. Resolves
+   * the ids of the rows it removed, in any order — never an id whose row it
+   * left in place — for the same claim-release reason.
+   */
   hardDeleteEdgesBatch?: (
     this: void,
     params: DeleteEdgesBatchParams,
-  ) => Promise<void>;
+  ) => Promise<readonly string[]>;
   getEdge: (
     this: void,
     graphId: string,
