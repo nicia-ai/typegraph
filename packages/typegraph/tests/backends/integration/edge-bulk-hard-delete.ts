@@ -517,5 +517,31 @@ export function registerEdgeBulkHardDeleteIntegrationTests(
     // of `executeEdgeHardDelete` calls, each its own transaction — m1 stays
     // removed after the injected failure (and the two refusal cases above
     // fail too).
+
+    it("keeps none of its writes when a failure among them is caught inside a transaction that commits", async () => {
+      const seeded = await createSeededStore(context, "live");
+      const failing = withoutHardDeleteBatch(seeded.backend, 2);
+      const failingStore = createStore(
+        buildGraph(seeded.graphId),
+        failing.backend,
+        { revisionTracking: true },
+      );
+      const before = await dumpState(seeded, { history: false });
+
+      const caught = await failingStore.transaction(async (tx) =>
+        tx.edges.bhdMentors
+          .bulkHardDelete(["m1", "m3"] as never)
+          .catch((error: unknown) => error),
+      );
+
+      expect(caught).toBeInstanceOf(InjectedHardDeleteFailure);
+      // m1's DELETE ran before m3's failed; the commit must not keep it.
+      expect(failing.calls()).toBe(2);
+      expect(await dumpState(seeded, { history: false })).toEqual(before);
+    });
+    // MUTATION CHECK: call `session.purgeEdges(purges)` directly in
+    // `executeEdgeHardDeleteBatch` instead of through
+    // `runFrameWritesAsUnit` — m1 and its claim are gone after the commit
+    // while the revision is unchanged.
   });
 }

@@ -2502,11 +2502,14 @@ export type EdgeCollection<
    * refuses with `CompositionExistenceError`; every id is resolved and judged
    * before the first row is removed, so either refusal deletes nothing.
    *
-   * Runs as one write transaction (atomic when the backend supports
-   * transactions) whose delete issues one kind-asserting statement per
-   * bind-budget chunk when the backend implements `hardDeleteEdgesBatch`, and
-   * one per edge otherwise. Like every batch method it fires no operation
-   * hooks.
+   * Its delete issues one kind-asserting statement per bind-budget chunk when
+   * the backend implements `hardDeleteEdgesBatch`, and one per edge
+   * otherwise. On its own the call is one write transaction; inside
+   * `store.transaction()` its writes run behind a savepoint, so a caught
+   * failure among them keeps none of them. On a raw store over a driver
+   * without interactive transactions the chunks are separate statements, and
+   * a later chunk's failure leaves the earlier ones deleted. Like every batch
+   * method it fires no operation hooks.
    *
    * **Warning:** This operation is irreversible. Consider `bulkDelete()` for
    * most use cases.

@@ -1916,14 +1916,25 @@ an ID belonging to another edge kind (`ValidationError` with
 `existence: "required"` part without its whole (`CompositionExistenceError`),
 refuses the whole call and deletes nothing.
 
-The call runs as one write transaction: one batched lookup, then one delete per
-bind-budget chunk that also asserts the collection's kind, so an ID re-pointed
-at another kind by a concurrent writer is never removed. A backend without the
-optional `hardDeleteEdgesBatch` port issues one delete per edge inside the same
-transaction. The only per-edge statement on the batched path is the part read
-the required-existence check makes, and only for a composition edge whose part
-kind is `existence: "required"`. Like the other batch methods, it fires no
+The call makes one batched lookup, then one delete per bind-budget chunk that
+also asserts the collection's kind, so an ID re-pointed at another kind by a
+concurrent writer is never removed, and claims are released only for the rows
+the delete actually removed, so such a replacement keeps its own. A backend
+without the optional `hardDeleteEdgesBatch` port issues one delete per edge
+instead. The only per-edge statement on the batched path is the part read the
+required-existence check makes, and only for a composition edge whose part kind
+is `existence: "required"`. Like the other batch methods, it fires no
 operation hooks.
+
+On its own the call is one write transaction. Inside `store.transaction()` it
+runs in the caller's transaction, and its deletes and claim releases sit behind
+a savepoint: if one of them fails and the callback catches the error, the
+commit keeps none of the call's writes. On a raw store over a driver without
+interactive transactions (Cloudflare D1, `drizzle-orm/neon-http`) the chunks
+run as separate statements, so a failure in a later chunk leaves the earlier
+chunks deleted; a schema-managed store on those drivers refuses the call before
+it writes, as it refuses every write it cannot fence (see
+[Backend support](#backend-support)).
 
 #### `bulkUpsertById(items)`
 
