@@ -84,7 +84,9 @@ async function createBudgetedStore() {
 }
 
 /** The one member of the driver client the bind assertion observes. */
-interface SqliteClient { prepare: (source: string) => unknown }
+interface SqliteClient {
+  prepare: (source: string) => unknown;
+}
 
 /**
  * Runs `operation` while recording every statement it prepares on `client`,

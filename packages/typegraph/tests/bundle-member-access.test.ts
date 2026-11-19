@@ -79,12 +79,16 @@ const REASONED_FLOOR = 132;
 // declared.
 // The composition cascade and unattached-part read each add one heterogeneous
 // endpoint-set read: 238 -> 240 live, 243 -> 245 declared.
-const DEFERRED_LIVE_TOTAL = 240;
+// Same-kind soft-delete sets go through one dispatcher, so the edge write
+// pipeline reads the optional `deleteEdgesBatch` once instead of twice:
+// 240 -> 239 live; its declared ceiling is unchanged.
+const DEFERRED_LIVE_TOTAL = 239;
 const DEFERRED_DECLARED_TOTAL = 245;
 const EXCLUDED_COUNT = 5;
 // Lineage source selection reads the backend's own `lineage` once instead of
 // twice (the read-set fence binds it for its key-delta filter): 387 -> 386.
-const TOTAL_ROW_COUNT = 386;
+// One `deleteEdgesBatch` read left the edge write pipeline: 386 -> 385.
+const TOTAL_ROW_COUNT = 385;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",
@@ -231,7 +235,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 387)", () => {
+  it("the class partition covers every scanned row (total 385)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
