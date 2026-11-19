@@ -522,18 +522,22 @@ async function runOutcome(
 }
 
 /**
- * Builds the fixture twice and compares a per-id `hardDelete` loop in one
- * transaction with one `bulkHardDelete` of the same ids. Returns the batch's
- * outcome for case-specific assertions.
+ * Builds the fixture twice — each seeded, then extended by `extendSeed` when
+ * given — and compares a per-id `hardDelete` loop in one transaction with
+ * one `bulkHardDelete` of the same ids. Returns the batch's outcome for
+ * case-specific assertions.
  */
 async function expectLoopEquivalence(
   context: IntegrationTestContext,
   mode: StoreMode,
   kind: NodeKindName,
   ids: readonly string[],
+  extendSeed?: (store: NbhdStore) => Promise<void>,
 ): Promise<Outcome> {
   const looped = await createSeededStore(context, mode);
   const batched = await createSeededStore(context, mode);
+  await extendSeed?.(looped);
+  await extendSeed?.(batched);
   const loopOutcome = await runOutcome(looped, mode, async (nodes) => {
     for (const id of ids) await nodeCollection(nodes, kind).hardDelete(id);
   });
@@ -614,6 +618,24 @@ function instrumentedBackend(
   };
 }
 
+/**
+ * An nbhdPageOf row from folder f2 to l3, written beneath the store: f2 sits
+ * on the edge kind's part side, and no declared pair makes a folder a page of
+ * anything — older data the current definition would refuse.
+ */
+async function seedStalePageOfFromFolder(store: NbhdStore): Promise<void> {
+  await store.backend.insertEdge({
+    graphId: store.graphId,
+    id: "stale-page-of",
+    kind: "nbhdPageOf",
+    fromKind: "NbhdFolder",
+    fromId: "f2",
+    toKind: "NbhdLocked",
+    toId: "l3",
+    props: {},
+  });
+}
+
 /** A second store over `seeded`'s graph and rows, through `backend`. */
 function reopen(seeded: NbhdStore, backend: GraphBackend): NbhdStoreHandle {
   return createStore(buildGraph(seeded.graphId), backend, {
@@ -692,6 +714,29 @@ export function registerNodeBulkHardDeleteIntegrationTests(
       // MUTATION CHECK: make `wholeCascadesToParts` answer `false` — f1 is
       // removed as a plain node and its pages survive.
     }
+
+    it("matches the per-id loop when a whole holds a stored composition row the graph no longer declares, with the whole on its part side", async () => {
+      // {@link seedStalePageOfFromFolder}. The single path's walk reads only
+      // rows with the folder on the whole side, so it never judges this one
+      // and deletes f2 (cascading the row away); the batch must too.
+      for (const ids of [["f2"], ["f1", "f2"], ["f2", "f1"]]) {
+        const outcome = await expectLoopEquivalence(
+          context,
+          "live",
+          "NbhdFolder",
+          ids,
+          seedStalePageOfFromFolder,
+        );
+        expect(outcome.error).toBeUndefined();
+        const state = outcome.state as Readonly<{ edges: readonly string[] }>;
+        expect(state.edges.some((row) => row.includes("stale-page-of"))).toBe(
+          false,
+        );
+      }
+    });
+    // MUTATION CHECK: in `wholeCascadesToParts`, judge the row's pair
+    // (`countedCompositionRow`) before the whole-side check — the batch
+    // throws CompilerInvariantError where the loop deletes.
 
     it("refuses a late restrict id with the loop's first refusal and deletes nothing, top-level and caught inside a committed transaction", async () => {
       // l1 is connected (r3) and comes last: a batch that wrote as it judged

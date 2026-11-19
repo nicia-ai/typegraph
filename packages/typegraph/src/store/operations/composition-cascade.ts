@@ -195,6 +195,26 @@ export function requireCompositionPairVia(
   );
 }
 
+/**
+ * Whether `node` is the WHOLE endpoint of composition row `row`, by the
+ * orientation `row.kind` declares. THE whole-side predicate of the cascade's
+ * walk: a row passes it before anything else is asked of it — in particular
+ * before its endpoint pair is looked up ({@link countedCompositionRow}), so a
+ * stored row with `node` on its part side is never judged as a membership of
+ * `node`'s, however stale its pair.
+ */
+function isWholeEndpointOf(
+  registry: KindRegistry,
+  row: EdgeRow,
+  node: CascadeNode,
+): boolean {
+  const { whole } = compositionRowEndpoints(
+    requirePartSide(registry, row.kind),
+    row,
+  );
+  return whole.kind === node.kind && whole.id === node.id;
+}
+
 /** {@link readWholeSideEdges}'s result: the rows, and whether the set-read port answered. */
 type WholeSideEdgesResult = Readonly<{
   rows: readonly EdgeRow[];
@@ -272,13 +292,7 @@ async function readWholeSideEdges(
     for (const row of rowsPerNode[index] ?? []) {
       if (row.deleted_at !== undefined) continue;
       if (!edgeKindSet.has(row.kind)) continue;
-      const { whole: wholeEndpoint } = compositionRowEndpoints(
-        requirePartSide(ctx.registry, row.kind),
-        row,
-      );
-      if (wholeEndpoint.kind !== node.kind || wholeEndpoint.id !== node.id) {
-        continue;
-      }
+      if (!isWholeEndpointOf(ctx.registry, row, node)) continue;
       if (seenIds.has(row.id)) continue;
       seenIds.add(row.id);
       filtered.push(row);
@@ -498,13 +512,17 @@ export function wholeCascadesToParts(
   whole: CascadeNode,
   connectedEdges: readonly EdgeRow[],
 ): boolean {
+  if (!registry.isCompositionWhole(whole.kind)) return false;
   const edgeKinds = new Set(registry.compositionEdgeKindsUnder(whole.kind));
-  if (edgeKinds.size === 0) return false;
-  return connectedEdges.some((row) => {
-    if (row.deleted_at !== undefined || !edgeKinds.has(row.kind)) return false;
-    const counted = countedCompositionRow(registry, row);
-    return counted?.whole.kind === whole.kind && counted.whole.id === whole.id;
-  });
+  // The walk's own filters, in the walk's order: live, of a kind it follows,
+  // with `whole` on the whole side — and only then counted.
+  return connectedEdges.some(
+    (row) =>
+      row.deleted_at === undefined &&
+      edgeKinds.has(row.kind) &&
+      isWholeEndpointOf(registry, row, whole) &&
+      countedCompositionRow(registry, row) !== undefined,
+  );
 }
 
 /**
