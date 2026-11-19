@@ -8,8 +8,10 @@
  * runtime presence, so they are read from the TypeScript checker's view of
  * `src/index.ts`, which also classifies every name as value or type: a value
  * re-exported with `export type` would otherwise pass the runtime check by
- * omission.
+ * omission. The same view checks the move map: every name it moves to a
+ * subpath must be exported there, at the kind the map records.
  */
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import ts from "typescript";
@@ -143,7 +145,19 @@ function isTypeOnlyExportSpecifier(declaration: ts.Declaration): boolean {
   return declaration.isTypeOnly || declaration.parent.parent.isTypeOnly;
 }
 
-function readRootExportKinds(): ReadonlyMap<string, ExportKind> {
+type ExportMove = Readonly<{
+  symbol: string;
+  kind: ExportKind;
+  from: string;
+  to: string | null;
+}>;
+
+function readExportMoves(): readonly ExportMove[] {
+  const movesPath = path.join(PACKAGE_ROOT, "etc/root-export-moves.json");
+  return JSON.parse(readFileSync(movesPath, "utf8")) as readonly ExportMove[];
+}
+
+function readPackageConfig(): ts.ParsedCommandLine {
   const configPath = path.join(PACKAGE_ROOT, "tsconfig.json");
   const read = ts.readConfigFile(configPath, (file) => ts.sys.readFile(file));
   if (read.error !== undefined) {
@@ -151,23 +165,47 @@ function readRootExportKinds(): ReadonlyMap<string, ExportKind> {
       `Could not read ${configPath}: ${ts.flattenDiagnosticMessageText(read.error.messageText, " ")}`,
     );
   }
-  const parsed = ts.parseJsonConfigFileContent(
-    read.config,
-    ts.sys,
-    PACKAGE_ROOT,
-  );
+  return ts.parseJsonConfigFileContent(read.config, ts.sys, PACKAGE_ROOT);
+}
+
+/** The source file the package's TypeScript paths map `specifier` to. */
+function entryFileOf(config: ts.ParsedCommandLine, specifier: string): string {
+  const mapped = config.options.paths?.[specifier]?.[0];
+  if (mapped === undefined) {
+    throw new Error(`tsconfig.json maps no path for ${specifier}.`);
+  }
+  return path.resolve(PACKAGE_ROOT, mapped);
+}
+
+function readExportKinds(
+  entries: readonly string[],
+): ReadonlyMap<string, ReadonlyMap<string, ExportKind>> {
+  const config = readPackageConfig();
   const program = ts.createProgram({
-    rootNames: [ROOT_ENTRY],
-    options: { ...parsed.options, noEmit: true },
+    rootNames: entries,
+    options: { ...config.options, noEmit: true },
   });
   const checker = program.getTypeChecker();
-  const sourceFile = program.getSourceFile(ROOT_ENTRY);
+  return new Map(
+    entries.map((entry) => [
+      entry,
+      readModuleExportKinds(checker, program, entry),
+    ]),
+  );
+}
+
+function readModuleExportKinds(
+  checker: ts.TypeChecker,
+  program: ts.Program,
+  entry: string,
+): ReadonlyMap<string, ExportKind> {
+  const sourceFile = program.getSourceFile(entry);
   if (sourceFile === undefined) {
-    throw new Error(`The program does not contain ${ROOT_ENTRY}.`);
+    throw new Error(`The program does not contain ${entry}.`);
   }
   const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
   if (moduleSymbol === undefined) {
-    throw new Error(`${ROOT_ENTRY} is not a module.`);
+    throw new Error(`${entry} is not a module.`);
   }
 
   const kinds = new Map<string, ExportKind>();
@@ -182,6 +220,13 @@ function readRootExportKinds(): ReadonlyMap<string, ExportKind> {
     const isValue = !typeOnly && (target.flags & ts.SymbolFlags.Value) !== 0;
     kinds.set(exported.name, isValue ? "value" : "type");
   }
+  return kinds;
+}
+
+function readRootExportKinds(): ReadonlyMap<string, ExportKind> {
+  const kinds = readExportKinds([ROOT_ENTRY]).get(ROOT_ENTRY);
+  if (kinds === undefined)
+    throw new Error(`No exports read for ${ROOT_ENTRY}.`);
   return kinds;
 }
 
@@ -223,5 +268,28 @@ describe("package root export surface", () => {
       values: { unexpected: [], missing: [] },
       types: { unexpected: [], missing: [] },
     });
+  });
+});
+
+describe("root export move map", () => {
+  it("names a subpath that exports each moved name at its recorded kind", () => {
+    const config = readPackageConfig();
+    const moves = readExportMoves().filter(
+      (move): move is ExportMove & Readonly<{ to: string }> => move.to !== null,
+    );
+    const entries = [
+      ...new Set(moves.map((move) => entryFileOf(config, move.to))),
+    ];
+    const kindsByEntry = readExportKinds(entries);
+
+    const stale = moves
+      .filter(
+        (move) =>
+          kindsByEntry.get(entryFileOf(config, move.to))?.get(move.symbol) !==
+          move.kind,
+      )
+      .map((move) => `${move.symbol} (${move.kind}) -> ${move.to}`);
+
+    expect(stale).toEqual([]);
   });
 });

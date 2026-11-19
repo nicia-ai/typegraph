@@ -1503,7 +1503,7 @@
     "symbol": "FlexibleQueryFragment",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/query"
+    "to": null
   },
   {
     "symbol": "ForwardedExpansionAxes",
