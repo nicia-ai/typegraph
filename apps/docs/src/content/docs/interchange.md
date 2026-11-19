@@ -516,9 +516,19 @@ validation on. `batchSize` and `idleTimeoutMs` are `exportGraphStream` options;
 An import applies its edge rows in one order, the same at every `batchSize`:
 every row whose id names an existing edge is applied first — skipped,
 refused or updated, per `onConflict` — then every composition move the
-document states (see below), then every new edge is created. Within each
-phase rows apply in document order, and a later row repeating an id applies
-after the row it repeats, so it observes that row's outcome.
+document states (see below), then every new edge is created, and last every
+row repeating an id this import creates. Within each phase rows apply in
+document order, and a later row repeating an id applies after the row it
+repeats, so it observes that row's outcome.
+
+One kind of create waits for that last phase: a create of a composition row
+whose part an earlier row of the document, repeating an id this import
+creates, also writes a composition row for. A part's composition rows share
+one slot, so such a create applies with the repeats, in document order. A
+document that attaches a part, ends that attachment by repeating its id, and
+then attaches the part elsewhere therefore commits all three rows, as the
+source wrote them, instead of refusing the last one against an attachment the
+repeat has not ended yet. Every other create keeps its phase.
 
 The order matters because rows depend on each other. An update that ends a
 `oneActive` window frees the slot a create in the same document takes, so the
@@ -530,7 +540,8 @@ document therefore commits the same rows at `batchSize: 1` and
 
 `result.errors` lists refusals in that phase order rather than document order:
 validation refusals first, then refusals of existing rows, then of moves, then
-of creates. Within the create phase the order also depends on `batchSize`:
+of creates, then of repeats of created ids together with the creates that wait
+for them, in document order. Within the create phase the order also depends on `batchSize`:
 each slice reports the refusals of the rows it writes as a batch before those
 of the rows it must write one at a time (rows checked for cycles), so at
 `batchSize: 1` create refusals follow document order and at larger sizes they

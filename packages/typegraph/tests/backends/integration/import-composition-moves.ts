@@ -1377,8 +1377,10 @@ export function registerImportCompositionMoveIntegrationTests(
       });
 
       it("keeps an attachment the document creates when the row moving it on is refused", async () => {
-        // The repeat that ends the created row is applied after every create,
-        // so the move's attach is refused against the still-open row first.
+        // The row moving the part on precedes, in the document, the repeat
+        // that ends the created row, so it is applied while that row is
+        // still open and refused; the end is then refused rather than
+        // written alone.
         const outcome = await importByEveryRoute(
           context,
           "optional",
@@ -1394,7 +1396,6 @@ export function registerImportCompositionMoveIntegrationTests(
             );
             return [
               attached,
-              { ...attached, validTo: MOVED_AT },
               compositionRow(
                 "icmPartOf",
                 "icm-second",
@@ -1402,6 +1403,7 @@ export function registerImportCompositionMoveIntegrationTests(
                 { kind: "IcmWhole", id: seeded.newWholeId },
                 { validFrom: MOVED_AT },
               ),
+              { ...attached, validTo: MOVED_AT },
             ];
           },
         );
@@ -1638,6 +1640,167 @@ export function registerImportCompositionMoveIntegrationTests(
             ],
             fenceViolations: 0,
           });
+        });
+      });
+    });
+
+    describe("rows touching one part's slot apply in document order", () => {
+      // A repeat of an id the document creates applies after the row it
+      // repeats; a create of the same part later in the document waits for
+      // it, so a repeat ending the part's attachment frees the slot first.
+      it("ends an attachment the document creates by a repeat, then attaches the part elsewhere", async () => {
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const attached = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              { kind: "IcmWhole", id: seeded.oldWholeId },
+              { validFrom: ATTACHED_AT },
+            );
+            return [
+              attached,
+              { ...attached, validTo: MOVED_AT },
+              compositionRow(
+                "icmPartOf",
+                "icm-second",
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: MOVED_AT,
+            },
+            {
+              id: "icm-second",
+              whole: "new",
+              validFrom: MOVED_AT,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 2, updated: 1, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        });
+      });
+
+      it("applies a chain of such moves in document order", async () => {
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const oldWhole = { kind: "IcmWhole", id: seeded.oldWholeId };
+            const newWhole = { kind: "IcmWhole", id: seeded.newWholeId };
+            const first = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              oldWhole,
+              { validFrom: ATTACHED_AT },
+            );
+            const second = compositionRow(
+              "icmPartOf",
+              "icm-second",
+              part,
+              newWhole,
+              { validFrom: MOVED_AT },
+            );
+            return [
+              first,
+              { ...first, validTo: MOVED_AT },
+              second,
+              { ...second, validTo: LATER },
+              compositionRow("icmPartOf", "icm-third", part, oldWhole, {
+                validFrom: LATER,
+              }),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: MOVED_AT,
+            },
+            {
+              id: "icm-second",
+              whole: "new",
+              validFrom: MOVED_AT,
+              validTo: LATER,
+            },
+            {
+              id: "icm-third",
+              whole: "old",
+              validFrom: LATER,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 3, updated: 2, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        });
+      });
+
+      it("still refuses a later create when the repeat before it does not free the slot", async () => {
+        // The repeat restates the open attachment's props; the part still
+        // holds it when the later create is applied.
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const attached = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              { kind: "IcmWhole", id: seeded.oldWholeId },
+              { validFrom: ATTACHED_AT },
+            );
+            return [
+              attached,
+              { ...attached, properties: { note: "restated" } },
+              compositionRow(
+                "icmPartOf",
+                "icm-second",
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 1, updated: 1, skipped: 0 },
+          errors: [{ id: "icm-second", code: "COMPOSITION_WHOLE_OCCUPIED" }],
+          fenceViolations: 0,
         });
       });
     });

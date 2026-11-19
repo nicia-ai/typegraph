@@ -3441,7 +3441,19 @@ async function processEdges(
     ...unpaired.filter((row) => row.existing !== undefined),
     ...classified.repeatsOfExisting,
   ].toSorted((left, right) => left.index - right.index);
-  const creates = unpaired.filter((row) => row.existing === undefined);
+  const allCreates = unpaired.filter((row) => row.existing === undefined);
+  const slotOrdered = createsAfterSlotRepeat(
+    registry,
+    allCreates,
+    classified.repeatsOfCreated,
+  );
+  const creates = allCreates.filter((row) => !slotOrdered.has(row.index));
+  // The repeats of created ids, and the creates that wait for one of them, in
+  // document order.
+  const lastRows: readonly (ClassifiedEdgeRow | DocumentEdgeRow)[] = [
+    ...classified.repeatsOfCreated,
+    ...allCreates.filter((row) => slotOrdered.has(row.index)),
+  ].toSorted((left, right) => left.index - right.index);
 
   // The rows ending a part's attachment that this import refuses because no
   // row attaching the part again is applied, by document position. What the
@@ -3553,7 +3565,20 @@ async function processEdges(
         pendingMatchIdentityOwners,
       );
     }
-    for (const repeat of classified.repeatsOfCreated) {
+    for (const repeat of lastRows) {
+      if ("registration" in repeat) {
+        // A create waiting for a repeat that touches its part's slot, written
+        // through the same slice path as every other create.
+        await createEdgeSlice(
+          frame,
+          graphId,
+          registry,
+          [repeat],
+          record,
+          pendingMatchIdentityOwners,
+        );
+        continue;
+      }
       const refusal = strandedEnds.get(repeat.index);
       apply(
         refusal === undefined ?
@@ -4428,6 +4453,50 @@ function compositionMoveRows(
   return [move.end, move.attach].toSorted(
     (left, right) => left.index - right.index,
   );
+}
+
+/**
+ * The document positions of the creates that must be written after a repeat
+ * of an id this import creates: a create of a composition row whose part a
+ * repeat EARLIER in the document also writes a composition row for. A part's
+ * composition rows share one slot, and a repeat applies after every create
+ * (it must observe the row it repeats), so without this a create later in the
+ * document than a repeat ending the part's attachment would be judged against
+ * the still-open attachment. Such a create is applied with the repeats, in
+ * document order, so the rows that touch one part's slot apply in the order
+ * the document states them. Every other create keeps its phase.
+ *
+ * Decided over the whole payload, so it is the same at every `batchSize`.
+ */
+function createsAfterSlotRepeat(
+  registry: KindRegistry,
+  creates: readonly ClassifiedEdgeRow[],
+  repeatsOfCreated: readonly DocumentEdgeRow[],
+): ReadonlySet<number> {
+  const partKeyOf = (edge: InterchangeEdge): string | undefined => {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) return undefined;
+    const { part } = orientCompositionEndpoints(partSide, edge.from, edge.to);
+    return makeNodeKey(part.kind, part.id);
+  };
+  const firstRepeatByPart = new Map<string, number>();
+  for (const repeat of repeatsOfCreated) {
+    const partKey = partKeyOf(repeat.edge);
+    if (partKey === undefined) continue;
+    const first = firstRepeatByPart.get(partKey);
+    if (first === undefined || repeat.index < first) {
+      firstRepeatByPart.set(partKey, repeat.index);
+    }
+  }
+  const ordered = new Set<number>();
+  if (firstRepeatByPart.size === 0) return ordered;
+  for (const row of creates) {
+    const partKey = partKeyOf(row.edge);
+    if (partKey === undefined) continue;
+    const first = firstRepeatByPart.get(partKey);
+    if (first !== undefined && first < row.index) ordered.add(row.index);
+  }
+  return ordered;
 }
 
 /**

@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+`importGraph` and `importGraphStream` now accept a document that attaches a composition part, ends that attachment with a later row repeating its id, and then attaches the part elsewhere, such as `[l1 part→w1 from T0, l1 again with validTo T1, l2 part→w2 from T1]`. Repeats of an id the import creates apply after every create, so the last row was judged while `l1` was still open and refused at every `batchSize` (`already has a whole`). A create of a composition row whose part an earlier repeat of a created id also writes a composition row for now waits for that repeat and applies with the repeats, in document order, so the rows that touch one part's slot apply in the order the document states them. The outcome is the same at every `batchSize` and through `importGraphStream` for a document in one chunk. Every other create keeps its phase. In `result.errors`, refusals of such a create now follow those of the other creates, among the repeats' refusals in document order; the documented phase order of `result.errors` says so.
