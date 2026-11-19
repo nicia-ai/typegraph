@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
@@ -25,10 +26,19 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
+import { nextParkedSessionUnit } from "../../../src/backend/session-exclusivity";
 import {
   type HardDeleteEdgeParams,
   type TransactionBackend,
 } from "../../../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { MergePlanCapabilityError, unwrap } from "../../../src/graph-merge";
+import { branch } from "../../../src/graph-merge/branch";
+import {
+  applyMergePlanInTransaction,
+  planMerge,
+} from "../../../src/graph-merge/merge";
+import { asBranchId } from "../../../src/graph-merge/types";
 import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
 import { transactionBackend } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
@@ -113,6 +123,23 @@ function pausingHardDelete(
   };
 }
 
+/**
+ * Resolves once the overlapping call is provably parked in the session's turn
+ * order (`parked`), or once it has settled without parking — the defect the
+ * cases guard. Releasing the failing scope only after this point means a
+ * sibling that did not wait has already issued its writes inside the scope.
+ */
+function parkedOrSettled(
+  parked: Promise<void>,
+  call: Promise<unknown>,
+): Promise<void> {
+  return Promise.race([parked, call.then(ignore, ignore)]);
+}
+
+function ignore(): void {
+  return;
+}
+
 async function seed(context: IntegrationTestContext) {
   const graph = buildGraph(nextGraphId());
   const store = await context.createStore(graph);
@@ -159,13 +186,12 @@ export function registerSavepointOverlapIntegrationTests(
         );
         // Start B only once A's delete has landed and A is still open.
         await Promise.race([pausing.deleted, callA]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
         const callB = tx.edges.spoFollows.bulkHardDelete(["b1"] as never);
-        // B may wait for A's savepoint scope; give it the chance to finish
-        // first if it does not, then fail A.
-        await Promise.race([
-          callB,
-          new Promise((resolve) => setTimeout(resolve, 500)),
-        ]);
+        const parkedB = parkedOrSettled(parked, callB);
+        // Fail A only once B is provably parked behind A's scope, or has
+        // finished without waiting (the defect this case guards).
+        await parkedB;
         pausing.release();
         const [errorA] = await Promise.all([callA, callB]);
         return errorA;
@@ -194,14 +220,13 @@ export function registerSavepointOverlapIntegrationTests(
           (error: unknown) => error,
         );
         await Promise.race([pausing.deleted, callA]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
         const callB = tx.nodes.SpoPerson.create(
           { name: "late" },
           { id: "late" },
         );
-        await Promise.race([
-          callB,
-          new Promise((resolve) => setTimeout(resolve, 500)),
-        ]);
+        const parkedB = parkedOrSettled(parked, callB);
+        await parkedB;
         pausing.release();
         const [errorA] = await Promise.all([callA, callB]);
         return errorA;
@@ -246,14 +271,13 @@ export function registerSavepointOverlapIntegrationTests(
           },
         );
         await Promise.race([opened.promise, scope]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
         const sibling = tx.nodes.SpoPerson.create(
           { name: "out" },
           { id: "out" },
         );
-        await Promise.race([
-          sibling,
-          new Promise((resolve) => setTimeout(resolve, 500)),
-        ]);
+        const parkedSibling = parkedOrSettled(parked, sibling);
+        await parkedSibling;
         release.resolve();
         const [value] = await Promise.all([scope, sibling]);
         return value;
@@ -315,5 +339,354 @@ export function registerSavepointOverlapIntegrationTests(
     // session's top-level turn order, ignoring the holder it runs inside —
     // the nested calls wait for the scope that awaits them, and the race
     // resolves to the timeout.
+
+    it("keeps an earlier unit's recorded history when a savepoint queued behind it rolls back", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createHistoryStore(graph);
+      const verdict = statementExecutionVerdict(context.getBackend());
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const gate = deferred();
+
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        // The earlier unit holds the session and writes only after the
+        // later scope has been called.
+        const earlier = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_earlier_unit",
+          async () => {
+            await gate.promise;
+            await tx.nodes.SpoPerson.create({ name: "kept" }, { id: "kept" });
+            return { action: "release", value: undefined } as const;
+          },
+        );
+        const later = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_later_scope",
+          () =>
+            Promise.resolve({
+              action: "rollback",
+              value: undefined,
+              cause: new InjectedOverlapFailure(),
+            } as const),
+        );
+        gate.resolve();
+        await Promise.all([earlier, later]);
+      });
+
+      expect(
+        await store.backend.getNode(store.graphId, "SpoPerson", "kept"),
+      ).toBeDefined();
+      // The committed create allocated a recorded revision: the later scope's
+      // rollback did not restore a capture checkpoint taken before it.
+      expect(receipt.recorded).toBeDefined();
+    });
+    // MUTATION CHECK: take the capture and graph-lock checkpoint in
+    // `runRecordedTransactionSavepoint` before `withSavepointState` instead of
+    // inside it — the rollback restores the empty capture taken before the
+    // earlier unit wrote, and the transaction records no revision.
+
+    it("queues a heterogeneous upsert batch behind an open savepoint scope", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createHistoryStore(graph);
+      const verdict = statementExecutionVerdict(context.getBackend());
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const opened = deferred();
+      const release = deferred();
+
+      const outcome = await store.transaction(async (tx) => {
+        if (transactionBackend(tx).upsertHeterogeneousNodes === undefined) {
+          // A declared gap of this lane: the batch is refused outright.
+          return tx
+            .writeNodeUpsertBatch([
+              { kind: "SpoPerson", id: "u" as never, props: { name: "u" } },
+            ])
+            .then(
+              () => "accepted" as const,
+              (error: unknown) => error,
+            );
+        }
+        const scope = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_upsert_overlap_scope",
+          async () => {
+            opened.resolve();
+            await release.promise;
+            return {
+              action: "rollback",
+              value: "rolled-back",
+              cause: new InjectedOverlapFailure(),
+            } as const;
+          },
+        );
+        await Promise.race([opened.promise, scope]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
+        const batch = tx.writeNodeUpsertBatch([
+          { kind: "SpoPerson", id: "upserted" as never, props: { name: "u" } },
+        ]);
+        await parkedOrSettled(parked, batch);
+        release.resolve();
+        const [value] = await Promise.all([scope, batch]);
+        return value;
+      });
+
+      const supported = outcome === "rolled-back";
+      expect(
+        supported ? outcome : (
+          outcome instanceof UnsupportedBackendCapabilityError
+        ),
+      ).toBe(supported ? "rolled-back" : true);
+      const upserted = await store.backend.getNode(
+        store.graphId,
+        "SpoPerson",
+        "upserted",
+      );
+      expect(upserted !== undefined).toBe(supported);
+    });
+    // MUTATION CHECK: build `tx.writeNodeUpsertBatch` without
+    // `withSessionTurn` — the batch writes inside the open scope and the
+    // scope's rollback removes the node it reported.
+
+    it("decides an edge delete only once its turn comes", async () => {
+      const { graph, store } = await seed(context);
+      const pausing = pausingHardDelete(store.backend, "a1");
+      const pausingStore = createStore(graph, pausing.backend);
+
+      const outcome = await pausingStore.transaction(async (tx) => {
+        const callA = tx.edges.spoFollows.bulkHardDelete(["a1"] as never).then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+        await Promise.race([pausing.deleted, callA]);
+        // A has removed a1 inside its scope; B's lookup must not see that.
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
+        const callB = tx.edges.spoFollows.delete("a1" as never);
+        await parkedOrSettled(parked, callB);
+        pausing.release();
+        const [errorA] = await Promise.all([callA, callB]);
+        return errorA;
+      });
+
+      expect(outcome).toBeInstanceOf(InjectedOverlapFailure);
+      // A rolled back, so a1 is back; B's delete then tombstoned it.
+      const a1 = await store.backend.getEdge(store.graphId, "a1");
+      expect(a1).toBeDefined();
+      expect(a1?.deleted_at).toBeDefined();
+    });
+    // MUTATION CHECK: create collections without the per-call
+    // `withSessionTurn` wrapper — `delete` looks the edge up while A's
+    // scope has it removed, returns without writing, and A's rollback leaves
+    // the edge live.
+
+    it("takes a continuation that outlived its holder through the turn order that is live", async () => {
+      const { graph, store } = await seed(context);
+      const pausing = pausingHardDelete(store.backend, "a1");
+      const pausingStore = createStore(graph, pausing.backend);
+      const verdict = statementExecutionVerdict(store.backend);
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const resume = deferred();
+
+      const outcome = await pausingStore.transaction(async (tx) => {
+        let continuation: Promise<unknown> | undefined;
+        await runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_finished_holder",
+          () => {
+            // Scheduled inside this holder, run after it has finished.
+            continuation = resume.promise.then(() =>
+              tx.nodes.SpoPerson.create({ name: "c" }, { id: "continued" }),
+            );
+            return Promise.resolve({
+              action: "release",
+              value: undefined,
+            } as const);
+          },
+        );
+        const callA = tx.edges.spoFollows.bulkHardDelete(["a1"] as never).then(
+          () => "resolved" as const,
+          (error: unknown) => error,
+        );
+        await Promise.race([pausing.deleted, callA]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
+        resume.resolve();
+        await resume.promise;
+        const created = requireDefined(continuation);
+        await parkedOrSettled(parked, created);
+        pausing.release();
+        const [errorA] = await Promise.all([callA, created]);
+        return errorA;
+      });
+
+      expect(outcome).toBeInstanceOf(InjectedOverlapFailure);
+      expect(await store.backend.getEdge(store.graphId, "a1")).toBeDefined();
+      expect(
+        await store.backend.getNode(store.graphId, "SpoPerson", "continued"),
+      ).toBeDefined();
+    });
+    // MUTATION CHECK: let `liveHolder` return the innermost holder whether or
+    // not it has been released — the continuation queues in the finished
+    // holder's empty order, creates inside A's scope, and A's rollback
+    // removes the node after the create resolved.
+
+    it("refuses an adopted merge apply when a unit ahead of it writes the target first", async () => {
+      const graph = buildGraph(nextGraphId());
+      const target = await context.createStore(graph, {
+        revisionTracking: true,
+      });
+      await target.nodes.SpoPerson.create({ name: "orig" }, { id: "m1" });
+      const source = unwrap(
+        await branch(target, () => context.createIsolatedBackend(), {
+          id: asBranchId("overlap-branch"),
+        }),
+      );
+      await source.store.nodes.SpoPerson.update("m1" as never, {
+        name: "branch",
+      });
+      const plan = unwrap(await planMerge(target, [source]));
+      const verdict = statementExecutionVerdict(context.getBackend());
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const gate = deferred();
+
+      const refusal = await target.transaction(async (tx) => {
+        const earlier = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_earlier_writer",
+          async () => {
+            await gate.promise;
+            await tx.nodes.SpoPerson.update("m1" as never, { name: "tx" });
+            return { action: "release", value: undefined } as const;
+          },
+        );
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
+        const apply = applyMergePlanInTransaction(target, tx, plan).then(
+          () => "applied" as const,
+          (error: unknown) => error,
+        );
+        await parkedOrSettled(parked, apply);
+        gate.resolve();
+        const [, applied] = await Promise.all([earlier, apply]);
+        return applied;
+      });
+
+      // The earlier update is pending when the apply's turn comes, so the
+      // apply refuses instead of overwriting it.
+      expect(refusal).toBeInstanceOf(MergePlanCapabilityError);
+      const m1 = await target.nodes.SpoPerson.getById("m1" as never);
+      expect(m1?.name).toBe("tx");
+    });
+    // MUTATION CHECK: run `assertMergeTransactionPristine` before
+    // `applyMergePlanInTransaction` takes its turn — the check passes while
+    // the earlier unit has yet to write, and the apply then overwrites "tx".
+
+    it("shares one turn order between two bindings of one native transaction", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      const verdict = statementExecutionVerdict(context.getBackend());
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const opened = deferred();
+      const release = deferred();
+
+      const outcome = await store.transaction(async (tx) => {
+        if (tx.sqlAvailability !== "available") {
+          throw new Error("Lane does not expose tx.sql.");
+        }
+        const adopted = store.withTransaction(tx.sql);
+        const scope = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_original_binding_scope",
+          async () => {
+            opened.resolve();
+            await release.promise;
+            return {
+              action: "rollback",
+              value: "rolled-back",
+              cause: new InjectedOverlapFailure(),
+            } as const;
+          },
+        );
+        await Promise.race([opened.promise, scope]);
+        const parked = nextParkedSessionUnit(transactionBackend(tx));
+        const sibling = adopted.nodes.SpoPerson.create(
+          { name: "adopted" },
+          { id: "adopted" },
+        );
+        await parkedOrSettled(parked, sibling);
+        release.resolve();
+        const [value] = await Promise.all([scope, sibling]);
+        return value;
+      });
+
+      expect(outcome).toBe("rolled-back");
+      expect(
+        await context
+          .getBackend()
+          .getNode(store.graphId, "SpoPerson", "adopted"),
+      ).toBeDefined();
+    });
+    // MUTATION CHECK: key `transactionSessionOf` by the derivation root only,
+    // ignoring the registered native transaction — the adopted binding gets
+    // a turn order of its own, creates inside the scope, and the scope's
+    // rollback removes the node it reported.
+
+    it("refuses a recorded-revision request while an overlapping call holds the session", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createHistoryStore(graph);
+      const verdict = statementExecutionVerdict(context.getBackend());
+      if (!verdict.supported)
+        throw new Error("Lane lacks statement execution.");
+      const opened = deferred();
+      const release = deferred();
+
+      const { receipt } = await store.transactionWithReceipt(async (tx) => {
+        const scope = runRecordedTransactionSavepoint(
+          transactionBackend(tx),
+          verdict,
+          "test_request_overlap_scope",
+          async () => {
+            opened.resolve();
+            await release.promise;
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new InjectedOverlapFailure(),
+            } as const;
+          },
+        );
+        await Promise.race([opened.promise, scope]);
+        // The scope's rollback would restore a checkpoint taken before this
+        // request and drop it, so the request is refused, not accepted.
+        expect(() => {
+          tx.requestRecordedRevision();
+        }).toThrow(
+          expect.objectContaining({
+            details: expect.objectContaining({
+              code: "RECORDED_REVISION_REQUEST_OVERLAPS_CALL",
+            }) as unknown,
+          }) as unknown,
+        );
+        release.resolve();
+        await scope;
+        // With no call in progress, the request is honored.
+        tx.requestRecordedRevision();
+      });
+
+      expect(receipt.recorded).toBeDefined();
+    });
+    // MUTATION CHECK: drop the `isSessionHeldByAnotherUnit` refusal from
+    // `tx.requestRecordedRevision()` — the request during the open scope is
+    // accepted instead of refused.
   });
 }
