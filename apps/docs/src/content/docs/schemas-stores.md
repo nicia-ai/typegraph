@@ -1937,7 +1937,10 @@ operation hooks.
 On its own the call is one write transaction. Inside `store.transaction()` it
 runs in the caller's transaction, and its deletes and claim releases sit behind
 a savepoint: if one of them fails and the callback catches the error, the
-commit keeps none of the call's writes. On a raw store over a driver without
+commit keeps none of the call's writes, and keeps the writes of any call that
+overlapped it, which waits for the savepoint (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+On a raw store over a driver without
 interactive transactions (Cloudflare D1, `drizzle-orm/neon-http`) the chunks
 run as separate statements, so a failure in a later chunk leaves the earlier
 chunks deleted; a schema-managed store on those drivers refuses the call before
@@ -2170,6 +2173,29 @@ await store.transaction(async (tx) => {
   await tx.edges.worksAt.create(person, company, { role: "Engineer" });
 });
 ```
+
+#### Overlapping calls in one transaction
+
+Calls on `tx` may overlap, for example under `Promise.all`; the transaction's
+connection still runs one statement at a time. Some calls guard their own
+writes with a TypeGraph savepoint inside your transaction, so that a failure
+you catch leaves none of that call's writes behind — `bulkHardDelete` and
+`applyMergePlanInTransaction` among them. A savepoint's rollback undoes every
+statement issued on the connection since it was taken, whoever issued it. So
+writes through `tx` take turns: each write call, and each savepoint, has the
+transaction to itself while it runs, and an overlapping write call waits for
+it to finish before it starts. A call made from inside the guarded work (such
+as a write a merge apply makes) is part of that work and does not wait. As a
+result, when one of two overlapping calls fails and you catch the error and
+commit, the other call's writes are kept exactly when it reported success.
+
+A read through `tx` may run while a savepoint is open and observe writes that
+the guarded call's failure later rolls back. Writes take no turns on a backend
+without transaction-scoped statement execution, which takes no savepoints, or
+on a runtime without `AsyncLocalStorage` (`node:async_hooks`; on Cloudflare
+Workers, the `nodejs_als` compatibility flag), where a nested call cannot be
+told apart from an overlapping one. On such a runtime, await a
+savepoint-guarded call before starting another write in the same transaction.
 
 #### Return values
 
