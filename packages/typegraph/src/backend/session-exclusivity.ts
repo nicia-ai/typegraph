@@ -28,7 +28,9 @@ import { createAsyncContextLoader } from "./async-context";
 import { backendDerivationRoot } from "./derive-backend";
 
 /** One holder's FIFO turn order for the units nested directly inside it. */
-interface TurnOrder { tail: Promise<void> }
+interface TurnOrder {
+  tail: Promise<void>;
+}
 
 /** The innermost holder, per session, of the current async execution. */
 type HeldSessions = ReadonlyMap<object, TurnOrder>;
