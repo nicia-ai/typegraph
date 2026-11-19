@@ -5451,9 +5451,10 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
-    async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
+    async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<boolean> {
       const query = operationStrategy.buildHardDeleteEdge(params);
-      await execution.execRun(query);
+      const removed = await execution.execAll<{ id: string }>(query);
+      return removed.length > 0;
     },
 
     async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
@@ -5478,8 +5479,11 @@ export function createCommonOperationBackend(
       }
     },
 
-    async hardDeleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
-      if (params.ids.length === 0) return;
+    async hardDeleteEdgesBatch(
+      params: DeleteEdgesBatchParams,
+    ): Promise<readonly string[]> {
+      if (params.ids.length === 0) return [];
+      const removedIds: string[] = [];
       const hardDeleteChunkSize = Math.max(
         1,
         batchConfig.getEdgesChunkSize - (params.kind === undefined ? 0 : 1),
@@ -5490,8 +5494,10 @@ export function createCommonOperationBackend(
           ids: chunk,
           ...(params.kind === undefined ? {} : { kind: params.kind }),
         });
-        await execution.execRun(query);
+        const removed = await execution.execAll<{ id: string }>(query);
+        for (const row of removed) removedIds.push(row.id);
       }
+      return removedIds;
     },
 
     async countEdgesAtEndpoint(

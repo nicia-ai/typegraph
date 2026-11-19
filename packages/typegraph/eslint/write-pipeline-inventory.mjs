@@ -168,7 +168,8 @@ export const WRITE_PIPELINE_INTERNAL_IMPORT_NAMES = [
   "applyEdgeSoftDelete",
   "applyEdgeHardDelete",
   "applyEdgeHardDeleteBatch",
-  "deleteEdgeRows",
+  "softDeleteEdgeRows",
+  "hardDeleteEdgeRows",
 ];
 
 export function writePipelineImportRestrictions(importNames) {
@@ -219,7 +220,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "deleteNode",
       "hardDeleteNode",
     ],
-    allowedImports: ["deleteEdgeRows"],
+    allowedImports: ["softDeleteEdgeRows", "hardDeleteEdgeRows"],
   },
   {
     path: "src/store/insert-dispatch.ts",
@@ -402,6 +403,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "deleteEdge",
       "deleteEdgesBatch",
       "hardDeleteEdge",
+      "hardDeleteEdgesBatch",
     ],
   },
   {

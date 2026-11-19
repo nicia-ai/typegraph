@@ -279,10 +279,10 @@ function withoutHardDeleteBatch(
   ): Omit<T, "hardDeleteEdgesBatch"> {
     const stripped = projectBackendWithout(target, ["hardDeleteEdgesBatch"]);
     return deriveBackend(stripped, {
-      async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
+      async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<boolean> {
         calls += 1;
         if (calls === failOnCall) throw new InjectedHardDeleteFailure();
-        await target.hardDeleteEdge(params);
+        return target.hardDeleteEdge(params);
       },
     } as never);
   }

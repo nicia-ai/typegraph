@@ -85,7 +85,7 @@ import {
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeDeletePlan } from "../types";
-import { deleteEdgeRows } from "./edge-write-pipeline";
+import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -384,8 +384,9 @@ export async function judgeNodeDeleteBehavior(
 
 /**
  * Deletes a set of edges by id, in the given mode, through
- * {@link deleteEdgeRows} (one batched statement per bind-budget chunk, stating
- * no kind), and releases the claims of hard-deleted ones.
+ * {@link softDeleteEdgeRows} / {@link hardDeleteEdgeRows} (one batched
+ * statement per bind-budget chunk, stating no kind), and releases the claims
+ * of the rows a hard delete removed.
  *
  * The one owner of "how does a node delete remove an edge" for both
  * {@link enforceNodeDeleteBehavior}'s cascade/disconnect arm (unconsumed
@@ -400,14 +401,17 @@ export async function deleteEdgesById(
   mode: NodeDeleteMode,
   edgeIds: readonly string[],
 ): Promise<void> {
-  await deleteEdgeRows(ctx.graphId, backend, mode, edgeIds);
-  // Hard-deleted holders are already takeable through the liveness probe;
-  // this is housekeeping so node cascades do not grow edgeClaims forever.
   // Soft-deleted edges retain their rows for resurrection and are not
   // reaped here.
-  if (mode === "hard") {
-    await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, edgeIds);
+  if (mode === "soft") {
+    await softDeleteEdgeRows(ctx.graphId, backend, edgeIds);
+    return;
   }
+  const removedIds = await hardDeleteEdgeRows(ctx.graphId, backend, edgeIds);
+  // Hard-deleted holders are already takeable through the liveness probe;
+  // this is housekeeping so node cascades do not grow edgeClaims forever.
+  // Keyed by the rows the delete removed, as every edge hard delete is.
+  await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, removedIds);
 }
 
 /** One inserted row, as the post-insert sync fans read it. */

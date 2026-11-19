@@ -1375,8 +1375,8 @@ export function buildAtomicEdgeDeleteBatchWithSchemaFence(
 
 /**
  * Builds one hard DELETE covering a batch of edge ids. Matches
- * {@link buildHardDeleteEdge} semantics per row; the caller chunks ids to
- * the bind budget.
+ * {@link buildHardDeleteEdge} semantics per row, returning the id of every
+ * row it removed; the caller chunks ids to the bind budget.
  */
 export function buildHardDeleteEdgesBatch(
   tables: Tables,
@@ -1391,11 +1391,13 @@ export function buildHardDeleteEdgesBatch(
         params.ids.map((id) => sql`${id}`),
         sql`, `,
       )})${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
+    RETURNING ${edges.id}
   `;
 }
 
 /**
- * Builds a hard DELETE query for an edge (permanent removal).
+ * Builds a hard DELETE query for an edge (permanent removal), returning the
+ * removed row's id — no row when the statement matched none.
  */
 export function buildHardDeleteEdge(
   tables: Tables,
@@ -1407,6 +1409,7 @@ export function buildHardDeleteEdge(
     DELETE FROM ${edges}
     WHERE ${edges.graphId} = ${params.graphId}
       AND ${edges.id} = ${params.id}${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
+    RETURNING ${edges.id}
   `;
 }
 

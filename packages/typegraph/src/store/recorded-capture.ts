@@ -1374,7 +1374,7 @@ export function createRecordedBackend(
     },
 
     async hardDeleteEdge(params) {
-      await capture((target) => target.hardDeleteEdge(params));
+      return capture((target) => target.hardDeleteEdge(params));
     },
 
     ...(backend.deleteEdgesBatch === undefined ?
@@ -1392,8 +1392,8 @@ export function createRecordedBackend(
     : {
         async hardDeleteEdgesBatch(
           params: DeleteEdgesBatchParams,
-        ): Promise<void> {
-          await capture((target) =>
+        ): Promise<readonly string[]> {
+          return capture((target) =>
             requireDefined(target.hardDeleteEdgesBatch)(params),
           );
         },

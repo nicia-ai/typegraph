@@ -486,8 +486,9 @@ export function buildRecordedWriteMembers(
 
     async hardDeleteEdge(params) {
       await hooks.beforeOne?.(params.graphId);
-      await target.hardDeleteEdge(params);
+      const removed = await target.hardDeleteEdge(params);
       sink.touchEdge(params.graphId, params.id);
+      return removed;
     },
 
     ...(target.deleteEdgesBatch === undefined ?
@@ -507,12 +508,15 @@ export function buildRecordedWriteMembers(
     : {
         async hardDeleteEdgesBatch(
           params: DeleteEdgesBatchParams,
-        ): Promise<void> {
+        ): Promise<readonly string[]> {
           await hooks.beforeOne?.(params.graphId);
-          await requireDefined(target.hardDeleteEdgesBatch)(params);
+          const removedIds = await requireDefined(target.hardDeleteEdgesBatch)(
+            params,
+          );
           for (const id of params.ids) {
             sink.touchEdge(params.graphId, id);
           }
+          return removedIds;
         },
       }),
   };

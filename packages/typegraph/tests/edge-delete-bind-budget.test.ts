@@ -222,6 +222,8 @@ describe("kind-scoped edge delete honors the D1 bind budget", () => {
   it("reserves and carries the asserted kind for soft and hard chunks", async () => {
     const dialect = new SQLiteSyncDialect();
     const run = vi.fn((_query: SQL) => Promise.resolve());
+    // The hard delete returns the ids it removed, so it runs through `all`.
+    const all = vi.fn((_query: SQL) => Promise.resolve([]));
     const db = {
       $client: {},
       session: { constructor: { name: "SQLiteD1Session" } },
@@ -230,7 +232,7 @@ describe("kind-scoped edge delete honors the D1 bind budget", () => {
           return dialect.sqlToQuery(query);
         },
       },
-      all: vi.fn(() => Promise.resolve([])),
+      all,
       get: vi.fn(() => Promise.resolve(undefined)),
       run,
     } as unknown as AnySqliteDatabase;
@@ -256,8 +258,9 @@ describe("kind-scoped edge delete honors the D1 bind budget", () => {
       kind: "knows",
     });
 
-    expect(run).toHaveBeenCalledTimes(4);
-    for (const [query] of run.mock.calls) {
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(all).toHaveBeenCalledTimes(2);
+    for (const [query] of [...run.mock.calls, ...all.mock.calls]) {
       const compiled = dialect.sqlToQuery(query);
       expect(compiled.params.length).toBeLessThanOrEqual(
         D1_MAX_BIND_PARAMETERS,
