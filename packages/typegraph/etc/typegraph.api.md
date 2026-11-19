@@ -1071,6 +1071,24 @@ type CompositionErrorDetails = Readonly<{
     incumbentValidFrom?: string;
     incumbentValidTo?: string;
 }> | Readonly<{
+    situation: "moveGap";
+    partKind: string;
+    partId: string;
+    endedEdgeKind: string;
+    endedEdgeId: string;
+    endedWholeKind: string;
+    endedWholeId: string;
+    endedValidFrom?: string;
+    endedValidTo: string;
+    edgeKind: string;
+    edgeId: string;
+    wholeKind: string;
+    wholeId: string;
+    validFrom: string;
+    validFromStated: boolean;
+    gapFrom: string;
+    gapTo: string;
+}> | Readonly<{
     situation: "existing";
     partKind: string;
     partId: string;
