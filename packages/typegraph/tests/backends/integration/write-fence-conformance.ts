@@ -138,6 +138,49 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 /**
+ * The point at which a holder transaction's lock is known to be held: its
+ * holder calls `markHeld()` right after the awaited lock statement returns,
+ * which the driver reports only once the server has granted the lock inside
+ * that still-open transaction.
+ *
+ * Every concurrency test below starts its contender only after this signal,
+ * never after a fixed interval. A fixed interval races the holder's own
+ * first statement — a cold connection's connect, authentication and (for
+ * postgres-js) type fetch all land inside it — and when the holder loses,
+ * the contender runs unopposed and the test reports a fence that "never
+ * blocked" when nothing was holding it yet.
+ */
+function createHeldSignal(): Readonly<{
+  held: Promise<void>;
+  markHeld: () => void;
+}> {
+  let markHeld: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    markHeld = resolve;
+  });
+  return { held, markHeld: requireDefined(markHeld) };
+}
+
+/**
+ * Waits for `held`, failing instead of hanging when `holder` settles first:
+ * a holder that throws before taking its lock surfaces that error, and one
+ * that commits without ever signalling is reported as such.
+ */
+async function waitUntilHeld(
+  held: Promise<void>,
+  holder: Promise<unknown>,
+): Promise<void> {
+  await Promise.race([
+    held,
+    holder.then(() => {
+      throw new Error(
+        "The holder transaction finished before signalling that its lock was held.",
+      );
+    }),
+  ]);
+}
+
+/**
  * Overrides a real `buildPostgresEngineProfile` result's declared write
  * fence through `deriveEngineProfile` — never a hand-copied profile
  * literal.
@@ -291,8 +334,8 @@ const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
 /**
  * Opens a transaction on `backend` that acquires the schema-commit fence row
  * for `graphId` — the SAME row `acquireSchemaWriteFence` and graph-template
- * instantiation's row branch acquire — and holds it open until `holdOpen`
- * resolves.
+ * instantiation's row branch acquire — calls `markHeld` once the acquisition
+ * statement has returned, and holds the row until `holdOpen` resolves.
  *
  * Neither `commitSchemaVersion` nor `instantiateGraphTemplate` exposes a
  * caller-controlled pause point mid-transaction the way a managed node/edge
@@ -306,6 +349,7 @@ async function holdSchemaCommitFenceRow(
   backend: AdapterBackend<unknown>,
   graphId: string,
   holdOpen: Promise<void>,
+  markHeld: () => void,
 ): Promise<void> {
   await backend.transaction(async (tx) => {
     const plan = resolveWriteFencePlan(tx);
@@ -319,6 +363,7 @@ async function holdSchemaCommitFenceRow(
         plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
       ),
     );
+    markHeld();
     await holdOpen;
   });
 }
@@ -682,6 +727,7 @@ export function registerWriteFenceConformanceIntegrationTests(
               releaseHolder = resolve;
             });
             let holderFinished = false;
+            const { held, markHeld } = createHeldSignal();
             const holderTransaction = backendA
               .transaction(async (tx) => {
                 // The override must reach the transaction handle the lock
@@ -696,17 +742,16 @@ export function registerWriteFenceConformanceIntegrationTests(
                       ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, ${JSON.stringify({ marker })}::jsonb, now(), now())
                   `),
                 );
+                markHeld();
                 await holdLockOpen;
               })
               .then(() => {
                 holderFinished = true;
               });
 
-            // No earlier signal than "the lock is actually held" is
-            // available from the driver, so this waits a fixed interval for
-            // connection A's advisory lock to land before connection B
-            // races it.
-            await delay(100);
+            // Connection B races only once connection A's advisory lock is
+            // held (see `createHeldSignal`).
+            await waitUntilHeld(held, holderTransaction);
 
             const readerTransaction = backendB.transaction(async (tx) => {
               await lockIdentityGraph(tx, graphId);
@@ -763,19 +808,20 @@ export function registerWriteFenceConformanceIntegrationTests(
             releaseHolder = resolve;
           });
           let holderFinished = false;
+          const { held, markHeld } = createHeldSignal();
           const holderTransaction = backendA
             .transaction(async (tx) => {
               await lockIdentityEnablementNodes(tx, schema);
+              markHeld();
               await holdLockOpen;
             })
             .then(() => {
               holderFinished = true;
             });
 
-          // No earlier signal than "the lock is actually held" is available
-          // from the driver, so this waits a fixed interval for connection
-          // A's `LOCK TABLE` to land before connection B races it.
-          await delay(100);
+          // Connection B races only once connection A's `LOCK TABLE` is held
+          // (see `createHeldSignal`).
+          await waitUntilHeld(held, holderTransaction);
 
           const writerTransaction = backendB.transaction((tx) =>
             tx.execute(
@@ -1014,6 +1060,7 @@ export function registerWriteFenceConformanceIntegrationTests(
               releaseHolder = resolve;
             });
             let holderFinished = false;
+            const { held, markHeld } = createHeldSignal();
             const holderTransaction = backendA
               .transaction(async (tx) => {
                 expect(resolveWriteFencePlan(tx)).toMatchObject({
@@ -1029,18 +1076,16 @@ export function registerWriteFenceConformanceIntegrationTests(
                       ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, ${JSON.stringify({ marker })}::jsonb, now(), now())
                   `),
                 );
+                markHeld();
                 await holdLockOpen;
               })
               .then(() => {
                 holderFinished = true;
               });
 
-            // No earlier signal than "the fence row is actually held" is
-            // available from the driver, so this waits a fixed interval for
-            // connection A's acquisition to land before connection B races
-            // it — the same convention the advisory-mechanism test above
-            // follows.
-            await delay(100);
+            // Connection B races only once connection A's fence row is held
+            // (see `createHeldSignal`).
+            await waitUntilHeld(held, holderTransaction);
 
             const readerTransaction = backendB.transaction(async (tx) => {
               await lockIdentityGraph(tx, graphId);
@@ -1145,23 +1190,24 @@ export function registerWriteFenceConformanceIntegrationTests(
               releaseHolder = resolve;
             });
             let holderFinished = false;
+            const { held, markHeld } = createHeldSignal();
             const holderTransaction = storeA
               .transaction(async (tx) => {
                 await tx.nodes.ConformancePerson.create(
                   { name: "holder" },
                   { id: holderNodeId },
                 );
+                markHeld();
                 await holdLockOpen;
               })
               .then(() => {
                 holderFinished = true;
               });
 
-            // No earlier signal than "the fence row is actually held" is
-            // available from the driver, so this waits a fixed interval for
-            // connection A's nested create to land before connection B
-            // races it.
-            await delay(100);
+            // Connection B races only once connection A's nested create —
+            // and with it the fence row it acquires — has landed (see
+            // `createHeldSignal`).
+            await waitUntilHeld(held, holderTransaction);
 
             const conflictingCreate = storeB.nodes.ConformancePerson.create(
               { name: "loser" },
@@ -1263,20 +1309,19 @@ export function registerWriteFenceConformanceIntegrationTests(
               releaseHolder = resolve;
             });
             let holderFinished = false;
+            const { held, markHeld } = createHeldSignal();
             const holderTransaction = holdSchemaCommitFenceRow(
               backendA,
               targetGraphId,
               holdLockOpen,
+              markHeld,
             ).then(() => {
               holderFinished = true;
             });
 
-            // No earlier signal than "the fence row is actually held" is
-            // available from the driver, so this waits a fixed interval for
-            // connection A's acquisition to land before connection B races
-            // it — the same convention every concurrency test in this file
-            // follows.
-            await delay(100);
+            // Connection B races only once connection A's fence row is held
+            // (see `createHeldSignal`).
+            await waitUntilHeld(held, holderTransaction);
 
             const conflictingInstantiate = instantiateGraphTemplate(backendB, {
               template,
@@ -1369,15 +1414,20 @@ export function registerWriteFenceConformanceIntegrationTests(
               releaseHolder = resolve;
             });
             let holderFinished = false;
+            const { held, markHeld } = createHeldSignal();
             const holderTransaction = holdSchemaCommitFenceRow(
               backendA,
               graph.id,
               holdLockOpen,
+              markHeld,
             ).then(() => {
               holderFinished = true;
             });
 
-            await delay(100);
+            // Connection A's very first statement is this acquisition, so a
+            // fixed wait here would race A's cold connect: B races only once
+            // the fence row is held (see `createHeldSignal`).
+            await waitUntilHeld(held, holderTransaction);
 
             const conflictingCommit = createAdapterStoreWithSchema(
               graph,
