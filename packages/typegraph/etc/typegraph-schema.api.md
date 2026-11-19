@@ -937,7 +937,7 @@ type CompositionCascadedPart = CompositionNodeRef & Readonly<{
 }>;
 
 // @public
-type CompositionClaimScope = Readonly<{
+export type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
         edgeKind: string;
@@ -1193,26 +1193,26 @@ type ContributionMaterializationRow = Readonly<{
 }>;
 
 // @public
-type ContributionProbeContribution = "fulltext" | "vector";
+export type ContributionProbeContribution = "fulltext" | "vector";
 
 // @public
-type ContributionProbeEntry = Readonly<{
+export type ContributionProbeEntry = Readonly<{
     contribution: ContributionProbeContribution;
     state: ContributionProbeState;
     detail?: string;
 }>;
 
 // @public
-type ContributionProbeResult = Readonly<{
+export type ContributionProbeResult = Readonly<{
     graphRevision?: string;
     entries: readonly ContributionProbeEntry[];
 }>;
 
 // @public
-type ContributionProbeState = "ready" | "degraded" | "building";
+export type ContributionProbeState = "ready" | "degraded" | "building";
 
 // @public
-type ContributionRebuildResult = Readonly<{
+export type ContributionRebuildResult = Readonly<{
     rebuilt: readonly string[];
     processed: number;
     repopulated: number;
@@ -1220,7 +1220,7 @@ type ContributionRebuildResult = Readonly<{
 }>;
 
 // @public
-type ContributionRebuildScope = ContributionProbeContribution;
+export type ContributionRebuildScope = ContributionProbeContribution;
 
 // @public
 export type ContributionRepairEntry = Readonly<{
@@ -1819,7 +1819,7 @@ type EdgeCardinalityAxisRef = Readonly<{
 }>;
 
 // @public
-type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
     scope?: CompositionClaimScope;
 }>;
@@ -6689,7 +6689,7 @@ export type SchemaValidationResult = {
 };
 
 // @public
-type SchemaVersionRow = Readonly<{
+export type SchemaVersionRow = Readonly<{
     graph_id: string;
     version: number;
     schema_hash: string;

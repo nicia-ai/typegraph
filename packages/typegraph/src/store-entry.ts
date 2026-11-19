@@ -264,3 +264,20 @@ export {
   type ValidityEndMutation,
   type WorkingCopyOptions,
 } from "./store/types";
+
+// Backend-declared types a Store signature names: the lineage revision and
+// delta behind `changesSince` and the read-set fence, the transaction
+// options `StoreTransactionOptions` extends, the search-option literals, and
+// the row a constraint-fence violation reports.
+export type {
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
+} from "./backend/capabilities/lineage";
+export type {
+  FulltextQueryMode,
+  MisassignedEdgeEndpointRow,
+  TransactionOptions,
+  VectorIndexType,
+  VectorMetric,
+} from "./backend/types";

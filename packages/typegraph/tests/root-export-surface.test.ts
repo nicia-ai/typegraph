@@ -87,16 +87,32 @@ const ROOT_VALUE_EXPORTS = [
   "ValidationError",
 ] as const;
 
+// Type-only names include the ones an inferred graph, node, edge, ontology,
+// store or query type is spelled with, so a consumer emitting declarations for
+// an exported graph names them through the root it already imports
+// (`type-smoke/declaration-emit.ts`).
 const ROOT_TYPE_EXPORTS = [
+  "DeleteBehavior",
   "Edge",
   "EdgeCollection",
   "EdgeId",
+  "EdgeInGraph",
   "EdgeKinds",
   "EdgeProps",
   "EdgeType",
+  "EmbeddingSchema",
+  "EmbeddingValue",
   "ErrorCategory",
+  "ExecutableQuery",
+  "ExtensionEdgeDef",
+  "ExtensionIndex",
+  "ExtensionNodeDef",
+  "ExtensionOntologyRelation",
+  "GraphAnnotations",
   "GraphBackend",
   "GraphDef",
+  "GraphExtensionVersion",
+  "KindAnnotations",
   "Node",
   "NodeCollection",
   "NodeId",
@@ -107,12 +123,15 @@ const ROOT_TYPE_EXPORTS = [
   "PaginatedResult",
   "Predicate",
   "ReadSetScope",
+  "SearchableSchema",
   "Store",
   "StoreOptions",
+  "TemporalMode",
   "TransactionContext",
+  "TypedOntologyRelation",
 ] as const;
 
-const EXPECTED_ROOT_EXPORT_COUNT = 89;
+const EXPECTED_ROOT_EXPORT_COUNT = 104;
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const ROOT_ENTRY = path.join(PACKAGE_ROOT, "src/index.ts");

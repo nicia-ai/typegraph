@@ -80,6 +80,30 @@ export {
   searchable,
 } from "./core";
 
+// Types a defineNode/defineEdge/defineGraph/ontology result is spelled with.
+// They are owned by `/core` and `/graph-extension`; the root re-exports
+// them, type-only, so a consumer that emits declarations for an exported
+// graph can name its inferred type without importing another entrypoint
+// (TypeScript only names a type through a module the program already
+// imports).
+export type {
+  DeleteBehavior,
+  EmbeddingSchema,
+  EmbeddingValue,
+  GraphAnnotations,
+  KindAnnotations,
+  SearchableSchema,
+  TemporalMode,
+  TypedOntologyRelation,
+} from "./core";
+export type {
+  ExtensionEdgeDef,
+  ExtensionIndex,
+  ExtensionNodeDef,
+  ExtensionOntologyRelation,
+  GraphExtensionVersion,
+} from "./graph-extension/extension-types";
+
 // ============================================================
 // Ontology DSL
 // ============================================================
@@ -113,6 +137,7 @@ export type { ReadSetScope } from "./store/read-set";
 export type {
   Edge,
   EdgeCollection,
+  EdgeInGraph,
   Node,
   NodeCollection,
   NodeRef,
@@ -147,6 +172,9 @@ export {
   sum,
 } from "./query";
 export { expr } from "./query/expressions";
+// The class behind `store.query()...select(...)`, type-only: naming an
+// exported query in emitted declarations needs it, constructing one does not.
+export type { ExecutableQuery } from "./query";
 
 // ============================================================
 // Errors

@@ -2810,7 +2810,7 @@ Whole
 ] extends [T] ? false : true : never;
 
 // @public (undocumented)
-type JsonPointer = string & {
+export type JsonPointer = string & {
     readonly __jsonPointer: unique symbol;
 };
 
@@ -4430,7 +4430,7 @@ const SQL_PLACEHOLDER_BRAND: unique symbol;
 type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
 
 // @public
-type SqlDialect = "sqlite" | "postgres";
+export type SqlDialect = "sqlite" | "postgres";
 
 // @public
 type SqlFragment = Readonly<{
@@ -4514,7 +4514,7 @@ type SqlSchemaFields = Readonly<{
 }>;
 
 // @public
-type SqlTableNames = Readonly<{
+export type SqlTableNames = Readonly<{
     schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
@@ -5011,7 +5011,7 @@ type UpsertFulltextParams = Readonly<{
 type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? ArrayNodeKinds<G["edges"][EK]["to"]> | EdgeTargetKinds<G["edges"][EK]["to"]> : G["edges"][EK]["from"][number]["kind"] : never;
 
 // @public
-type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";
+export type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";
 
 // @public
 type VariableLengthSpec = Readonly<{

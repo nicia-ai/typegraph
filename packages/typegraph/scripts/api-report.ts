@@ -11,6 +11,8 @@ import {
   ExtractorMessageId,
 } from "@microsoft/api-extractor";
 
+import { reportNameForExport } from "./api-report-names";
+
 type PackageExport = Readonly<{ types: string }>;
 type PackageManifest = Readonly<{
   exports: Readonly<Record<string, PackageExport>>;
@@ -1221,6 +1223,20 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `./postgres/pglite`, `./profiler`, `./provenance`, `./schema`,
   // `./sqlite/local` and `./store` each gain exactly that one forgotten name
   // (+1 apiece). No other name moved, and no other entrypoint changed.
+  // Public type reachability: each entrypoint that took type-only exports of
+  // names its own signatures already referenced loses exactly those names
+  // from its debt and gains none. `.` re-exports the fifteen types an
+  // inferred graph, node, edge, ontology, store or query type is spelled with
+  // (1092→1077); `./store` takes the lineage revision and delta, the
+  // transaction options, the search-option literals and
+  // `MisassignedEdgeEndpointRow` (806→798); `./query` `JsonPointer`,
+  // `ValueType`, `SqlDialect` and `SqlTableNames` (543→539); `./schema` the
+  // contribution probe and rebuild results and the probe entry/state/contribution
+  // types their bodies name, `EdgeCardinalityDeclaration` with its
+  // `CompositionClaimScope`, and `SchemaVersionRow` (994→985); `./indexes` the index base and where-operand
+  // types (46→41); `./core` `MetaEdgeName` and, type-only,
+  // the `ALL_META_EDGE_NAMES` constant it is spelled with (96→94); `./graph-extension`
+  // `ExtensionPropertyModifiers` (28→27).
   // Metadata predicates (#866): `NodeAccessor` and `EdgeAccessor` gain
   // `$meta: NodeMetadataAccessor` / `EdgeMetadataAccessor`. `./query` exports
   // both; `.`, `./adapters/drizzle/postgres/working-copy`, `./graph-merge`,
@@ -1231,8 +1247,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `ExpressionMetadata`, now mapped over `SelectableNodeMeta` /
   // `SelectableEdgeMeta`.
   ".": {
-    count: 1092,
-    sha256: "6b6b3db6ee0dd224d74415767f3c2c7cc45f795a9cb77e3ab579d6b7a85dc0f3",
+    count: 1077,
+    sha256: "663095dd42b26339fbbe9f3f6476a5dd70409be63c21737673fffa0dd6a2662d",
   },
   "./adapters/drizzle/engine": {
     count: 350,
@@ -1307,8 +1323,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "3d657aa71ed47e43904143825eb9a60e957194664a5e4d821f7256b822b350e9",
   },
   "./core": {
-    count: 96,
-    sha256: "e7b5372a2b3fffec03f3ae0a5e0a3cdda6f4f9fa8cb4fcf492e454afcb58e1a0",
+    count: 94,
+    sha256: "1e4a0abd4d19077fa53e15c0ab0b81a5d531b47c8b26867b9249b4003cb779f5",
   },
   "./errors": {
     count: 64,
@@ -1316,8 +1332,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 28,
-    sha256: "f0da2bb6b3bdc363689d3283a489c2e864bcd85b13e8419c4b0d8dd60319d9b8",
+    count: 27,
+    sha256: "64115e9abfc9ee39681d481ff752343070dedd3df72904966cbcad3cfb920896",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
   // named `IdentityTransitionHistory` instead of a bare array. The root
@@ -1344,8 +1360,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "e93fdf6b111cdb8639f60b702262083c4d261d3cf84981d03d9310e2c5a5e1d9",
   },
   "./indexes": {
-    count: 46,
-    sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
+    count: 41,
+    sha256: "cf3148262fa915c1fe8ae10b6ab8e79e9e3faeda326f8cd26264211b8675a021",
   },
   "./interchange": {
     count: 975,
@@ -1380,8 +1396,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `FlexibleQueryFragment` drops `MergeAliasMaps` and `MergeEdgeAliasMaps`
   // (-2). Delta: `./query` 520→543; no other entrypoint moved.
   "./query": {
-    count: 543,
-    sha256: "d1c07f2a5ab4e962539ffdd286a11cd0373c2eeb1bfeb9913ae8454eda3f8e5d",
+    count: 539,
+    sha256: "2ac059a6557488fccf88817cdd2b9333ee236e44dcbdd4d00a86d5d315948ec2",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1393,16 +1409,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 994,
-    sha256: "854f8b96d9d73f117f644d5c4ec18b7bb0e7f8ff3cb393eb776c313330b7d429",
+    count: 985,
+    sha256: "4cf958297511497cc12fc2fed38ec840da58428e85c4afbee87c559678c8fe78",
   },
   "./sqlite/local": {
     count: 981,
     sha256: "b9d22323de0a96a0d107bd763ffa34bab7f40beb6bc147f0f0dcc283a025323d",
   },
   "./store": {
-    count: 806,
-    sha256: "57a3c25a322208cbe85b65009e617b22fcc14806e862a51b5ab69102b40d25b3",
+    count: 798,
+    sha256: "da4aae7211d406b65d4cfda40d7bd6c3978f94b9555960eb18aa8cfef00366f4",
   },
 };
 
@@ -1422,15 +1438,6 @@ function readForgottenExportSymbol(message: string): string {
     throw new Error(`Unexpected ae-forgotten-export message: ${message}`);
   }
   return match[1];
-}
-
-function reportNameForExport(exportPath: string): string {
-  if (exportPath === ".") return "typegraph";
-  const suffix = exportPath
-    .replace(/^\.\//, "")
-    .replaceAll(/[^a-zA-Z0-9]+/g, "-")
-    .replaceAll(/^-|-$/g, "");
-  return `typegraph-${suffix}`;
 }
 
 function resolveTypesPath(typesPath: string): string {

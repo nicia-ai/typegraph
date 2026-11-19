@@ -149,7 +149,7 @@ export function generateSystemIndexDDL(declaration: SystemIndexDeclaration, phys
 export type IndexDeclaration = RelationalIndexDeclaration | VectorIndexDeclaration;
 
 // @public
-type IndexDeclarationBase = Readonly<{
+export type IndexDeclarationBase = Readonly<{
     name: string;
     origin?: IndexOrigin;
     fields: readonly JsonPointer[];
@@ -228,17 +228,17 @@ export type IndexWhereFieldBuilder<T> = Readonly<{
 export type IndexWhereInput<Builder> = IndexWhereExpression | ((where: Builder) => IndexWhereExpression);
 
 // @public (undocumented)
-type IndexWhereLiteral = Readonly<{
+export type IndexWhereLiteral = Readonly<{
     __type: "index_where_literal";
     value: string | number | boolean;
     valueType: ValueType;
 }>;
 
 // @public (undocumented)
-type IndexWhereOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
+export type IndexWhereOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 // @public (undocumented)
-type IndexWhereOperand = Readonly<{
+export type IndexWhereOperand = Readonly<{
     __type: "index_operand_system";
     column: SystemColumnName;
     valueType: ValueType | undefined;
@@ -417,7 +417,7 @@ type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" |
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public
-type RelationalIndexMethod = "btree" | "gin" | "trigram";
+export type RelationalIndexMethod = "btree" | "gin" | "trigram";
 
 // @public
 type SqlDialect = "sqlite" | "postgres";
