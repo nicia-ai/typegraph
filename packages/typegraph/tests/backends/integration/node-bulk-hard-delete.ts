@@ -72,6 +72,13 @@ const NbhdFolder = defineNode("NbhdFolder", {
 const NbhdPage = defineNode("NbhdPage", {
   schema: z.object({ name: z.string() }),
 });
+/** A composition whole of sheets that keeps `onDelete: "restrict"`. */
+const NbhdBinder = defineNode("NbhdBinder", {
+  schema: z.object({ name: z.string() }),
+});
+const NbhdSheet = defineNode("NbhdSheet", {
+  schema: z.object({ name: z.string() }),
+});
 
 /** `cardinality: "one"`: every edge holds a claim row to release. */
 const nbhdLinks = defineEdge("nbhdLinks", { schema: z.object({}) });
@@ -81,6 +88,9 @@ const nbhdPageOf = defineEdge("nbhdPageOf", { schema: z.object({}) });
 const nbhdSubfolderOf = defineEdge("nbhdSubfolderOf", {
   schema: z.object({}),
 });
+const nbhdSheetOf = defineEdge("nbhdSheetOf", { schema: z.object({}) });
+/** From a sheet to a binder: blocks the binder's `restrict` delete. */
+const nbhdCites = defineEdge("nbhdCites", { schema: z.object({}) });
 
 const REFERABLE = [NbhdItem, NbhdLocked, NbhdFolder] as const;
 
@@ -96,6 +106,8 @@ function buildGraph(id: string) {
       NbhdLocked: { type: NbhdLocked },
       NbhdFolder: { type: NbhdFolder, onDelete: "cascade" },
       NbhdPage: { type: NbhdPage, onDelete: "cascade" },
+      NbhdBinder: { type: NbhdBinder },
+      NbhdSheet: { type: NbhdSheet, onDelete: "cascade" },
     },
     edges: {
       nbhdLinks: {
@@ -117,6 +129,13 @@ function buildGraph(id: string) {
         to: [NbhdFolder],
         cardinality: "one",
       },
+      nbhdSheetOf: {
+        type: nbhdSheetOf,
+        from: [NbhdSheet],
+        to: [NbhdBinder],
+        cardinality: "one",
+      },
+      nbhdCites: { type: nbhdCites, from: [NbhdSheet], to: [NbhdBinder] },
     },
     ontology: [
       partOf(NbhdPage, NbhdFolder, { via: nbhdPageOf }),
@@ -124,6 +143,7 @@ function buildGraph(id: string) {
         via: nbhdSubfolderOf,
         partSide: "from",
       }),
+      partOf(NbhdSheet, NbhdBinder, { via: nbhdSheetOf }),
     ],
     identity: { sameIdAcrossKinds: "ignore" },
   });
@@ -231,6 +251,25 @@ async function seed(store: NbhdStore): Promise<void> {
       { id: `of-${id}` },
     );
   }
+
+  // Binder b1 holds sheet s1, which cites binder b2: b2 is deletable only
+  // once b1's cascade has taken s1, and the citation, with it.
+  for (const id of ["b1", "b2"]) {
+    await store.nodes.NbhdBinder.create({ name: id }, { id });
+  }
+  await store.nodes.NbhdSheet.create({ name: "s1" }, { id: "s1" });
+  await store.edges.nbhdSheetOf.create(
+    ref("NbhdSheet", "s1"),
+    ref("NbhdBinder", "b1"),
+    {},
+    { id: "of-s1" },
+  );
+  await store.edges.nbhdCites.create(
+    ref("NbhdSheet", "s1"),
+    ref("NbhdBinder", "b2"),
+    {},
+    { id: "c1" },
+  );
 
   const { nbhdLinks: links, nbhdRefs: references } = store.edges;
   await links.create(
@@ -737,6 +776,37 @@ export function registerNodeBulkHardDeleteIntegrationTests(
     // MUTATION CHECK: in `wholeCascadesToParts`, judge the row's pair
     // (`countedCompositionRow`) before the whole-side check — the batch
     // throws CompilerInvariantError where the loop deletes.
+
+    it("judges a later restrict node against the edge an earlier whole's cascading part removes, in both orders", async () => {
+      // b1 first: its cascade deletes s1 and, by s1's `cascade`, the citation
+      // c1, so b2 is left unconnected and deletes. b2 first: c1 still blocks.
+      const removable = await expectLoopEquivalence(
+        context,
+        "live",
+        "NbhdBinder",
+        ["b1", "b2"],
+      );
+      expect(removable.error).toBeUndefined();
+      const state = removable.state as Readonly<{ nodes: readonly string[] }>;
+      expect(
+        state.nodes.filter((row) => /^NbhdBinder\||^NbhdSheet\|/.test(row)),
+      ).toEqual([]);
+
+      const refused = await expectLoopEquivalence(
+        context,
+        "live",
+        "NbhdBinder",
+        ["b2", "b1"],
+      );
+      expect(refused.error).toMatchObject({
+        name: "RestrictedDeleteError",
+        nodeId: "b2",
+        edgeKinds: ["nbhdCites"],
+      });
+    });
+    // MUTATION CHECK: drop the earlier-deletes policy from the plain-node
+    // verdict in `planNodeHardDeleteBatch` (pass no policy) — b1-then-b2
+    // refuses b2 over c1, which the loop had already removed.
 
     it("refuses a late restrict id with the loop's first refusal and deletes nothing, top-level and caught inside a committed transaction", async () => {
       // l1 is connected (r3) and comes last: a batch that wrote as it judged
