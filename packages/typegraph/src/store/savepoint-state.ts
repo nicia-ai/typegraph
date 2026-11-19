@@ -1,4 +1,5 @@
 import { backendDerivationRoot } from "../backend/derive-backend";
+import { withExclusiveSessionUse } from "../backend/session-exclusivity";
 
 type Checkpoint = () => () => void;
 type SavepointEffect = Readonly<{
@@ -60,8 +61,23 @@ export function publishSavepointEffect(
   publish();
 }
 
-/** The one owner of savepoint-local state and success/error hook settlement. */
-export async function withSavepointState<T>(
+/**
+ * The one owner of savepoint-local state and success/error hook settlement.
+ *
+ * The scope has exclusive use of its session for its whole duration,
+ * settlement included ({@link withExclusiveSessionUse}): a savepoint's
+ * rollback undoes every statement issued on the session since it was taken,
+ * so a call overlapping this one waits rather than issue statements this
+ * scope could roll back, and the scope chain below only ever nests.
+ */
+export function withSavepointState<T>(
+  target: object,
+  run: (restore: (cause: unknown) => void) => Promise<T>,
+): Promise<T> {
+  return withExclusiveSessionUse(target, () => runSavepointScope(target, run));
+}
+
+async function runSavepointScope<T>(
   target: object,
   run: (restore: (cause: unknown) => void) => Promise<T>,
 ): Promise<T> {

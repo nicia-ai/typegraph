@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+A TypeGraph savepoint no longer rolls back an overlapping call's completed writes. Inside one `store.transaction()` callback, two calls started without awaiting each other (for example under `Promise.all`) shared one rollback boundary: when a call that guards its writes with a savepoint, such as edge `bulkHardDelete`, failed after its first delete and the callback caught the error and committed, the savepoint's rollback also undid the writes of a call that had overlapped it and already reported success. Managed writes through one transaction now take turns: each write call and each TypeGraph savepoint scope (batch-call write units, interchange import, merge-plan application in a caller-owned transaction) has the transaction session to itself while it runs, an overlapping write waits for it, and a call nested inside it runs inside it. On a backend without transaction-scoped statement execution, and on a runtime without `AsyncLocalStorage`, overlapping writes run as before.
