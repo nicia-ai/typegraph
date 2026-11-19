@@ -72,6 +72,11 @@ import {
 } from "../backend/row-mappers";
 import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import {
+  isSessionHeldByAnotherUnit,
+  withNativeTransactionTurn,
+  withSessionTurn,
+} from "../backend/session-exclusivity";
+import {
   type AdapterBackend,
   type BackendCapabilities,
   type ContributionDiagnostic,
@@ -4920,8 +4925,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    // The fences taken before the callback, the callback and the capture
+    // flush after it are one unit on the caller's native transaction: another
+    // binding of that transaction (`withTransaction`, or the context a
+    // `store.transaction()` callback holds when `externalTx` is its
+    // `tx.sql`) cannot roll a savepoint back over them or write between the
+    // callback and its flush. Calls the callback makes nest inside the unit.
     return withAdoptedTransactionScope(externalTx, () =>
-      this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
+      withNativeTransactionTurn(externalTx, () =>
+        this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
+      ),
     );
   }
 
@@ -5475,7 +5488,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           },
           acquireReadFences: async () => {
             if (readOnly) {
-              await lockRecordedGraphWrite(txBackend, this.graphId);
+              // A lock memo a sibling's savepoint rollback could restore
+              // away is taken in this call's turn, like a write fence.
+              await withSessionTurn(txBackend, () =>
+                lockRecordedGraphWrite(txBackend, this.graphId),
+              );
               return;
             }
             await acquireManagedWriteFences(nodeOperationContext, txBackend);
@@ -5525,17 +5542,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
       >(
         entries: Entries,
-      ) => this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
+      ) =>
+        // One unit on the session, like every collection call: an
+        // overlapping savepoint scope can neither roll the batch back nor
+        // change what it validated (see `session-exclusivity.ts`).
+        withSessionTurn(txBackend, () =>
+          this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
+        ),
       ...this.#createTransactionReadSurface(txBackend, attempt),
       assertUnchangedSince: (
         anchor: EngineRevision,
         scopes: readonly ReadSetScope<G>[],
       ) =>
-        assertReadSetUnchangedSince(
-          this.#readSetFenceContext(readOnly),
-          txBackend,
-          anchor,
-          scopes,
+        withSessionTurn(txBackend, () =>
+          assertReadSetUnchangedSince(
+            this.#readSetFenceContext(readOnly),
+            txBackend,
+            anchor,
+            scopes,
+          ),
         ),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
@@ -5558,6 +5583,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 "TypeGraph-owned recorded-time capture",
                 { graphId: this.graphId, dialect: this.#backend.dialect },
                 "Use a backend with TypeGraph-owned history capture; engine-native revision allocation is controlled by the database engine.",
+              );
+            }
+            // The request is synchronous, so it cannot wait for its turn. An
+            // overlapping call holding the session could roll its savepoint
+            // back and restore a capture checkpoint taken before the request,
+            // erasing it; refuse rather than accept a request that may be
+            // dropped.
+            if (isSessionHeldByAnotherUnit(txBackend)) {
+              throw new ConfigurationError(
+                "tx.requestRecordedRevision() cannot run while another call on this transaction is in progress.",
+                {
+                  graphId: this.graphId,
+                  code: "RECORDED_REVISION_REQUEST_OVERLAPS_CALL",
+                },
+                {
+                  suggestion:
+                    "Await the overlapping store call before requesting a recorded revision.",
+                },
               );
             }
             if (!forceRecordedGraphRevision(txBackend, this.graphId)) {
@@ -5940,9 +5983,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend,
       "withEvolvedTransaction",
     );
+    // The schema fence, the evolution's writes, the callback and its flush
+    // are one unit on the caller's native transaction (see
+    // `withRecordedTransaction`).
     return withAdoptedTransactionScope(
       externalTx,
-      () => this.#applyEvolvedTransaction(externalTx, plan, fn, options),
+      () =>
+        withNativeTransactionTurn(externalTx, () =>
+          this.#applyEvolvedTransaction(externalTx, plan, fn, options),
+        ),
       true,
     );
   }

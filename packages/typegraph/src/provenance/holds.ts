@@ -6,6 +6,7 @@
  * `computeSupportSnapshot`, so there is one support predicate; they differ
  * only in how much of the graph they load.
  */
+import { withSessionTurn } from "../backend/session-exclusivity";
 import type { GraphDef } from "../core/define-graph";
 import {
   ConfigurationError,
@@ -77,8 +78,12 @@ export async function believedFactsInCallerTransaction<
   scope: CapabilityScope,
   tx: TransactionContext<G>,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
-  await acquireCallerTransactionReadLocks(tx);
-  return readBelievedFacts<G, FactKind>(scope, tx);
+  // One unit on the caller's session: an overlapping call's savepoint
+  // rollback can neither release the locks nor change what is read under them.
+  return withSessionTurn(transactionBackend(tx), async () => {
+    await acquireCallerTransactionReadLocks(tx);
+    return readBelievedFacts<G, FactKind>(scope, tx);
+  });
 }
 
 async function readBelievedFacts<
@@ -132,20 +137,24 @@ export async function assertFactsHold<
   if (named.length === 0) return [];
   assertFactKinds(scope.config, named);
 
-  await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
-  const graph = await loadSupportClosure(
-    transactionBackend(tx),
-    scope.registry,
-    scope.graphId,
-    scope.config,
-    named,
-    scope,
-  );
-  return judgeNamedFacts<G, FactKind, JustificationKind>(
-    scope.config,
-    graph,
-    named,
-  );
+  // One unit on the caller's session, like a collection call: the locks and
+  // the read the verdict is judged from are taken in this call's turn.
+  return withSessionTurn(transactionBackend(tx), async () => {
+    await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
+    const graph = await loadSupportClosure(
+      transactionBackend(tx),
+      scope.registry,
+      scope.graphId,
+      scope.config,
+      named,
+      scope,
+    );
+    return judgeNamedFacts<G, FactKind, JustificationKind>(
+      scope.config,
+      graph,
+      named,
+    );
+  });
 }
 
 function assertFactKinds(

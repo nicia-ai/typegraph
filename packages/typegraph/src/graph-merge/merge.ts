@@ -1,3 +1,4 @@
+import { withSessionTurn } from "../backend/session-exclusivity";
 import { validateEdgeEndpoints } from "../constraints";
 import {
   assertGraphAllocationOwner,
@@ -6314,12 +6315,14 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
       );
     }
     const txBackend = transactionBackend(tx);
-    await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
-    const merged = await withAdoptedMergeApplySavepoint(
-      effectiveTarget,
-      tx,
-      () =>
+    // The pristine check and the apply are one unit on the caller's session:
+    // a check made before the turn would pass while an earlier call has yet
+    // to write, and the apply's durable revision checks cannot see that
+    // pending write once it lands (see `session-exclusivity.ts`).
+    const merged = await withSessionTurn(txBackend, async () => {
+      await assertMergeTransactionPristine(effectiveTarget, txBackend);
+      return withAdoptedMergeApplySavepoint(effectiveTarget, tx, () =>
         applyValidatedMergePlanInTransaction(
           effectiveTarget,
           tx,
@@ -6328,7 +6331,8 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
           true,
           decision,
         ),
-    );
+      );
+    });
     return reportFromArtifact(artifact, merged, artifact.review.warnings);
   } catch (error) {
     const translated = translateMergeCommitError(error);

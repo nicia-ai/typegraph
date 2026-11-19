@@ -9,6 +9,7 @@ import {
   type ENDPOINT_SET_READ,
 } from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
+import { takesSessionTurns } from "../backend/session-exclusivity";
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type TemporalMode } from "../core/types";
@@ -28,6 +29,10 @@ import {
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
+import {
+  edgeCollectionInSessionTurns,
+  nodeCollectionInSessionTurns,
+} from "./collections/session-turns";
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
@@ -352,13 +357,17 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         return cached;
       }
 
-      const collection = createNodeCollection({
+      const created = createNodeCollection({
         graphId,
         kind,
         backend,
         batchPointRead,
         ...operations,
       });
+      const collection =
+        takesSessionTurns(backend) ?
+          nodeCollectionInSessionTurns(created, backend)
+        : created;
       collectionCache.set(kind, collection);
       return collection;
     },
@@ -396,7 +405,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         return cached;
       }
 
-      const collection = createEdgeCollection({
+      const created = createEdgeCollection({
         graphId,
         kind,
         backend,
@@ -404,6 +413,10 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         endpointSetRead,
         ...operations,
       });
+      const collection =
+        takesSessionTurns(backend) ?
+          edgeCollectionInSessionTurns(created, backend)
+        : created;
       collectionCache.set(kind, collection);
       return collection;
     },
