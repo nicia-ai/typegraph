@@ -187,6 +187,36 @@ describe("cascade edge deletion batches", () => {
     }
   });
 
+  it("direct bulkHardDelete resolves and removes N edges with two batch calls", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("direct_edge_batch_hard_delete"),
+        backend,
+      );
+      const hub = await seedHubAndSpokes(store);
+      const edges = await store.edges.links.findFrom(hub);
+
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      await store.edges.links.bulkHardDelete(edges.map((edge) => edge.id));
+
+      // One resolution read and one kind-asserting delete for all N ids,
+      // where a per-id loop pays a gate read and a delete per edge.
+      expect(counts["getEdges"]).toBe(1);
+      expect(counts["getEdge"]).toBe(0);
+      expect(counts["hardDeleteEdgesBatch"]).toBe(1);
+      expect(counts["hardDeleteEdge"]).toBe(0);
+      expect(
+        await store.edges.links.findFrom(hub, {
+          temporalMode: "includeTombstones",
+        }),
+      ).toHaveLength(0);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
   it("soft delete removes N edges with one batched statement", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {

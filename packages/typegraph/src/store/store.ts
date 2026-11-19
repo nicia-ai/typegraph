@@ -371,6 +371,7 @@ import {
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
+  executeEdgeHardDeleteBatch,
   executeEdgeResolvedMutationSet,
   executeEdgeUpdate,
   executeEdgeUpsertUpdateBatch,
@@ -3145,6 +3146,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeEdgeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeEdgeHardDelete(ctx, kind, id, backend),
+      executeHardDeleteBatch: (kind, ids, backend) =>
+        executeEdgeHardDeleteBatch(ctx, kind, ids, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (

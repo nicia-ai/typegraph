@@ -104,6 +104,7 @@ import { type GraphWriteLock } from "../recorded-capture/clock";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import {
   applyEdgeHardDelete,
+  applyEdgeHardDeleteBatch,
   applyEdgeSoftDelete,
   applyEdgeSoftDeleteBatch,
   applyEdgeUpdate,
@@ -479,6 +480,8 @@ export type EdgeWriteSession = Readonly<{
   /** Applies one already-resolved soft-delete set through the batch port. */
   retireEdges: (work: readonly EdgeDeleteWork[]) => Promise<void>;
   purgeEdge: (work: EdgeHardDeleteWork) => Promise<void>;
+  /** Applies one already-resolved hard-delete set through the batch port. */
+  purgeEdges: (work: readonly EdgeHardDeleteWork[]) => Promise<void>;
 }>;
 
 export type WriteSession = NodeWriteSession & EdgeWriteSession;
@@ -876,5 +879,7 @@ export function createWriteSession(
     retireEdges: (work) => applyEdgeSoftDeleteBatch(edgeContext, work, target),
 
     purgeEdge: (work) => applyEdgeHardDelete(edgeContext, work, target),
+
+    purgeEdges: (work) => applyEdgeHardDeleteBatch(edgeContext, work, target),
   };
 }

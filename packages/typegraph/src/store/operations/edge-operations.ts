@@ -7,7 +7,7 @@
  *
  * **An edge write lands only on a row satisfying every identity component it
  * ASSERTED.** Each write issued on behalf of a kind-scoped collection —
- * `update`, soft `delete`, `hardDelete`, the batch soft delete — carries the
+ * `update`, soft `delete`, `hardDelete`, the batch soft and hard deletes — carries the
  * identity it asserted INSIDE the write statement's own `WHERE` (see
  * {@link UpdateEdgeParams}'s `kind` / `fromKind` / `fromId` / `toKind` /
  * `toId`). The identity the operation checked and the row the statement mutates
@@ -263,7 +263,10 @@ import {
   EdgeUpdateTargetMoved,
   withUnmatchedEdgeUpdateRefusal,
 } from "./edge-write-fences";
-import { type EdgeUpdateWork } from "./edge-write-pipeline";
+import {
+  type EdgeHardDeleteWork,
+  type EdgeUpdateWork,
+} from "./edge-write-pipeline";
 import { lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
   atomicResolvedUpdateAttemptBudget,
@@ -4246,18 +4249,92 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
       await session.purgeEdge({
         id,
         kind: expectedKind,
-        // Housekeeping, not a fence: this edge's claim is already takeable — its
-        // liveness predicate reads a row that no longer exists — so dropping the
-        // row only keeps the relation from growing by one row per hard-deleted
-        // constrained edge. An unconstrained kind holds no claim and pays no
-        // statement for one, the same rule its create follows.
-        holdsCardinalityClaim: edgeKindOwesAnyClaim(
-          ctx.registry,
-          edgeCardinalityDeclarations(ctx, expectedKind),
-          expectedKind,
-        ),
+        holdsCardinalityClaim: edgeHardDeleteReleasesClaim(ctx, expectedKind),
       });
     },
+  );
+}
+
+/**
+ * Whether hard-deleting an edge of `kind` owes a claim release.
+ *
+ * Housekeeping, not a fence: a hard-deleted edge's claim is already takeable —
+ * its liveness predicate reads a row that no longer exists — so dropping the
+ * claim row only keeps the relation from growing by one row per hard-deleted
+ * constrained edge. An unconstrained kind holds no claim and pays no statement
+ * for one, the same rule its create follows.
+ */
+function edgeHardDeleteReleasesClaim<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  kind: string,
+): boolean {
+  return edgeKindOwesAnyClaim(
+    ctx.registry,
+    edgeCardinalityDeclarations(ctx, kind),
+    kind,
+  );
+}
+
+/**
+ * Hard-deletes a batch of one collection's edges as ONE write frame: exactly
+ * the state {@link executeEdgeHardDelete} leaves when called once per id
+ * inside one transaction, without per-item operation hooks.
+ *
+ * Resolution happens before any write, on the frame's own target: the batch
+ * point read is the identity gate (absent ids are skipped; an id owned by
+ * another edge kind refuses the whole batch with the same
+ * `EDGE_IDENTITY_MISMATCH` refusal), and each resolved row is judged by the
+ * required-part existence check single `hardDelete` applies. Only then does
+ * the resolved set reach the backend, as one kind-asserting statement per
+ * bind-budget chunk, so a refusal anywhere leaves nothing deleted and an id
+ * concurrently re-pointed at another kind matches zero rows.
+ *
+ * The one per-row statement left is that existence check's part read, and it
+ * is paid only for a composition edge kind whose part kind is `"required"` and
+ * only for a row that still attaches its part.
+ */
+export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  expectedKind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const holdsCardinalityClaim = edgeHardDeleteReleasesClaim(ctx, expectedKind);
+  await runWritePlan(
+    ctx,
+    edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
+    backend,
+    async (session, target, _overlaidSession, lock) => {
+      const rowsById = await getEdgeRowsByIds(
+        target,
+        ctx.batchPointRead,
+        ctx.graphId,
+        ids,
+      );
+      const purges: EdgeHardDeleteWork[] = [];
+      const scheduledIds = new Set<string>();
+      for (const id of ids) {
+        const current = rowsById.get(id);
+        if (!current) continue;
+        assertEdgeIdentityMatches(
+          id,
+          { kind: expectedKind },
+          edgeIdentityFromRow(current),
+          "hardDelete",
+        );
+        if (scheduledIds.has(id)) continue;
+        scheduledIds.add(id);
+        await assertCompositionExistencePreserved(
+          { graphId: ctx.graphId, registry: ctx.registry, lock },
+          current,
+          target,
+        );
+        purges.push({ id, kind: expectedKind, holdsCardinalityClaim });
+      }
+      await session.purgeEdges(purges);
+      return purges.length;
+    },
+    { didWrite: (affectedCount) => affectedCount > 0 },
   );
 }
 

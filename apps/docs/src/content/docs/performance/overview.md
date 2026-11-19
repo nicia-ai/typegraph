@@ -353,6 +353,7 @@ internally.
 | `bulkUpsertById(items)`                   | Yes             | Idempotent import (create or update by ID)           |
 | `bulkReplaceById(items)`                  | Yes             | Idempotent complete-document replacement by ID       |
 | `bulkDelete(ids)`                         | No              | Mass soft-delete                                     |
+| `bulkHardDelete(ids)` (edges)             | No              | Mass permanent removal (retention, cleanup)          |
 | `trustedImportGraphStream(store, chunks)` | No              | Fastest initial load into a fresh dedicated database |
 
 The collection APIs remain the default: they validate data and maintain every
@@ -649,10 +650,10 @@ const edgesBySource = await store.bulkFindEdgesFrom({
 ```
 
 :::note[Operation hooks]
-Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`) skip per-item operation hooks for
-throughput, and the bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not stand in for them — those fire
-only for node `updateWhere`, so a bulk method emits no hook events at all, neither per-item nor bulk. To observe every
-individual write, call the single-item method instead. Query hooks still fire normally. See
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkHardDelete`) skip per-item
+operation hooks for throughput, and the bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not stand in
+for them — those fire only for node `updateWhere`, so a bulk method emits no hook events at all, neither per-item nor
+bulk. To observe every individual write, call the single-item method instead. Query hooks still fire normally. See
 [Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::
 

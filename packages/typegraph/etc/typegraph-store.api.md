@@ -1694,7 +1694,7 @@ const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"
 const EDGE_TYPE_BRAND: "__edgeType";
 
 // @public
-const EDGE_WRITE_NAMES: readonly ["create", "update", "delete", "hardDelete", "bulkCreate", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByEndpoints", "bulkGetOrCreateByEndpoints"];
+const EDGE_WRITE_NAMES: readonly ["create", "update", "delete", "hardDelete", "bulkCreate", "bulkUpsertById", "bulkInsert", "bulkDelete", "bulkHardDelete", "getOrCreateByEndpoints", "bulkGetOrCreateByEndpoints"];
 
 // @public
 type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? DynamicEdgeAccessor : Readonly<{
@@ -1844,6 +1844,7 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     bulkUpsertById: (items: readonly EdgeBulkUpsertItem<E, Pairs, InputId, G>[]) => Promise<EdgeInGraph<G, E, From, To>[]>;
     bulkInsert: (items: readonly EdgeBulkInsertItem<Pairs, E["schema"], G>[]) => Promise<void>;
     bulkDelete: (ids: readonly InputId[]) => Promise<void>;
+    bulkHardDelete: (ids: readonly InputId[]) => Promise<void>;
     findByEndpoints: (...args: EdgeFindByEndpointsArguments<E, Pairs, G>) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
     getOrCreateByEndpoints: (...args: EdgeGetOrCreateByEndpointsArguments<E, Pairs, G>) => Promise<EdgeGetOrCreateByEndpointsResult<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>>;
     bulkGetOrCreateByEndpoints: (items: readonly EdgeBulkGetOrCreateItem<E, Pairs, G>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>[]>;
