@@ -52,6 +52,7 @@ export {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeHardDeleteBatch,
   executeNodeReparent,
   executeNodeReparentBatch,
   executeNodeReplacementBatch,

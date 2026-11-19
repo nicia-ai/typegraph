@@ -184,6 +184,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "deleteEmbedding",
+  "deleteEmbeddingBatch",
   "insertEdge",
   "commands",
   "insertEdgeNoReturn",
@@ -207,6 +208,7 @@ const WATCHED_MEMBERS = [
   "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",
+  "hardDeleteNodesBatch",
 ] as const;
 
 type WatchedMember = (typeof WATCHED_MEMBERS)[number];
@@ -602,6 +604,25 @@ const CASES: Record<keyof WriteSession, Case> = {
     },
     sidecars: ["hardDeleteEdgesBatch", "deleteEmbedding"],
     row: "hardDeleteNode",
+    plan: NODE_PLAN,
+  },
+  purgeNodes: {
+    run: async (raw) => {
+      await seed(raw, "pn");
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work the same way; hoisting this one would make the table read as if it were different.
+      return (session) =>
+        session.purgeNodes({
+          kind: "Doc",
+          schema,
+          ids: ["pn"],
+          // The verdict the caller judged: the seeded self-loop.
+          removedEdgeIds: ["edge-pn"],
+        });
+    },
+    // The verdict's edges, then the rows (with their uniqueness and fulltext
+    // rows) in one batch, then the embeddings in one batch per field.
+    sidecars: ["hardDeleteEdgesBatch", "deleteEmbeddingBatch"],
+    row: "hardDeleteNodesBatch",
     plan: NODE_PLAN,
   },
   reviveNode: {

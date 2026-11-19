@@ -285,30 +285,40 @@ export async function syncEmbeddingsBatchForKind(
       }
     }
 
-    if (deletionIds.length > 0 && backend.deleteEmbeddingBatch !== undefined) {
-      await backend.deleteEmbeddingBatch({
-        graphId,
-        nodeKind,
-        nodeIds: deletionIds,
-        fieldPath: field.fieldPath,
-        dimensions: field.dimensions,
-        metric: field.metric,
-        indexType: field.indexType,
-      });
-    } else {
-      for (const nodeId of deletionIds) {
-        await backend.deleteEmbedding({
-          graphId,
-          nodeKind,
-          nodeId,
-          fieldPath: field.fieldPath,
-          dimensions: field.dimensions,
-          metric: field.metric,
-          indexType: field.indexType,
-        });
-      }
-    }
+    await deleteFieldEmbeddings(backend, graphId, nodeKind, field, deletionIds);
   }
+}
+
+/**
+ * Deletes one embedding field's rows for a set of one kind's nodes: one
+ * `deleteEmbeddingBatch` (which chunks on the bind budget) when the backend
+ * has it, else one `deleteEmbedding` per node. The one owner of that choice
+ * for the batch sync above and the batch hard delete below.
+ */
+async function deleteFieldEmbeddings(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  nodeKind: string,
+  field: ReturnType<typeof getEmbeddingFields>[number],
+  nodeIds: readonly string[],
+): Promise<void> {
+  const slot = {
+    graphId,
+    nodeKind,
+    fieldPath: field.fieldPath,
+    dimensions: field.dimensions,
+    metric: field.metric,
+    indexType: field.indexType,
+  };
+  const deleteOne = backend.deleteEmbedding;
+  // The same gate `deleteNodeEmbeddings` applies: no embedding support, no
+  // embedding rows to delete.
+  if (deleteOne === undefined || nodeIds.length === 0) return;
+  if (backend.deleteEmbeddingBatch !== undefined) {
+    await backend.deleteEmbeddingBatch({ ...slot, nodeIds });
+    return;
+  }
+  for (const nodeId of nodeIds) await deleteOne({ ...slot, nodeId });
 }
 
 /**
@@ -346,6 +356,33 @@ export async function deleteNodeEmbeddings(
       metric: field.metric,
       indexType: field.indexType,
     });
+  }
+}
+
+/**
+ * {@link deleteNodeEmbeddings} for many nodes of one kind: one
+ * `deleteEmbeddingBatch` per embedding field (which chunks on the bind budget)
+ * instead of one `deleteEmbedding` per node and field, falling back to the
+ * per-node member when the backend has no batch member. Same gate and same
+ * field set as the single form.
+ */
+export async function deleteNodeEmbeddingsBatch(
+  ctx: Readonly<{
+    graphId: string;
+    nodeKind: string;
+    backend: GraphBackend | TransactionBackend;
+  }>,
+  schema: z.ZodType,
+  nodeIds: readonly string[],
+): Promise<void> {
+  for (const field of getEmbeddingFields(schema)) {
+    await deleteFieldEmbeddings(
+      ctx.backend,
+      ctx.graphId,
+      ctx.nodeKind,
+      field,
+      nodeIds,
+    );
   }
 }
 

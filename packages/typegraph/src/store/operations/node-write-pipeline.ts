@@ -26,6 +26,7 @@ import {
   missingRequiredExtras,
 } from "../../backend/capabilities/resolve";
 import {
+  type EdgeRow,
   type GraphBackend,
   type LiveNodeRow,
   type NodePropertyExpectation,
@@ -71,6 +72,7 @@ import {
 } from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
+  deleteNodeEmbeddingsBatch,
   getEmbeddingFields,
   syncEmbeddings,
   syncEmbeddingsBatchForKind,
@@ -329,13 +331,36 @@ export async function judgeNodeDeleteBehavior(
   policy?: NodeDeletePolicy,
 ): Promise<NodeDeleteBehaviorVerdict> {
   if (policy?.enforceDeleteBehavior === false) return NO_EDGES_REMOVED;
-  const behavior = args.onDelete ?? "restrict";
   const connectedEdges = await backend.findEdgesConnectedTo({
     graphId: ctx.graphId,
     nodeKind: args.kind,
     nodeId: args.id,
   });
+  return decideNodeDeleteBehavior(ctx, args, connectedEdges, policy);
+}
 
+/**
+ * The pure half of {@link judgeNodeDeleteBehavior}: the verdict for one node
+ * given the live edges connected to it, however they were read. The batch hard
+ * delete (`node-operations.ts`) reads those edges for many nodes in one
+ * set-wise statement and decides each node here, so the single and batched
+ * paths share one owner of the delete-behavior decision.
+ *
+ * @throws RestrictedDeleteError when a `restrict` node keeps a
+ *   non-composition edge.
+ */
+export function decideNodeDeleteBehavior(
+  ctx: Pick<NodeWriteContext, "registry">,
+  args: Readonly<{
+    kind: string;
+    id: string;
+    onDelete: DeleteBehavior | undefined;
+  }>,
+  connectedEdges: readonly Pick<EdgeRow, "id" | "kind">[],
+  policy?: NodeDeletePolicy,
+): NodeDeleteBehaviorVerdict {
+  if (policy?.enforceDeleteBehavior === false) return NO_EDGES_REMOVED;
+  const behavior = args.onDelete ?? "restrict";
   if (connectedEdges.length === 0) return NO_EDGES_REMOVED;
 
   const { consumedEdgeIds } = policy ?? {};
@@ -412,6 +437,123 @@ export async function deleteEdgesById(
   // this is housekeeping so node cascades do not grow edgeClaims forever.
   // Keyed by the rows the delete removed, as every edge hard delete is.
   await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, removedIds);
+}
+
+/**
+ * The live edges connected to each of a set of one kind's nodes, keyed by node
+ * id — what {@link judgeNodeDeleteBehavior} reads for one node, read for all of
+ * them with one `findEdgesConnectedToNodes` statement per bind-budget chunk,
+ * or one `findEdgesConnectedTo` per node on a backend without that member.
+ *
+ * Each node's list holds its source-side edges before its target-side ones and
+ * a self-loop once, as `findEdgesConnectedTo` returns them, so a
+ * {@link decideNodeDeleteBehavior} refusal names its edge kinds the same way
+ * on both paths.
+ */
+export async function readEdgesConnectedToNodes(
+  graphId: string,
+  backend: Pick<Backend, "findEdgesConnectedTo" | "findEdgesConnectedToNodes">,
+  kind: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, readonly EdgeRow[]>> {
+  const connected = new Map<string, EdgeRow[]>(ids.map((id) => [id, []]));
+  if (ids.length === 0) return connected;
+  const setRead = backend.findEdgesConnectedToNodes;
+  if (setRead === undefined) {
+    for (const id of ids) {
+      connected.set(id, [
+        ...(await backend.findEdgesConnectedTo({
+          graphId,
+          nodeKind: kind,
+          nodeId: id,
+        })),
+      ]);
+    }
+    return connected;
+  }
+  const rows = await setRead({ graphId, nodeKind: kind, nodeIds: ids });
+  for (const row of rows) {
+    if (row.from_kind === kind) connected.get(row.from_id)?.push(row);
+  }
+  for (const row of rows) {
+    const isSelfLoop = row.from_kind === kind && row.from_id === row.to_id;
+    if (row.to_kind === kind && !isSelfLoop) {
+      connected.get(row.to_id)?.push(row);
+    }
+  }
+  return connected;
+}
+
+/**
+ * The hard delete of a run of one kind's nodes that need no composition
+ * cascade and no identity detach, judged in deletion order before the frame's
+ * first statement (`node-operations.ts`'s batch hard delete).
+ */
+export type NodeHardDeleteBatchWork = Readonly<{
+  kind: string;
+  schema: z.ZodType;
+  /** The nodes, in deletion order. */
+  ids: readonly string[];
+  /** Every edge their delete-behavior verdicts remove, in deletion order. */
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
+ * {@link applyNodeHardDelete} for a run of nodes, as set-wise statements: the
+ * verdicts' edges through {@link deleteEdgesById} (claims released for the
+ * rows removed), then the node rows with their uniqueness, fulltext and
+ * remaining incident edge rows through `hardDeleteNodesBatch`, then their
+ * embeddings. The state is the one applying {@link applyNodeHardDelete} to
+ * each node in turn leaves: every statement is a set delete, and no node of
+ * the run is an endpoint another node of the run still needs.
+ *
+ * A backend without `hardDeleteNodesBatch` gets one `hardDeleteNode` per node,
+ * in order, inside the same frame.
+ */
+export async function applyNodeHardDeleteBatch(
+  ctx: NodeWriteContext,
+  work: NodeHardDeleteBatchWork,
+  backend: Backend,
+): Promise<void> {
+  if (work.ids.length === 0) return;
+  if (work.removedEdgeIds.length > 0) {
+    await deleteEdgesById(ctx, backend, "hard", work.removedEdgeIds);
+  }
+  const removedNodeIds = await hardDeleteNodeRows(
+    ctx.graphId,
+    backend,
+    work.kind,
+    work.ids,
+  );
+  await deleteNodeEmbeddingsBatch(
+    { graphId: ctx.graphId, nodeKind: work.kind, backend },
+    work.schema,
+    removedNodeIds,
+  );
+}
+
+/**
+ * Removes a set of one kind's node rows with their uniqueness, fulltext and
+ * incident edge rows: `hardDeleteNodesBatch` when the backend has it, else one
+ * `hardDeleteNode` per id. Resolves the ids whose embeddings are owed — the
+ * rows the batch reports removed, or every id on the per-node path, which
+ * reports nothing (exactly as single `hardDelete` cleans embeddings by id).
+ */
+async function hardDeleteNodeRows(
+  graphId: string,
+  backend: Backend,
+  kind: string,
+  ids: readonly string[],
+): Promise<readonly string[]> {
+  const hardDeleteNodesBatch = backend.hardDeleteNodesBatch;
+  if (hardDeleteNodesBatch !== undefined) {
+    const removed = await hardDeleteNodesBatch({ graphId, kind, ids });
+    return removed.removedNodeIds;
+  }
+  for (const id of ids) {
+    await backend.hardDeleteNode({ graphId, kind, id });
+  }
+  return ids;
 }
 
 /** One inserted row, as the post-insert sync fans read it. */

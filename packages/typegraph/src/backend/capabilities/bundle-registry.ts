@@ -898,8 +898,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   findEdgesConnectedToNodes: {
     kind: "reasoned",
     reason:
-      "Optional kind-blind set read of the live edges connected to one kind's nodes, for judging a batch of node deletes. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.",
-    accesses: 0,
+      "Optional kind-blind set read of the live edges connected to one kind's nodes, judged by node bulkHardDelete. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.",
+    accesses: 1,
   },
   findEdgesByMatchIdentity: {
     kind: "reasoned",
@@ -1338,8 +1338,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "batchEntityWrite",
-    // The guard and call in each of the two recorded-capture write overlays.
-    ceiling: 4,
+    // The node batch hard delete's one call site, plus the guard and call in
+    // each of the two recorded-capture write overlays.
+    ceiling: 5,
   },
   hybridSearch: {
     kind: "deferred",

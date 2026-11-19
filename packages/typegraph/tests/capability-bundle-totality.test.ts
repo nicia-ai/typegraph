@@ -110,7 +110,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("43 reasoned entries sum to 132 accesses; 51 deferred entries sum to 249", () => {
+  it("43 reasoned entries sum to 133 accesses; 51 deferred entries sum to 250", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -179,8 +179,8 @@ describe("capability bundle totality (T9)", () => {
     // composition relations through one table-name read (-1): 131 -> 132.
     // Recorded pruning adds one required base-schema assertion: 132 -> 133.
     // Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
-    // `findEdgesConnectedToNodes` (#460) has no consumer yet: still 132.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(132);
+    // Node bulkHardDelete reads `findEdgesConnectedToNodes` once: 132 -> 133.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(133);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.
@@ -194,8 +194,8 @@ describe("capability bundle totality (T9)", () => {
     // inventory and the namespace fork add one guarded strategy read each: 241 -> 243.
     // The composition cascade and the unattached-part read each add one
     // heterogeneous endpoint-set consumer: 243 -> 245.
-    // `hardDeleteNodesBatch` (#460) is wrapped by the two recorded-capture
-    // overlays, four live access sites: 245 -> 249.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(249);
+    // Node bulkHardDelete's `hardDeleteNodesBatch` has five live access
+    // sites: 245 -> 250.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(250);
   });
 });

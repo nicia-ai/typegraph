@@ -4439,8 +4439,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly findEdgesConnectedToNodes: {
         readonly kind: "reasoned";
-        readonly reason: "Optional kind-blind set read of the live edges connected to one kind's nodes, for judging a batch of node deletes. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.";
-        readonly accesses: 0;
+        readonly reason: "Optional kind-blind set read of the live edges connected to one kind's nodes, judged by node bulkHardDelete. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.";
+        readonly accesses: 1;
     };
     readonly findEdgesByMatchIdentity: {
         readonly kind: "reasoned";
@@ -4815,7 +4815,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
-        readonly ceiling: 4;
+        readonly ceiling: 5;
     };
     readonly hybridSearch: {
         readonly kind: "deferred";

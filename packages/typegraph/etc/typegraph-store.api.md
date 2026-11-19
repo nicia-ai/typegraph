@@ -4799,7 +4799,7 @@ const NODE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public
-const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "reparent", "bulkReparent", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
+const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "reparent", "bulkReparent", "compareAndSet", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "bulkHardDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
 
 // @public
 type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? DynamicNodeAccessor : Readonly<{
@@ -4926,6 +4926,7 @@ type NodeCollection<N extends NodeType, CN extends string = string, Whole extend
         validTo?: string;
     }>[]) => Promise<void>;
     bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+    bulkHardDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
     findByConstraint: (constraintName: CN, props: z.input<N["schema"]>) => Promise<Node<N> | undefined>;
     bulkFindByConstraint: (constraintName: CN, items: readonly Readonly<{
         props: z.input<N["schema"]>;

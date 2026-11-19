@@ -5035,6 +5035,7 @@ type NodeCollection<N extends NodeType, CN extends string = string, Whole extend
         validTo?: string;
     }>[]) => Promise<void>;
     bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+    bulkHardDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
     findByConstraint: (constraintName: CN, props: z.input<N["schema"]>) => Promise<Node<N> | undefined>;
     bulkFindByConstraint: (constraintName: CN, items: readonly Readonly<{
         props: z.input<N["schema"]>;
