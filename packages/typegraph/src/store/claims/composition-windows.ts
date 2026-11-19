@@ -55,8 +55,10 @@ import {
   resolveStampedValidityLowerBound,
   type ValidityWindow,
   validityWindowCovers,
+  validityWindowGap,
   validityWindowsOverlap,
 } from "../../utils/date";
+import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
 import {
   compositionRowEndpoints,
@@ -753,6 +755,135 @@ function openCompositionWindowVerdict(
     if (verdict !== undefined) return verdict;
   }
   return undefined;
+}
+
+/**
+ * One composition move as its two writes leave it: `ended` is the row whose
+ * window the move ends, with the `valid_to` the end gives it, and `attach` the
+ * row that attaches the part again, before it is stamped — `statedValidFrom`
+ * is the lower bound the write states (`null` for a confirmed open-left
+ * window, `undefined` for none, which the insert stamps with its own instant).
+ */
+export type CompositionMoveWindows = Readonly<{
+  part: CompositionNodeRef;
+  ended: CompositionWindowEdge;
+  attach: Omit<CompositionWindowEdge, "valid_from" | "deleted_at"> &
+    Readonly<{ statedValidFrom: string | null | undefined }>;
+}>;
+
+/**
+ * What {@link compositionMoveGapVerdict} decided for one move: refused, with
+ * the refusal both of its rows report, or accepted. An accepted move whose
+ * attach states no `validFrom` was judged with the lower bound
+ * `stampedValidFrom` names, so its write must store exactly that bound: a
+ * later stamp could open the gap after the old window that the judgement
+ * ruled out. `stampedValidFrom` is `undefined` when the attach states a
+ * bound, when the stamp leaves it none (a window born ended), and when the
+ * move was not judged (an optional part).
+ */
+export type CompositionMoveGapVerdict =
+  | Readonly<{ verdict: "refused"; refusal: CompositionError }>
+  | Readonly<{ verdict: "accepted"; stampedValidFrom: string | undefined }>;
+
+/**
+ * THE rule that a move of an `existence: "required"` part abuts: the
+ * attachment it ends and the one that replaces it leave no valid-time instant
+ * between them, so the part holds a whole at every instant of the move, as a
+ * `reparent` — which ends the old window and opens the new one at one instant
+ * (`resolveCompositionMoveInstant`) — guarantees by construction. Refuses
+ * (`COMPOSITION_MOVE_GAP`, naming the part, both windows and the gap) a move
+ * that leaves one, and accepts a move that abuts, one whose windows overlap
+ * (the disjointness half of this module refuses that), and every move of an
+ * optional part, where a gap is legal.
+ *
+ * An ended window of zero width — the end at the attachment's own
+ * `validFrom`, as a `reparent` at that instant leaves it — holds the part at
+ * no instant and overlaps nothing, so a new attachment opening before it
+ * leaves no gap, and what that attachment meets is the disjointness half's
+ * to judge, against the part's other rows.
+ *
+ * The other half of {@link firstInFrameConflict}'s "at most one whole at every
+ * instant", judged over the same membership windows
+ * ({@link compositionWindowOf}) and the same stamped lower bound an insert
+ * stores ({@link insertedRow}'s `resolveStampedValidityLowerBound`), with the
+ * gap measured by `validityWindowGap`, the interval reading of touching
+ * windows that `validityWindowsOverlap` shares. It speaks of a move only: a
+ * required part's stored history may hold gaps the store writes on purpose (a
+ * backdated history row), so it is not an audit of stored rows.
+ *
+ * The verdict names the lower bound an attach stating none was judged with
+ * (`stampedValidFrom`) for the caller to write, so the decision and the write
+ * use one bound rather than two clock reads.
+ *
+ * Pure. Interchange import judges every move pair it applies with it, before
+ * the move's first write.
+ */
+export function compositionMoveGapVerdict(
+  registry: KindRegistry,
+  move: CompositionMoveWindows,
+  operationInstant: string,
+): CompositionMoveGapVerdict {
+  const { part, ended, attach } = move;
+  if (registry.compositionExistence(part.kind) !== "required") {
+    return { verdict: "accepted", stampedValidFrom: undefined };
+  }
+  const attached: CompositionWindowEdge = {
+    ...attach,
+    valid_from: resolveStampedValidityLowerBound(
+      attach.statedValidFrom,
+      attach.valid_to,
+      operationInstant,
+    ),
+    deleted_at: undefined,
+  };
+  const accepted: CompositionMoveGapVerdict = {
+    verdict: "accepted",
+    stampedValidFrom:
+      attach.statedValidFrom === undefined ? attached.valid_from : undefined,
+  };
+  const endedWindow = compositionWindowOf(registry, ended);
+  const attachedWindow = compositionWindowOf(registry, attached);
+  if (endedWindow === undefined || attachedWindow === undefined) {
+    return accepted;
+  }
+  const gap = validityWindowGap(endedWindow, attachedWindow);
+  if (gap === undefined) return accepted;
+  const endedWhole = compositionWholeOf(registry, ended);
+  const attachedWhole = compositionWholeOf(registry, attached);
+  const refusal = new CompositionError({
+    situation: "moveGap",
+    partKind: part.kind,
+    partId: part.id,
+    endedEdgeKind: ended.kind,
+    endedEdgeId: ended.id,
+    endedWholeKind: endedWhole.kind,
+    endedWholeId: endedWhole.id,
+    ...(endedWindow.validFrom === undefined ?
+      {}
+    : { endedValidFrom: endedWindow.validFrom }),
+    endedValidTo: gap.validFrom,
+    edgeKind: attached.kind,
+    edgeId: attached.id,
+    wholeKind: attachedWhole.kind,
+    wholeId: attachedWhole.id,
+    validFrom: gap.validTo,
+    validFromStated: typeof attach.statedValidFrom === "string",
+    gapFrom: gap.validFrom,
+    gapTo: gap.validTo,
+  });
+  return { verdict: "refused", refusal };
+}
+
+/** The whole endpoint of a row of a composition edge kind. */
+function compositionWholeOf(
+  registry: KindRegistry,
+  row: CompositionWindowEdge,
+): CompositionNodeRef {
+  const partSide = requireDefined(
+    registry.compositionPartSide(row.kind),
+    `compositionPartSide(${row.kind}) is undefined for a row whose composition window is defined`,
+  );
+  return compositionRowEndpoints(partSide, row).whole;
 }
 
 /**

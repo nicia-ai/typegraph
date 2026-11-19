@@ -205,3 +205,25 @@ describe("composition move import without savepoints", () => {
     }
   });
 });
+
+describe("a required part's move that leaves a gap, without savepoints", () => {
+  it("is refused before anything is written, so it needs no savepoint", async () => {
+    const seeded = await seededWithoutSavepoints();
+    try {
+      const result = await importGraph(
+        seeded.store,
+        seeded.move("2022-01-01T00:00:00.000Z"),
+        { onConflict: "update", batchSize: 1 },
+      );
+      expect(
+        result.errors.map((entry) => [entry.id, entry.error.split(":")[0]]),
+      ).toEqual([
+        [seeded.incumbentId, "COMPOSITION_MOVE_GAP"],
+        ["cms-moved", "COMPOSITION_MOVE_GAP"],
+      ]);
+      expect(await seeded.openAttachments()).toEqual([seeded.oldWhole.id]);
+    } finally {
+      await seeded.backend.close();
+    }
+  });
+});

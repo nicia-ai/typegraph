@@ -1326,6 +1326,18 @@ export class NodeDeletePlanMismatchError extends TypeGraphError {
  *   `edgeId` / `validFrom` / `validTo` are the written edge's window as the
  *   write leaves it, and the `incumbent*` fields the other edge's — the one
  *   the write would overlap. An omitted bound is unbounded on that side.
+ * - `"moveGap"` (`COMPOSITION_MOVE_GAP`): a move of an
+ *   `existence: "required"` part ends its attachment (edge `endedEdgeKind` /
+ *   `endedEdgeId`, to the whole `endedWholeKind` / `endedWholeId`, window
+ *   `endedValidFrom`–`endedValidTo`) at an instant before the attachment that
+ *   replaces it (`edgeKind` / `edgeId`, to `wholeKind` / `wholeId`, window
+ *   from `validFrom`) opens, so the part would hold no whole on valid-time
+ *   reads during `gapFrom`–`gapTo`. `validFromStated` is `false` when the new
+ *   attachment states no `validFrom`: `validFrom` is then the instant the
+ *   import judged the move at, the bound such an attachment is written with
+ *   when its move is accepted. A required part's move must abut, as
+ *   `reparent`'s one instant makes it. Raised by `importGraph`, which reports
+ *   it per row.
  * - `"existing"` (`COMPOSITION_WHOLE_CONFLICT`): a `getOrCreateByConstraint`
  *   call whose `partOf` postcondition the already-existing node CONTRADICTS.
  *   `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` name both
@@ -1423,6 +1435,25 @@ export type CompositionErrorDetails =
       incumbentWholeId: string;
       incumbentValidFrom?: string;
       incumbentValidTo?: string;
+    }>
+  | Readonly<{
+      situation: "moveGap";
+      partKind: string;
+      partId: string;
+      endedEdgeKind: string;
+      endedEdgeId: string;
+      endedWholeKind: string;
+      endedWholeId: string;
+      endedValidFrom?: string;
+      endedValidTo: string;
+      edgeKind: string;
+      edgeId: string;
+      wholeKind: string;
+      wholeId: string;
+      validFrom: string;
+      validFromStated: boolean;
+      gapFrom: string;
+      gapTo: string;
     }>
   | Readonly<{
       situation: "existing";
@@ -1556,6 +1587,18 @@ function describeCompositionRefusal(
         message: `Cannot write composition edge "${details.edgeKind}" ${details.edgeId} between ${partLabel} and ${wholeLabel} with window ${compositionWindowLabel(details.validFrom, details.validTo)}: it overlaps the window ${compositionWindowLabel(details.incumbentValidFrom, details.incumbentValidTo)} of edge "${details.incumbentEdgeKind}" ${details.incumbentEdgeId}, which attaches the part to ${details.incumbentWholeKind}/${details.incumbentWholeId}. A part holds one whole at every valid-time instant.`,
         suggestion:
           "Give the edge a window that ends at or before the other edge's validFrom, or starts at or after its validTo (windows are half-open, so touching windows do not overlap). To move the part, call `store.nodes.<PartKind>.reparent(partId, { whole, at? })`, which ends the current window at the instant the new one opens. To correct recorded history, end or delete the overlapping edge first.",
+      };
+    }
+    case "moveGap": {
+      const wholeLabel = compositionRequestedWholeLabel(details);
+      const opens =
+        details.validFromStated ?
+          `opens at "${details.validFrom}"`
+        : `states no validFrom, so it opens at the instant the import judged the move ("${details.validFrom}")`;
+      return {
+        code: "COMPOSITION_MOVE_GAP",
+        message: `Cannot move ${partLabel} to ${wholeLabel}: edge "${details.endedEdgeKind}" ${details.endedEdgeId} ends its attachment to ${details.endedWholeKind}/${details.endedWholeId}, window ${compositionWindowLabel(details.endedValidFrom, details.endedValidTo)}, and edge "${details.edgeKind}" ${details.edgeId}, which attaches it again, ${opens}, so the part would hold no whole during ${compositionWindowLabel(details.gapFrom, details.gapTo)}. This kind requires a whole (\`existence: "required"\`), so a move must open the new attachment at the instant it ends the old one.`,
+        suggestion: `Give the new attachment a validFrom equal to the ended attachment's validTo ("${details.endedValidTo}"), or move the part with \`store.nodes.${details.partKind}.reparent(partId, { whole, at? })\`, which ends the old attachment and opens the new one at one instant.`,
       };
     }
     case "existing": {
