@@ -34,7 +34,8 @@
 //     probes are left as they are until the PR settles. The two-argument advisory lock
 //     and LOCK TABLE are still missing on that build.
 //   - Unchanged on all three: LIKE and ILIKE with ESCAPE (bare ILIKE is open as #3904),
-//     `INSERT INTO ... AS`, `ANALYZE (SKIP_LOCKED)`, #3335, #3389, #3771, #3772 and the
+//     `INSERT INTO ... AS` (filed today as doltgresql#3917), `ANALYZE (SKIP_LOCKED)`
+//     (filed today as doltgresql#3918), #3335, #3389, #3771, #3772 and the
 //     data-modifying INSERT CTE.
 //
 // RE-MEASURED 2026-11-17 on TypeGraph main f4bb59ce (0.75.0) against 1.5.1, still the
@@ -664,8 +665,6 @@ function report(): void {
  * What stops the revision-change journal's first write: its trigger function's
  * `EXECUTE format('... $1 ...') USING` has the `$1` substituted inside the literal.
  */
-/** A gap measured here that has no upstream issue yet. */
-const UNFILED = "not yet filed upstream";
 const BIND_SUBSTITUTION_ISSUE = "doltgresql#3771";
 const FORMAT_BIND_SUBSTITUTION = 'at or near "{": syntax error';
 
@@ -1310,7 +1309,7 @@ async function runDeviationBattery(): Promise<void> {
   // conflict arm can read the stored row.
   await probe(
     "bulk node upsert: INSERT INTO ... AS alias",
-    unsupported("aliased inserts are not yet supported", UNFILED),
+    unsupported("aliased inserts are not yet supported", "doltgresql#3917"),
     [
       `DROP TABLE IF EXISTS "probe_aliased_insert"`,
       `CREATE TABLE "probe_aliased_insert" ("id" INT PRIMARY KEY, "version" INT NOT NULL)`,
@@ -1335,7 +1334,7 @@ async function runDeviationBattery(): Promise<void> {
   // degrades to a warning when the statement fails. Plain `ANALYZE t` is accepted.
   await probe(
     "statistics: ANALYZE (SKIP_LOCKED)",
-    unsupported('at or near "(": syntax error', UNFILED),
+    unsupported('at or near "(": syntax error', "doltgresql#3918"),
     [...PROBE_SETUP, `ANALYZE (SKIP_LOCKED) "probe_rows"`],
   );
 }
