@@ -114,13 +114,21 @@ async function recordDelete(
 }
 
 describe("node bulkHardDelete statement count", () => {
-  it("issues the same statements for 10 and for 1,000 plain nodes, apart from bind-budget chunks", async () => {
+  it("issues the same statements for 10 and for 1,000 plain nodes, apart from bind-budget chunks, where the per-id loop grows with every id", async () => {
     const bulk = (
       nodes: Parameters<Parameters<typeof recordDelete>[1]>[0],
       ids: readonly string[],
     ) => nodes.Item.bulkHardDelete(ids as never);
+    const loop = async (
+      nodes: Parameters<Parameters<typeof recordDelete>[1]>[0],
+      ids: readonly string[],
+    ) => {
+      for (const id of ids) await nodes.Item.hardDelete(id as never);
+    };
     const ten = await recordDelete(10, bulk);
     const thousand = await recordDelete(1000, bulk);
+    const loopTen = await recordDelete(10, loop);
+    const loopTwenty = await recordDelete(20, loop);
 
     // The same statements, in the same order of first appearance.
     expect([...new Set(thousand)]).toEqual([...new Set(ten)]);
@@ -139,26 +147,21 @@ describe("node bulkHardDelete statement count", () => {
         count: expected,
       });
     }
-    // Bounded: no statement per node.
-    expect(ten.length).toBeLessThan(40);
+
+    // The baseline the batch replaces, measured by the same recorder: every
+    // further id costs the loop its own gate, frame, connected-edge read,
+    // edge, claim, uniqueness, fulltext and row statements.
+    const loopStatementsPerId = (loopTwenty.length - loopTen.length) / 10;
+    expect(loopStatementsPerId).toBeGreaterThanOrEqual(8);
+    // The batch costs fewer statements for 10 ids than the loop does, and
+    // each further id costs it a small fraction of one statement — the
+    // identity probe's extra chunks — where it costs the loop eight or more.
+    expect(ten.length).toBeLessThan(loopTen.length);
+    const batchStatementsPerId = (thousand.length - ten.length) / 990;
+    expect(batchStatementsPerId).toBeLessThan(loopStatementsPerId / 100);
   });
   // MUTATION CHECK: drop `findEdgesConnectedToNodes` (or
   // `hardDeleteNodesBatch`) from the PostgreSQL backend, so the batch takes
-  // its per-node fallback — the 1,000-node sequence grows by one statement
-  // set per node.
-
-  it("is the per-id loop's statement fanout it replaces", async () => {
-    const loop = async (
-      nodes: Parameters<Parameters<typeof recordDelete>[1]>[0],
-      ids: readonly string[],
-    ) => {
-      for (const id of ids) await nodes.Item.hardDelete(id as never);
-    };
-    const ten = await recordDelete(10, loop);
-    const twenty = await recordDelete(20, loop);
-
-    // Every further id costs the loop its own gate, frame, connected-edge
-    // read, edge, claim, uniqueness, fulltext and row statements.
-    expect(twenty.length - ten.length).toBeGreaterThanOrEqual(10 * 8);
-  });
+  // its per-node fallback, or implement `bulkHardDelete` as the per-id loop —
+  // the 1,000-node sequence grows by one statement set per node.
 });
