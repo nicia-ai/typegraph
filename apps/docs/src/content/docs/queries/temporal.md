@@ -750,20 +750,24 @@ const allIncludingDeleted = await store
 ### Filtering Deleted Records
 
 ```typescript
-// Find only deleted records. Predicates see declared properties plus `id` and
-// `kind`, not `meta`, so filter on the selected `deletedAt`.
-const allUsers = await store
+// Find only deleted records
+const deletedUsers = await store
   .query()
   .from("User", "u")
   .temporal("includeTombstones")
+  .whereNode("u", (u) => u.$meta.deletedAt.isNotNull())
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
     deletedAt: ctx.u.meta.deletedAt,
   }))
   .execute();
-const deletedUsers = allUsers.filter((user) => user.deletedAt !== undefined);
 ```
+
+A metadata predicate narrows the rows the temporal mode admits. Under the default `"current"`
+mode deleted rows are already excluded, so the same predicate matches nothing; query
+`includeTombstones` to reach them. See [Metadata](/queries/filter#metadata) for every `$meta`
+field.
 
 ## Temporal Metadata Fields
 
@@ -860,24 +864,34 @@ for subgraph.
 
 ### Version Comparison
 
-Compare two versions of a document:
+Compare two versions of a document. An update rewrites the node's one stored row and raises
+`meta.version`; it does not keep the previous version as a row, so no temporal mode returns two
+versions of one id. Read the earlier version from [recorded time](#recorded-time-bitemporal)
+instead: with `history: true`, keep a `recordedNow()` checkpoint after each revision you may want
+to compare, then read the document at both checkpoints.
 
 ```typescript
-async function compareVersions(docId: string, v1: number, v2: number) {
-  const versions = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(docId))
-    .select((ctx) => ctx.d)
-    .execute();
+import { type RecordedInstant } from "@nicia-ai/typegraph/core";
 
-  const version1 = versions.find((v) => v.meta.version === v1);
-  const version2 = versions.find((v) => v.meta.version === v2);
+// After each revision worth comparing:
+//   await store.nodes.Document.update(docId, { title: "Revised" });
+//   const revised = await store.recordedNow();
+async function compareVersions(
+  docId: NodeId<typeof Document>,
+  before: RecordedInstant,
+  after: RecordedInstant,
+) {
+  const [version1, version2] = await Promise.all([
+    store.asOfRecorded(before).nodes.Document.getById(docId),
+    store.asOfRecorded(after).nodes.Document.getById(docId),
+  ]);
 
   return { version1, version2 };
 }
 ```
+
+Each result is the document as TypeGraph recorded it at that checkpoint, including its
+`meta.version`, or `undefined` when it did not exist (or was deleted) there.
 
 ### Compliance Reporting
 

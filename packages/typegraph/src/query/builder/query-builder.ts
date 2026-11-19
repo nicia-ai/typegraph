@@ -101,6 +101,7 @@ import {
 import { createExpressionSubqueryHelpers } from "./expression-subqueries";
 import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import { createMetadataAccessor } from "./metadata-accessor";
 import { assertSharedNodeField, resolveAliasOrderSpec } from "./order-by-field";
 import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
@@ -2437,12 +2438,14 @@ export class QueryBuilder<
           this.#config.schemaIntrospector.kindsWithoutSearchableField(kindNames)
       ),
     );
+    const metadataAccessor = createMetadataAccessor(alias, false);
 
     if (this.#state.dynamicNodeAliases.has(alias)) {
       return {
         id: idAccessor,
         kind: kindAccessor,
         $fulltext: fulltextAccessor,
+        $meta: metadataAccessor,
         field: (name: string) =>
           createDynamicFieldBuilder(
             this.#config.schemaIntrospector,
@@ -2464,6 +2467,7 @@ export class QueryBuilder<
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "$fulltext") return fulltextAccessor;
+        if (property === "$meta") return metadataAccessor;
 
         // A DECLARED field wins over the interop exemption: `toJSON` and `then`
         // are legal schema field names, and the accessor type offers them, so
@@ -2596,6 +2600,7 @@ export class QueryBuilder<
     const toIdAccessor = stringField(
       fieldRef(alias, ["to_id"], { valueType: "string" }),
     );
+    const metadataAccessor = createMetadataAccessor(alias, true);
 
     if (this.#state.dynamicEdgeAliases.has(alias)) {
       return {
@@ -2603,6 +2608,7 @@ export class QueryBuilder<
         kind: kindAccessor,
         fromId: fromIdAccessor,
         toId: toIdAccessor,
+        $meta: metadataAccessor,
         field: (name: string) =>
           createDynamicFieldBuilder(
             this.#config.schemaIntrospector,
@@ -2625,6 +2631,7 @@ export class QueryBuilder<
         if (property === "kind") return kindAccessor;
         if (property === "fromId") return fromIdAccessor;
         if (property === "toId") return toIdAccessor;
+        if (property === "$meta") return metadataAccessor;
 
         // A DECLARED field wins over the interop exemption — see
         // #createNodeAccessor.
