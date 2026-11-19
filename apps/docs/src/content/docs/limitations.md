@@ -390,19 +390,6 @@ before the affected nodes can be deleted.
   live required part with no live whole) and ships no repair step.
   `store.verifyConstraintFences()` reports the same finding on an already-live
   graph but does not fix it.
-- **Graph merge does not protect a reopened composition row from a
-  concurrent deletion of that same row.** If one branch moves a part back
-  under a whole by reopening an ended `oneActive` row (`clearValidTo`) while
-  another branch deletes that row itself, with both the part and the whole
-  surviving, the deletion wins under every `onDeleteModifyConflict` policy: a
-  window change is not a modification, so no `DeleteModifyConflict` is
-  recorded, and the absorbed reopen does not appear in `validityEnds`. If the
-  reopening branch also ended the part's other attachment, the merged part is
-  left with no whole and nothing reports it.
-  `store.verifyConstraintFences()`'s `compositionExistence` family reports
-  such a part only when its pair declares `existence: "required"`. The same
-  absorption drops a reopen of any edge kind; it is tracked in
-  [#789](https://github.com/nicia-ai/typegraph/issues/789).
 
 ## Write Fence Row
 

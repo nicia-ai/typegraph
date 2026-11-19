@@ -984,11 +984,15 @@ function indexNewNodesById(
  * `branchId` is a write vehicle rather than a contribution (see the loop below),
  * which the provenance fold must know so it does not credit it.
  *
- * `deletionAbsorbed` holds the re-windowed copies a finally-deleted edge absorbs:
- * never written, but still a branch's staged state, so the cross-branch
- * composition check ({@link lostBranchAttachment}) can see a re-attachment the
- * deletion would otherwise discard without a trace. Each carries the window its
- * branch wrote.
+ * `authoredWindows` holds EVERY branch's re-windowed copy, each carrying the
+ * window its branch wrote, for the cross-branch composition check
+ * ({@link lostBranchAttachment}). The staged rows cannot stand in for them: an
+ * identity is staged at most once, with the RESOLVED window, so a branch's
+ * re-attachment (a reopen) is invisible there whenever the merge does not
+ * write it — the edge's own deletion absorbs it, the incremental target's end
+ * takes precedence over it, or a sibling branch's end beats it. In each case
+ * the deletion of one endpoint still discards that attachment, and the check
+ * must see it.
  */
 function buildStagedEdges(
   staging: StagingSet,
@@ -998,12 +1002,12 @@ function buildStagedEdges(
 ): Readonly<{
   edges: readonly StagedEdge[];
   windowOnlyCarried: ReadonlySet<MergeKey>;
-  deletionAbsorbed: readonly StagedEdge[];
+  authoredWindows: readonly StagedEdge[];
 }> {
   const staged: StagedEdge[] = [];
   const stagedIdentities = new Set<MergeKey>();
   const windowOnlyCarried = new Set<MergeKey>();
-  const deletionAbsorbed: StagedEdge[] = [];
+  const authoredWindows: StagedEdge[] = [];
   // Every branch diffs against the same merge base, so any re-windowed copy of
   // an identity states that base's window.
   const baseWindowByEdge = new Map<MergeKey, ValidWindow>();
@@ -1056,18 +1060,16 @@ function buildStagedEdges(
   // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
+    authoredWindows.push(
+      windowedStagedEdge(
+        item,
+        item.edge.fork.validTo === undefined ?
+          { clearValidTo: true }
+        : { validTo: item.edge.fork.validTo },
+      ),
+    );
     if (stagedIdentities.has(identity)) continue;
-    if (edgeDeletions.has(identity)) {
-      deletionAbsorbed.push(
-        windowedStagedEdge(
-          item,
-          item.edge.fork.validTo === undefined ?
-            { clearValidTo: true }
-          : { validTo: item.edge.fork.validTo },
-        ),
-      );
-      continue;
-    }
+    if (edgeDeletions.has(identity)) continue;
     const validToChange = edgeValidityEnds.get(identity);
     if (validToChange === undefined) continue;
     stagedIdentities.add(identity);
@@ -1081,7 +1083,7 @@ function buildStagedEdges(
       ),
     );
   }
-  return { edges: staged, windowOnlyCarried, deletionAbsorbed };
+  return { edges: staged, windowOnlyCarried, authoredWindows };
 }
 
 /** The inherited {@link StagedEdge} for a re-windowed row, carrying `window`. */
@@ -1683,7 +1685,8 @@ function buildInternalMergePlan<G extends GraphDef>(
   // (6-window) reconcile the inherited valid-time windows the branches moved.
   // Runs AFTER both delete/modify resolutions because a finally-deleted row
   // absorbs its own ending: deleting and ending are both "no longer true", and
-  // the stronger statement wins without recording a conflict.
+  // the stronger statement wins without recording a conflict. A reopen was
+  // already weighed against any deletion there, as a DeleteModifyConflict.
   const validWindows = resolveValidWindows(
     staging,
     new Set(nodeDeletions.keys()),
@@ -1812,7 +1815,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   const {
     edges: stagedEdges,
     windowOnlyCarried,
-    deletionAbsorbed,
+    authoredWindows,
   } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
@@ -1863,7 +1866,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     registry,
     [
       ...repoint.endpointDeletedEdges,
-      ...deletionAbsorbed.map((staged) =>
+      ...authoredWindows.map((staged) =>
         withRepointedEndpoints(staged, canonicalOf),
       ),
     ],
@@ -3801,9 +3804,9 @@ async function compositionMovedPartsAmong(
 /**
  * THE cross-branch composition finding: whether a branch's staged edge that the
  * plan does not write because an endpoint is finally deleted — dropped by the
- * repoint, or a re-windowed copy absorbed by the edge's own deletion — is a
- * composition attachment the plan would silently lose, and if so which `cause`
- * it is.
+ * repoint, or a branch's re-windowed copy carrying the window that branch wrote,
+ * which the plan may not write at all — is a composition attachment the plan
+ * would silently lose, and if so which `cause` it is.
  *
  * One branch attached the part — moved it, created it under a whole, or
  * re-attached it through a row ended at the merge base — while another
@@ -3883,7 +3886,7 @@ function stagedRowAttachesForBranch(
 /**
  * Plan-time refusal of every {@link lostBranchAttachment}: throws
  * `MergeCompositionOrphanError` for the first one — the repoint's drops in
- * their (edge id, branch id) order, then the deletion-absorbed copies in
+ * their (edge id, branch id) order, then every branch's re-windowed copy in
  * staging order — so the refusal does not depend on the order the branches
  * were passed in.
  *

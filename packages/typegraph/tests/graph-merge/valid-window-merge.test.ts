@@ -10,7 +10,10 @@
  *   2. props + window change together apply in one write;
  *   3. disjoint edits across branches all survive;
  *   4. two branches ending differently resolve to the EARLIEST end, reported;
- *   5. a deletion ABSORBS another branch's ending — no delete/modify conflict;
+ *   5. a deletion ABSORBS another branch's ending — no delete/modify conflict —
+ *      but NOT a reopen, which asserts the opposite and so is a delete/modify
+ *      conflict decided by `onDeleteModifyConflict` (issue #789), on the
+ *      snapshot and incremental paths alike;
  *   6. the incremental target's own end wins over a branch's — and the claims that
  *      loses are REPORTED against the target's instant, marked
  *      `precedence: "target"` and credited to nobody (issue #409), so a discarded
@@ -55,6 +58,8 @@ import { z } from "zod";
 
 import { asEdgeId, asNodeId } from "../../src/core/types";
 import { branch } from "../../src/graph-merge/branch";
+import { COMMITTED_TARGET_BRANCH } from "../../src/graph-merge/canonicalize";
+import { DELETED_NODE_DROP_REASON } from "../../src/graph-merge/delete-modify";
 import { MergeError } from "../../src/graph-merge/errors";
 import { merge, mergeIncremental } from "../../src/graph-merge/merge";
 import {
@@ -62,7 +67,11 @@ import {
   readProvenance,
 } from "../../src/graph-merge/provenance-store";
 import { isErr, unwrap } from "../../src/graph-merge/result";
-import type { GraphBranch, MergeReport } from "../../src/graph-merge/types";
+import type {
+  DeleteModifyPolicy,
+  GraphBranch,
+  MergeReport,
+} from "../../src/graph-merge/types";
 import {
   asBranchId,
   VALIDITY_END_TARGET_PRECEDENCE,
@@ -120,6 +129,12 @@ const EARLY = "2100-01-01T00:00:00.000Z";
 const LATE = "2100-06-01T00:00:00.000Z";
 const LATEST = "2100-09-01T00:00:00.000Z";
 const MOVED_FROM = "2099-01-01T00:00:00.000Z";
+
+const DELETE_MODIFY_POLICIES = [
+  "flag",
+  "modifyWins",
+  "deleteWins",
+] as const satisfies readonly DeleteModifyPolicy[];
 
 describe.each(backendMatrix())(
   "merging valid-time windows [$name]",
@@ -358,6 +373,206 @@ describe.each(backendMatrix())(
       // wins and the two do not disagree.
       expect(report.deleteModifyConflicts).toEqual([]);
       expect(report.validityEnds).toEqual([]);
+    });
+
+    describe.each(DELETE_MODIFY_POLICIES)(
+      "a reopen against a concurrent deletion under %s",
+      (policy) => {
+        const reopenSurvives = policy !== "deleteWins";
+
+        it("raises a DeleteModifyConflict on the node instead of absorbing the reopen", async () => {
+          const forkPoint = await seededForkPoint();
+          await forkPoint.nodes.Patient.update(
+            LONE_PATIENT,
+            {},
+            { validTo: LATE },
+          );
+          const reopener = await forkOf(forkPoint, BRANCH_A);
+          const deleter = await forkOf(forkPoint, BRANCH_B);
+          await reopener.store.nodes.Patient.update(
+            LONE_PATIENT,
+            {},
+            { clearValidTo: true },
+          );
+          await deleter.store.nodes.Patient.delete(LONE_PATIENT);
+
+          const report = unwrap(
+            await merge(forkPoint, [reopener, deleter], {
+              branchOrder: BRANCH_ORDER,
+              onDeleteModifyConflict: policy,
+            }),
+          );
+
+          // A reopen says the fact is true AGAIN — the opposite of the
+          // deletion — so the two disagree and the policy decides the row.
+          expect(report.deleteModifyConflicts).toEqual([
+            {
+              entityId: "pat-2",
+              kind: "Patient",
+              deletedBy: BRANCH_B,
+              modifiedBy: BRANCH_A,
+              resolution: policy,
+            },
+          ]);
+          const row = await nodeRow(forkPoint, "Patient", "pat-2");
+          if (reopenSurvives) {
+            expect(row.deleted_at).toBeUndefined();
+            expect(
+              await nodeEnd(forkPoint, "Patient", "pat-2"),
+            ).toBeUndefined();
+            expect(report.validityEnds).toEqual([
+              {
+                entity: "node",
+                kind: "Patient",
+                id: "pat-2",
+                clearValidTo: true,
+                claimedBy: [BRANCH_A],
+              },
+            ]);
+          } else {
+            expect(row.deleted_at).not.toBeUndefined();
+            expect(report.validityEnds).toEqual([]);
+            expect(report.dropped).toContainEqual({
+              kind: "node",
+              id: "pat-2",
+              reason: DELETED_NODE_DROP_REASON,
+            });
+          }
+        });
+
+        it("raises a DeleteModifyConflict on the edge instead of absorbing the reopen", async () => {
+          const forkPoint = await seededForkPoint();
+          await forkPoint.edges.hadEncounter.update(
+            EDGE_1,
+            {},
+            { validTo: LATE },
+          );
+          const reopener = await forkOf(forkPoint, BRANCH_A);
+          const deleter = await forkOf(forkPoint, BRANCH_B);
+          await reopener.store.edges.hadEncounter.update(
+            EDGE_1,
+            {},
+            { clearValidTo: true },
+          );
+          await deleter.store.edges.hadEncounter.delete(EDGE_1);
+
+          const report = unwrap(
+            await merge(forkPoint, [reopener, deleter], {
+              branchOrder: BRANCH_ORDER,
+              onDeleteModifyConflict: policy,
+            }),
+          );
+
+          expect(report.deleteModifyConflicts).toEqual([
+            {
+              entityId: "edge-1",
+              kind: "hadEncounter",
+              deletedBy: BRANCH_B,
+              modifiedBy: BRANCH_A,
+              resolution: policy,
+            },
+          ]);
+          const row = await edgeRow(forkPoint, "edge-1");
+          if (reopenSurvives) {
+            expect(row.deleted_at).toBeUndefined();
+            expect(await edgeEnd(forkPoint, "edge-1")).toBeUndefined();
+            expect(report.validityEnds).toEqual([
+              {
+                entity: "edge",
+                kind: "hadEncounter",
+                id: "edge-1",
+                clearValidTo: true,
+                claimedBy: [BRANCH_A],
+              },
+            ]);
+          } else {
+            expect(row.deleted_at).not.toBeUndefined();
+            expect(report.validityEnds).toEqual([]);
+            expect(report.dropped).toContainEqual({
+              kind: "edge",
+              id: "edge-1",
+              reason: DELETED_NODE_DROP_REASON,
+            });
+          }
+        });
+      },
+    );
+
+    it("keeps an incremental target's own reopen over a branch's deletion, even under deleteWins", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.edges.hadEncounter.update(EDGE_1, {}, { validTo: LATE });
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const deleter = await forkOf(forkPoint, BRANCH_A);
+      await target.edges.hadEncounter.update(
+        EDGE_1,
+        {},
+        { clearValidTo: true },
+      );
+      await deleter.store.edges.hadEncounter.delete(EDGE_1);
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [deleter],
+          options: {
+            branchOrder: BRANCH_ORDER,
+            onDeleteModifyConflict: "deleteWins",
+          },
+        }),
+      );
+
+      // The committed target's own change is preferred over a branch's, the
+      // same precedence a target props edit gets against a branch deletion.
+      expect(report.deleteModifyConflicts).toEqual([
+        {
+          entityId: "edge-1",
+          kind: "hadEncounter",
+          deletedBy: BRANCH_A,
+          modifiedBy: COMMITTED_TARGET_BRANCH,
+          resolution: "modifyWins",
+        },
+      ]);
+      expect((await edgeRow(target, "edge-1")).deleted_at).toBeUndefined();
+      expect(await edgeEnd(target, "edge-1")).toBeUndefined();
+    });
+
+    it("reports a branch reopen that the incremental target's own deletion overrules", async () => {
+      const forkPoint = await seededForkPoint();
+      await forkPoint.nodes.Patient.update(LONE_PATIENT, {}, { validTo: LATE });
+      const target = (await forkOf(forkPoint, asBranchId("window-target")))
+        .store;
+      const reopener = await forkOf(forkPoint, BRANCH_A);
+      await target.nodes.Patient.delete(LONE_PATIENT);
+      await reopener.store.nodes.Patient.update(
+        LONE_PATIENT,
+        {},
+        { clearValidTo: true },
+      );
+
+      const report = unwrap(
+        await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [reopener],
+          options: { branchOrder: BRANCH_ORDER },
+        }),
+      );
+
+      // The target's deletion stands, but the reopen it overruled is visible.
+      expect(report.deleteModifyConflicts).toEqual([
+        {
+          entityId: "pat-2",
+          kind: "Patient",
+          deletedBy: COMMITTED_TARGET_BRANCH,
+          modifiedBy: BRANCH_A,
+          resolution: "deleteWins",
+        },
+      ]);
+      expect(
+        (await nodeRow(target, "Patient", "pat-2")).deleted_at,
+      ).not.toBeUndefined();
     });
 
     it("keeps the incremental target's own end over a branch's, and reports the discard", async () => {
