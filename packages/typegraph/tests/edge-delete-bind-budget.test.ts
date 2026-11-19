@@ -14,6 +14,12 @@
  * vacuously. Each edge count is placed exactly on a chunk boundary (one full
  * chunk, one under, one over, and an exact multiple) so a boundary regression
  * has nowhere to hide.
+ *
+ * The local SQLite engine itself accepts far more binds than the pinned
+ * budget, so an oversized statement still runs and removes every edge. Each
+ * case therefore also records every statement the delete prepares on the
+ * connection and asserts its bind count stays within the budget: that, not
+ * the surviving rows, is what catches a chunk sized one id too large.
  */
 import { type SQL } from "drizzle-orm";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
@@ -66,12 +72,50 @@ afterEach(async () => {
  * — the only way to make the chunk math observable (see the file header).
  */
 async function createBudgetedStore() {
-  const { backend } = createLocalSqliteBackend({
+  const { backend, db } = createLocalSqliteBackend({
     capabilities: { maxBindParameters: MAX_BIND_PARAMETERS },
   });
   openBackends.push(backend);
   const store = await createInitializedStore(graph, backend);
-  return { backend, store };
+  const { $client: client } = db as unknown as Readonly<{
+    $client: SqliteClient;
+  }>;
+  return { backend, store, client };
+}
+
+/** The one member of the driver client the bind assertion observes. */
+interface SqliteClient { prepare: (source: string) => unknown }
+
+/**
+ * Runs `operation` while recording every statement it prepares on `client`,
+ * and asserts each one that binds an id list (`IN (...)`, the statements the
+ * chunking sizes) stays within the pinned budget. Fixed-shape statements such
+ * as the cascade's connected-edge read bind a constant number of parameters
+ * the budget does not govern. Asserts at least one chunked DELETE or
+ * soft-delete UPDATE was prepared, so a case that never reached the delete
+ * cannot pass on an empty record.
+ */
+async function expectWithinBindBudget(
+  client: SqliteClient,
+  operation: () => Promise<unknown>,
+): Promise<void> {
+  const prepared = vi.spyOn(client, "prepare");
+  let statements: readonly string[];
+  try {
+    await operation();
+  } finally {
+    // Read before restoring: `mockRestore` also clears the recorded calls.
+    statements = prepared.mock.calls.map(([source]) => source);
+    prepared.mockRestore();
+  }
+  const chunked = statements.filter((source) => /\bIN \(/.test(source));
+  expect(chunked.some((source) => /\b(?:DELETE|UPDATE)\b/.test(source))).toBe(
+    true,
+  );
+  const overBudget = chunked.filter(
+    (source) => (source.match(/\?/g)?.length ?? 0) > MAX_BIND_PARAMETERS,
+  );
+  expect(overBudget).toEqual([]);
 }
 
 type BudgetedStore = Awaited<ReturnType<typeof createBudgetedStore>>["store"];
@@ -149,14 +193,16 @@ describe("cascade edge delete honors the bind budget", () => {
   describe("soft cascade node delete (routes through deleteEdgesBatch)", () => {
     for (const shape of boundaryShapes(SOFT_DELETE_CHUNK)) {
       it(`removes all edges — ${shape.label} (${shape.edgeCount} edges, chunk ${SOFT_DELETE_CHUNK})`, async () => {
-        const { backend, store } = await createBudgetedStore();
+        const { backend, store, client } = await createBudgetedStore();
         const { hubId, edgeIds } = await seedHub(
           store,
           `soft-${shape.edgeCount}`,
           shape.edgeCount,
         );
 
-        await store.nodes.Person.delete(hubId);
+        await expectWithinBindBudget(client, () =>
+          store.nodes.Person.delete(hubId),
+        );
 
         await expectAllEdgesGone(backend, hubId, edgeIds);
       });
@@ -171,7 +217,7 @@ describe("cascade edge delete honors the bind budget", () => {
   describe("hardDeleteEdgesBatch (driven directly)", () => {
     for (const shape of boundaryShapes(HARD_DELETE_CHUNK)) {
       it(`removes all edges — ${shape.label} (${shape.edgeCount} edges, chunk ${HARD_DELETE_CHUNK})`, async () => {
-        const { backend, store } = await createBudgetedStore();
+        const { backend, store, client } = await createBudgetedStore();
         const { hubId, edgeIds } = await seedHub(
           store,
           `hard-${shape.edgeCount}`,
@@ -182,10 +228,12 @@ describe("cascade edge delete honors the bind budget", () => {
         if (hardDeleteEdgesBatch === undefined) {
           throw new Error("backend must expose hardDeleteEdgesBatch");
         }
-        await hardDeleteEdgesBatch({
-          graphId: GRAPH_ID,
-          ids: [...edgeIds],
-        });
+        await expectWithinBindBudget(client, () =>
+          hardDeleteEdgesBatch({
+            graphId: GRAPH_ID,
+            ids: [...edgeIds],
+          }),
+        );
 
         await expectAllEdgesGone(backend, hubId, edgeIds);
       });
@@ -199,16 +247,22 @@ describe("collection bulkHardDelete honors the bind budget", () => {
   // resolution read and the delete must slice on that budget, or an id past
   // the first chunk is either refused by the engine or stranded.
   const KIND_SCOPED_HARD_DELETE_CHUNK = HARD_DELETE_CHUNK - 1;
+  // MUTATION CHECK: drop the kind's bind from the hard-delete chunk size in
+  // `operation-backend-core.ts` — every shape holding more ids than one
+  // chunk then emits a DELETE one bind over the budget and fails the bind
+  // assertion. The exactly-one-chunk shape cannot exceed it either way.
   for (const shape of boundaryShapes(KIND_SCOPED_HARD_DELETE_CHUNK)) {
     it(`removes every edge — ${shape.label} (${shape.edgeCount} edges, chunk ${KIND_SCOPED_HARD_DELETE_CHUNK})`, async () => {
-      const { backend, store } = await createBudgetedStore();
+      const { backend, store, client } = await createBudgetedStore();
       const { hubId, edgeIds } = await seedHub(
         store,
         `bulk-hard-${shape.edgeCount}`,
         shape.edgeCount,
       );
 
-      await store.edges.knows.bulkHardDelete(edgeIds as never);
+      await expectWithinBindBudget(client, () =>
+        store.edges.knows.bulkHardDelete(edgeIds as never),
+      );
 
       await expectAllEdgesGone(backend, hubId, edgeIds);
       for (const edgeId of edgeIds) {
