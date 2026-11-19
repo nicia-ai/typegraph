@@ -102,6 +102,7 @@ import {
   lockRecordedGraphDecision,
   lockRecordedGraphWrite,
   recordedTransactionControlTarget,
+  runRecordedTransactionSavepoint,
 } from "../recorded-capture";
 import {
   acquiredGraphWriteLockFromCombinedFence,
@@ -654,6 +655,50 @@ export type WriteTransactionOptions<T> = Readonly<{
  * the executor opened, so the target object is not an honest second source.
  */
 export type WriteTransactionMode = "opened" | "existing" | "none";
+
+const FRAME_WRITES_SAVEPOINT = "typegraph_frame_writes";
+
+/**
+ * Runs the writes of one managed write frame so that a failure among them
+ * leaves the transaction they land in exactly as the frame found it.
+ *
+ * A frame the store opened (`"opened"`) rolls its own transaction back on a
+ * throw, so its writes are a unit already. A frame inside the caller's
+ * transaction (`"existing"`) is not: a caller that catches the failure and
+ * commits would otherwise keep the statements that ran before it, while the
+ * session's revision flag — set only when a frame completes — reports that
+ * nothing was written. Such a frame's writes therefore run behind a
+ * TypeGraph-owned savepoint ({@link runRecordedTransactionSavepoint}), whose
+ * rollback also restores every piece of transaction state registered with
+ * `savepoint-state.ts`: capture, receipts, and this module's session.
+ *
+ * A target with no statement execution has no savepoint to take, and its
+ * writes run unguarded: a caught failure keeps what landed before it, as every
+ * other write on such a target does. No revision clock can disagree with
+ * them there — history and revision tracking both refuse a backend without
+ * statement execution at construction. A frame with no transaction
+ * (`"none"`) applies statement by statement.
+ *
+ * Call it AFTER every refusal the frame can reach: reads and judgments belong
+ * before it, so a refusal costs no savepoint, and the locks the frame took
+ * predate the savepoint and survive its rollback.
+ */
+export async function runFrameWritesAsUnit<T>(
+  ctx: Pick<WriteTransactionContext, "statementExecution">,
+  target: Readonly<Pick<TransactionBackend, "executeStatement">>,
+  transactionMode: WriteTransactionMode,
+  writes: () => Promise<T>,
+): Promise<T> {
+  if (transactionMode !== "existing") return writes();
+  const statementExecution = ctx.statementExecution;
+  if (statementExecution?.supported !== true) return writes();
+  return runRecordedTransactionSavepoint(
+    target,
+    statementExecution,
+    FRAME_WRITES_SAVEPOINT,
+    async () => ({ action: "release", value: await writes() }),
+  );
+}
 
 export function resolveWriteTransactionMode(
   backend: GraphBackend | TransactionBackend,
