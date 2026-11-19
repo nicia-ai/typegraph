@@ -1,4 +1,5 @@
-import { ConfigurationError } from "../../errors";
+import { ConfigurationError, ValidationError } from "../../errors";
+import { validateCanonicalIsoDate } from "../../utils/date";
 import { type FieldRef, type OrderSpec, type SortDirection } from "../ast";
 import { jsonPointer } from "../json-pointer";
 import { fieldRef } from "../predicates";
@@ -32,6 +33,12 @@ type SystemOrderField = Readonly<{
    * accepts a `Date` operand.
    */
   timestamp?: true;
+  /**
+   * Present on `version`, a 32-bit integer column on PostgreSQL. A predicate
+   * refuses any other operand, which PostgreSQL would reject while SQLite
+   * compared it numerically.
+   */
+  integer?: true;
 }>;
 
 /**
@@ -75,6 +82,7 @@ const SYSTEM_ORDER_FIELDS: readonly SystemOrderField[] = [
   {
     selectedPath: ["meta", "version"],
     column: "version",
+    integer: true,
     nullable: false,
     owner: "node",
     valueType: "number",
@@ -162,6 +170,7 @@ export type SystemMetadataField = Readonly<{
   nullable: boolean;
   valueType: NonNullable<FieldRef["valueType"]>;
   timestamp: boolean;
+  integer: boolean;
 }>;
 
 function metadataFields(
@@ -178,6 +187,7 @@ function metadataFields(
         nullable: field.nullable,
         valueType: field.valueType,
         timestamp: field.timestamp === true,
+        integer: field.integer === true,
       };
       return [[name, metadata] as const];
     }),
@@ -186,6 +196,106 @@ function metadataFields(
 
 const NODE_METADATA_FIELDS = metadataFields(false);
 const EDGE_METADATA_FIELDS = metadataFields(true);
+
+/**
+ * The metadata fields by physical column. Node and edge fields share their
+ * columns, so one map resolves either alias's field reference.
+ */
+const METADATA_FIELDS_BY_COLUMN: ReadonlyMap<string, SystemMetadataField> =
+  new Map(
+    [...NODE_METADATA_FIELDS.values(), ...EDGE_METADATA_FIELDS.values()].map(
+      (field) => [field.column, field],
+    ),
+  );
+
+/** The smallest and largest values PostgreSQL's `integer` column stores. */
+const INT32_MIN = -(2 ** 31);
+const INT32_MAX = 2 ** 31 - 1;
+
+/**
+ * The metadata field a predicate's field reference compares, or `undefined`
+ * for any other reference (a property, `id`, `kind`, an edge endpoint).
+ */
+function metadataFieldOfReference(
+  reference: FieldRef,
+): SystemMetadataField | undefined {
+  if (reference.jsonPointer !== undefined || reference.path.length !== 1)
+    return undefined;
+  const [column] = reference.path;
+  return column === undefined ? undefined : (
+      METADATA_FIELDS_BY_COLUMN.get(column)
+    );
+}
+
+/**
+ * Refuses one operand a metadata predicate compares against a metadata
+ * column unless every backend compares it the same way. It is the single
+ * check for a literal (the `$meta` accessor calls it before building the
+ * predicate) and for a `param()` binding (prepared-query validation calls it
+ * for every value bound against a metadata field), so both refuse before any
+ * SQL runs:
+ *
+ * - `version` takes a 32-bit integer. PostgreSQL rejects `1.5` or `2 ** 31`
+ *   against its `integer` column, while SQLite compared them numerically.
+ * - A timestamp takes a `Date` or a canonical UTC ISO-8601 string
+ *   (`YYYY-MM-DDTHH:mm:ss.sssZ`, via `validateCanonicalIsoDate`). SQLite
+ *   compares the stored text and PostgreSQL the parsed instant, so
+ *   `"2021-01-01T00:00:00Z"` — the instant of a stored
+ *   `"2021-01-01T00:00:00.000Z"` but text that sorts after it — matched
+ *   `lt` on SQLite and not on PostgreSQL.
+ *
+ * A reference to anything other than a metadata column is not checked here.
+ */
+export function assertMetadataOperand(
+  reference: FieldRef,
+  operand: unknown,
+): void {
+  const field = metadataFieldOfReference(reference);
+  if (field === undefined) return;
+  const path = `${reference.alias}.$meta.${field.name}`;
+  if (field.timestamp) {
+    if (operand instanceof Date && !Number.isNaN(operand.getTime())) return;
+    if (typeof operand === "string") {
+      validateCanonicalIsoDate(operand, path);
+      return;
+    }
+    refuseMetadataOperand(
+      path,
+      operand,
+      "a Date or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ)",
+    );
+  }
+  if (
+    field.integer &&
+    !(
+      typeof operand === "number" &&
+      Number.isInteger(operand) &&
+      operand >= INT32_MIN &&
+      operand <= INT32_MAX
+    )
+  ) {
+    refuseMetadataOperand(
+      path,
+      operand,
+      `an integer from ${INT32_MIN} to ${INT32_MAX}`,
+    );
+  }
+}
+
+function refuseMetadataOperand(
+  path: string,
+  operand: unknown,
+  expected: string,
+): never {
+  const received =
+    operand instanceof Date ? "an invalid Date" : (
+      `${typeof operand} ${String(operand)}`
+    );
+  throw new ValidationError(
+    `Invalid operand for "${path}": expected ${expected}, got ${received}.`,
+    { issues: [{ path, message: `Expected ${expected}, got ${received}` }] },
+  );
+}
 
 /** The metadata fields a node or edge alias stores, in table order. */
 export function systemMetadataFields(

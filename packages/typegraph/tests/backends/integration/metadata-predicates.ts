@@ -74,6 +74,20 @@ function titles(rows: readonly string[]): string[] {
   return rows.toSorted();
 }
 
+/**
+ * The error class `run` refuses with, building and executing the query, or
+ * `"ran"` when it executes. A driver error carries the engine's class, so a
+ * refusal that only one engine raises reads differently on each backend.
+ */
+async function refusal(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+    return "ran";
+  } catch (error) {
+    return error instanceof Error ? error.name : typeof error;
+  }
+}
+
 export function registerMetadataPredicateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -433,6 +447,209 @@ export function registerMetadataPredicateIntegrationTests(
         beforeLate: ["first", "second", "third"],
         afterLate: ["first", "late", "second", "third"],
         none: [],
+      });
+    });
+
+    it("refuses a version operand that is not a 32-bit integer before any SQL runs, literal or bound", async () => {
+      const store = await context.createStore(metadataGraph);
+      await seedVersions(store);
+      const releases = () => store.query().from("MetaRelease", "r");
+      const boundScalar = releases()
+        .whereNode("r", (r) => r.$meta.version.gt(parameter("version")))
+        .select((ctx) => ctx.r.title)
+        .prepare();
+      const boundList = releases()
+        .whereNode("r", (r) => r.$meta.version.in(parameter("versions")))
+        .select((ctx) => ctx.r.title)
+        .prepare();
+      const boundBetween = releases()
+        .whereNode("r", (r) =>
+          r.$meta.version.between(parameter("low"), parameter("high")),
+        )
+        .select((ctx) => ctx.r.title)
+        .prepare();
+
+      const outcomes = {
+        fractional: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.version.gt(1.5))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        fractionalListElement: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.version.in([1.5, 2]))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        fractionalBound: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.version.between(1, 2.5))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        beyondInt32: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.version.lt(2 ** 31))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        boundFractional: await refusal(() =>
+          boundScalar.execute({ version: 1.5 }),
+        ),
+        boundFractionalListElement: await refusal(() =>
+          boundList.execute({ versions: [1.5, 2] }),
+        ),
+        boundFractionalBetween: await refusal(() =>
+          boundBetween.execute({ low: 1, high: 2.5 }),
+        ),
+        boundInteger: titles(await boundScalar.execute({ version: 1 })),
+        boundIntegerBetween: titles(
+          await boundBetween.execute({ low: 2, high: 3 }),
+        ),
+      };
+
+      expect(outcomes).toEqual({
+        fractional: "ValidationError",
+        fractionalListElement: "ValidationError",
+        fractionalBound: "ValidationError",
+        beyondInt32: "ValidationError",
+        boundFractional: "ValidationError",
+        boundFractionalListElement: "ValidationError",
+        boundFractionalBetween: "ValidationError",
+        boundInteger: ["second", "third"],
+        boundIntegerBetween: ["second", "third"],
+      });
+    });
+
+    it("refuses a non-canonical timestamp string operand, literal or bound, so both engines compare the same instant", async () => {
+      const store = await context.createStore(metadataGraph);
+      await store.nodes.MetaRelease.create(
+        { title: "boundary", version: "1" },
+        { validFrom: BEFORE },
+      );
+      const releases = () => store.query().from("MetaRelease", "r");
+      // The same instant as BEFORE ("2021-01-01T00:00:00.000Z"), but text
+      // that sorts after it: a text comparison and an instant comparison
+      // disagree on it.
+      const shortForm = "2021-01-01T00:00:00Z";
+      const boundScalar = releases()
+        .whereNode("r", (r) => r.$meta.validFrom.lt(parameter("until")))
+        .select((ctx) => ctx.r.title)
+        .prepare();
+      const boundList = releases()
+        .whereNode("r", (r) => r.$meta.validFrom.in(parameter("instants")))
+        .select((ctx) => ctx.r.title)
+        .prepare();
+
+      const outcomes = {
+        literal: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.validFrom.lt(shortForm))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        listElement: await refusal(() =>
+          releases()
+            // A typed caller cannot pass a string element; an untyped one can.
+            // @ts-expect-error -- a date in() list is typed Date[]
+            .whereNode("r", (r) => r.$meta.validFrom.in([shortForm]))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        betweenBound: await refusal(() =>
+          releases()
+            .whereNode("r", (r) => r.$meta.validFrom.between(PAST, shortForm))
+            .select((ctx) => ctx.r.title)
+            .execute(),
+        ),
+        bound: await refusal(() => boundScalar.execute({ until: shortForm })),
+        boundListElement: await refusal(() =>
+          boundList.execute({ instants: [shortForm] }),
+        ),
+        canonicalBefore: await releases()
+          .whereNode("r", (r) => r.$meta.validFrom.lt(BEFORE))
+          .select((ctx) => ctx.r.title)
+          .execute(),
+        canonicalAtOrBefore: await releases()
+          .whereNode("r", (r) => r.$meta.validFrom.lte(BEFORE))
+          .select((ctx) => ctx.r.title)
+          .execute(),
+        boundCanonical: await boundScalar.execute({ until: BEFORE }),
+        boundDate: await boundList.execute({ instants: [new Date(BEFORE)] }),
+      };
+
+      expect(outcomes).toEqual({
+        literal: "ValidationError",
+        listElement: "ValidationError",
+        betweenBound: "ValidationError",
+        bound: "ValidationError",
+        boundListElement: "ValidationError",
+        canonicalBefore: [],
+        canonicalAtOrBefore: ["boundary"],
+        boundCanonical: [],
+        boundDate: ["boundary"],
+      });
+    });
+
+    it("applies the same operand checks to $meta comparisons in the expression context", async () => {
+      const store = await context.createStore(metadataGraph);
+      await seedVersions(store);
+      await store.nodes.MetaRelease.create(
+        { title: "boundary", version: "1" },
+        { validFrom: BEFORE },
+      );
+      const releases = () => store.query().from("MetaRelease", "r");
+      const boundVersion = releases()
+        .where((ctx) =>
+          expr.gt(ctx.r.$meta.version, expr.param("version", "number")),
+        )
+        .project((ctx) => ({ title: ctx.r.title }))
+        .prepare();
+      const boundUntil = releases()
+        .where((ctx) =>
+          expr.gt(expr.param("until", "string"), ctx.r.$meta.validFrom),
+        )
+        .project((ctx) => ({ title: ctx.r.title }))
+        .prepare();
+
+      const boundIntegerRows = await boundVersion.execute({ version: 2 });
+
+      const outcomes = {
+        fractionalLiteral: await refusal(() =>
+          releases()
+            .where((ctx) => expr.gt(ctx.r.$meta.version, expr.literal(1.5)))
+            .project((ctx) => ({ title: ctx.r.title }))
+            .execute(),
+        ),
+        boundFractional: await refusal(() =>
+          boundVersion.execute({ version: 1.5 }),
+        ),
+        shortTimestampLiteral: await refusal(() =>
+          releases()
+            .where((ctx) =>
+              expr.lt(
+                ctx.r.$meta.validFrom,
+                expr.literal("2021-01-01T00:00:00Z"),
+              ),
+            )
+            .project((ctx) => ({ title: ctx.r.title }))
+            .execute(),
+        ),
+        boundShortTimestamp: await refusal(() =>
+          boundUntil.execute({ until: "2021-01-01T00:00:00Z" }),
+        ),
+        boundInteger: titles(boundIntegerRows.map((row) => row.title)),
+        boundCanonical: await boundUntil.execute({ until: BEFORE }),
+      };
+
+      expect(outcomes).toEqual({
+        fractionalLiteral: "ValidationError",
+        boundFractional: "ValidationError",
+        shortTimestampLiteral: "ValidationError",
+        boundShortTimestamp: "ValidationError",
+        boundInteger: ["third"],
+        boundCanonical: [],
       });
     });
 
