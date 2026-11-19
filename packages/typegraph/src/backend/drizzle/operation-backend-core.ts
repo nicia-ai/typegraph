@@ -3313,8 +3313,9 @@ export function createCommonOperationBackend(
           );
           if (input.resultMode === "count") {
             const edgeSlotIndexes: number[] = [];
-            const slots: AtomicSqlProgram<number, number>["slots"][number][] =
-              [...fenceSlots(endpointFences, 0)];
+            const slots: AtomicSqlProgram<number, number>["slots"][number][] = [
+              ...fenceSlots(endpointFences, 0),
+            ];
             appendClaimSlots(slots, input.claims, (rows) => rows.length);
             for (const chunk of chunks) {
               edgeSlotIndexes.push(slots.length);
@@ -5304,9 +5305,13 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
-    // Not atomic either: the store runs it inside its write frame. The node
-    // DELETE runs first in each chunk and RETURNs what it removed, so the
-    // sidecar and edge deletes that follow are scoped to exactly those rows.
+    // Not atomic either: the store runs it inside its write frame. Each chunk
+    // deletes in `hardDeleteNode`'s order — uniqueness, fulltext, incident
+    // edges, then the node row last — all scoped to the requested ids, so a
+    // failure part-way (on a backend without interactive transactions, say)
+    // leaves the node row in place and a retry clears whatever it owns, never
+    // a claim behind an already-removed row. The edge and node DELETEs RETURN
+    // what they removed, which is all the call reports.
     // Present only when the strategy supplies both of its builders.
     ...((
       buildHardDeleteNodesBatch === undefined ||
@@ -5323,6 +5328,24 @@ export function createCommonOperationBackend(
             [...new Set(params.ids)],
             nodeSetEdgeChunkSize(maxBindParameters),
           )) {
+            await execution.execRun(
+              operationStrategy.buildHardDeleteUniquesByNodeIds({
+                graphId: params.graphId,
+                concreteKind: params.kind,
+                nodeIds: chunk,
+              }),
+            );
+            for (const statement of operationStrategy.buildDeleteFulltextBatch({
+              graphId: params.graphId,
+              nodeKind: params.kind,
+              nodeIds: chunk,
+            })) {
+              await execution.execRun(statement);
+            }
+            const removedEdges = await execution.execAll<{ id: string }>(
+              buildHardDeleteEdgesByNodes(params.graphId, params.kind, chunk),
+            );
+            for (const row of removedEdges) removedEdgeIds.push(row.id);
             const removedNodes = await execution.execAll<{ id: string }>(
               buildHardDeleteNodesBatch({
                 graphId: params.graphId,
@@ -5330,32 +5353,7 @@ export function createCommonOperationBackend(
                 ids: chunk,
               }),
             );
-            if (removedNodes.length === 0) continue;
-            const removedChunk = removedNodes.map((row) => row.id);
-            removedNodeIds.push(...removedChunk);
-
-            await execution.execRun(
-              operationStrategy.buildHardDeleteUniquesByNodeIds({
-                graphId: params.graphId,
-                concreteKind: params.kind,
-                nodeIds: removedChunk,
-              }),
-            );
-            for (const statement of operationStrategy.buildDeleteFulltextBatch({
-              graphId: params.graphId,
-              nodeKind: params.kind,
-              nodeIds: removedChunk,
-            })) {
-              await execution.execRun(statement);
-            }
-            const removedEdges = await execution.execAll<{ id: string }>(
-              buildHardDeleteEdgesByNodes(
-                params.graphId,
-                params.kind,
-                removedChunk,
-              ),
-            );
-            for (const row of removedEdges) removedEdgeIds.push(row.id);
+            for (const row of removedNodes) removedNodeIds.push(row.id);
           }
           return { removedNodeIds, removedEdgeIds };
         },

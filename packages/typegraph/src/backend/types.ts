@@ -1105,9 +1105,9 @@ export type HardDeleteNodesBatchParams = Readonly<{
 
 /**
  * What {@link GraphBackend.hardDeleteNodesBatch} removed: the node rows its
- * delete matched, and every edge row (live or tombstoned, of any kind) those
- * nodes' removal took with it. Neither list names a row the call left in
- * place.
+ * delete matched, and every edge row (live or tombstoned, of any kind) it
+ * removed at an endpoint named by a listed id of the kind. Neither list names
+ * a row the call left in place.
  */
 export type HardDeleteNodesBatchResult = Readonly<{
   removedNodeIds: readonly string[];
@@ -2469,13 +2469,15 @@ export type GraphBackend = Readonly<{
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   /**
-   * Batched {@link hardDeleteNode} for one kind: removes the node rows of
-   * `kind` whose ids are listed, then — for exactly the rows it removed —
-   * their uniqueness entries, fulltext rows, and every incident edge (either
-   * endpoint, any edge kind, live or tombstoned). One statement set per
-   * bind-budget chunk instead of one per node. Never touches a row of another
-   * kind: a listed id that is absent, or present only under another kind,
-   * matches nothing.
+   * Batched {@link hardDeleteNode} for one kind, in its order: removes the
+   * uniqueness entries, fulltext rows and every incident edge (either
+   * endpoint, any edge kind, live or tombstoned) of the listed ids of `kind`,
+   * then their node rows last — so a failure part-way leaves each node row in
+   * place for a retry to finish, never an orphaned claim behind a removed
+   * row. A listed id whose node row is already gone still has whatever such
+   * rows it left cleared, as `hardDeleteNode` clears them. One statement set
+   * per bind-budget chunk instead of one per node. Never touches a row of
+   * another kind.
    *
    * Like `hardDeleteNode` it cleans no embeddings (the store does, through the
    * vector members) and releases no edge claims. Not atomic on its own: the

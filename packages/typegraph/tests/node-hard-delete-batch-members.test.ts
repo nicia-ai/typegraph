@@ -12,14 +12,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, searchable } from "../src";
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  searchable,
+} from "../src";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
-import { createInitializedStore } from "./test-utils";
+import { createInitializedStore, disableTransactions } from "./test-utils";
 
 const GRAPH_ID = "node_hard_delete_batch_members";
 const MAX_BIND_PARAMETERS = 9;
@@ -206,13 +212,13 @@ describe("hardDeleteNodesBatch", () => {
   // to the requested ids instead of the RETURNING ones and nothing here
   // changes, which is why the next case exists.
 
-  it("scopes the sidecar deletes to the rows its own delete removed", async () => {
+  it("removes a requested id's leftover sidecar and edge rows even when its node row is already gone, and reports only rows it removed", async () => {
     const { backend } = await createSeededBackend();
     const batch = requireDefined(backend.hardDeleteNodesBatch);
     const schema = createSqlSchema(backend.tableNames);
     // q's node row is already gone; its uniqueness, fulltext and edge rows
-    // remain. The batch names q but removes no row for it, so it must leave
-    // those rows alone.
+    // remain — what an interrupted delete that removed the node first would
+    // leave. The single-node port clears such rows by id; so must the batch.
     await backend.execute(
       asCompiledRowsSql(sql`
         DELETE FROM ${schema.nodesTable}
@@ -227,18 +233,78 @@ describe("hardDeleteNodesBatch", () => {
       ids: ["q", "p3"],
     });
 
-    expect(removed).toEqual({ removedNodeIds: ["p3"], removedEdgeIds: [] });
-    expect(await readIds(backend, schema.edgesTable, "id")).toContain("eq6");
+    // No node row for q was removed, so none is reported; q's incident edges
+    // were — eq6, the tombstoned e2q, and oq from the Robot.
+    expect(removed.removedNodeIds).toEqual(["p3"]);
+    expect([...removed.removedEdgeIds].toSorted()).toEqual([
+      "e2q",
+      "eq6",
+      "oq",
+    ]);
+    expect(await readIds(backend, schema.edgesTable, "id")).toEqual([
+      "e05",
+      "e44",
+      "o1",
+      "orr",
+    ]);
+    const uniqueOwners = await readIds(
+      backend,
+      sql.identifier(schema.tables.uniques),
+      "concrete_kind || ':' || node_id",
+    );
+    expect(uniqueOwners).not.toContain("Person:q");
+    // The Robot sharing an id with a requested Person keeps its rows.
+    expect(uniqueOwners).toContain("Robot:p0");
     expect(
       await readIds(
         backend,
-        sql.identifier(schema.tables.uniques),
+        schema.fulltextTable,
+        "node_kind || ':' || node_id",
+      ),
+    ).not.toContain("Person:q");
+  });
+  // MUTATION CHECK: scope the sidecar and edge deletes to the node DELETE's
+  // RETURNING ids again — q's uniqueness and fulltext rows and eq6 survive.
+
+  it("leaves a retry able to clear the node's claims when a sidecar delete fails, on a store without interactive transactions", async () => {
+    const { backend, client } = await createSeededBackend();
+    const schema = createSqlSchema(backend.tableNames);
+    const store = createStore(graph, disableTransactions(backend));
+    const uniquesTable = schema.tables.uniques;
+    const realPrepare = client.prepare.bind(client);
+    const failing = vi.spyOn(client, "prepare").mockImplementation((source) => {
+      if (source.trimStart().startsWith(`DELETE FROM "${uniquesTable}"`)) {
+        throw new Error("injected uniqueness cleanup failure");
+      }
+      return realPrepare(source);
+    });
+    try {
+      await expect(
+        store.nodes.Person.bulkHardDelete(["p3"] as never),
+      ).rejects.toThrow("injected uniqueness cleanup failure");
+    } finally {
+      failing.mockRestore();
+    }
+
+    await store.nodes.Person.bulkHardDelete(["p3"] as never);
+    expect(
+      await readIds(
+        backend,
+        sql.identifier(uniquesTable),
         "concrete_kind || ':' || node_id",
       ),
-    ).toContain("Person:q");
+    ).not.toContain("Person:p3");
+    // The replacement takes the released key.
+    const replacement = await store.nodes.Person.create(
+      { email: "p3@person", bio: "replacement" },
+      { id: "p3-new" },
+    );
+    expect(replacement.id).toBe("p3-new");
   });
-  // MUTATION CHECK: pass `chunk` instead of the RETURNING ids to the sidecar
-  // and edge deletes in `hardDeleteNodesBatch` — q's rows are removed.
+  // MUTATION CHECK: run the node DELETE first in `hardDeleteNodesBatch` (the
+  // original order) — the failure leaves p3's uniqueness row behind a removed
+  // node, the retry finds no node and does nothing, and the replacement is
+  // refused with a uniqueness violation.
 });
 
 describe("findEdgesConnectedToNodes", () => {
