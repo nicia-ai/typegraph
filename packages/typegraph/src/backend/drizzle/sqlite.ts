@@ -113,6 +113,7 @@ import {
   runWithSerializedQueue,
   type SerializedExecutionQueue,
 } from "../serialized-execution-queue";
+import { registerNativeTransactionSession } from "../session-exclusivity";
 import { engineSerializedWriterSlotStatement } from "../sqlite-writer-slot";
 import {
   type AdapterBackend,
@@ -2682,7 +2683,14 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
-  return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  // Every binding of this native transaction — TypeGraph-opened, or the
+  // same handle adopted again through `withTransaction` — shares one turn
+  // order for TypeGraph savepoint scopes.
+  registerNativeTransactionSession(txBackend, options.db);
+  const bound =
+    options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  registerNativeTransactionSession(bound, options.db);
+  return bound;
 }
 
 // Re-export schema utilities

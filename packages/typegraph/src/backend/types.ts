@@ -296,8 +296,7 @@ export type {
 import { type BackendCatalogProbes } from "./capabilities/catalog";
 import { type LineageMembers } from "./capabilities/lineage";
 import { type EngineRecordedTimeMembers } from "./capabilities/recorded-time";
-import { statementExecutionVerdict } from "./capabilities/resolve";
-import { withExclusiveSessionUse } from "./session-exclusivity";
+import { withSessionTurn } from "./session-exclusivity";
 
 export type {
   BackendCatalogProbes,
@@ -4320,21 +4319,13 @@ export async function runOptionallyInTransaction<T>(
       options?.transaction,
     );
   }
-  const runSequentially = (): Promise<T> =>
-    fn(options?.fallback ?? backend, { mode: "sequential" });
-  // A backend with `transaction` is a root that cannot open one: there is no
-  // session to share. Otherwise `backend` is an open transaction session
-  // another call may be using too. Where TypeGraph can take a savepoint on
-  // it, this unit takes its turn, so a savepoint an overlapping call rolls
-  // back never undoes it (see `session-exclusivity.ts`). Without statement
-  // execution there is no TypeGraph savepoint to guard against.
-  if (
-    "transaction" in backend ||
-    !statementExecutionVerdict(backend as GraphBackend).supported
-  ) {
-    return runSequentially();
-  }
-  return withExclusiveSessionUse(backend, runSequentially);
+  // Otherwise `backend` is a root that cannot open a transaction, or an open
+  // transaction session another call may be using too: on a session, this
+  // unit takes its turn, so a savepoint an overlapping call rolls back never
+  // undoes it (see `session-exclusivity.ts`).
+  return withSessionTurn(backend, () =>
+    fn(options?.fallback ?? backend, { mode: "sequential" }),
+  );
 }
 
 // ============================================================

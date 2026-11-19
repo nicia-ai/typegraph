@@ -164,6 +164,7 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { registerNativeTransactionSession } from "../session-exclusivity";
 import {
   registerDriverSavepointScope,
   runSessionSavepoint,
@@ -4362,6 +4363,11 @@ function createTransactionBackend(
       replaceNodes: requireDefined(backend.executeAtomicNodeReplacementBatch),
     });
   }
+
+  // Every binding of this native transaction — TypeGraph-opened, or the
+  // same handle adopted again through `withTransaction` — shares one turn
+  // order for TypeGraph savepoint scopes.
+  registerNativeTransactionSession(backend, options.db);
 
   return {
     backend,

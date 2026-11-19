@@ -709,30 +709,15 @@ export async function runRecordedTransactionSavepoint<T>(
     rawTarget,
     statementExecution,
   );
-  // Capture owns its touched entities and graph-lock memo. Other transaction
-  // state (revision flags, mutation witnesses, hooks) participates
-  // through withSavepointState below, including targets without capture.
-  const captureCheckpoint = binding?.capture?.session.checkpoint();
-  const graphLockCheckpoint =
-    binding?.capture === undefined ?
-      undefined
-    : new Map(binding.capture.graphLocks);
-  const restoreCapture = (): void => {
-    if (
-      binding?.capture === undefined ||
-      captureCheckpoint === undefined ||
-      graphLockCheckpoint === undefined
-    )
-      return;
-    binding.capture.session.restore(captureCheckpoint);
-    binding.capture.graphLocks.clear();
-    for (const [graphId, lock] of graphLockCheckpoint) {
-      binding.capture.graphLocks.set(graphId, lock);
-    }
-  };
-
-  return withSavepointState(target, (restoreState) =>
-    runSessionSavepoint(
+  return withSavepointState(target, (restoreState) => {
+    // Capture owns its touched entities and graph-lock memo. Other
+    // transaction state (revision flags, mutation witnesses, hooks)
+    // participates through withSavepointState, including targets without
+    // capture. The checkpoint is read here, inside the scope's turn on the
+    // session: one read before the turn would predate writes an earlier unit
+    // makes while this scope waits, and a rollback would erase them.
+    const restoreCapture = checkpointRecordedCapture(binding?.capture);
+    return runSessionSavepoint(
       {
         executeControl: (statement) =>
           executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
@@ -744,8 +729,28 @@ export async function runRecordedTransactionSavepoint<T>(
         restoreCapture();
         restoreState(cause);
       },
-    ),
-  );
+    );
+  });
+}
+
+/** Snapshots pending capture and the graph-lock memo; returns their restore. */
+function checkpointRecordedCapture(
+  capture: RecordedTransactionBinding["capture"],
+): () => void {
+  if (capture === undefined) return ignoreCaptureRestore;
+  const captureCheckpoint = capture.session.checkpoint();
+  const graphLockCheckpoint = new Map(capture.graphLocks);
+  return () => {
+    capture.session.restore(captureCheckpoint);
+    capture.graphLocks.clear();
+    for (const [graphId, lock] of graphLockCheckpoint) {
+      capture.graphLocks.set(graphId, lock);
+    }
+  };
+}
+
+function ignoreCaptureRestore(): void {
+  return;
 }
 
 /** Internal fence/control statements bypass row capture but retain its lifetime guard. */
