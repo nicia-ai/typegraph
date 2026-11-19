@@ -12,16 +12,23 @@
  * against a `batchSize: 1000` run, then pins the expected state, and checks
  * that `verifyConstraintFences()` reports nothing.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   asEdgeId,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
+  type Store,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import {
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -307,6 +314,51 @@ function withoutValidFrom(row: EdgeRows[number]): EdgeRows[number] {
 /** After {@link MOVED_AT}: the end a later row gives an attachment. */
 const LATER = "2022-01-01T00:00:00.000Z";
 const REPLACEMENT_ID = "icm-replacement";
+
+/**
+ * `store`, rebuilt over a backend whose transactions move the faked clock a
+ * second on before every edge insert: the instant an insert stamps an omitted
+ * `validFrom` with is then later than any the import sampled before it wrote.
+ */
+function withClockAdvancingBeforeEdgeInserts(
+  store: MoveStore,
+): Store<MoveStore["graph"]> {
+  const { backend } = store;
+  const advancing = (tx: TransactionBackend): TransactionBackend => {
+    const batchInsert = tx.insertEdgesDurableBatchReturning;
+    return deriveBackend(tx, {
+      insertEdge(...args: Parameters<TransactionBackend["insertEdge"]>) {
+        vi.advanceTimersByTime(1000);
+        return tx.insertEdge(...args);
+      },
+      // Decorated only where the backend has it, so its presence is unchanged.
+      ...(batchInsert === undefined ?
+        {}
+      : {
+          insertEdgesDurableBatchReturning(
+            ...args: Parameters<typeof batchInsert>
+          ) {
+            vi.advanceTimersByTime(1000);
+            return batchInsert(...args);
+          },
+        }),
+    });
+  };
+  return createStore(
+    store.graph,
+    deriveBackend(backend, {
+      transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        transactionOptions?: TransactionOptions,
+      ): Promise<T> {
+        return backend.transaction(
+          (tx) => fn(advancing(tx)),
+          transactionOptions,
+        );
+      },
+    }),
+  );
+}
 
 /** The error of a row attaching the part to a whole that does not exist. */
 function missing(id: string): Readonly<{ id: string; code: string }> {
@@ -1941,6 +1993,149 @@ export function registerImportCompositionMoveIntegrationTests(
           });
         });
       });
+
+      it("opens a new attachment stating no validFrom at the instant its move was judged at", async () => {
+        // The end closes the old attachment at the import's own clock and the
+        // attach states no validFrom, so the move abuts at the instant it is
+        // judged at. The clock then moves on before every edge insert; the
+        // attach must still open at the judged instant, or the committed rows
+        // leave the gap the judgement ruled out.
+        const judgedAt = "2023-01-01T00:00:00.000Z";
+        const outcomes: Outcome[] = [];
+        for (const batchSize of BATCH_SIZES) {
+          const seeded = await seed(
+            context,
+            "oneActive",
+            "required",
+            `judged_b${batchSize}`,
+          );
+          const store = withClockAdvancingBeforeEdgeInserts(seeded.store);
+          try {
+            // Inside the try so the `finally` always restores real timers.
+            vi.useFakeTimers({ toFake: ["Date"], now: new Date(judgedAt) });
+            const result = await importGraph(
+              store,
+              document([
+                endIncumbent(seeded, judgedAt),
+                withoutValidFrom(attachElsewhere(seeded, judgedAt)),
+              ]),
+              options(batchSize),
+            );
+            vi.useRealTimers();
+            outcomes.push(await outcomeOf(seeded, result));
+          } finally {
+            vi.useRealTimers();
+          }
+        }
+        const moved: Outcome = {
+          edges: [
+            {
+              id: MOVED_EDGE_ID,
+              whole: "new",
+              validFrom: judgedAt,
+              validTo: undefined,
+            },
+            {
+              id: INCUMBENT,
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: judgedAt,
+            },
+          ],
+          counts: { created: 1, updated: 1, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        };
+        expect(outcomes).toEqual(BATCH_SIZES.map(() => moved));
+      });
+
+      describe.each(ORDERS)(
+        "an end that leaves a zero-width window, %s",
+        (order) => {
+          // Ending the incumbent at its own validFrom leaves a window that reads
+          // at no instant and overlaps nothing, as a `reparent` at that instant
+          // leaves it. The part holds no whole at any instant of that window, so
+          // a new attachment opening before it leaves no gap either: it is
+          // judged, as any attachment is, against the part's other rows.
+          const BEFORE_INCUMBENT = "2019-06-01T00:00:00.000Z";
+          const zeroWidth = (seeded: Seeded): EdgeRows =>
+            ordered(
+              order,
+              endIncumbent(seeded, ATTACHED_AT),
+              attachElsewhere(seeded, BEFORE_INCUMBENT),
+            );
+
+          it("moves the part to a new attachment opening before it", async () => {
+            const outcome = await importAtEveryBatchSize(
+              context,
+              "oneActive",
+              "required",
+              zeroWidth,
+            );
+            expect(outcome).toEqual({
+              edges: [
+                {
+                  id: MOVED_EDGE_ID,
+                  whole: "new",
+                  validFrom: BEFORE_INCUMBENT,
+                  validTo: undefined,
+                },
+                {
+                  id: INCUMBENT,
+                  whole: "old",
+                  validFrom: ATTACHED_AT,
+                  validTo: ATTACHED_AT,
+                },
+              ],
+              counts: { created: 1, updated: 1, skipped: 0 },
+              errors: [],
+              fenceViolations: 0,
+            });
+          });
+
+          it("refuses that attachment when it overlaps the part's earlier history", async () => {
+            const outcomes: Outcome[] = [];
+            for (const batchSize of BATCH_SIZES) {
+              const seeded = await seed(
+                context,
+                "oneActive",
+                "required",
+                `zero_width_${order}_b${batchSize}`,
+              );
+              await seedEarlierAttachment(seeded);
+              const result = await importGraph(
+                seeded.store,
+                document(zeroWidth(seeded)),
+                options(batchSize),
+              );
+              outcomes.push(await outcomeOf(seeded, result));
+            }
+            const endError = { id: INCUMBENT, code: MOVE_INCOMPLETE };
+            const attachError = {
+              id: MOVED_EDGE_ID,
+              code: "COMPOSITION_WINDOW_OVERLAP",
+            };
+            const refused: Outcome = {
+              edges: [
+                {
+                  id: EARLIER_EDGE_ID,
+                  whole: "new",
+                  validFrom: EARLIER,
+                  validTo: ATTACHED_AT,
+                },
+                ...UNMOVED,
+              ],
+              counts: { created: 0, updated: 0, skipped: 0 },
+              errors:
+                order === "endFirst" ?
+                  [endError, attachError]
+                : [attachError, endError],
+              fenceViolations: 0,
+            };
+            expect(outcomes).toEqual(BATCH_SIZES.map(() => refused));
+          });
+        },
+      );
 
       it("names the part, both windows and the gap", async () => {
         const seeded = await seed(context, "oneActive", "required", "gap_text");

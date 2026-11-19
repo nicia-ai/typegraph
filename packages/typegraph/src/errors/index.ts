@@ -1333,11 +1333,11 @@ export class NodeDeletePlanMismatchError extends TypeGraphError {
  *   replaces it (`edgeKind` / `edgeId`, to `wholeKind` / `wholeId`, window
  *   from `validFrom`) opens, so the part would hold no whole on valid-time
  *   reads during `gapFrom`–`gapTo`. `validFromStated` is `false` when the new
- *   attachment states no `validFrom` and its window opens at the instant it
- *   is written: `validFrom` is then the instant the move was judged at, which
- *   the written bound can only follow. A required part's move must abut, as
- *   `reparent`'s one instant makes it. Raised by interchange import, which
- *   reports it per row.
+ *   attachment states no `validFrom`: `validFrom` is then the instant the
+ *   import judged the move at, the bound such an attachment is written with
+ *   when its move is accepted. A required part's move must abut, as
+ *   `reparent`'s one instant makes it. Raised by `importGraph`, which reports
+ *   it per row.
  * - `"existing"` (`COMPOSITION_WHOLE_CONFLICT`): a `getOrCreateByConstraint`
  *   call whose `partOf` postcondition the already-existing node CONTRADICTS.
  *   `currentWhole`/`currentVia` and `requestedWhole`/`requestedVia` name both
@@ -1594,7 +1594,7 @@ function describeCompositionRefusal(
       const opens =
         details.validFromStated ?
           `opens at "${details.validFrom}"`
-        : `states no validFrom, so it opens when it is written (no earlier than "${details.validFrom}")`;
+        : `states no validFrom, so it opens at the instant the import judged the move ("${details.validFrom}")`;
       return {
         code: "COMPOSITION_MOVE_GAP",
         message: `Cannot move ${partLabel} to ${wholeLabel}: edge "${details.endedEdgeKind}" ${details.endedEdgeId} ends its attachment to ${details.endedWholeKind}/${details.endedWholeId}, window ${compositionWindowLabel(details.endedValidFrom, details.endedValidTo)}, and edge "${details.edgeKind}" ${details.edgeId}, which attaches it again, ${opens}, so the part would hold no whole during ${compositionWindowLabel(details.gapFrom, details.gapTo)}. This kind requires a whole (\`existence: "required"\`), so a move must open the new attachment at the instant it ends the old one.`,

@@ -820,14 +820,21 @@ A source whose part moved to another whole re-imports with `onConflict:
 
 A required part's move must abut: the new attachment's `validFrom` must be
 the `validTo` that ends the old one, the one instant `reparent` gives both
-halves. A new attachment that opens later, or that states no `validFrom` (so
-it opens when the import writes it, after the end the document states), would
-leave the part with no whole on valid-time reads in between. Both rows of such
-a move are refused before anything is written, each with
+halves. A new attachment that opens later would leave the part with no whole
+on valid-time reads in between. A new attachment that states no `validFrom`
+is judged as opening at the instant `importGraph` judges the move, and is
+written with that instant when the move is accepted, so it abuts an end at
+that instant and leaves a gap after an earlier one. Both rows of a move that
+leaves a gap are refused before anything is written, each with
 `COMPOSITION_MOVE_GAP`, naming the part, both windows and the gap, and the part
-keeps its current whole. A new attachment that opens before the old one ends
-overlaps it and is refused as `COMPOSITION_WINDOW_OVERLAP`, as before. An
-optional part may move across a gap: it has no whole in between.
+keeps its current whole. A new attachment that overlaps the old one is refused
+as `COMPOSITION_WINDOW_OVERLAP`, as before. An end at the old attachment's own
+`validFrom` leaves a zero-width window, which holds the part at no instant and
+overlaps nothing, so a new attachment opening before it leaves no gap; it is
+judged, as any attachment is, against the part's other rows. An optional part
+may move across a gap: it has no whole in between. `importGraphStream`
+refuses a graph that declares a required part before it reads any chunk (see
+above), so this refusal is `importGraph`'s.
 
 Every move a document states is applied together, as `bulkReparent` applies
 its moves: every old attachment is ended before any new one is written. So moves that depend on each other land

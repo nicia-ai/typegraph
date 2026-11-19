@@ -126,7 +126,7 @@ import {
 import { edgeInsertClaims } from "../store/claims/composition-claims";
 import {
   assertCompositionWindowsDisjoint,
-  compositionMoveGapRefusal,
+  compositionMoveGapVerdict,
 } from "../store/claims/composition-windows";
 import {
   edgeCardinalityAxisReferences,
@@ -3426,10 +3426,16 @@ async function processEdges(
     record,
   );
 
-  const moves = pairCompositionMoves(registry, classified, options).toSorted(
-    (left, right) =>
-      (compositionMoveRows(left)[0]?.index ?? 0) -
-      (compositionMoveRows(right)[0]?.index ?? 0),
+  // A required part's move whose windows leave a gap is refused whole before
+  // anything is written; every other move is written with the bounds it was
+  // judged with.
+  const { moves, gaps } = judgeCompositionMoveGaps(
+    registry,
+    pairCompositionMoves(registry, classified, options).toSorted(
+      (left, right) =>
+        (compositionMoveRows(left)[0]?.index ?? 0) -
+        (compositionMoveRows(right)[0]?.index ?? 0),
+    ),
   );
   const pairedEdgeIds = new Set(
     moves.flatMap((move) => [move.end.edge.id, move.attach.edge.id]),
@@ -3492,11 +3498,8 @@ async function processEdges(
     }
   }
 
-  // A required part's move whose windows leave a gap is refused whole before
-  // anything is written; `failed` only grows from here.
-  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>(
-    compositionMoveGaps(registry, moves),
-  );
+  // `failedMoves` only grows from the moves refused before any write.
+  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>(gaps);
   const writeRound = async (): Promise<EdgeRoundRefusals> => {
     // Every write of a row naming an id that may already be written, in
     // write order, for the judgement of what each one did.
@@ -5061,23 +5064,29 @@ function compositionMoveIncomplete(
 }
 
 /**
- * The moves of required parts whose two rows leave the part with no whole
- * between the end of the old attachment and the start of the new one, each
- * with the refusal ({@link compositionMoveGapRefusal}) both of its rows
- * report. Judged once, before anything is written, so neither row of such a
- * move is ever applied. An attach that states no `validFrom` is judged by the
- * lower bound its insert would stamp now, which the written bound can only
- * follow.
+ * Every move judged by the rule that a required part's move abuts
+ * ({@link compositionMoveGapVerdict}), once, before anything is written:
+ * `gaps` holds each refused move with the refusal both of its rows report,
+ * so neither row of such a move is ever applied, and `moves` is every move
+ * as it is to be written. An attach that states no `validFrom` is judged by
+ * the lower bound an insert would stamp at this one instant, and an accepted
+ * move's attach states that bound, so the row is written with the bound the
+ * judgement accepted rather than a later clock read, which could open a gap
+ * after an end at the judged instant.
  */
-function compositionMoveGaps(
+function judgeCompositionMoveGaps(
   registry: KindRegistry,
-  moves: readonly CompositionMove[],
-): ReadonlyMap<CompositionMove, CompositionMoveFailure> {
+  judged: readonly CompositionMove[],
+): Readonly<{
+  moves: readonly CompositionMove[];
+  gaps: ReadonlyMap<CompositionMove, CompositionMoveFailure>;
+}> {
   const operationInstant = nowIso();
-  const failures = new Map<CompositionMove, CompositionMoveFailure>();
-  for (const move of moves) {
+  const moves: CompositionMove[] = [];
+  const gaps = new Map<CompositionMove, CompositionMoveFailure>();
+  for (const move of judged) {
     const { part, end, attach } = move;
-    const refusal = compositionMoveGapRefusal(
+    const verdict = compositionMoveGapVerdict(
       registry,
       {
         part,
@@ -5095,16 +5104,32 @@ function compositionMoveGaps(
       },
       operationInstant,
     );
-    if (refusal === undefined) continue;
-    failures.set(move, {
-      cause: "gap",
-      outcome: {
-        status: "error",
-        error: `${refusal.code}: ${refusal.message}`,
-      },
-    });
+    if (verdict.verdict === "refused") {
+      const { refusal } = verdict;
+      moves.push(move);
+      gaps.set(move, {
+        cause: "gap",
+        outcome: {
+          status: "error",
+          error: `${refusal.code}: ${refusal.message}`,
+        },
+      });
+      continue;
+    }
+    const { stampedValidFrom } = verdict;
+    moves.push(
+      stampedValidFrom === undefined ? move : (
+        {
+          ...move,
+          attach: {
+            ...attach,
+            edge: { ...attach.edge, validFrom: stampedValidFrom },
+          },
+        }
+      ),
+    );
   }
-  return failures;
+  return { moves, gaps };
 }
 
 /**
