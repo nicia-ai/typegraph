@@ -12,16 +12,23 @@
  * against a `batchSize: 1000` run, then pins the expected state, and checks
  * that `verifyConstraintFences()` reports nothing.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   asEdgeId,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
   partOf,
+  type Store,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import {
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../../../src/backend/types";
 import {
   FORMAT_VERSION,
   type GraphData,
@@ -295,9 +302,63 @@ const EARLIER_EDGE_ID = "icm-earlier";
 const OTHER_PART_ID = "icm-other-part";
 const OTHER_PART_EDGE_ID = "icm-other-part-edge";
 const MOVE_INCOMPLETE = "INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE";
+const MOVE_GAP = "COMPOSITION_MOVE_GAP";
+/** Later than any clock this suite runs under. */
+const FAR_FUTURE = "2999-01-01T00:00:00.000Z";
+
+/** `row` with no `validFrom`: its insert stamps the instant it is written. */
+function withoutValidFrom(row: EdgeRows[number]): EdgeRows[number] {
+  const { validFrom: _validFrom, ...rest } = row;
+  return rest;
+}
 /** After {@link MOVED_AT}: the end a later row gives an attachment. */
 const LATER = "2022-01-01T00:00:00.000Z";
 const REPLACEMENT_ID = "icm-replacement";
+
+/**
+ * `store`, rebuilt over a backend whose transactions move the faked clock a
+ * second on before every edge insert: the instant an insert stamps an omitted
+ * `validFrom` with is then later than any the import sampled before it wrote.
+ */
+function withClockAdvancingBeforeEdgeInserts(
+  store: MoveStore,
+): Store<MoveStore["graph"]> {
+  const { backend } = store;
+  const advancing = (tx: TransactionBackend): TransactionBackend => {
+    const batchInsert = tx.insertEdgesDurableBatchReturning;
+    return deriveBackend(tx, {
+      insertEdge(...args: Parameters<TransactionBackend["insertEdge"]>) {
+        vi.advanceTimersByTime(1000);
+        return tx.insertEdge(...args);
+      },
+      // Decorated only where the backend has it, so its presence is unchanged.
+      ...(batchInsert === undefined ?
+        {}
+      : {
+          insertEdgesDurableBatchReturning(
+            ...args: Parameters<typeof batchInsert>
+          ) {
+            vi.advanceTimersByTime(1000);
+            return batchInsert(...args);
+          },
+        }),
+    });
+  };
+  return createStore(
+    store.graph,
+    deriveBackend(backend, {
+      transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        transactionOptions?: TransactionOptions,
+      ): Promise<T> {
+        return backend.transaction(
+          (tx) => fn(advancing(tx)),
+          transactionOptions,
+        );
+      },
+    }),
+  );
+}
 
 /** The error of a row attaching the part to a whole that does not exist. */
 function missing(id: string): Readonly<{ id: string; code: string }> {
@@ -552,6 +613,70 @@ async function sameAtEveryBatchSize<T>(
   // Compared as a whole, so a mismatch prints every batch size's report.
   expect(reports).toEqual(reports.map(() => first));
   return first;
+}
+
+/** Inside the item's history row, before it ends. */
+const EARLIER_END = "2019-06-01T00:00:00.000Z";
+/**
+ * Two items, two slots: the first item's ended history on the first slot, a
+ * repeat of that row ending it at `repeatValidTo`, then both items attached
+ * to the second slot, which holds one item at a time. Returns the open rows
+ * and the rows the target claim refused.
+ */
+async function slotContest(
+  context: IntegrationTestContext,
+  batchSize: number,
+  repeatValidTo: string,
+): Promise<
+  Readonly<{
+    open: readonly string[];
+    refused: readonly string[];
+  }>
+> {
+  const store = await context.createStore(
+    slotGraph(`contest_${repeatValidTo.slice(0, 4)}_b${batchSize}`),
+  );
+  const s1 = await store.nodes.IcmSlot.create({});
+  const s2 = await store.nodes.IcmSlot.create({});
+  const firstItem = await store.nodes.IcmItem.create({});
+  const secondItem = await store.nodes.IcmItem.create({});
+  const history = compositionRow(
+    "icmInSlot",
+    "i1-s1",
+    itemRef(firstItem.id),
+    slotRef(s1.id),
+    { validFrom: EARLIER, validTo: ATTACHED_AT },
+  );
+  const result = await importGraph(
+    store,
+    document([
+      history,
+      { ...history, validTo: repeatValidTo },
+      compositionRow(
+        "icmInSlot",
+        "i1-s2",
+        itemRef(firstItem.id),
+        slotRef(s2.id),
+        { validFrom: MOVED_AT },
+      ),
+      compositionRow(
+        "icmInSlot",
+        "i2-s2",
+        itemRef(secondItem.id),
+        slotRef(s2.id),
+        { validFrom: MOVED_AT },
+      ),
+    ]),
+    options(batchSize),
+  );
+  const open = await store.edges.icmInSlot.find({});
+  return {
+    open: open.map((edge) => edge.id).toSorted(),
+    // The target claim refusal names the slot by its generated id.
+    refused: result.errors.map((entry) =>
+      entry.error.startsWith("Cardinality violation") ? entry.id : entry.error,
+    ),
+  };
 }
 
 export function registerImportCompositionMoveIntegrationTests(
@@ -1368,8 +1493,10 @@ export function registerImportCompositionMoveIntegrationTests(
       });
 
       it("keeps an attachment the document creates when the row moving it on is refused", async () => {
-        // The repeat that ends the created row is applied after every create,
-        // so the move's attach is refused against the still-open row first.
+        // The row moving the part on precedes, in the document, the repeat
+        // that ends the created row, so it is applied while that row is
+        // still open and refused; the end is then refused rather than
+        // written alone.
         const outcome = await importByEveryRoute(
           context,
           "optional",
@@ -1385,7 +1512,6 @@ export function registerImportCompositionMoveIntegrationTests(
             );
             return [
               attached,
-              { ...attached, validTo: MOVED_AT },
               compositionRow(
                 "icmPartOf",
                 "icm-second",
@@ -1393,6 +1519,7 @@ export function registerImportCompositionMoveIntegrationTests(
                 { kind: "IcmWhole", id: seeded.newWholeId },
                 { validFrom: MOVED_AT },
               ),
+              { ...attached, validTo: MOVED_AT },
             ];
           },
         );
@@ -1630,6 +1757,535 @@ export function registerImportCompositionMoveIntegrationTests(
             fenceViolations: 0,
           });
         });
+      });
+    });
+
+    describe("rows touching one part's slot apply in document order", () => {
+      // A repeat of an id the document creates applies after the row it
+      // repeats; a create of the same part later in the document waits for
+      // it, so a repeat ending the part's attachment frees the slot first.
+      it("ends an attachment the document creates by a repeat, then attaches the part elsewhere", async () => {
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const attached = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              { kind: "IcmWhole", id: seeded.oldWholeId },
+              { validFrom: ATTACHED_AT },
+            );
+            return [
+              attached,
+              { ...attached, validTo: MOVED_AT },
+              compositionRow(
+                "icmPartOf",
+                "icm-second",
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: MOVED_AT,
+            },
+            {
+              id: "icm-second",
+              whole: "new",
+              validFrom: MOVED_AT,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 2, updated: 1, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        });
+      });
+
+      it("applies a chain of such moves in document order", async () => {
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const oldWhole = { kind: "IcmWhole", id: seeded.oldWholeId };
+            const newWhole = { kind: "IcmWhole", id: seeded.newWholeId };
+            const first = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              oldWhole,
+              { validFrom: ATTACHED_AT },
+            );
+            const second = compositionRow(
+              "icmPartOf",
+              "icm-second",
+              part,
+              newWhole,
+              { validFrom: MOVED_AT },
+            );
+            return [
+              first,
+              { ...first, validTo: MOVED_AT },
+              second,
+              { ...second, validTo: LATER },
+              compositionRow("icmPartOf", "icm-third", part, oldWhole, {
+                validFrom: LATER,
+              }),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: MOVED_AT,
+            },
+            {
+              id: "icm-second",
+              whole: "new",
+              validFrom: MOVED_AT,
+              validTo: LATER,
+            },
+            {
+              id: "icm-third",
+              whole: "old",
+              validFrom: LATER,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 3, updated: 2, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        });
+      });
+
+      it("still refuses a later create when the repeat before it does not free the slot", async () => {
+        // The repeat restates the open attachment's props; the part still
+        // holds it when the later create is applied.
+        const outcome = await importByEveryRoute(
+          context,
+          "optional",
+          createUnattachedPart,
+          (seeded, partId) => {
+            const part = { kind: "IcmPart", id: partId };
+            const attached = compositionRow(
+              "icmPartOf",
+              "icm-first",
+              part,
+              { kind: "IcmWhole", id: seeded.oldWholeId },
+              { validFrom: ATTACHED_AT },
+            );
+            return [
+              attached,
+              { ...attached, properties: { note: "restated" } },
+              compositionRow(
+                "icmPartOf",
+                "icm-second",
+                part,
+                { kind: "IcmWhole", id: seeded.newWholeId },
+                { validFrom: MOVED_AT },
+              ),
+            ];
+          },
+        );
+        expect(outcome).toEqual({
+          edges: [
+            {
+              id: "icm-first",
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: undefined,
+            },
+            ...UNMOVED,
+          ],
+          counts: { created: 1, updated: 1, skipped: 0 },
+          errors: [{ id: "icm-second", code: "COMPOSITION_WHOLE_OCCUPIED" }],
+          fenceViolations: 0,
+        });
+      });
+
+      describe("creates competing for one slot keep document priority", () => {
+        // The first create in the document takes the second slot, whatever
+        // the repeat before it says.
+        it("when the repeat restates the row's window", async () => {
+          const report = await sameAtEveryBatchSize((batchSize) =>
+            slotContest(context, batchSize, ATTACHED_AT),
+          );
+          expect(report).toEqual({
+            open: ["i1-s2"],
+            refused: ["i2-s2"],
+          });
+        });
+
+        it("keeps a create after a repeat that frees nothing in the create phase", async () => {
+          // The repeat restates the row's window under a validFrom it cannot
+          // apply, so it is refused; the create after it opens inside the
+          // item's history, so it is refused too. A create is refused in its
+          // phase, before the repeats, unless a repeat before it can free its
+          // part's slot.
+          const report = await sameAtEveryBatchSize(async (batchSize) => {
+            const store = await context.createStore(
+              slotGraph(`restated_phase_b${batchSize}`),
+            );
+            const s1 = await store.nodes.IcmSlot.create({});
+            const s2 = await store.nodes.IcmSlot.create({});
+            const item = await store.nodes.IcmItem.create({});
+            const history = compositionRow(
+              "icmInSlot",
+              "i1-s1",
+              itemRef(item.id),
+              slotRef(s1.id),
+              { validFrom: EARLIER, validTo: ATTACHED_AT },
+            );
+            const result = await importGraph(
+              store,
+              document([
+                history,
+                { ...history, validFrom: EARLIER_END },
+                compositionRow(
+                  "icmInSlot",
+                  "i1-s2",
+                  itemRef(item.id),
+                  slotRef(s2.id),
+                  { validFrom: EARLIER_END },
+                ),
+              ]),
+              options(batchSize),
+            );
+            return result.errors.map((entry) => ({
+              id: entry.id,
+              code: errorCode(entry.error),
+            }));
+          });
+          expect(report).toEqual([
+            { id: "i1-s2", code: "COMPOSITION_WINDOW_OVERLAP" },
+            { id: "i1-s1", code: "IMMUTABLE_VALIDITY_LOWER_BOUND" },
+          ]);
+        });
+
+        it("when the repeat changes the row's window", async () => {
+          const report = await sameAtEveryBatchSize((batchSize) =>
+            slotContest(context, batchSize, EARLIER_END),
+          );
+          expect(report).toEqual({
+            open: ["i1-s2"],
+            refused: ["i2-s2"],
+          });
+        });
+      });
+    });
+
+    describe("a required part's move must abut", () => {
+      // `reparent` ends the old attachment and opens the new one at one
+      // instant; an imported move of a required part is held to the same,
+      // both rows or neither. The abutting move and the overlapping one are
+      // pinned above ("ends the old attachment and opens the new one", "keeps
+      // the old attachment when the new one is refused").
+      describe.each(ORDERS)("%s", (order) => {
+        it("refuses both rows when the new attachment opens after the old one ends", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, LATER),
+              ),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_GAP };
+          const attachError = { id: MOVED_EDGE_ID, code: MOVE_GAP };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses both rows when the new attachment states no validFrom", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                withoutValidFrom(attachElsewhere(seeded, MOVED_AT)),
+              ),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_GAP };
+          const attachError = { id: MOVED_EDGE_ID, code: MOVE_GAP };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses an end later than the import's clock as before, and the attach as a second whole", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, FAR_FUTURE),
+                withoutValidFrom(attachElsewhere(seeded, MOVED_AT)),
+              ),
+          );
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors: [
+              { id: INCUMBENT, code: "COMPOSITION_VALIDITY_FUTURE_END" },
+              { id: MOVED_EDGE_ID, code: "COMPOSITION_WHOLE_OCCUPIED" },
+            ],
+            fenceViolations: 0,
+          });
+        });
+
+        it("refuses an attachment with no lower bound as an overlap, as before", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "required",
+            (seeded) =>
+              ordered(order, endIncumbent(seeded, MOVED_AT), {
+                ...attachElsewhere(seeded, MOVED_AT),
+                // eslint-disable-next-line unicorn/no-null -- the interchange format's confirmed open-left window
+                validFrom: null,
+              }),
+          );
+          const endError = { id: INCUMBENT, code: MOVE_INCOMPLETE };
+          const attachError = {
+            id: MOVED_EDGE_ID,
+            code: "COMPOSITION_WINDOW_OVERLAP",
+          };
+          expect(outcome).toEqual({
+            edges: UNMOVED,
+            counts: { created: 0, updated: 0, skipped: 0 },
+            errors:
+              order === "endFirst" ?
+                [endError, attachError]
+              : [attachError, endError],
+            fenceViolations: 0,
+          });
+        });
+
+        it("moves an optional part across the gap", async () => {
+          const outcome = await importAtEveryBatchSize(
+            context,
+            "oneActive",
+            "optional",
+            (seeded) =>
+              ordered(
+                order,
+                endIncumbent(seeded, MOVED_AT),
+                attachElsewhere(seeded, LATER),
+              ),
+          );
+          expect(outcome).toEqual({
+            edges: [
+              {
+                id: MOVED_EDGE_ID,
+                whole: "new",
+                validFrom: LATER,
+                validTo: undefined,
+              },
+              ...ENDED,
+            ],
+            counts: { created: 1, updated: 1, skipped: 0 },
+            errors: [],
+            fenceViolations: 0,
+          });
+        });
+      });
+
+      it("opens a new attachment stating no validFrom at the instant its move was judged at", async () => {
+        // The end closes the old attachment at the import's own clock and the
+        // attach states no validFrom, so the move abuts at the instant it is
+        // judged at. The clock then moves on before every edge insert; the
+        // attach must still open at the judged instant, or the committed rows
+        // leave the gap the judgement ruled out.
+        const judgedAt = "2023-01-01T00:00:00.000Z";
+        const outcomes: Outcome[] = [];
+        for (const batchSize of BATCH_SIZES) {
+          const seeded = await seed(
+            context,
+            "oneActive",
+            "required",
+            `judged_b${batchSize}`,
+          );
+          const store = withClockAdvancingBeforeEdgeInserts(seeded.store);
+          try {
+            // Inside the try so the `finally` always restores real timers.
+            vi.useFakeTimers({ toFake: ["Date"], now: new Date(judgedAt) });
+            const result = await importGraph(
+              store,
+              document([
+                endIncumbent(seeded, judgedAt),
+                withoutValidFrom(attachElsewhere(seeded, judgedAt)),
+              ]),
+              options(batchSize),
+            );
+            vi.useRealTimers();
+            outcomes.push(await outcomeOf(seeded, result));
+          } finally {
+            vi.useRealTimers();
+          }
+        }
+        const moved: Outcome = {
+          edges: [
+            {
+              id: MOVED_EDGE_ID,
+              whole: "new",
+              validFrom: judgedAt,
+              validTo: undefined,
+            },
+            {
+              id: INCUMBENT,
+              whole: "old",
+              validFrom: ATTACHED_AT,
+              validTo: judgedAt,
+            },
+          ],
+          counts: { created: 1, updated: 1, skipped: 0 },
+          errors: [],
+          fenceViolations: 0,
+        };
+        expect(outcomes).toEqual(BATCH_SIZES.map(() => moved));
+      });
+
+      describe.each(ORDERS)(
+        "an end that leaves a zero-width window, %s",
+        (order) => {
+          // Ending the incumbent at its own validFrom leaves a window that reads
+          // at no instant and overlaps nothing, as a `reparent` at that instant
+          // leaves it. The part holds no whole at any instant of that window, so
+          // a new attachment opening before it leaves no gap either: it is
+          // judged, as any attachment is, against the part's other rows.
+          const BEFORE_INCUMBENT = "2019-06-01T00:00:00.000Z";
+          const zeroWidth = (seeded: Seeded): EdgeRows =>
+            ordered(
+              order,
+              endIncumbent(seeded, ATTACHED_AT),
+              attachElsewhere(seeded, BEFORE_INCUMBENT),
+            );
+
+          it("moves the part to a new attachment opening before it", async () => {
+            const outcome = await importAtEveryBatchSize(
+              context,
+              "oneActive",
+              "required",
+              zeroWidth,
+            );
+            expect(outcome).toEqual({
+              edges: [
+                {
+                  id: MOVED_EDGE_ID,
+                  whole: "new",
+                  validFrom: BEFORE_INCUMBENT,
+                  validTo: undefined,
+                },
+                {
+                  id: INCUMBENT,
+                  whole: "old",
+                  validFrom: ATTACHED_AT,
+                  validTo: ATTACHED_AT,
+                },
+              ],
+              counts: { created: 1, updated: 1, skipped: 0 },
+              errors: [],
+              fenceViolations: 0,
+            });
+          });
+
+          it("refuses that attachment when it overlaps the part's earlier history", async () => {
+            const outcomes: Outcome[] = [];
+            for (const batchSize of BATCH_SIZES) {
+              const seeded = await seed(
+                context,
+                "oneActive",
+                "required",
+                `zero_width_${order}_b${batchSize}`,
+              );
+              await seedEarlierAttachment(seeded);
+              const result = await importGraph(
+                seeded.store,
+                document(zeroWidth(seeded)),
+                options(batchSize),
+              );
+              outcomes.push(await outcomeOf(seeded, result));
+            }
+            const endError = { id: INCUMBENT, code: MOVE_INCOMPLETE };
+            const attachError = {
+              id: MOVED_EDGE_ID,
+              code: "COMPOSITION_WINDOW_OVERLAP",
+            };
+            const refused: Outcome = {
+              edges: [
+                {
+                  id: EARLIER_EDGE_ID,
+                  whole: "new",
+                  validFrom: EARLIER,
+                  validTo: ATTACHED_AT,
+                },
+                ...UNMOVED,
+              ],
+              counts: { created: 0, updated: 0, skipped: 0 },
+              errors:
+                order === "endFirst" ?
+                  [endError, attachError]
+                : [attachError, endError],
+              fenceViolations: 0,
+            };
+            expect(outcomes).toEqual(BATCH_SIZES.map(() => refused));
+          });
+        },
+      );
+
+      it("names the part, both windows and the gap", async () => {
+        const seeded = await seed(context, "oneActive", "required", "gap_text");
+        const result = await importGraph(
+          seeded.store,
+          document([
+            endIncumbent(seeded, MOVED_AT),
+            attachElsewhere(seeded, LATER),
+          ]),
+          options(1000),
+        );
+        const [endError, attachError] = result.errors;
+        expect(attachError?.error).toBe(endError?.error);
+        expect(endError?.error).toBe(
+          `${MOVE_GAP}: Cannot move IcmPart/${seeded.partId} to IcmWhole/${seeded.newWholeId}: edge "icmPartOf" ${seeded.incumbentId} ends its attachment to IcmWhole/${seeded.oldWholeId}, window [${ATTACHED_AT}, ${MOVED_AT}), and edge "icmPartOf" ${MOVED_EDGE_ID}, which attaches it again, opens at "${LATER}", so the part would hold no whole during [${MOVED_AT}, ${LATER}). This kind requires a whole (\`existence: "required"\`), so a move must open the new attachment at the instant it ends the old one.`,
+        );
       });
     });
 

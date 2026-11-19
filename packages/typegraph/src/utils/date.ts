@@ -349,6 +349,29 @@ export function validityWindowsOverlap(
 }
 
 /**
+ * The instants after `earlier` ends and before `later` starts — the
+ * half-open window `[earlier.validTo, later.validFrom)` — or `undefined` when
+ * there are none: `earlier` has no end, `later` has no start, or `later`
+ * starts at or before the instant `earlier` ends. So two windows that touch
+ * (`earlier.validTo === later.validFrom`) leave no gap, exactly as they share
+ * no instant ({@link validityWindowsOverlap}); windows that overlap leave
+ * none either.
+ *
+ * PRECONDITION: as {@link validityWindowsOverlap}.
+ */
+export function validityWindowGap(
+  earlier: ValidityWindow,
+  later: ValidityWindow,
+): Readonly<{ validFrom: string; validTo: string }> | undefined {
+  if (earlier.validTo === undefined || later.validFrom === undefined) {
+    return undefined;
+  }
+  return earlier.validTo < later.validFrom ?
+      { validFrom: earlier.validTo, validTo: later.validFrom }
+    : undefined;
+}
+
+/**
  * Whether every instant of `inner` belongs to `outer`. An empty `inner`
  * belongs to every window.
  *

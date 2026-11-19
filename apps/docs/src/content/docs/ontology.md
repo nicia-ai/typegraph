@@ -959,6 +959,16 @@ pair over such rows is refused until they are repaired
 To repair one, end or delete one of the overlapping edges so the windows
 abut.
 
+The rule is "at most one whole" at every instant. It does not require a
+required part to hold a whole at every past instant: a history row written
+with `store.edges.<via>.create` may leave a gap before the part's current
+attachment, and `verifyConstraintFences()` does not report one. A move of a
+required part is held to "no gap", though: `reparent` ends the old window and
+opens the new one at one instant, and an import's move of a required part must
+abut the same way or both its rows are refused with `CompositionError`
+(`COMPOSITION_MOVE_GAP`, `situation: "moveGap"`; see
+[A composition part that moved](/interchange#a-composition-part-that-moved)).
+
 #### `partOf` on get-or-create is a postcondition
 
 `partOf` on `getOrCreateByConstraint` / `bulkGetOrCreateByConstraint` states

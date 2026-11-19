@@ -124,7 +124,10 @@ import {
   edgeKindIsInAcyclicRelation,
 } from "../store/acyclicity";
 import { edgeInsertClaims } from "../store/claims/composition-claims";
-import { assertCompositionWindowsDisjoint } from "../store/claims/composition-windows";
+import {
+  assertCompositionWindowsDisjoint,
+  compositionMoveGapVerdict,
+} from "../store/claims/composition-windows";
 import {
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
@@ -3423,10 +3426,16 @@ async function processEdges(
     record,
   );
 
-  const moves = pairCompositionMoves(registry, classified, options).toSorted(
-    (left, right) =>
-      (compositionMoveRows(left)[0]?.index ?? 0) -
-      (compositionMoveRows(right)[0]?.index ?? 0),
+  // A required part's move whose windows leave a gap is refused whole before
+  // anything is written; every other move is written with the bounds it was
+  // judged with.
+  const { moves, gaps } = judgeCompositionMoveGaps(
+    registry,
+    pairCompositionMoves(registry, classified, options).toSorted(
+      (left, right) =>
+        (compositionMoveRows(left)[0]?.index ?? 0) -
+        (compositionMoveRows(right)[0]?.index ?? 0),
+    ),
   );
   const pairedEdgeIds = new Set(
     moves.flatMap((move) => [move.end.edge.id, move.attach.edge.id]),
@@ -3438,7 +3447,25 @@ async function processEdges(
     ...unpaired.filter((row) => row.existing !== undefined),
     ...classified.repeatsOfExisting,
   ].toSorted((left, right) => left.index - right.index);
-  const creates = unpaired.filter((row) => row.existing === undefined);
+  const allCreates = unpaired.filter((row) => row.existing === undefined);
+  const firstWaiting = firstCreateAfterSlotRepeat(
+    registry,
+    allCreates,
+    classified.repeatsOfCreated,
+  );
+  const waits = (row: ClassifiedEdgeRow): boolean =>
+    firstWaiting !== undefined && row.index >= firstWaiting;
+  const creates = allCreates.filter((row) => !waits(row));
+  // The repeats of created ids, and the creates that wait for one of them, in
+  // document order: each run of consecutive waiting creates is one group,
+  // written in `batchSize` slices as phase 4 writes its creates.
+  const lastRows: readonly (CreateRun | DocumentEdgeRow)[] =
+    groupConsecutiveCreates(
+      [
+        ...classified.repeatsOfCreated,
+        ...allCreates.filter((row) => waits(row)),
+      ].toSorted((left, right) => left.index - right.index),
+    );
 
   // The rows ending a part's attachment that this import refuses because no
   // row attaching the part again is applied, by document position. What the
@@ -3477,7 +3504,8 @@ async function processEdges(
     }
   }
 
-  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>();
+  // `failedMoves` only grows from the moves refused before any write.
+  const failedMoves = new Map<CompositionMove, CompositionMoveFailure>(gaps);
   const writeRound = async (): Promise<EdgeRoundRefusals> => {
     // Every write of a row naming an id that may already be written, in
     // write order, for the judgement of what each one did.
@@ -3546,7 +3574,22 @@ async function processEdges(
         pendingMatchIdentityOwners,
       );
     }
-    for (const repeat of classified.repeatsOfCreated) {
+    for (const repeat of lastRows) {
+      if ("creates" in repeat) {
+        // Creates waiting for a repeat that frees a part's slot, written
+        // through the same slice path as every other create.
+        for (const slice of chunk(repeat.creates, options.batchSize)) {
+          await createEdgeSlice(
+            frame,
+            graphId,
+            registry,
+            slice,
+            record,
+            pendingMatchIdentityOwners,
+          );
+        }
+        continue;
+      }
       const refusal = strandedEnds.get(repeat.index);
       apply(
         refusal === undefined ?
@@ -4424,6 +4467,108 @@ function compositionMoveRows(
 }
 
 /**
+ * The document position from which creates are written with the repeats of
+ * ids this import creates, in document order, or `undefined` when every
+ * create keeps its phase.
+ *
+ * A repeat applies after every create (it must observe the row it repeats),
+ * so without this a create later in the document than a repeat that ends the
+ * part's attachment would be judged against the still-open attachment. The
+ * first create that must wait is the first create of a composition row whose
+ * part a repeat EARLIER in the document gives a composition row a different
+ * window ({@link repeatChangesWindow}): the part's rows share one slot, and
+ * only such a repeat can free it. A repeat that restates the window it
+ * repeats frees nothing, so it moves no create.
+ *
+ * Every create from that one on waits with it, so the creates keep their
+ * document order among themselves: a create that competes with a waiting one
+ * — for a part's slot, a whole's `targetCardinality` slot, an acyclic
+ * relation or a match identity — cannot take it first by keeping an earlier
+ * phase. Every create before it keeps its phase. Decided over the whole
+ * payload, so it is the same at every `batchSize`.
+ */
+function firstCreateAfterSlotRepeat(
+  registry: KindRegistry,
+  creates: readonly ClassifiedEdgeRow[],
+  repeatsOfCreated: readonly DocumentEdgeRow[],
+): number | undefined {
+  const partKeyOf = (edge: InterchangeEdge): string | undefined => {
+    const partSide = registry.compositionPartSide(edge.kind);
+    if (partSide === undefined) return undefined;
+    const { part } = orientCompositionEndpoints(partSide, edge.from, edge.to);
+    return makeNodeKey(part.kind, part.id);
+  };
+  const occurrences = [...creates, ...repeatsOfCreated].toSorted(
+    (left, right) => left.index - right.index,
+  );
+  const firstFreeingRepeatByPart = new Map<string, number>();
+  for (const repeat of repeatsOfCreated) {
+    const partKey = partKeyOf(repeat.edge);
+    if (partKey === undefined) continue;
+    if (!repeatChangesWindow(repeat, occurrences)) continue;
+    const first = firstFreeingRepeatByPart.get(partKey);
+    if (first === undefined || repeat.index < first) {
+      firstFreeingRepeatByPart.set(partKey, repeat.index);
+    }
+  }
+  return creates
+    .toSorted((left, right) => left.index - right.index)
+    .find((row) => {
+      const partKey = partKeyOf(row.edge);
+      if (partKey === undefined) return false;
+      const firstFreeingRepeat = firstFreeingRepeatByPart.get(partKey);
+      return firstFreeingRepeat !== undefined && firstFreeingRepeat < row.index;
+    })?.index;
+}
+
+/** Consecutive creates of the document, written together in slices. */
+type CreateRun = Readonly<{ creates: readonly ClassifiedEdgeRow[] }>;
+
+/**
+ * `rows`, in their order, with each run of consecutive creates (a row with a
+ * `registration`) gathered into one {@link CreateRun}.
+ */
+function groupConsecutiveCreates(
+  rows: readonly (ClassifiedEdgeRow | DocumentEdgeRow)[],
+): readonly (CreateRun | DocumentEdgeRow)[] {
+  const grouped: (CreateRun | DocumentEdgeRow)[] = [];
+  for (const row of rows) {
+    if (!("registration" in row)) {
+      grouped.push(row);
+      continue;
+    }
+    const last = grouped.at(-1);
+    if (last !== undefined && "creates" in last) {
+      grouped[grouped.length - 1] = { creates: [...last.creates, row] };
+    } else {
+      grouped.push({ creates: [row] });
+    }
+  }
+  return grouped;
+}
+
+/**
+ * Whether a repeat of an id this import creates writes a different window than
+ * the occurrence of the id it follows in the document. An update applies only
+ * the document's `validTo` (a stated `validFrom` must match the row's), so a
+ * repeat stating the same `validTo` leaves the row's window as it found it. A
+ * repeat whose earlier occurrence is not among `occurrences` (it is a move's
+ * row, or was refused) is taken to change it.
+ */
+function repeatChangesWindow(
+  repeat: DocumentEdgeRow,
+  occurrences: readonly DocumentEdgeRow[],
+): boolean {
+  const previous = occurrences.findLast(
+    (occurrence) =>
+      occurrence.index < repeat.index && occurrence.edge.id === repeat.edge.id,
+  );
+  return (
+    previous === undefined || previous.edge.validTo !== repeat.edge.validTo
+  );
+}
+
+/**
  * The composition move pairs the payload states, decided over the WHOLE
  * payload so the two rows pair up whatever slices they land in. A part pairs
  * when the payload holds exactly one row ending its current attachment and
@@ -4918,8 +5063,10 @@ const COMPOSITION_MOVE_INCOMPLETE_CODE =
 
 /**
  * Why a move was taken out of its move set: one of its rows was refused (with
- * that row's own outcome), or the state the set left behind does not hold the
- * moved part where the move put it.
+ * that row's own outcome), the move as a whole was refused before anything
+ * was written (a required part's move whose windows leave a gap, with the
+ * refusal both rows report), or the state the set left behind does not hold
+ * the moved part where the move put it.
  */
 type CompositionMoveFailure =
   | Readonly<{
@@ -4927,12 +5074,14 @@ type CompositionMoveFailure =
       row: ClassifiedEdgeRow;
       outcome: ProcessResult;
     }>
+  | Readonly<{ cause: "gap"; outcome: ProcessResult }>
   | Readonly<{ cause: "unattached" }>;
 
 /**
  * The per-row outcomes a move that failed is reported with: a refused row
- * carries its own refusal, and every other row of the move names the move and
- * why it could not land.
+ * carries its own refusal, a move refused as a whole reports its refusal on
+ * every row, and every other row of the move names the move and why it could
+ * not land.
  */
 function compositionMoveFailureOutcomes(
   move: CompositionMove,
@@ -4940,6 +5089,7 @@ function compositionMoveFailureOutcomes(
 ): readonly Readonly<{ row: ClassifiedEdgeRow; outcome: ProcessResult }>[] {
   const { part, whole: destination, end, attach } = move;
   return compositionMoveRows(move).map((row) => {
+    if (failure.cause === "gap") return { row, outcome: failure.outcome };
     if (failure.cause === "refused" && row === failure.row) {
       return { row, outcome: failure.outcome };
     }
@@ -4977,6 +5127,75 @@ function compositionMoveIncomplete(
     status: "error",
     error: `${COMPOSITION_MOVE_INCOMPLETE_CODE}: Edge "${edgeId}" was not applied: it is part of a move of ${part.kind} "${part.id}" to ${destination.kind} "${destination.id}" — edge "${endEdgeId}" ends the part's current attachment and edge "${attachEdgeId}" attaches it again, and a move is applied whole or not at all; ${reason}.`,
   };
+}
+
+/**
+ * Every move judged by the rule that a required part's move abuts
+ * ({@link compositionMoveGapVerdict}), once, before anything is written:
+ * `gaps` holds each refused move with the refusal both of its rows report,
+ * so neither row of such a move is ever applied, and `moves` is every move
+ * as it is to be written. An attach that states no `validFrom` is judged by
+ * the lower bound an insert would stamp at this one instant, and an accepted
+ * move's attach states that bound, so the row is written with the bound the
+ * judgement accepted rather than a later clock read, which could open a gap
+ * after an end at the judged instant.
+ */
+function judgeCompositionMoveGaps(
+  registry: KindRegistry,
+  judged: readonly CompositionMove[],
+): Readonly<{
+  moves: readonly CompositionMove[];
+  gaps: ReadonlyMap<CompositionMove, CompositionMoveFailure>;
+}> {
+  const operationInstant = nowIso();
+  const moves: CompositionMove[] = [];
+  const gaps = new Map<CompositionMove, CompositionMoveFailure>();
+  for (const move of judged) {
+    const { part, end, attach } = move;
+    const verdict = compositionMoveGapVerdict(
+      registry,
+      {
+        part,
+        ended: { ...end.existing, valid_to: end.edge.validTo },
+        attach: {
+          id: attach.edge.id,
+          kind: attach.edge.kind,
+          from_kind: attach.edge.from.kind,
+          from_id: attach.edge.from.id,
+          to_kind: attach.edge.to.kind,
+          to_id: attach.edge.to.id,
+          valid_to: attach.edge.validTo,
+          statedValidFrom: attach.edge.validFrom,
+        },
+      },
+      operationInstant,
+    );
+    if (verdict.verdict === "refused") {
+      const { refusal } = verdict;
+      moves.push(move);
+      gaps.set(move, {
+        cause: "gap",
+        outcome: {
+          status: "error",
+          error: `${refusal.code}: ${refusal.message}`,
+        },
+      });
+      continue;
+    }
+    const { stampedValidFrom } = verdict;
+    moves.push(
+      stampedValidFrom === undefined ? move : (
+        {
+          ...move,
+          attach: {
+            ...attach,
+            edge: { ...attach.edge, validFrom: stampedValidFrom },
+          },
+        }
+      ),
+    );
+  }
+  return { moves, gaps };
 }
 
 /**

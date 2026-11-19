@@ -516,9 +516,23 @@ validation on. `batchSize` and `idleTimeoutMs` are `exportGraphStream` options;
 An import applies its edge rows in one order, the same at every `batchSize`:
 every row whose id names an existing edge is applied first — skipped,
 refused or updated, per `onConflict` — then every composition move the
-document states (see below), then every new edge is created. Within each
-phase rows apply in document order, and a later row repeating an id applies
-after the row it repeats, so it observes that row's outcome.
+document states (see below), then every new edge is created, and last every
+row repeating an id this import creates. Within each phase rows apply in
+document order, and a later row repeating an id applies after the row it
+repeats, so it observes that row's outcome.
+
+A create can wait for that last phase: a create of a composition row whose
+part an earlier row of the document, repeating an id this import creates,
+gives a composition row a different `validTo`. A part's composition rows
+share one slot and such a repeat can free it, so that create, and every create
+after it in the document, applies with the repeats, in document order. A
+document that attaches a part, ends that attachment by repeating its id, and
+then attaches the part elsewhere therefore commits all three rows, as the
+source wrote them, instead of refusing the last one against an attachment the
+repeat has not ended yet, and creates competing for one claim keep their
+document priority. A repeat that restates the window it repeats frees nothing
+and moves no create. Every create before the first one that waits keeps its
+phase.
 
 The order matters because rows depend on each other. An update that ends a
 `oneActive` window frees the slot a create in the same document takes, so the
@@ -530,7 +544,8 @@ document therefore commits the same rows at `batchSize: 1` and
 
 `result.errors` lists refusals in that phase order rather than document order:
 validation refusals first, then refusals of existing rows, then of moves, then
-of creates. Within the create phase the order also depends on `batchSize`:
+of creates, then of repeats of created ids together with the creates that wait
+for them, in document order. Within the create phase the order also depends on `batchSize`:
 each slice reports the refusals of the rows it writes as a batch before those
 of the rows it must write one at a time (rows checked for cycles), so at
 `batchSize: 1` create refusals follow document order and at larger sizes they
@@ -806,6 +821,24 @@ A source whose part moved to another whole re-imports with `onConflict:
   `COMPOSITION_WHOLE_OCCUPIED`, like any other, and the part stays where it
   was. To replay such a move, `reparent` the part on the target. The same
   refusal applies on a `oneActive` pair whose document omits the ended row.
+
+A required part's move must abut: the new attachment's `validFrom` must be
+the `validTo` that ends the old one, the one instant `reparent` gives both
+halves. A new attachment that opens later would leave the part with no whole
+on valid-time reads in between. A new attachment that states no `validFrom`
+is judged as opening at the instant `importGraph` judges the move, and is
+written with that instant when the move is accepted, so it abuts an end at
+that instant and leaves a gap after an earlier one. Both rows of a move that
+leaves a gap are refused before anything is written, each with
+`COMPOSITION_MOVE_GAP`, naming the part, both windows and the gap, and the part
+keeps its current whole. A new attachment that overlaps the old one is refused
+as `COMPOSITION_WINDOW_OVERLAP`, as before. An end at the old attachment's own
+`validFrom` leaves a zero-width window, which holds the part at no instant and
+overlaps nothing, so a new attachment opening before it leaves no gap; it is
+judged, as any attachment is, against the part's other rows. An optional part
+may move across a gap: it has no whole in between. `importGraphStream`
+refuses a graph that declares a required part before it reads any chunk (see
+above), so this refusal is `importGraph`'s.
 
 Every move a document states is applied together, as `bulkReparent` applies
 its moves: every old attachment is ended before any new one is written. So moves that depend on each other land
