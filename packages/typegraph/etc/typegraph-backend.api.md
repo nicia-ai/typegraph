@@ -2122,7 +2122,7 @@ export type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesConnectedToNodes" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2551,6 +2551,13 @@ export type FindEdgesByKindParams = Readonly<{
 }>;
 
 // @public
+export type FindEdgesConnectedToNodesParams = Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeIds: readonly string[];
+}>;
+
+// @public
 export type FindEdgesConnectedToParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -2722,6 +2729,7 @@ export type GraphBackend = Readonly<{
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
+    hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     lockNodes: (this: void, graphId: string, kind: string, ids: readonly string[], lock: NodeRowLock) => Promise<readonly NodeRow[]>;
@@ -2740,6 +2748,7 @@ export type GraphBackend = Readonly<{
     countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
+    findEdgesConnectedToNodes?: (this: void, params: FindEdgesConnectedToNodesParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
@@ -2987,6 +2996,19 @@ export type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+export type HardDeleteNodesBatchParams = Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+}>;
+
+// @public
+export type HardDeleteNodesBatchResult = Readonly<{
+    removedNodeIds: readonly string[];
+    removedEdgeIds: readonly string[];
 }>;
 
 // @public
@@ -3444,7 +3466,7 @@ export type NodeCreateCommandResult = Readonly<{
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "lockNodes">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -4415,6 +4437,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
         readonly accesses: 2;
     };
+    readonly findEdgesConnectedToNodes: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional kind-blind set read of the live edges connected to one kind's nodes, for judging a batch of node deletes. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.";
+        readonly accesses: 0;
+    };
     readonly findEdgesByMatchIdentity: {
         readonly kind: "reasoned";
         readonly reason: "Optional exact lookup for durable edge identity owners, including tombstones. Candidate planning uses it to seed active owners and falls back to full clone when the capability is absent or the owner is tombstoned.";
@@ -4783,6 +4810,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
         readonly ceiling: 5;
+    };
+    readonly hardDeleteNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
     };
     readonly hybridSearch: {
         readonly kind: "deferred";
@@ -5347,7 +5380,7 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "hardDeleteNodesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];

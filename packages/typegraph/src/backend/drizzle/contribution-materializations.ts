@@ -405,7 +405,9 @@ function markerGraphId(
  * The fulltext-touching methods the durable-marker gate wraps. The five
  * `upsert*`/`delete*`/`fulltextSearch` are optional (a graph with no
  * `searchable()` fields has none); `hardDeleteNode` is always present
- * because its cascade unconditionally deletes from the fulltext table.
+ * because its cascade unconditionally deletes from the fulltext table, and
+ * the optional `hardDeleteNodesBatch` is gated whenever present for the same
+ * reason.
  */
 export type GatableFulltextBackend = Pick<
   TransactionBackend,
@@ -415,6 +417,7 @@ export type GatableFulltextBackend = Pick<
   | "deleteFulltextBatch"
   | "fulltextSearch"
   | "hardDeleteNode"
+  | "hardDeleteNodesBatch"
 >;
 
 type RefuseUnavailableFulltext = (
@@ -567,6 +570,15 @@ export function gateFulltextMethods(
       rawHardDelete(params),
     );
   };
+  // Its batched form deletes from the fulltext table too, so it is gated
+  // whenever it exists, for the same reason.
+  if (source.hardDeleteNodesBatch) {
+    const raw = source.hardDeleteNodesBatch;
+    gated.hardDeleteNodesBatch = async (params) =>
+      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params),
+      );
+  }
   return gated;
 }
 

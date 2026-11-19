@@ -1832,7 +1832,7 @@ type EdgeEndpointRef<G extends GraphDef, N extends NodeType> = NodeRef<N | Assig
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesConnectedToNodes" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2923,6 +2923,13 @@ type FindEdgesByKindParams = Readonly<{
 }>;
 
 // @public
+type FindEdgesConnectedToNodesParams = Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeIds: readonly string[];
+}>;
+
+// @public
 type FindEdgesConnectedToParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -3162,6 +3169,7 @@ type GraphBackend = Readonly<{
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
+    hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     lockNodes: (this: void, graphId: string, kind: string, ids: readonly string[], lock: NodeRowLock) => Promise<readonly NodeRow[]>;
@@ -3180,6 +3188,7 @@ type GraphBackend = Readonly<{
     countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
+    findEdgesConnectedToNodes?: (this: void, params: FindEdgesConnectedToNodesParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
     findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
@@ -3496,6 +3505,19 @@ type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+type HardDeleteNodesBatchParams = Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+}>;
+
+// @public
+type HardDeleteNodesBatchResult = Readonly<{
+    removedNodeIds: readonly string[];
+    removedEdgeIds: readonly string[];
 }>;
 
 // @public
@@ -4839,7 +4861,7 @@ type NodeDeletePolicy = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "lockNodes">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public
 type NodeGetOrCreateByConstraintOptions<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined, Whole extends CompositionWholeInput = CompositionWholeInput> = Readonly<{

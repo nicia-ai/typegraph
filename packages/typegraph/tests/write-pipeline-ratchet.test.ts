@@ -133,8 +133,10 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * lifecycle beside `setActiveVersion`, owned by the schema manager.
  * `lockNodes` (140→141) is a read too: it row-locks what it returns for the
  * edge-endpoint / delete pairing and writes no row.
+ * Node `bulkHardDelete` (#460) adds the entity write `hardDeleteNodesBatch`
+ * and the read `findEdgesConnectedToNodes` (141→143).
  */
-const MEMBER_COUNT = 141;
+const MEMBER_COUNT = 143;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

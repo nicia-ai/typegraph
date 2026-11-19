@@ -82,13 +82,17 @@ const REASONED_FLOOR = 132;
 // Same-kind soft-delete sets go through one dispatcher, so the edge write
 // pipeline reads the optional `deleteEdgesBatch` once instead of twice:
 // 240 -> 239 live; its declared ceiling is unchanged.
-const DEFERRED_LIVE_TOTAL = 239;
-const DEFERRED_DECLARED_TOTAL = 245;
+// The optional `hardDeleteNodesBatch` member (#460) is wrapped by both
+// recorded-capture write overlays, a guard and a call each, declared at its
+// live count: 239 -> 243 live, 245 -> 249 declared.
+const DEFERRED_LIVE_TOTAL = 243;
+const DEFERRED_DECLARED_TOTAL = 249;
 const EXCLUDED_COUNT = 5;
 // Lineage source selection reads the backend's own `lineage` once instead of
 // twice (the read-set fence binds it for its key-delta filter): 387 -> 386.
 // One `deleteEdgesBatch` read left the edge write pipeline: 386 -> 385.
-const TOTAL_ROW_COUNT = 385;
+// The `hardDeleteNodesBatch` overlays (#460) add four reads: 385 -> 389.
+const TOTAL_ROW_COUNT = 389;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",

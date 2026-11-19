@@ -39,12 +39,14 @@ import type {
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesConnectedToNodesParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
   FindRowsAcrossKindsParams,
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteNodesBatchParams,
   HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
@@ -126,11 +128,13 @@ import {
   buildDeleteEdgesBatch,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
+  buildFindEdgesConnectedToNodes,
   buildGetEdge,
   buildGetEdges,
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
+  buildHardDeleteEdgesByNodes,
   buildInsertEdge,
   buildInsertEdgeIfEndpointsLive,
   buildInsertEdgeIfEndpointsLiveWithSchemaFence,
@@ -160,6 +164,7 @@ import {
   buildGetNode,
   buildGetNodes,
   buildHardDeleteNode,
+  buildHardDeleteNodesBatch,
   buildInsertNode,
   buildInsertNodeIfAbsent,
   buildInsertNodeIfAbsentWithSchemaFence,
@@ -429,6 +434,8 @@ export type CommonOperationStrategy = Readonly<{
     schemaLockClause: SQL,
   ) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
+  /** Optional: a strategy without it gets no `hardDeleteNodesBatch` member. */
+  buildHardDeleteNodesBatch?: (params: HardDeleteNodesBatchParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgeIfEndpointsLive: (
     params: InsertEdgeParams,
@@ -548,9 +555,20 @@ export type CommonOperationStrategy = Readonly<{
     nodeKind: string,
     nodeId: string,
   ) => SQL;
+  /** Optional, with {@link buildHardDeleteNodesBatch}. */
+  buildHardDeleteEdgesByNodes?: (
+    graphId: string,
+    nodeKind: string,
+    nodeIds: readonly string[],
+  ) => SQL;
   buildCountEdgesAtEndpoint: (params: CountEdgesAtEndpointParams) => SQL;
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
+  /** Optional: a strategy without it gets no `findEdgesConnectedToNodes`. */
+  buildFindEdgesConnectedToNodes?: (
+    params: FindEdgesConnectedToNodesParams,
+    nodeIds: readonly string[],
+  ) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
   buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
@@ -779,6 +797,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildReadAtomicNodeMutationPostimages,
   buildDeleteNode,
   buildHardDeleteNode,
+  buildHardDeleteNodesBatch,
   buildInsertEdge,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
@@ -794,9 +813,11 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
+  buildHardDeleteEdgesByNodes,
   buildCountEdgesAtEndpoint,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
+  buildFindEdgesConnectedToNodes,
   buildFindNodesByKind,
   buildFindNodesAcrossKinds,
   buildCountNodesByKind,
