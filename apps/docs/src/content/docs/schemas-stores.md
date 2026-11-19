@@ -1460,7 +1460,10 @@ of them fails and the callback catches the error, the commit keeps none of the
 call's writes. On a raw store over a driver without interactive transactions
 (Cloudflare D1, `drizzle-orm/neon-http`) the statements run separately; every
 refusal still comes before the first delete, but a failure in a later statement
-leaves the earlier ones applied. A schema-managed store on those drivers refuses
+leaves the earlier ones applied. As in `hardDelete()`, a node's row is removed
+only after its uniqueness, fulltext and connected-edge rows, so repeating the
+call after such a failure finishes the delete and frees the node's unique keys.
+A schema-managed store on those drivers refuses
 the call before it writes, as it refuses every write it cannot fence (see
 [Backend support](#backend-support)).
 
