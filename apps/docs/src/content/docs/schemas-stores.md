@@ -1132,6 +1132,14 @@ history, and revision state in the same transaction. If any row or sidecar is
 invalid, the whole update rolls back. Backends without transactional set-write
 and batched sidecar support reject the operation before writing.
 
+The selectors are evaluated once, against the statement's snapshot, and the
+write applies only to a row whose stored version is still the one that snapshot
+selected. Under PostgreSQL `READ COMMITTED`, a row that another transaction
+changes and commits after that snapshot (while this update waits for its row
+lock) is skipped rather than patched on the strength of its previous state, and
+`affectedCount` does not count it. Re-run `updateWhere()` to apply the patch to
+rows that still match.
+
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:
 

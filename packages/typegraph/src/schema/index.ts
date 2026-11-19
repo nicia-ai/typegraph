@@ -21,10 +21,19 @@
 
 export { installRevisionChangesJournal } from "../backend/revision-journal";
 export type {
+  CompositionClaimScope,
   ContributionDiagnostic,
   ContributionDiagnosticState,
+  ContributionProbeContribution,
+  ContributionProbeEntry,
+  ContributionProbeResult,
+  ContributionProbeState,
+  ContributionRebuildResult,
+  ContributionRebuildScope,
   ContributionRepairEntry,
   ContributionRepairResult,
+  EdgeCardinalityDeclaration,
+  SchemaVersionRow,
 } from "../backend/types";
 
 // ============================================================

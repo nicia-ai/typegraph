@@ -1722,7 +1722,7 @@ type DegreeOptions<G extends GraphDef> = TemporalAlgorithmOptions & Readonly<{
 }>;
 
 // @public
-type DeleteBehavior = "restrict" | "cascade" | "disconnect";
+export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 
 // @public
 type DeleteEdgeParams = Readonly<{
@@ -1887,6 +1887,7 @@ type DynamicEdgeAccessor = Readonly<{
     kind: StringFieldAccessor;
     fromId: StringFieldAccessor;
     toId: StringFieldAccessor;
+    $meta: EdgeMetadataAccessor;
     field: (name: string) => DynamicFieldBuilder;
 }>;
 
@@ -1924,6 +1925,7 @@ type DynamicNodeAccessor = Readonly<{
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
     $fulltext: FulltextAccessor;
+    $meta: NodeMetadataAccessor;
     field: (name: string) => DynamicFieldBuilder;
 }>;
 
@@ -1995,6 +1997,7 @@ type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? D
     kind: StringFieldAccessor;
     fromId: StringFieldAccessor;
     toId: StringFieldAccessor;
+    $meta: EdgeMetadataAccessor;
 }> & EdgePropsAccessor<E>;
 
 // @public
@@ -2323,7 +2326,7 @@ type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 type EdgeIndexDirection = "out" | "in" | "none";
 
 // @public
-type EdgeInGraph<G extends GraphDef, E extends AnyEdgeType, From extends NodeType, To extends NodeType> = Edge<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>;
+export type EdgeInGraph<G extends GraphDef, E extends AnyEdgeType, From extends NodeType, To extends NodeType> = Edge<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>;
 
 // @public (undocumented)
 type EdgeIntrospection = Readonly<{
@@ -2370,6 +2373,11 @@ type EdgeMatchIdentityStorage = Readonly<{
 
 // @public
 type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
+
+// @public
+type EdgeMetadataAccessor = Readonly<{
+    [Field in keyof SelectableEdgeMeta]-?: NodeMetadataAccessor[Field];
+}>;
 
 // @public
 export class EdgeNotFoundError extends TypeGraphError {
@@ -2511,13 +2519,13 @@ type EmbeddingIndexType = "hnsw" | "ivfflat" | "none";
 type EmbeddingMetric = "cosine" | "l2" | "inner_product";
 
 // @public
-type EmbeddingSchema<D extends number = number> = z.ZodType<EmbeddingValue> & Readonly<{
+export type EmbeddingSchema<D extends number = number> = z.ZodType<EmbeddingValue> & Readonly<{
     [EMBEDDING_DIMENSIONS_KEY]: D;
     [EMBEDDING_INDEX_KEY]: ResolvedEmbeddingIndex;
 }>;
 
 // @public
-type EmbeddingValue = readonly number[] & EmbeddingBrand;
+export type EmbeddingValue = readonly number[] & EmbeddingBrand;
 
 // @public (undocumented)
 const EMPTY_SCHEMA: z.ZodObject<{}, z.core.$strip>;
@@ -2868,7 +2876,7 @@ class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Resu
 }
 
 // @public
-class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
+export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     compile(): CompiledSelectSql;
     compileNodeCandidateIds(readInstant?: string): CompiledSelectSql;
@@ -3252,7 +3260,11 @@ export const expr: {
 
 // @public (undocumented)
 type ExpressionAliasContext<Aliases extends AliasMap, Edges extends EdgeAliasMap, Scope extends string = (keyof Aliases | keyof Edges) & string> = {
-    readonly [Alias in keyof Aliases & string]: AliasExpressions<Aliases[Alias], Scope>;
+    readonly [Alias in keyof Aliases & string]: AliasExpressions<Aliases[Alias], Scope> & Readonly<{
+        $meta: Readonly<{
+            version: DatabaseExpression<number | UndefinedWhenOptional<Aliases[Alias]["optional"]>, Scope>;
+        }>;
+    }>;
 } & {
     readonly [Alias in keyof Edges & string]: AliasExpressions<Edges[Alias], Scope> & Readonly<{
         fromId: DatabaseExpression<string | (Edges[Alias]["optional"] extends true ? undefined : never), Scope>;
@@ -3333,7 +3345,7 @@ type ExtensionChange = Readonly<{
 type ExtensionDefinedOutput<P extends ExtensionPropertyType> = P extends ExtensionStringProperty ? string : P extends ExtensionNumberProperty ? number : P extends ExtensionBooleanProperty ? boolean : P extends ExtensionEnumProperty ? P["values"][number] : P extends ExtensionArrayProperty ? readonly ExtensionPropertyOutput<P["items"]>[] : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]> : never;
 
 // @public
-type ExtensionEdgeDef = Readonly<{
+export type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
@@ -3374,7 +3386,7 @@ type ExtensionEnumProperty = Readonly<{
 }> & ExtensionPropertyModifiers;
 
 // @public (undocumented)
-type ExtensionIndex = ExtensionNodeIndex | ExtensionEdgeIndex;
+export type ExtensionIndex = ExtensionNodeIndex | ExtensionEdgeIndex;
 
 // @public
 type ExtensionIndexWhere = Readonly<{
@@ -3383,7 +3395,7 @@ type ExtensionIndexWhere = Readonly<{
 }>;
 
 // @public
-type ExtensionNodeDef = Readonly<{
+export type ExtensionNodeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     properties: Readonly<Record<string, ExtensionPropertyType>>;
@@ -3436,7 +3448,7 @@ type ExtensionObjectSchema<P extends Readonly<Record<string, ExtensionPropertyTy
 }>;
 
 // @public
-type ExtensionOntologyRelation = Readonly<{
+export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
@@ -3882,7 +3894,7 @@ type GraphAnalyticsCapabilities = Readonly<{
 }>;
 
 // @public
-type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
 type GraphAnnotationsChange = Readonly<{
@@ -4182,7 +4194,7 @@ type GraphExtension = Readonly<{
 }>;
 
 // @public
-type GraphExtensionVersion = number;
+export type GraphExtensionVersion = number;
 
 // @public
 type GraphIdentityConfig = Readonly<{
@@ -5046,7 +5058,7 @@ type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
 }>;
 
 // @public
-type KindAnnotations = Readonly<Record<string, JsonValue>>;
+export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
 type KindEntity = "node" | "edge";
@@ -5590,6 +5602,7 @@ type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? Dyna
     id: StringFieldAccessor;
     kind: StringFieldAccessor;
     $fulltext: FulltextAccessor;
+    $meta: NodeMetadataAccessor;
 }> & PropsAccessor<N>;
 
 // @public
@@ -5865,6 +5878,13 @@ export type NodeKinds<G extends GraphDef> = keyof G["nodes"] & string;
 // @public
 type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> & Readonly<{
     version: NodeRow["version"];
+}>;
+
+// @public
+type NodeMetadataAccessor = Readonly<{
+    [Field in keyof SelectableNodeMeta]-?: [
+    NonNullable<SelectableNodeMeta[Field]>
+    ] extends [number] ? NumberFieldAccessor : DateFieldAccessor;
 }>;
 
 // @public
@@ -6516,6 +6536,8 @@ class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap,
     aggregate<const Fields extends Readonly<Record<string, DatabaseExpression<unknown, (keyof Aliases | keyof EdgeAliases) & string>>>>(build: (context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>) => Fields): ExecutableProjectionQuery<Fields, QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>>;
     // (undocumented)
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
+    // @internal
+    assertFragmentRequirements(requires: Readonly<Record<string, string>>): void;
     count(): Promise<number>;
     exists(): Promise<boolean>;
     from<const Kinds extends SourceKindList<G>, A extends string>(kinds: Kinds, alias: UniqueAlias<A, Aliases>, options?: {
@@ -7583,7 +7605,7 @@ type SearchableOptions = Readonly<{
 }>;
 
 // @public
-type SearchableSchema = z.ZodString & Readonly<{
+export type SearchableSchema = z.ZodString & Readonly<{
     [SEARCHABLE_FIELD_KEY]: SearchableMetadata;
 }>;
 
@@ -8835,7 +8857,7 @@ type TemporalMetaFieldMap = Readonly<{
 type TemporalMethod<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState> = CoordinateState extends "open" ? (mode: TemporalMode, asOf?: string) => QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, "open"> : never;
 
 // @public
-type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
+export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
 type TemporalOptions = Readonly<{
@@ -9048,7 +9070,7 @@ type TupleComparisonPredicate = Readonly<{
 type TypedEdgeCollection<R extends EdgeRegistration, G extends GraphDef = GraphWithoutOntology> = EdgeCollection<R["type"], EdgeFromNodeTypes<R>, EdgeToNodeTypes<R>, EdgeAllowedPairs<R>, EdgeId<R["type"]>, G>;
 
 // @public
-type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
+export type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
     metaEdge: MetaEdge<M>;
     from: From;
     to: To;

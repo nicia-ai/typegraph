@@ -182,7 +182,7 @@ export type ExtensionOntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
-type ExtensionPropertyModifiers = Readonly<{
+export type ExtensionPropertyModifiers = Readonly<{
     optional?: boolean;
     searchable?: ExtensionSearchableModifier;
     embedding?: ExtensionEmbeddingModifier;

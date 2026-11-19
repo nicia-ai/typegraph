@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +15,23 @@ type TestMode = "all" | "inline" | "declarations" | "consumer";
 
 type TypegraphPackageJson = Readonly<{
   devDependencies?: Readonly<Record<string, string>>;
+  exports?: Readonly<Record<string, unknown>>;
 }>;
+
+const PACKAGE_NAME = "@nicia-ai/typegraph";
+
+/**
+ * The module resolutions the declaration-emit fixture compiles under. Each
+ * names a checked-in `type-smoke/tsconfig.declaration-emit.<name>.json` whose
+ * `outDir` is `declaration-out/<name>`.
+ */
+const DECLARATION_EMIT_RESOLUTIONS = ["bundler", "node16"] as const;
+
+/** Packages other than TypeGraph an emitted consumer declaration may import. */
+const DECLARATION_EMIT_FOREIGN_MODULES: ReadonlySet<string> = new Set(["zod"]);
+
+const MODULE_SPECIFIER_PATTERN =
+  /\b(?:from\s+|import\s*\(\s*)["']([^"']+)["']/g;
 
 function getUnknownErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -110,6 +133,70 @@ async function runCommand(
   });
 }
 
+/**
+ * The public module specifiers a consumer can import: the package name joined
+ * with each `exports` key.
+ */
+function publicEntrypointSpecifiers(
+  packageJson: TypegraphPackageJson,
+): ReadonlySet<string> {
+  const exportKeys = Object.keys(packageJson.exports ?? {});
+  if (exportKeys.length === 0) {
+    throw new Error("packages/typegraph/package.json declares no exports.");
+  }
+  return new Set(
+    exportKeys.map((exportKey) =>
+      exportKey === "." ? PACKAGE_NAME : (
+        `${PACKAGE_NAME}/${exportKey.slice(2)}`
+      ),
+    ),
+  );
+}
+
+/**
+ * Every module specifier in an emitted declaration that is neither a public
+ * TypeGraph entrypoint nor an allowed foreign package. A type TypeScript could
+ * not name through an entrypoint the program imports surfaces either as a
+ * TS2742/TS2883 refusal or, when the path happens to resolve, as a relative
+ * `dist/<hashed chunk>` specifier; this catches the second form.
+ */
+function nonPublicDeclarationSpecifiers(
+  declarationSource: string,
+  publicSpecifiers: ReadonlySet<string>,
+): readonly string[] {
+  const offending = new Set<string>();
+  for (const match of declarationSource.matchAll(MODULE_SPECIFIER_PATTERN)) {
+    const specifier = match[1];
+    if (specifier === undefined) continue;
+    if (publicSpecifiers.has(specifier)) continue;
+    if (DECLARATION_EMIT_FOREIGN_MODULES.has(specifier)) continue;
+    offending.add(specifier);
+  }
+  return [...offending].toSorted();
+}
+
+async function assertDeclarationsNamePublicEntrypoints(
+  outputDir: string,
+  publicSpecifiers: ReadonlySet<string>,
+): Promise<void> {
+  const entries = await readdir(outputDir);
+  const files = entries.filter((file) => file.endsWith(".d.ts"));
+  if (files.length === 0) {
+    throw new Error(
+      `Declaration emit produced no .d.ts files in ${outputDir}.`,
+    );
+  }
+  for (const file of files) {
+    const source = await readFile(path.join(outputDir, file), "utf8");
+    const offending = nonPublicDeclarationSpecifiers(source, publicSpecifiers);
+    if (offending.length > 0) {
+      throw new Error(
+        `${path.join(outputDir, file)} references non-public modules: ${offending.join(", ")}`,
+      );
+    }
+  }
+}
+
 async function getPackageJson(
   packageDir: string,
 ): Promise<TypegraphPackageJson> {
@@ -198,6 +285,17 @@ async function runConsumerTypeSmokeTest(
       path.join(fixtureDir, "tsconfig.json"),
       path.join(temporaryDir, "tsconfig.json"),
     );
+    await copyFile(
+      path.join(fixtureDir, "declaration-emit.ts"),
+      path.join(temporaryDir, "declaration-emit.ts"),
+    );
+    for (const resolution of DECLARATION_EMIT_RESOLUTIONS) {
+      const configName = `tsconfig.declaration-emit.${resolution}.json`;
+      await copyFile(
+        path.join(fixtureDir, configName),
+        path.join(temporaryDir, configName),
+      );
+    }
 
     const smokePackageJson = {
       name: "typegraph-consumer-smoke",
@@ -224,6 +322,26 @@ async function runConsumerTypeSmokeTest(
       [...commandArguments, "--noEmit", "--project", "tsconfig.json"],
       temporaryDir,
     );
+
+    const publicSpecifiers = publicEntrypointSpecifiers(packageJson);
+    for (const resolution of DECLARATION_EMIT_RESOLUTIONS) {
+      console.log(
+        `Emitting consumer declarations (moduleResolution: ${resolution})...`,
+      );
+      await runCommand(
+        "pnpm",
+        [
+          ...commandArguments,
+          "--project",
+          `tsconfig.declaration-emit.${resolution}.json`,
+        ],
+        temporaryDir,
+      );
+      await assertDeclarationsNamePublicEntrypoints(
+        path.join(temporaryDir, "declaration-out", resolution),
+        publicSpecifiers,
+      );
+    }
   } finally {
     await rm(temporaryDir, { recursive: true, force: true });
   }

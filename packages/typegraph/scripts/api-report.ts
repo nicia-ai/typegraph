@@ -11,6 +11,8 @@ import {
   ExtractorMessageId,
 } from "@microsoft/api-extractor";
 
+import { reportNameForExport } from "./api-report-names";
+
 type PackageExport = Readonly<{ types: string }>;
 type PackageManifest = Readonly<{
   exports: Readonly<Record<string, PackageExport>>;
@@ -1221,9 +1223,32 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `./postgres/pglite`, `./profiler`, `./provenance`, `./schema`,
   // `./sqlite/local` and `./store` each gain exactly that one forgotten name
   // (+1 apiece). No other name moved, and no other entrypoint changed.
+  // Public type reachability: each entrypoint that took type-only exports of
+  // names its own signatures already referenced loses exactly those names
+  // from its debt and gains none. `.` re-exports the fifteen types an
+  // inferred graph, node, edge, ontology, store or query type is spelled with
+  // (1092→1077); `./store` takes the lineage revision and delta, the
+  // transaction options, the search-option literals and
+  // `MisassignedEdgeEndpointRow` (806→798); `./query` `JsonPointer`,
+  // `ValueType`, `SqlDialect` and `SqlTableNames` (543→539); `./schema` the
+  // contribution probe and rebuild results and the probe entry/state/contribution
+  // types their bodies name, `EdgeCardinalityDeclaration` with its
+  // `CompositionClaimScope`, and `SchemaVersionRow` (994→985); `./indexes` the index base and where-operand
+  // types (46→41); `./core` `MetaEdgeName` and, type-only,
+  // the `ALL_META_EDGE_NAMES` constant it is spelled with (96→94); `./graph-extension`
+  // `ExtensionPropertyModifiers` (28→27).
+  // Metadata predicates (#866): `NodeAccessor` and `EdgeAccessor` gain
+  // `$meta: NodeMetadataAccessor` / `EdgeMetadataAccessor`. `./query` exports
+  // both; `.`, `./adapters/drizzle/postgres/working-copy`, `./graph-merge`,
+  // `./identity`, `./interchange`, `./maintenance`, `./postgres/pglite`,
+  // `./profiler`, `./provenance`, `./schema`, `./sqlite/local` and `./store`
+  // reach them only through the accessor types and gain exactly those two
+  // (+2 apiece). The expression context's `$meta` keeps its one forgotten name,
+  // `ExpressionMetadata`, now mapped over `SelectableNodeMeta` /
+  // `SelectableEdgeMeta`.
   ".": {
-    count: 1090,
-    sha256: "89cb6a1541942c4bf2ed092708e1a009f460e4f71209d56d7a3b2872fb540a8d",
+    count: 1077,
+    sha256: "663095dd42b26339fbbe9f3f6476a5dd70409be63c21737673fffa0dd6a2662d",
   },
   "./adapters/drizzle/engine": {
     count: 350,
@@ -1274,8 +1299,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `./postgres/pglite` and `./sqlite/local` 972→975, `./profiler`
   // 968→971, `./provenance` 981→984).
   "./adapters/drizzle/postgres/working-copy": {
-    count: 994,
-    sha256: "3e1e44680dd6704c46a57a54a1bc3d88c5fbd7631e3a97c81f148a214134a2a2",
+    count: 996,
+    sha256: "40646cefbb39a0089e22f5e3f164783b04bf779b0ea069af15b71ce7db2e6be4",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 282,
@@ -1298,8 +1323,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "3d657aa71ed47e43904143825eb9a60e957194664a5e4d821f7256b822b350e9",
   },
   "./core": {
-    count: 96,
-    sha256: "e7b5372a2b3fffec03f3ae0a5e0a3cdda6f4f9fa8cb4fcf492e454afcb58e1a0",
+    count: 94,
+    sha256: "1e4a0abd4d19077fa53e15c0ab0b81a5d531b47c8b26867b9249b4003cb779f5",
   },
   "./errors": {
     count: 64,
@@ -1307,8 +1332,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 28,
-    sha256: "f0da2bb6b3bdc363689d3283a489c2e864bcd85b13e8419c4b0d8dd60319d9b8",
+    count: 27,
+    sha256: "64115e9abfc9ee39681d481ff752343070dedd3df72904966cbcad3cfb920896",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
   // named `IdentityTransitionHistory` instead of a bare array. The root
@@ -1327,40 +1352,52 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Exact apply receipts expose TransactionReceipt as a named export here:
   // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 983,
-    sha256: "09a96052e402ceacc10be886e431e4f60a377c629fe955b284d3b44a8d299f44",
+    count: 985,
+    sha256: "74ede712a875888c87b958ca532d5b333760bb46507a57f1b939644f319ae0da",
   },
   "./identity": {
-    count: 947,
-    sha256: "27fe0e67afbd63afe2c447fee540a72cd837188bab207f8b7a77c42c9a281e9f",
+    count: 949,
+    sha256: "e93fdf6b111cdb8639f60b702262083c4d261d3cf84981d03d9310e2c5a5e1d9",
   },
   "./indexes": {
-    count: 46,
-    sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
+    count: 41,
+    sha256: "cf3148262fa915c1fe8ae10b6ab8e79e9e3faeda326f8cd26264211b8675a021",
   },
   "./interchange": {
-    count: 973,
-    sha256: "e9621033cb12c551117cbe41faa2de582ea12b60ddc30ef5a51d715b2b321e45",
+    count: 975,
+    sha256: "e9ebaf65a08dc03a1be12e0219495079fe5ba0075a5bffecef907669a41518fb",
   },
   "./maintenance": {
-    count: 981,
-    sha256: "356fa9adf36f2f8ba252e3866ad767a8b40e83ab428f0af4836f55bb0bfe86a3",
+    count: 983,
+    sha256: "64af789029d39469e78ae641f11b4d3fa1763b62bbbb05ce013926d2a2b4e0c8",
   },
   "./postgres/pglite": {
-    count: 979,
-    sha256: "3daa68210f7a6e6cf83e1af2b10c5306a9dfa977f7a94447372d23b39e196444",
+    count: 981,
+    sha256: "b9d22323de0a96a0d107bd763ffa34bab7f40beb6bc147f0f0dcc283a025323d",
   },
   "./profiler": {
-    count: 975,
-    sha256: "bb30b086a8f478933327ac27ec1b6af2571886e40581dd2bfa3b30629b88ca0d",
+    count: 977,
+    sha256: "a627beab91a08e8cf3b01ca9b5f1a4a894b202d1c247f957ef3419e1ab66b9d4",
   },
   "./provenance": {
-    count: 988,
-    sha256: "92fb73162fc688f3ec16f6ef9d748ed1c14afcc639a62a52365da5ffcf2e8cfe",
+    count: 990,
+    sha256: "69a4f2b23b8e5a429bf4ba27de88038e76bbac7cb9299b20cdb1704fb58ce32d",
   },
+  // Declared-alias fragments (#863): `QueryFragment`'s call signature and
+  // brand, and `composeFragments`' signature, are typed by private helpers in
+  // `query/builder/fragment.ts` (`AddedEntries`, `AliasKindIdentity`,
+  // `AnyFragmentShape`, `AnyQueryFragment`, `CollisionErrors`,
+  // `ComposeErrors`, `ComposeStep`, `ComposedGraph`, `ComposedNodeAliases`,
+  // `ComposedShape`, `CompositionErrors`, `CompositionShape`,
+  // `EmptyFragmentRequirements`, `FitReport`, `FragmentFit`,
+  // `FragmentFitErrors`, `FragmentShape`, `GraphErrors`, `InvariantShape`,
+  // `MergeMaps`, `RequirementErrors`, `RequirementKindErrors`,
+  // `ShapeFragment`, `ShapeOf`, `UnionFragmentErrors`): +25. Removing
+  // `FlexibleQueryFragment` drops `MergeAliasMaps` and `MergeEdgeAliasMaps`
+  // (-2). Delta: `./query` 520→543; no other entrypoint moved.
   "./query": {
-    count: 520,
-    sha256: "e658d6069c098aa647a4fcbd6210b3fd9cdafd31bbee2dc3253a021df4558b55",
+    count: 539,
+    sha256: "2ac059a6557488fccf88817cdd2b9333ee236e44dcbdd4d00a86d5d315948ec2",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1372,16 +1409,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 992,
-    sha256: "d0c24eda6c95e38cddf80399a3897165e149cb003766abe144074c9ba1a34f0f",
+    count: 985,
+    sha256: "4cf958297511497cc12fc2fed38ec840da58428e85c4afbee87c559678c8fe78",
   },
   "./sqlite/local": {
-    count: 979,
-    sha256: "3daa68210f7a6e6cf83e1af2b10c5306a9dfa977f7a94447372d23b39e196444",
+    count: 981,
+    sha256: "b9d22323de0a96a0d107bd763ffa34bab7f40beb6bc147f0f0dcc283a025323d",
   },
   "./store": {
-    count: 804,
-    sha256: "a6e2156306ad07bb0f627bd5746a9527b76a9066297feb905dd5e221d8cfa543",
+    count: 798,
+    sha256: "da4aae7211d406b65d4cfda40d7bd6c3978f94b9555960eb18aa8cfef00366f4",
   },
 };
 
@@ -1401,15 +1438,6 @@ function readForgottenExportSymbol(message: string): string {
     throw new Error(`Unexpected ae-forgotten-export message: ${message}`);
   }
   return match[1];
-}
-
-function reportNameForExport(exportPath: string): string {
-  if (exportPath === ".") return "typegraph";
-  const suffix = exportPath
-    .replace(/^\.\//, "")
-    .replaceAll(/[^a-zA-Z0-9]+/g, "-")
-    .replaceAll(/^-|-$/g, "");
-  return `typegraph-${suffix}`;
 }
 
 function resolveTypesPath(typesPath: string): string {

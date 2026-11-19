@@ -32,6 +32,7 @@ import {
   type ComparisonOp,
   type ComparisonPredicate,
   type ComposableQuery,
+  type FieldRef,
   type LiteralValue,
   type PredicateExpression,
   type QueryAst,
@@ -56,6 +57,7 @@ import {
 } from "../expressions";
 import { isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import { assertMetadataOperand } from "./order-by-field";
 import {
   assertListBinding,
   buildQueryTemplate,
@@ -700,6 +702,12 @@ export type ParameterMetadata = Readonly<{
   expressionParameterTypes: ReadonlyMap<string, ValueType>;
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: ReadonlySet<string>;
+  /**
+   * The field references each comparison or `between` parameter is compared
+   * against, so a binding can be checked against the field's own operand
+   * contract (`assertMetadataOperand`), the same check a literal gets.
+   */
+  comparedFields: ReadonlyMap<string, readonly FieldRef[]>;
 }>;
 
 /** The mutable form {@link collectParameterMetadataFromAst} fills. */
@@ -712,6 +720,7 @@ type ParameterMetadataAccumulator = Readonly<{
   expressionParameterTypes: Map<string, ValueType>;
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: Set<string>;
+  comparedFields: Map<string, FieldRef[]>;
 }>;
 
 export function collectParameterMetadata(
@@ -726,6 +735,7 @@ export function collectParameterMetadata(
     expressionParameters: new Set<string>(),
     expressionParameterTypes: new Map<string, ValueType>(),
     conflictingElementTypes: new Set<string>(),
+    comparedFields: new Map<string, FieldRef[]>(),
   };
 
   const queries: readonly QueryAst[] =
@@ -788,6 +798,19 @@ function recordListElementType(
   if (elementType !== undefined && elementType !== existing) {
     accumulator.conflictingElementTypes.add(name);
   }
+}
+
+function recordComparedField(
+  accumulator: ParameterMetadataAccumulator,
+  name: string,
+  field: FieldRef,
+): void {
+  const fields = accumulator.comparedFields.get(name);
+  if (fields === undefined) {
+    accumulator.comparedFields.set(name, [field]);
+    return;
+  }
+  fields.push(field);
 }
 
 export function hasParameterReferences(ast: QueryAst): boolean {
@@ -870,8 +893,19 @@ function collectParameterMetadataFromDatabaseExpression(
       accumulator.expressionParameterTypes.set(node.name, expression.valueType);
       return;
     }
-    case "arithmetic":
     case "comparison": {
+      for (const [field, operand] of [
+        [node.left, node.right],
+        [node.right, node.left],
+      ] as const) {
+        if (field.node.kind === "field" && operand.node.kind === "parameter")
+          recordComparedField(accumulator, operand.node.name, field.node.field);
+      }
+      collect(node.left);
+      collect(node.right);
+      return;
+    }
+    case "arithmetic": {
       collect(node.left);
       collect(node.right);
       return;
@@ -931,6 +965,7 @@ function collectParameterMetadataFromExpression(
       if (isParameterRef(expression.right)) {
         const name = expression.right.name;
         accumulator.names.add(name);
+        recordComparedField(accumulator, name, expression.left);
         if (isListComparisonOp(expression.op)) {
           recordListElementType(
             accumulator,
@@ -955,6 +990,7 @@ function collectParameterMetadataFromExpression(
       for (const bound of [expression.lower, expression.upper]) {
         if (isParameterRef(bound)) {
           accumulator.names.add(bound.name);
+          recordComparedField(accumulator, bound.name, expression.field);
           accumulator.scalarParameters.add(bound.name);
         }
       }
@@ -1041,6 +1077,7 @@ function validateBindings(
     names: expectedNames,
     stringOpParameters,
     listParameters,
+    comparedFields,
   } = metadata;
 
   const missing: string[] = [];
@@ -1091,6 +1128,17 @@ function validateBindings(
       continue;
     }
     validateBindingValue(name, value, stringOpParameters.has(name));
+  }
+
+  // A field with its own operand contract (a metadata column) refuses a
+  // bound value exactly as it refuses the same literal, on every backend.
+  for (const [name, fields] of comparedFields) {
+    const value = readOwnProperty(bindings, name);
+    const operands: readonly unknown[] =
+      Array.isArray(value) ? (value as readonly unknown[]) : [value];
+    for (const field of fields) {
+      for (const operand of operands) assertMetadataOperand(field, operand);
+    }
   }
 }
 

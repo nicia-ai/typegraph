@@ -39,6 +39,7 @@ export {
   type DynamicSelectableEdge,
   type DynamicSelectableNode,
   type EdgeAccessor,
+  type EdgeMetadataAccessor,
   type EdgeOrderField,
   type EmbeddableOneStatementRead,
   type EmptyAliasMap,
@@ -51,8 +52,9 @@ export {
   type FieldAccessor,
   type FieldRef,
   fieldRef,
-  type FlexibleQueryFragment,
   type ForwardedExpansionAxes,
+  type FragmentRequiredAliases,
+  type FragmentRequirements,
   type GraphOrderField,
   type IdentityTraversalOption,
   type InitialQueryBuilder,
@@ -69,6 +71,7 @@ export {
   type NodeAlias,
   type NodeCandidateQuery,
   type NodeCandidateSelection,
+  type NodeMetadataAccessor,
   type NodeOrderField,
   type NodePropsFor,
   offsetFragment,
@@ -87,6 +90,8 @@ export {
   QueryBuilder,
   type QueryCoordinateState,
   type QueryFragment,
+  type QueryFragmentBody,
+  type QueryFragmentFactory,
   type RecursiveTraversalOptions,
   type SelectableEdge,
   type SelectableNode,
@@ -99,7 +104,7 @@ export {
   type TraversalFragment,
   UnionableQuery,
 } from "./query";
-export type { ParameterRef } from "./query/ast";
+export type { ParameterRef, ValueType } from "./query/ast";
 export {
   type DatabaseProjection,
   ExecutableProjectionQuery,
@@ -128,7 +133,9 @@ export {
   type RecordedReadSource,
   recordedRelation,
   type RecordedRelationOptions,
+  type SqlTableNames,
 } from "./query/compiler/schema";
+export type { SqlDialect } from "./query/dialect/types";
 export type {
   CollectedRecord,
   CollectOptions,
@@ -137,3 +144,4 @@ export type {
   CollectRecordOperand,
   DatabaseExpression,
 } from "./query/expressions";
+export type { JsonPointer } from "./query/json-pointer";

@@ -1128,6 +1128,41 @@ export function buildUpdateNodeSet(
       sql.empty()
     : sql` AND ${sql.join(expectedPredicates, sql` AND `)}`;
 
+  // The candidate query is evaluated once, against the statement's snapshot,
+  // and yields only ids. Under PostgreSQL READ COMMITTED a target row a
+  // concurrent writer changes and commits while this UPDATE waits for its lock
+  // is re-checked against the outer conditions only, never against the
+  // candidate predicates — so for `updateWhere`, whose `where` / `exists` /
+  // `candidates` selectors live in that query, matching on the id alone writes
+  // a patch selected from the row's previous state. Pairing each candidate id
+  // with the version the snapshot held makes the write conditional on the row
+  // being exactly the one the selectors chose: every row write bumps
+  // `version` (a tombstone is fenced by `deleted_at IS NULL` above), so a row
+  // changed since the snapshot is skipped and absent from the after-images.
+  //
+  // `compareAndSet` keeps the id match. Its candidate query selects by id,
+  // which a concurrent write cannot falsify, and its guard is the `expected`
+  // predicates above, which the outer UPDATE re-checks on the target row, so a
+  // concurrent change to an unrelated property must not fail it.
+  const selected = "tg_set_selected";
+  const candidateMatch =
+    params.operation === "compareAndSet" ?
+      sql`
+        ${nodes.id} IN (
+                SELECT ${candidateIdColumn}
+                FROM (${candidateIds}) AS tg_set_candidates
+              )
+      `
+    : sql`
+      (${nodes.id}, ${nodes.version}) IN (
+              SELECT ${qualifiedColumn(selected, nodes.id)}, ${qualifiedColumn(selected, nodes.version)}
+              FROM (${candidateIds}) AS tg_set_candidates
+              JOIN ${nodes} AS ${sql.identifier(selected)}
+                ON ${qualifiedColumn(selected, nodes.graphId)} = ${params.graphId}
+               AND ${qualifiedColumn(selected, nodes.kind)} = ${params.kind}
+               AND ${qualifiedColumn(selected, nodes.id)} = tg_set_candidates.${candidateIdColumn}
+            )
+    `;
   return sql`
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${patchedProps},
@@ -1137,10 +1172,7 @@ export function buildUpdateNodeSet(
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.deletedAt} IS NULL
       ${expectedPredicate}
-      AND ${nodes.id} IN (
-        SELECT ${candidateIdColumn}
-        FROM (${candidateIds}) AS tg_set_candidates
-      )
+      AND ${candidateMatch}
     RETURNING *
   `;
 }
