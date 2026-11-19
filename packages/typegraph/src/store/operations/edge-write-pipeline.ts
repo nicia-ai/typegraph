@@ -158,30 +158,30 @@ export function applyEdgeSoftDelete(
   });
 }
 
-/** Applies one resolved soft-delete set through the backend's batch port. */
+/**
+ * Applies one resolved soft-delete set: a single-kind set through
+ * {@link softDeleteEdgeRows}, asserting that kind; a set mixing kinds one
+ * {@link applyEdgeSoftDelete} per member, each asserting its own.
+ */
 export async function applyEdgeSoftDeleteBatch(
   ctx: EdgeWriteContext,
   work: readonly EdgeDeleteWork[],
   backend: Backend,
 ): Promise<void> {
-  if (work.length === 0) return;
-  const deleteEdgesBatch = backend.deleteEdgesBatch;
   const kind = work[0]?.kind;
-  if (
-    deleteEdgesBatch === undefined ||
-    kind === undefined ||
-    work.some((item) => item.kind !== kind)
-  ) {
+  if (kind === undefined) return;
+  if (work.some((item) => item.kind !== kind)) {
     for (const item of work) {
       await applyEdgeSoftDelete(ctx, item, backend);
     }
     return;
   }
-  await deleteEdgesBatch({
-    graphId: ctx.graphId,
-    ids: work.map((item) => item.id),
+  await softDeleteEdgeRows(
+    ctx.graphId,
+    backend,
+    work.map((item) => item.id),
     kind,
-  });
+  );
 }
 
 /**
