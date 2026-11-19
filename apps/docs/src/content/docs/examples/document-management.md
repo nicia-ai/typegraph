@@ -534,25 +534,30 @@ async function getDocumentAsOf(
 
 ### Compare Versions
 
+An update rewrites the document's one stored row and raises `meta.version`, so the previous
+version is not a row any temporal mode can return. Comparing two versions reads them from
+[recorded time](/queries/temporal#recorded-time-bitemporal): open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`), keep a `store.recordedNow()`
+checkpoint after each revision worth comparing, and read the document at both checkpoints.
+
 ```typescript
+import { type RecordedInstant } from "@nicia-ai/typegraph/core";
+
+// After each revision worth comparing:
+//   await updateDocument(documentId, { content: revisedContent });
+//   const revised = await store.recordedNow();
 async function compareVersions(
   documentId: NodeId<typeof Document>,
-  version1: number,
-  version2: number
+  before: RecordedInstant,
+  after: RecordedInstant
 ): Promise<{ before: Node<typeof Document>; after: Node<typeof Document> } | undefined> {
-  const [before, after] = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) =>
-      d.id.eq(documentId).and(d.$meta.version.in([version1, version2])),
-    )
-    .orderBy("d", "meta.version", "asc")
-    .select((ctx) => ctx.d)
-    .execute();
-  if (before === undefined || after === undefined) return undefined;
+  const [earlier, later] = await Promise.all([
+    store.asOfRecorded(before).nodes.Document.getById(documentId),
+    store.asOfRecorded(after).nodes.Document.getById(documentId),
+  ]);
+  if (earlier === undefined || later === undefined) return undefined;
 
-  return { before, after };
+  return { before: earlier, after: later };
 }
 ```
 

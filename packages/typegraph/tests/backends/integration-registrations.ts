@@ -136,6 +136,7 @@ import {
   registerUniquenessClaimGateIntegrationTests,
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
+  registerVersionComparisonRecipeTests,
   registerWeightedShortestPathExtractionIntegrationTests,
   registerWriteFenceConformanceIntegrationTests,
 } from "./integration";
@@ -234,6 +235,7 @@ export const INTEGRATION_REGISTRATIONS: readonly IntegrationRegistration[] = [
   { register: registerSetOperationIntegrationTests, weight: 3 },
   { register: registerSetNodeMutationIntegrationTests, weight: 8 },
   { register: registerSetUpdateConcurrencyTests, weight: 1 },
+  { register: registerVersionComparisonRecipeTests, weight: 1 },
   { register: registerSelectiveRetryIntegrationTests, weight: 2 },
   { register: registerSchemaCheckedReadIntegrationTests, weight: 2 },
   { register: registerEdgeOperationIntegrationTests, weight: 9 },

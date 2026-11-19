@@ -864,22 +864,34 @@ for subgraph.
 
 ### Version Comparison
 
-Compare two versions of a document:
+Compare two versions of a document. An update rewrites the node's one stored row and raises
+`meta.version`; it does not keep the previous version as a row, so no temporal mode returns two
+versions of one id. Read the earlier version from [recorded time](#recorded-time-bitemporal)
+instead: with `history: true`, keep a `recordedNow()` checkpoint after each revision you may want
+to compare, then read the document at both checkpoints.
 
 ```typescript
-async function compareVersions(docId: string, v1: number, v2: number) {
-  const [version1, version2] = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(docId).and(d.$meta.version.in([v1, v2])))
-    .orderBy("d", "meta.version", "asc")
-    .select((ctx) => ctx.d)
-    .execute();
+import { type RecordedInstant } from "@nicia-ai/typegraph/core";
+
+// After each revision worth comparing:
+//   await store.nodes.Document.update(docId, { title: "Revised" });
+//   const revised = await store.recordedNow();
+async function compareVersions(
+  docId: NodeId<typeof Document>,
+  before: RecordedInstant,
+  after: RecordedInstant,
+) {
+  const [version1, version2] = await Promise.all([
+    store.asOfRecorded(before).nodes.Document.getById(docId),
+    store.asOfRecorded(after).nodes.Document.getById(docId),
+  ]);
 
   return { version1, version2 };
 }
 ```
+
+Each result is the document as TypeGraph recorded it at that checkpoint, including its
+`meta.version`, or `undefined` when it did not exist (or was deleted) there.
 
 ### Compliance Reporting
 

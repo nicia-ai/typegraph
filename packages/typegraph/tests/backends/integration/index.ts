@@ -123,5 +123,6 @@ export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";
+export { registerVersionComparisonRecipeTests } from "./version-comparison-recipe";
 export { registerWeightedShortestPathExtractionIntegrationTests } from "./weighted-shortest-path-extraction";
 export { registerWriteFenceConformanceIntegrationTests } from "./write-fence-conformance";
