@@ -984,11 +984,15 @@ function indexNewNodesById(
  * `branchId` is a write vehicle rather than a contribution (see the loop below),
  * which the provenance fold must know so it does not credit it.
  *
- * `deletionAbsorbed` holds the re-windowed copies a finally-deleted edge absorbs:
- * never written, but still a branch's staged state, so the cross-branch
- * composition check ({@link lostBranchAttachment}) can see a re-attachment the
- * deletion would otherwise discard without a trace. Each carries the window its
- * branch wrote.
+ * `authoredWindows` holds EVERY branch's re-windowed copy, each carrying the
+ * window its branch wrote, for the cross-branch composition check
+ * ({@link lostBranchAttachment}). The staged rows cannot stand in for them: an
+ * identity is staged at most once, with the RESOLVED window, so a branch's
+ * re-attachment (a reopen) is invisible there whenever the merge does not
+ * write it — the edge's own deletion absorbs it, the incremental target's end
+ * takes precedence over it, or a sibling branch's end beats it. In each case
+ * the deletion of one endpoint still discards that attachment, and the check
+ * must see it.
  */
 function buildStagedEdges(
   staging: StagingSet,
@@ -998,12 +1002,12 @@ function buildStagedEdges(
 ): Readonly<{
   edges: readonly StagedEdge[];
   windowOnlyCarried: ReadonlySet<MergeKey>;
-  deletionAbsorbed: readonly StagedEdge[];
+  authoredWindows: readonly StagedEdge[];
 }> {
   const staged: StagedEdge[] = [];
   const stagedIdentities = new Set<MergeKey>();
   const windowOnlyCarried = new Set<MergeKey>();
-  const deletionAbsorbed: StagedEdge[] = [];
+  const authoredWindows: StagedEdge[] = [];
   // Every branch diffs against the same merge base, so any re-windowed copy of
   // an identity states that base's window.
   const baseWindowByEdge = new Map<MergeKey, ValidWindow>();
@@ -1056,18 +1060,16 @@ function buildStagedEdges(
   // is credited from the resolution rather than from whoever carried the row.
   for (const item of staging.windowedEdges) {
     const identity = mergeKeyOf(item.edge);
+    authoredWindows.push(
+      windowedStagedEdge(
+        item,
+        item.edge.fork.validTo === undefined ?
+          { clearValidTo: true }
+        : { validTo: item.edge.fork.validTo },
+      ),
+    );
     if (stagedIdentities.has(identity)) continue;
-    if (edgeDeletions.has(identity)) {
-      deletionAbsorbed.push(
-        windowedStagedEdge(
-          item,
-          item.edge.fork.validTo === undefined ?
-            { clearValidTo: true }
-          : { validTo: item.edge.fork.validTo },
-        ),
-      );
-      continue;
-    }
+    if (edgeDeletions.has(identity)) continue;
     const validToChange = edgeValidityEnds.get(identity);
     if (validToChange === undefined) continue;
     stagedIdentities.add(identity);
@@ -1081,7 +1083,7 @@ function buildStagedEdges(
       ),
     );
   }
-  return { edges: staged, windowOnlyCarried, deletionAbsorbed };
+  return { edges: staged, windowOnlyCarried, authoredWindows };
 }
 
 /** The inherited {@link StagedEdge} for a re-windowed row, carrying `window`. */
@@ -1683,7 +1685,8 @@ function buildInternalMergePlan<G extends GraphDef>(
   // (6-window) reconcile the inherited valid-time windows the branches moved.
   // Runs AFTER both delete/modify resolutions because a finally-deleted row
   // absorbs its own ending: deleting and ending are both "no longer true", and
-  // the stronger statement wins without recording a conflict.
+  // the stronger statement wins without recording a conflict. A reopen was
+  // already weighed against any deletion there, as a DeleteModifyConflict.
   const validWindows = resolveValidWindows(
     staging,
     new Set(nodeDeletions.keys()),
@@ -1812,7 +1815,7 @@ function buildInternalMergePlan<G extends GraphDef>(
   const {
     edges: stagedEdges,
     windowOnlyCarried,
-    deletionAbsorbed,
+    authoredWindows,
   } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
@@ -1863,7 +1866,7 @@ function buildInternalMergePlan<G extends GraphDef>(
     registry,
     [
       ...repoint.endpointDeletedEdges,
-      ...deletionAbsorbed.map((staged) =>
+      ...authoredWindows.map((staged) =>
         withRepointedEndpoints(staged, canonicalOf),
       ),
     ],
@@ -2970,6 +2973,11 @@ export async function commitPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
+          await lockMergeCommitFence(
+            transactionBackend(tx),
+            target,
+            expectedBaseVersion,
+          );
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
           // precondition and this commit. Revision-anchored stores check their
@@ -3054,33 +3062,66 @@ function mergeCommitTransactionOptions<G extends GraphDef>(
 }
 
 /**
+ * The fences a live merge commit takes as the FIRST statements of its
+ * transaction, through the store's one prelude ({@link lockStoreWriteFence}):
+ * the schema-version fence, then the per-graph write lock wherever this commit
+ * needs it up front.
+ *
+ * Every later graph-lock acquisition in the apply (the composition orphan
+ * re-verification, the composition window decision, a write frame) then
+ * re-enters a lock taken behind the schema fence, so no read or decision of
+ * the commit can take the graph lock first. Taking it first is the inverted
+ * order: a concurrent schema commit holds the schema row `FOR UPDATE` and then
+ * waits for the graph lock, and PostgreSQL aborts one side as a deadlock.
+ *
+ * The graph lock is taken here when the store's writers all take it, or when
+ * the base version is revision-anchored: tracked writers advance that clock
+ * under this lock, so holding it around the read→apply sequence makes the
+ * O(1) anchor check a TOCTOU guard without relying on the transaction's
+ * snapshot being the latest committed state. Otherwise only the apply sites
+ * that need it take it, and a backend without a keyed fence can still commit
+ * a merge that needs none.
+ *
+ * A target handle whose schema another handle has advanced is refused here,
+ * as `BaseVersionMismatchError` with the `StaleVersionError` as its cause,
+ * before any read of the commit.
+ */
+async function lockMergeCommitFence<G extends GraphDef>(
+  txBackend: TransactionBackend,
+  target: Store<G>,
+  expectedBaseVersion: BaseVersion | undefined,
+): Promise<void> {
+  const graphLockRequired =
+    (expectedBaseVersion !== undefined &&
+      hasRevisionAnchor(expectedBaseVersion)) ||
+    storeWritersTakeGraphWriteFence({
+      historyEnabled: storeCaptureEnabled(target),
+      revisionTrackingEnabled: target.revisionTrackingEnabled,
+    });
+  await lockStoreWriteFence(txBackend, {
+    graphId: target.graphId,
+    schemaVersion: target.introspect().schemaVersion,
+    graphLock: graphLockRequired ? "required" : "not-required",
+    staleSchemaError: (cause) =>
+      new BaseVersionMismatchError(
+        "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
+        { cause },
+      ),
+  });
+}
+
+/**
  * The in-transaction half of the base@V guard: revision-anchored targets read
- * their durable clock under the graph lock. Untracked targets recompute the
- * complete content fingerprint through the transaction-scoped backend, which
- * includes current identity assertions and establishes read dependencies on
- * the graph state used by the plan.
+ * their durable clock under the graph lock {@link lockMergeCommitFence} took.
+ * Untracked targets recompute the complete content fingerprint through the
+ * transaction-scoped backend, which includes current identity assertions and
+ * establishes read dependencies on the graph state used by the plan.
  */
 async function assertTargetUnchanged<G extends GraphDef>(
   txBackend: TransactionBackend,
   target: Store<G>,
   expectedBaseVersion: BaseVersion,
 ): Promise<void> {
-  if (hasRevisionAnchor(expectedBaseVersion)) {
-    // All tracked writers acquire this lock before touching graph rows and
-    // advance the same clock before committing. Holding it around the
-    // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
-    // relying on the transaction's snapshot being the latest committed state.
-    await lockStoreWriteFence(txBackend, {
-      graphId: target.graphId,
-      schemaVersion: target.introspect().schemaVersion,
-      graphLock: "required",
-      staleSchemaError: (cause) =>
-        new BaseVersionMismatchError(
-          "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
-          { cause },
-        ),
-    });
-  }
   const comparison = await compareBaseVersionAtTarget(
     target,
     txBackend,
@@ -3763,9 +3804,9 @@ async function compositionMovedPartsAmong(
 /**
  * THE cross-branch composition finding: whether a branch's staged edge that the
  * plan does not write because an endpoint is finally deleted — dropped by the
- * repoint, or a re-windowed copy absorbed by the edge's own deletion — is a
- * composition attachment the plan would silently lose, and if so which `cause`
- * it is.
+ * repoint, or a branch's re-windowed copy carrying the window that branch wrote,
+ * which the plan may not write at all — is a composition attachment the plan
+ * would silently lose, and if so which `cause` it is.
  *
  * One branch attached the part — moved it, created it under a whole, or
  * re-attached it through a row ended at the merge base — while another
@@ -3845,7 +3886,7 @@ function stagedRowAttachesForBranch(
 /**
  * Plan-time refusal of every {@link lostBranchAttachment}: throws
  * `MergeCompositionOrphanError` for the first one — the repoint's drops in
- * their (edge id, branch id) order, then the deletion-absorbed copies in
+ * their (edge id, branch id) order, then every branch's re-windowed copy in
  * staging order — so the refusal does not depend on the order the branches
  * were passed in.
  *
@@ -7493,24 +7534,8 @@ async function commitIncrementalPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
-          await lockStoreWriteFence(transactionBackend(tx), {
-            graphId: target.graphId,
-            schemaVersion: target.introspect().schemaVersion,
-            graphLock:
-              (
-                storeWritersTakeGraphWriteFence({
-                  historyEnabled: storeCaptureEnabled(target),
-                  revisionTrackingEnabled: target.revisionTrackingEnabled,
-                })
-              ) ?
-                "required"
-              : "not-required",
-            staleSchemaError: (cause) =>
-              new BaseVersionMismatchError(
-                "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
-                { cause },
-              ),
-          });
+          // The fork point carries no target base version to anchor on.
+          await lockMergeCommitFence(transactionBackend(tx), target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
           // against is re-read here, so a write to it in the plan→commit window
           // refuses the merge instead of committing diffs against a fork point

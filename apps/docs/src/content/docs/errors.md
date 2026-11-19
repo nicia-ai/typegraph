@@ -1661,7 +1661,7 @@ ontology checks around it raise these `ConfigurationError` codes:
 | `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
 | `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
 | `COMPOSITION_WINDOW_VERDICT_NESTED` | A second composition-window verdict was opened on a transaction that already has one open. The graph-merge apply decides its whole edge write set once and opens that verdict around its writes, so this signals a nested call from inside such a write. |
-| `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` | An import applies the composition moves a document states as one set, each move whole or not at all, and a move could not land after part of the set was written, on a backend whose transaction offers no savepoint to take that write back. The import aborts and its transaction rolls back rather than committing half a move. Use a backend whose root verdict and transaction port both provide statement execution. |
+| `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` | An import applies the composition moves a document states as one set, each move whole or not at all, and a move could not land after part of the set was written, or a row ending a part's attachment was written while every row that would attach the part again was refused afterwards, on a backend whose transaction offers no savepoint to take that write back. The import aborts and its transaction rolls back rather than committing half a move or a lone end. Use a backend whose root verdict and transaction port both provide statement execution. |
 | `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
 
 `INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE` is not a thrown code: it prefixes the
@@ -1670,7 +1670,9 @@ move the import could not apply whole. A move is applied whole or not at all,
 so when one of its rows is refused, or the part no longer holds the destination
 whole once the import's other rows are written, every row of the move is
 reported with this prefix and the refused row additionally carries its own
-error.
+error. It also prefixes a row ending a part's attachment that was not written
+because no row of the document attaching the part again was applied, at
+whatever stage that row was refused; the error names those rows.
 
 #### Fresh-snapshot guard codes
 
@@ -1776,6 +1778,7 @@ rather than silently sorting or matching differently:
 | `ORDER_FIELD_RENAMED` | `orderBy(alias, field)` names a system field by its removed storage name (`created_at`, `updated_at`, `deleted_at`, `valid_from`, `valid_to`, `from_id`, `to_id`) and the alias does not declare a property of that name (refused on any schema, open or closed). `details.replacement` is the name to use, such as `"meta.createdAt"`. |
 | `ORDER_FIELD_UNKNOWN` | `orderBy(alias, field)` names neither a property the alias declares nor an orderable system field (`id`, `kind`, `meta.validFrom`, `meta.validTo`, `meta.createdAt`, `meta.updatedAt`, `meta.deletedAt`, plus `meta.version` on nodes and `fromId` / `toId` on edges), and the alias's schema is closed, so the name cannot be stored. An open schema, or one whose shape cannot be read, may hold any key and is not refused. The suggestion lists the valid names. |
 | `ORDER_ALIAS_UNKNOWN` | `orderBy(alias, field)` names an alias the query does not have. |
+| `METADATA_FIELD_UNKNOWN` | A predicate accessor or expression context reads `$meta.<name>` for a name the alias stores no metadata for, such as `$meta.version` on an edge. The typed accessors make this a compile error; untyped code reaches the refusal. `details.available` lists the alias's metadata fields. |
 | `LIKE_PATTERN_TRAILING_ESCAPE` | A `like()` / `ilike()` pattern ends with an escape character that escapes nothing. `details.operator` and `details.pattern` carry the call. Remove the trailing `\`, or double it to match a literal backslash. |
 
 #### Operational Identity guard codes

@@ -68,12 +68,15 @@ export {
 export {
   composeFragments,
   createFragment,
-  type FlexibleQueryFragment,
+  type FragmentRequiredAliases,
+  type FragmentRequirements,
   type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
   type QueryFragment,
+  type QueryFragmentBody,
+  type QueryFragmentFactory,
   type TraversalFragment,
 } from "./fragment";
 
@@ -96,6 +99,7 @@ export {
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,
+  type EdgeMetadataAccessor,
   type EdgeOrderField,
   type EmbeddableOneStatementRead,
   type EmbeddingFieldAccessor,
@@ -110,6 +114,7 @@ export {
   type NodeAlias,
   type NodeCandidateQuery,
   type NodeCandidateSelection,
+  type NodeMetadataAccessor,
   type NodeOrderField,
   type NodePropsFor,
   type NumberFieldAccessor,

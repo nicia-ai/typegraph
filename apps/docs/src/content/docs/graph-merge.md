@@ -1233,9 +1233,11 @@ branch moves a part (`reparent`), attaches a new part, or re-attaches a part
 by reopening an ended `oneActive` row (`clearValidTo`), while another
 branch's deletion removes one end of that attachment. Merged as-is, the
 attaching branch's composition edge would be dropped as
-`edge:endpoint-deleted` (a reopened row is absorbed by its deletion without
-even that) and its move would be lost. That conflict is refused too, and
-`details.branchId` names the attaching branch:
+`edge:endpoint-deleted` and its move would be lost. That conflict is refused too, and
+`details.branchId` names the attaching branch. A reopen is judged as the
+reopening branch wrote it, even when the merge itself would not write that
+reopen because the incremental target's own end for the row, or a sibling
+branch's end, takes precedence over it:
 
 - `cause: "moved"`: the part is deleted (directly, or by its old whole's
   cascade) while the attaching branch put it under a whole that survives.
@@ -1566,6 +1568,29 @@ Inspection tools that have a backend and graph id but not the target's
 ```typescript
 const store = await openProvenanceStore(backend, targetGraphId);
 ```
+
+`openProvenanceStore` opens **or creates**: on a free id it claims the marker and
+registers the sidecar schema. To ask "does this target have persisted
+provenance?" without creating anything, use `readProvenanceStore`. It runs the
+same ownership inspection but never writes — no marker, no schema registration,
+no DDL — so it works under a role that can only `SELECT`:
+
+```typescript
+import { readProvenanceStore } from "@nicia-ai/typegraph/graph-merge";
+
+const store = await readProvenanceStore(backend, targetGraphId);
+if (store === undefined) {
+  // No sidecar exists for this target; nothing was created.
+} else {
+  const rows = await readProvenance(store, { canonicalId: "patient-123" });
+}
+```
+
+It resolves to `undefined` for a free id, to the store when TypeGraph owns the
+id, and throws the same `GRAPH_MERGE_PROVENANCE_ID_COLLISION` as
+`openProvenanceStore` when the id is occupied by something else. A sidecar left
+half-created by an interrupted open, or still on the pre-marker schema, is
+returned as is for reading; finishing that work is `openProvenanceStore`'s job.
 
 ## Snapshot vs incremental
 
@@ -3160,6 +3185,7 @@ explains the whole contract:
 | Sibling branches end and reopen it | The end wins as the stronger monotone claim; every claimant remains visible in `report.validityEnds`. |
 | The incremental target already ended it | The target's end stands. A branch never re-windows a row the target itself windowed, and the row is left out of the merge's writes entirely — but the discarded claims are still reported, as an entry carrying `precedence: "target"` and the target's own instant. |
 | One branch ends it, another deletes it | Deleted, with **no** `DeleteModifyConflict` — the stronger statement absorbs the weaker one. |
+| One branch reopens it, another deletes it | A `DeleteModifyConflict`, decided by `onDeleteModifyConflict` like a properties edit against a deletion. Under `"flag"` and `"modifyWins"` the row survives and is reopened (reported in `validityEnds`); under `"deleteWins"` it is deleted and listed in `dropped`. A reopen asserts the opposite of a deletion, so there is no stronger statement to absorb it. |
 | A branch re-states the end the target holds | No write at all — nothing is staged, so there is no version bump or history row even with `coalesceUnchangedUpserts` off. |
 | No branch touched the window | Untouched. A properties-only edit never passes a window, so the committed one stands. |
 
@@ -3192,10 +3218,18 @@ empty. A demo or topology that needs to exercise this report must seed the row
 before branching, then end that inherited row on one or more branches.
 
 Because an ending is not a modification, `onDeleteModifyConflict` never sees
-one: a row whose *only* change is its window loses to a concurrent deletion even
+one: a row whose *only* change is an ending loses to a concurrent deletion even
 under `"modifyWins"`, since there is no modification to prefer. A row with a
 properties edit *and* an ending keeps the usual delete/modify behavior on the
 properties, and its ending rides along only if that modification survives.
+
+A reopen is the exception. `clearValidTo: true` says the fact is true again,
+the opposite of a deletion, so it counts as a modification for delete/modify
+purposes: the deleting and reopening branches are named in the
+`DeleteModifyConflict` (`deletedBy` / `modifiedBy`), and the policy decides
+whether the row survives. On an incremental merge, the committed target's own
+reopen or deletion takes precedence over a branch's, as a target properties
+edit does.
 
 **What is still NOT merged, and why.** On a row that is live in both the base
 and the branch, `validTo` is the only window field a branch can author *and* the

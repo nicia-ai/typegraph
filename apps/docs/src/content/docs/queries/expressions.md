@@ -30,7 +30,11 @@ are compiled to SQL; they do not run once per result row.
 ## Fields, literals, and parameters
 
 The callback context exposes every query alias. Node and edge schema properties appear directly on
-their alias, including nested object properties. System metadata lives under `$meta`.
+their alias, including nested object properties. System metadata lives under `$meta`: `validFrom`,
+`validTo`, `createdAt`, `updatedAt` and `deletedAt`, plus `version` on node aliases. A literal or
+parameter compared with a `$meta` field gets the same operand check as a
+[metadata predicate](/queries/filter#metadata): `version` takes a 32-bit integer and a timestamp a
+canonical `YYYY-MM-DDTHH:mm:ss.sssZ` string, and anything else is refused with `ValidationError`.
 
 ```typescript
 .project((e) => ({

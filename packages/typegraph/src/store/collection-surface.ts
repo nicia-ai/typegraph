@@ -101,6 +101,7 @@ export const EDGE_WRITE_NAMES = [
   "bulkUpsertById",
   "bulkInsert",
   "bulkDelete",
+  "bulkHardDelete",
   "getOrCreateByEndpoints",
   "bulkGetOrCreateByEndpoints",
 ] as const satisfies readonly (keyof EdgeCollection<

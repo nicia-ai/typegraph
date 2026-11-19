@@ -167,6 +167,8 @@ export const WRITE_PIPELINE_INTERNAL_IMPORT_NAMES = [
   "applyEdgeUpdate",
   "applyEdgeSoftDelete",
   "applyEdgeHardDelete",
+  "applyEdgeHardDeleteBatch",
+  "deleteEdgeRows",
 ];
 
 export function writePipelineImportRestrictions(importNames) {
@@ -207,7 +209,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/operations/node-write-pipeline.ts",
     reason:
-      "The node step bodies themselves (updateNode, deleteNode, hardDeleteNode, and the delete-behavior edge cascade), reachable only through the session.",
+      "The node step bodies themselves (updateNode, deleteNode, hardDeleteNode), reachable only through the session. The delete-behavior edge cascade writes its rows through the edge step module.",
     permanent: true,
     allowedMembers: [
       "updateNode",
@@ -216,9 +218,8 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "updateNodeSet",
       "deleteNode",
       "hardDeleteNode",
-      "deleteEdge",
-      "hardDeleteEdge",
     ],
+    allowedImports: ["deleteEdgeRows"],
   },
   {
     path: "src/store/insert-dispatch.ts",
@@ -394,7 +395,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/operations/edge-write-pipeline.ts",
     reason:
-      "The edge step bodies themselves (updateEdge, deleteEdge/deleteEdgesBatch, hardDeleteEdge), reachable only through the session.",
+      "The edge step bodies themselves (updateEdge, deleteEdge/deleteEdgesBatch, hardDeleteEdge/hardDeleteEdgesBatch, including the edge rows a node delete cascade removes), reachable only through the session.",
     permanent: true,
     allowedMembers: [
       "updateEdge",

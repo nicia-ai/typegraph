@@ -84,8 +84,8 @@ type PendingLeak = Readonly<{
 
 /**
  * Backend contracts that covered signatures reference but that only the
- * authoring entrypoints export, pending a maintainer ruling on whether each
- * moves under semver or the covered signature stops naming it. Do not add to
+ * authoring entrypoints export, pending the ruling tracked in #902 on whether
+ * each moves under semver or the covered signature stops naming it. Do not add to
  * this list to silence a new leak: export an application-facing type from the
  * covered entrypoint that owns it instead. Each entry names one covered
  * declaration it leaks through; removing a leak fails until its entry goes.

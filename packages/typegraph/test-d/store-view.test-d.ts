@@ -35,13 +35,7 @@ import type {
   StoreViewNodeCollection,
   WeaklyConnectedComponentMembership,
 } from "../dist/store-entry";
-import {
-  createFragment,
-  type EmptyEdgeAliasMap,
-  type EmptyRecursiveAliasMap,
-  type NodeAlias,
-  type InitialQueryBuilder,
-} from "../dist/query-entry";
+import { createFragment, type InitialQueryBuilder } from "../dist/query-entry";
 import {
   defineEdge,
   defineGraph,
@@ -86,7 +80,6 @@ declare const recordedAnchor: RecordedInstant;
 
 const CANONICAL = "2024-01-01T00:00:00.000Z";
 const LEAKED_RECORDED_OPTIONS = { recordedAsOf: recordedAnchor };
-type PersonAliasMap = Readonly<Record<"p", NodeAlias<typeof Person>>>;
 
 // ============================================================
 // Entry points return a StoreView
@@ -230,14 +223,9 @@ expectError(
 );
 
 const fragment = createFragment<typeof graph>();
-const personNameFragment = fragment<
-  PersonAliasMap,
-  PersonAliasMap,
-  EmptyEdgeAliasMap,
-  EmptyEdgeAliasMap,
-  EmptyRecursiveAliasMap,
-  EmptyRecursiveAliasMap
->((query) => query.whereNode("p", ({ name }) => name.eq("Alice")));
+const personNameFragment = fragment({ p: "Person" }, (query) =>
+  query.whereNode("p", ({ name }) => name.eq("Alice")),
+);
 
 void store
   .query()

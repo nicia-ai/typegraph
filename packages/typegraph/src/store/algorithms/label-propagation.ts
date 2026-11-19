@@ -92,8 +92,8 @@ export async function executeLabelPropagation<G extends GraphDef>(
     algorithm: "labelPropagation",
     maxIterations,
     createWorkingTable,
-    initialize: (context) =>
-      initializeWorkingTables(context, options.nodeKinds),
+    populate: (context) => populateWorkingTable(context, options.nodeKinds),
+    initialize: initializeNeighborTable,
     runRound: (context, state, iteration) =>
       runLabelPropagationRound(context, state, iteration, policy),
     hasConverged(state) {
@@ -181,10 +181,10 @@ function activeIndexIdentifier(context: IterativeGraphRunContext) {
   );
 }
 
-async function initializeWorkingTables(
+async function populateWorkingTable(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
-): Promise<IterationState> {
+): Promise<number> {
   await seedWorkingTableFromNodes(context, nodeKinds, [
     { name: "label_id", value: sql.raw("n.id") },
     { name: "label_kind", value: sql.raw("n.kind") },
@@ -201,6 +201,18 @@ async function initializeWorkingTables(
     CREATE INDEX ${activeIndexIdentifier(context)}
     ON ${context.workingTable} (graph_id, run_id, active_round)
   `);
+  return countWorkingTableRows(context);
+}
+
+/**
+ * Materializes the symmetric neighbor relation of the populated working
+ * table. Its statement joins every expanded edge back against the working
+ * table, so it runs only after the runner refreshed that table's statistics.
+ */
+async function initializeNeighborTable(
+  context: IterativeGraphRunContext,
+  workingTableSize: number,
+): Promise<IterationState> {
   const neighborTable = neighborTableIdentifier(context);
   await context.executeTemporary(sql`
     CREATE TEMP TABLE ${neighborTable} (
@@ -220,7 +232,6 @@ async function initializeWorkingTables(
     await context.executeTemporary(analyzeNeighbors);
   }
 
-  const workingTableSize = await countWorkingTableRows(context);
   return {
     changedCount: workingTableSize,
     workingTableSize,

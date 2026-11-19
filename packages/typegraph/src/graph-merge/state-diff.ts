@@ -221,9 +221,10 @@ export type ValidWindow = Readonly<{
  * compares props only, so a row can appear in one bucket, the other, or both.
  *
  * Keeping the two buckets separate is what makes an end-of-validity behave as a
- * sibling of deletion rather than as a modification: a window-only change never
- * enters delete/modify resolution, so a branch that ends a row another branch
- * deleted raises no conflict — the deletion simply absorbs the weaker claim.
+ * sibling of deletion rather than as a modification: a branch that ends a row
+ * another branch deleted raises no conflict — the deletion simply absorbs the
+ * weaker claim. A REOPEN is the exception delete/modify resolution picks out of
+ * this bucket (`reopensValidity`), because it asserts the opposite of a delete.
  */
 export type WindowedNode = Readonly<{
   id: NodeId<NodeType>;

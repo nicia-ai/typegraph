@@ -1,8 +1,10 @@
+import { type PGlite } from "@electric-sql/pglite";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import {
   createLocalPgliteBackend,
   type LocalPgliteBackendResult,
 } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
+import { drizzle } from "drizzle-orm/pglite";
 
 import { generatePostgresMigrationSQL } from "../../src/backend/drizzle/ddl";
 import { tables as defaultTables } from "../../src/backend/drizzle/postgres";
@@ -16,6 +18,52 @@ export type PgliteFixturePool = Readonly<{
   >;
   dispose: () => Promise<void>;
 }>;
+
+type LeaseClient = Readonly<{
+  client: PGlite;
+  /** Refuses every later call, then resolves once the calls already made settle. */
+  release: () => Promise<void>;
+}>;
+
+/**
+ * The engine's client as one lease sees it. PGlite serializes statements, so a
+ * statement already issued is ordered before the cleanup that follows it; a
+ * statement issued AFTER release is not, and would run against whatever the
+ * engine holds next: the reset search path (a missing relation) or the next
+ * lease's schema (a silent write into another fixture). The guard refuses it
+ * with an error that names the cause.
+ */
+function createLeaseClient(engineClient: PGlite): LeaseClient {
+  const inFlight = new Set<Promise<unknown>>();
+  let released = false;
+  const client = new Proxy(engineClient, {
+    get(target, property) {
+      const member = Reflect.get(target, property, target) as unknown;
+      if (typeof member !== "function") return member;
+      return (...args: unknown[]): unknown => {
+        if (released) {
+          throw new Error(
+            `PGlite fixture lease was released before ${String(property)}() was called`,
+          );
+        }
+        const result: unknown = Reflect.apply(member, target, args);
+        if (result instanceof Promise) {
+          const settled = Promise.allSettled([result]);
+          inFlight.add(settled);
+          void settled.then(() => inFlight.delete(settled));
+        }
+        return result;
+      };
+    },
+  });
+  return {
+    client,
+    release: async () => {
+      released = true;
+      await Promise.all(inFlight);
+    },
+  };
+}
 
 /**
  * Reuse idle WASM engines, never connections belonging to a live fixture.
@@ -51,7 +99,8 @@ export function createPgliteFixturePool(): PgliteFixturePool {
            SET search_path TO "${schema}", public;
            ${generatePostgresMigrationSQL(defaultTables)}`,
         );
-        const backend = createPostgresBackend(engine.db);
+        const lease = createLeaseClient(engine.client);
+        const backend = createPostgresBackend(drizzle(lease.client));
         let released = false;
 
         return {
@@ -60,6 +109,7 @@ export function createPgliteFixturePool(): PgliteFixturePool {
             if (released) return;
             released = true;
             try {
+              await lease.release();
               await backend.close();
               // Drop the entire schema, not just core tables: fulltext,
               // vector and declared indexes must not survive into another test.

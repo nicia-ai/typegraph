@@ -4,6 +4,7 @@ import {
   assertPortableScalarValueType,
 } from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
+import { assertMetadataOperand } from "./builder/order-by-field";
 import { resolveNullOrdering } from "./order";
 
 type DatabaseJsonValue =
@@ -583,6 +584,20 @@ function arithmetic<
   );
 }
 
+/**
+ * A literal compared with a metadata column gets the column's operand check
+ * (`assertMetadataOperand`), the one a predicate literal and a bound
+ * parameter get, so the expression form cannot reach an engine that compares
+ * it differently from the other.
+ */
+function assertComparedLiteral(
+  field: DatabaseExpression,
+  operand: DatabaseExpression,
+): void {
+  if (field.node.kind === "field" && operand.node.kind === "literal")
+    assertMetadataOperand(field.node.field, operand.node.value);
+}
+
 function comparison<
   Left extends Comparable | undefined,
   Right extends NonNull<Left> | undefined,
@@ -594,6 +609,8 @@ function comparison<
 ): DatabaseExpression<NullIfEitherUndefined<Left, Right, boolean>, Scope> {
   const scopeIdentity = resolveScope([left, right]);
   assertSameValueType([left, right]);
+  assertComparedLiteral(left, right);
+  assertComparedLiteral(right, left);
   return createExpression(
     { kind: "comparison", left, operator, right },
     "boolean",

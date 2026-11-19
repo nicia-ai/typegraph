@@ -23,11 +23,18 @@ import {
   GraphAlgorithmConvergenceError,
   ValidationError,
 } from "../src/errors";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { sqliteDialect } from "../src/query/dialect/sqlite";
+import { sql } from "../src/query/sql-fragment";
 import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
 } from "../src/query/sql-intent";
 import { createStore, type Store } from "../src/store";
+import type { AlgorithmContext } from "../src/store/algorithms/context";
+import { WORKING_TABLE_ANALYZE_MINIMUM_ROWS } from "../src/store/algorithms/iterative-graph-operation";
+import { executeLabelPropagation } from "../src/store/algorithms/label-propagation";
+import { executePageRank } from "../src/store/algorithms/page-rank";
 import { requireDefined } from "../src/utils/presence";
 import { createStatementCountingBackend } from "./statement-counting-backend";
 import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
@@ -212,6 +219,79 @@ function postgresError(message: string, code: string): Error {
 
 function personMembership(id: string, labelId: string) {
   return { id, kind: "Person", labelId, labelKind: "Person" };
+}
+
+/**
+ * Runs one iterative algorithm on a SQLite ring large enough to pass the
+ * statistics size gate, with the dialect's temporary-table ANALYZE seam
+ * overridden by a real SQLite `ANALYZE temp.<table>` (the production SQLite
+ * dialect emits none), and reports where the runner refreshed the main
+ * working table relative to the first statement containing `joinMarker`.
+ */
+async function observeInitializationStatistics<Result>(
+  run: (ctx: AlgorithmContext) => Promise<Result>,
+  joinMarker: string,
+): Promise<
+  Readonly<{
+    analyzeIndexes: readonly number[];
+    firstJoin: number;
+    result: Result;
+    store: Store<typeof testGraph>;
+  }>
+> {
+  const sqliteBackend = createTestBackend();
+  const store = createStore(testGraph, sqliteBackend);
+  const people = await Promise.all(
+    Array.from({ length: WORKING_TABLE_ANALYZE_MINIMUM_ROWS + 4 }, (_, index) =>
+      store.nodes.Person.create(
+        { name: `Ring ${index}` },
+        { id: `ring-${String(index).padStart(2, "0")}` },
+      ),
+    ),
+  );
+  await Promise.all(
+    people.map((person, index) =>
+      store.edges.knows.create(
+        person,
+        requireDefined(people[(index + 1) % people.length]),
+        {},
+      ),
+    ),
+  );
+  const statements: string[] = [];
+  const ctx: AlgorithmContext = {
+    graphId: store.graphId,
+    graph: testGraph,
+    registry: store.registry,
+    backend: createStatementCountingBackend(sqliteBackend, statements),
+    dialect: {
+      ...sqliteDialect,
+      analyzeTemporaryTable: (table) => sql`ANALYZE temp.${table}`,
+    },
+    schema: createSqlSchema(sqliteBackend.tableNames),
+    recordedReadBinding: undefined,
+    defaultTemporalMode: "current",
+  };
+
+  const result = await run(ctx);
+
+  // The main working table is the first one a run creates.
+  const workingTable = requireDefined(
+    statements
+      .map((statement) =>
+        /CREATE TEMP TABLE ("typegraph_iterative_[^"]+")/u.exec(statement),
+      )
+      .find((match) => match !== null)?.[1],
+  );
+  const analyze = `ANALYZE temp.${workingTable}`;
+  const analyzeIndexes = statements.flatMap((statement, index) =>
+    statement === analyze ? [index] : [],
+  );
+  const firstJoin = statements.findIndex((statement) =>
+    statement.includes(joinMarker),
+  );
+  expect(firstJoin).toBeGreaterThanOrEqual(0);
+  return { analyzeIndexes, firstJoin, result, store };
 }
 
 const ITERATIVE_WORKING_TABLE_PREFIX = "typegraph_iterative_";
@@ -1692,6 +1772,28 @@ describe("store.algorithms", () => {
   // --------------------------------------------------------------
 
   describe("labelPropagation", () => {
+    it("refreshes label propagation's working-table statistics before the neighbor materialization", async () => {
+      const observed = await observeInitializationStatistics(
+        (ctx) =>
+          executeLabelPropagation(ctx, {
+            edges: ["knows"],
+            onMaxIterations: "return",
+          }),
+        " scoped_neighbor",
+      );
+
+      expect(observed.analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(observed.analyzeIndexes[0])).toBeLessThan(
+        observed.firstJoin,
+      );
+      expect(observed.result).toEqual(
+        await observed.store.algorithms.labelPropagation({
+          edges: ["knows"],
+          onMaxIterations: "return",
+        }),
+      );
+    });
+
     it("uses synchronous neighbor-mode labels and retains isolated nodes", async () => {
       const labelStore = createStore(testGraph, createTestBackend());
       const [alpha, beta, gamma, isolated] = await Promise.all([
@@ -2128,6 +2230,23 @@ describe("store.algorithms", () => {
       expect(scores.reduce((total, row) => total + row.score, 0)).toBeCloseTo(
         1,
         10,
+      );
+    });
+
+    it("refreshes working-table statistics after population and before the out-weight join", async () => {
+      const observed = await observeInitializationStatistics(
+        (ctx) => executePageRank(ctx, { edges: ["knows"] }),
+        " scoped_target",
+      );
+
+      // One refresh: the post-initialize refresh sees an unchanged row count.
+      expect(observed.analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(observed.analyzeIndexes[0])).toBeLessThan(
+        observed.firstJoin,
+      );
+      // Statistics never change the result.
+      expect(observed.result).toEqual(
+        await observed.store.algorithms.pageRank({ edges: ["knows"] }),
       );
     });
 

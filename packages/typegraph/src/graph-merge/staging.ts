@@ -150,7 +150,8 @@ export type StagingSet = Readonly<{
    * (id, branch) change). Disjoint from {@link StagingSet.modifiedNodes} in
    * MEANING, not in membership: a branch that edits props AND moves the end
    * appears in both, and a window-only change appears here alone — which is
-   * exactly what keeps it out of delete/modify resolution.
+   * exactly what keeps an ENDING out of delete/modify resolution. A reopen is
+   * read from here by that resolution, since it contends with a deletion.
    */
   windowedNodes: readonly StagedWindowedNode[];
   /** New fork edges, bucketed by kind. Map iterates in lexicographic kind order. */

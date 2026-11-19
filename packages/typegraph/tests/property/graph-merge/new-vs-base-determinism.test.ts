@@ -46,6 +46,7 @@ import type {
   MergeOptions,
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { assertProperty } from "../../graph-merge/assert-property";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
@@ -280,7 +281,7 @@ describe.each(backendMatrix())(
       { timeout: 300_000 },
       async () => {
         let nonEmptyBaseAmbiguityRuns = 0;
-        await fc.assert(
+        await assertProperty(
           fc.asyncProperty(nvbScenarioArb, async (scenario) => {
             const disposers: (() => Promise<void>)[] = [];
             try {

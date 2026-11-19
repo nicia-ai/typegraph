@@ -193,6 +193,31 @@ describe("cascade edge delete honors the bind budget", () => {
   });
 });
 
+describe("collection bulkHardDelete honors the bind budget", () => {
+  // The collection states its kind, which costs the batch DELETE one bind:
+  // its chunk is one id smaller than the kind-blind cascade's. Both the
+  // resolution read and the delete must slice on that budget, or an id past
+  // the first chunk is either refused by the engine or stranded.
+  const KIND_SCOPED_HARD_DELETE_CHUNK = HARD_DELETE_CHUNK - 1;
+  for (const shape of boundaryShapes(KIND_SCOPED_HARD_DELETE_CHUNK)) {
+    it(`removes every edge — ${shape.label} (${shape.edgeCount} edges, chunk ${KIND_SCOPED_HARD_DELETE_CHUNK})`, async () => {
+      const { backend, store } = await createBudgetedStore();
+      const { hubId, edgeIds } = await seedHub(
+        store,
+        `bulk-hard-${shape.edgeCount}`,
+        shape.edgeCount,
+      );
+
+      await store.edges.knows.bulkHardDelete(edgeIds as never);
+
+      await expectAllEdgesGone(backend, hubId, edgeIds);
+      for (const edgeId of edgeIds) {
+        expect(await backend.getEdge(GRAPH_ID, edgeId)).toBeUndefined();
+      }
+    });
+  }
+});
+
 describe("kind-scoped edge delete honors the D1 bind budget", () => {
   it("reserves and carries the asserted kind for soft and hard chunks", async () => {
     const dialect = new SQLiteSyncDialect();

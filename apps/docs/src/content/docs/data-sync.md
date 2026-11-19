@@ -295,6 +295,9 @@ await store.edges.relatedTo.bulkInsert([
 
 // Delete many edges at once
 await store.edges.relatedTo.bulkDelete(edgeIds);
+
+// Permanently remove many edges at once (no tombstones left behind)
+await store.edges.relatedTo.bulkHardDelete(edgeIds);
 ```
 
 ## On-Demand Sync

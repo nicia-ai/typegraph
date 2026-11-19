@@ -1132,6 +1132,14 @@ history, and revision state in the same transaction. If any row or sidecar is
 invalid, the whole update rolls back. Backends without transactional set-write
 and batched sidecar support reject the operation before writing.
 
+The selectors are evaluated once, against the statement's snapshot, and the
+write applies only to a row whose stored version is still the one that snapshot
+selected. Under PostgreSQL `READ COMMITTED`, a row that another transaction
+changes and commits after that snapshot (while this update waits for its row
+lock) is skipped rather than patched on the strength of its previous state, and
+`affectedCount` does not count it. Re-run `updateWhere()` to apply the patch to
+rows that still match.
+
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:
 
@@ -1895,6 +1903,35 @@ On eligible bundled roots, the whole call is one schema-fenced atomic exchange.
 An ID belonging to another edge kind refuses the call and rolls back every
 chunk. Portable backends batch both the authoritative lookup and soft delete
 when their optional batch ports are available.
+
+#### `bulkHardDelete(ids)`
+
+Permanently deletes multiple edges. This is irreversible and should be used carefully.
+
+```typescript
+store.edges.worksAt.bulkHardDelete(
+  ids: readonly EdgeId<worksAt>[]
+): Promise<void>;
+```
+
+The call leaves exactly the state that calling `hardDelete()` once per ID inside
+one transaction leaves: live and soft-deleted edges are removed, absent and
+repeated IDs are ignored, cardinality and composition claims are released, and a
+history store captures each removed edge's last version without recording a
+delete row. Every ID is resolved and judged before the first row is removed, so
+an ID belonging to another edge kind (`ValidationError` with
+`EDGE_IDENTITY_MISMATCH_CODE`), or a delete that would leave a live
+`existence: "required"` part without its whole (`CompositionExistenceError`),
+refuses the whole call and deletes nothing.
+
+The call runs as one write transaction: one batched lookup, then one delete per
+bind-budget chunk that also asserts the collection's kind, so an ID re-pointed
+at another kind by a concurrent writer is never removed. A backend without the
+optional `hardDeleteEdgesBatch` port issues one delete per edge inside the same
+transaction. The only per-edge statement on the batched path is the part read
+the required-existence check makes, and only for a composition edge whose part
+kind is `existence: "required"`. Like the other batch methods, it fires no
+operation hooks.
 
 #### `bulkUpsertById(items)`
 
@@ -3802,10 +3839,10 @@ type OperationHookContext = HookContext &
   }>;
 ```
 
-> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkReparent`) skip per-item
-operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not
-stand in for them — those fire only for node `updateWhere` and `compareAndSet`, so a batch method emits no hook
-events at all, neither
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkHardDelete`,
+`bulkReparent`) skip per-item operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` /
+`onBulkOperationEnd`) do not stand in for them — those fire only for node `updateWhere` and `compareAndSet`, so a
+batch method emits no hook events at all, neither
 per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally.
 
 `onOperationEnd.result.outcome` is `"written"` when durable graph state

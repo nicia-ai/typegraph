@@ -67,6 +67,7 @@ import {
   raceTimeout,
   TIMEOUT_SENTINEL,
 } from "../../concurrency-utils";
+import { createStatementCountingBackend } from "../../statement-counting-backend";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string().optional() }),
@@ -330,6 +331,71 @@ describe("PGlite backend", () => {
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0)) await cleanup();
   });
+
+  it.each([
+    {
+      algorithm: "pageRank",
+      joinMarker: " scoped_target",
+      run: (store: Store<typeof connectedPeopleGraph>) =>
+        store.algorithms.pageRank({ edges: ["knows"] }),
+    },
+    {
+      algorithm: "labelPropagation",
+      joinMarker: " scoped_neighbor",
+      run: (store: Store<typeof connectedPeopleGraph>) =>
+        store.algorithms.labelPropagation({
+          edges: ["knows"],
+          onMaxIterations: "return",
+        }),
+    },
+  ])(
+    "analyzes the populated working table before the first join of $algorithm",
+    async ({ joinMarker, run }) => {
+      const { backend } = await createLocalPgliteBackend({ vector: false });
+      cleanups.push(() => backend.close());
+      const [seedStore] = await createAdapterStoreWithSchema(
+        connectedPeopleGraph,
+        backend,
+      );
+      const people = await seedStore.nodes.Person.bulkCreate(
+        Array.from({ length: 32 }, (_, index) => ({
+          props: { name: `Ring ${index}` },
+        })),
+      );
+      await seedStore.edges.knows.bulkCreate(
+        people.map((person, index) => ({
+          from: person,
+          to: requireDefined(people[(index + 1) % people.length]),
+          props: {},
+        })),
+      );
+      const statements: string[] = [];
+      const observedStore = createStore(
+        connectedPeopleGraph,
+        createStatementCountingBackend(backend, statements),
+      );
+
+      await run(observedStore);
+
+      // The main working table is the first one a run creates.
+      const workingTable = requireDefined(
+        statements
+          .map((statement) =>
+            /CREATE TEMP TABLE ("typegraph_iterative_[^"]+")/u.exec(statement),
+          )
+          .find((match) => match !== null)?.[1],
+      );
+      const analyzeIndexes = statements.flatMap((statement, index) =>
+        statement === `ANALYZE ${workingTable}` ? [index] : [],
+      );
+      const firstJoin = statements.findIndex((statement) =>
+        statement.includes(joinMarker),
+      );
+      expect(firstJoin).toBeGreaterThanOrEqual(0);
+      expect(analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(analyzeIndexes[0])).toBeLessThan(firstJoin);
+    },
+  );
 
   it("instantiates a durable graph template through the PostgreSQL dialect", async () => {
     const { backend, db } = await createLocalPgliteBackend({ vector: false });
