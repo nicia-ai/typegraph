@@ -110,7 +110,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("43 reasoned entries sum to 133 accesses; 51 deferred entries sum to 250", () => {
+  it("43 reasoned entries sum to 134 accesses; 51 deferred entries sum to 250", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -180,7 +180,9 @@ describe("capability bundle totality (T9)", () => {
     // Recorded pruning adds one required base-schema assertion: 132 -> 133.
     // Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
     // Node bulkHardDelete reads `findEdgesConnectedToNodes` once: 132 -> 133.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(133);
+    // The managed DoltLite factory adds one guarded bootstrapTables access:
+    // 133 -> 134.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(134);
     // Compiled projection/relation templates add four raw-statement reuse
     // sites (row and scalar terminals), while import adds one heterogeneous
     // endpoint-set prefetch: 218 -> 223.

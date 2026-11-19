@@ -56,7 +56,9 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
 // Node bulkHardDelete (#460) reads the optional `findEdgesConnectedToNodes`
 // once, in its connected-edge read: 132 -> 133.
-const REASONED_FLOOR = 133;
+// The managed DoltLite factory provisions its owned connection once before
+// use, through one guarded `bootstrapTables` read: 133 -> 134.
+const REASONED_FLOOR = 134;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -97,7 +99,8 @@ const EXCLUDED_COUNT = 5;
 // One `deleteEdgesBatch` read left the edge write pipeline: 386 -> 385.
 // Node bulkHardDelete (#460): one `findEdgesConnectedToNodes` and five
 // `hardDeleteNodesBatch` reads: 385 -> 391.
-const TOTAL_ROW_COUNT = 391;
+// The managed DoltLite factory's `bootstrapTables` read: 391 -> 392.
+const TOTAL_ROW_COUNT = 392;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",
@@ -244,7 +247,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 385)", () => {
+  it("the class partition covers every scanned row (total 392)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

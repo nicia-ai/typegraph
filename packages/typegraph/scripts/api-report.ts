@@ -1107,6 +1107,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // its siblings and reached elsewhere only through the opaque `GraphBackend`
 // handle: +3 on every entrypoint that reaches it, `./backend` unchanged.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
+  // The managed DoltLite Store and native working-copy entrypoints render the
+  // same portable Store/GraphBackend graph as the existing adapters. Pin only
+  // their measured symbol sets; established entrypoint debt is unchanged.
+  "./doltlite": {
+    count: 1004,
+    sha256: "b1acfb1465a8b580dbda3e482e2161c0b08e20d2af25ea69cde48bd9d50c8cff",
+  },
+  "./adapters/drizzle/doltlite": {
+    count: 999,
+    sha256: "edded84400e4ac5e75bc9673c2f67d952501a311c3fae797b25dd9aae46feb6f",
+  },
   // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
   // transitively through `MetaEdgeProperties`/`SerializedMetaEdge`) dropped

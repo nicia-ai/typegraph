@@ -22,7 +22,7 @@ TARBALL_PATH="$(echo "$PACK_OUTPUT" | node -e 'const fs = require("node:fs"); co
 # those optional peers to the exact ranges the repo validates against —
 # PGlite's is tight (>=0.5.0 <0.6.0) — so the smoke can import every public
 # subpath, not just the driver-agnostic ones.
-OPTIONAL_PEER_SPECS="$(node -e 'const dev = require("./packages/typegraph/package.json").devDependencies; const names = ["drizzle-orm", "better-sqlite3", "@libsql/client", "@electric-sql/pglite"]; process.stdout.write(names.map((name) => `${name}@${dev[name]}`).join(" "));')"
+OPTIONAL_PEER_SPECS="$(node -e 'const dev = require("./packages/typegraph/package.json").devDependencies; const names = ["drizzle-orm", "better-sqlite3", "@libsql/client", "@electric-sql/pglite", "@dolthub/doltlite"]; process.stdout.write(names.map((name) => `${name}@${dev[name]}`).join(" "));')"
 
 mkdir -p "$work_directory/smoke"
 cp packages/typegraph/scripts/smoke-exports.mjs "$work_directory/smoke/"

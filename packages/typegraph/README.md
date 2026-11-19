@@ -70,8 +70,9 @@ semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
 `/maintenance`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
 `/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
 `/postgres/pglite` and `/adapters/drizzle/...` subpaths other than
-`/adapters/drizzle/engine`. See
-[Stability](https://typegraph.dev/backend-authoring#stability).
+`/adapters/drizzle/engine` and the experimental DoltLite entrypoints
+(`/doltlite`, `/adapters/drizzle/doltlite`), which may also change in any
+release. See [Stability](https://typegraph.dev/backend-authoring#stability).
 
 ## Optional Peer: drizzle-orm
 

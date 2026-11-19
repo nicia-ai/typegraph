@@ -163,6 +163,7 @@ describe("CI workflow contract", () => {
       "better-sqlite3",
       "@libsql/client",
       "@electric-sql/pglite",
+      "@dolthub/doltlite",
     ]);
     expect(script).toContain(
       'npm install "$TARBALL_PATH" $OPTIONAL_PEER_SPECS >/dev/null',
@@ -329,6 +330,7 @@ describe("CI workflow contract", () => {
       "test-typescript-compat",
       "test-postgres",
       "test-durable-objects",
+      "test-doltlite",
     ]) {
       expect(workflow).toMatch(
         new RegExp(String.raw`\n {6}- ${requiredJob}(?:\n|$)`),

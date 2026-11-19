@@ -128,6 +128,8 @@ export const DRIZZLE_SPECIFIER_PATTERN =
 export const ADAPTER_ENTRYPOINTS: Readonly<
   Record<string, "adapter-static" | "adapter-dynamic-only">
 > = {
+  "./doltlite": "adapter-dynamic-only",
+  "./adapters/drizzle/doltlite": "adapter-static",
   "./adapters/drizzle/sqlite": "adapter-static",
   "./adapters/drizzle/postgres": "adapter-static",
   "./adapters/drizzle/postgres/working-copy": "adapter-static",

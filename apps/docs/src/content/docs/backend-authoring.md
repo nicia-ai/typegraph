@@ -37,6 +37,10 @@ authoring entrypoints, `/backend` and `/adapters/drizzle/engine`, are not part
 of it. Using a first-party backend through the application API never depends
 on the authoring surface staying stable.
 
+The DoltLite backend is experimental. Its entrypoints, `/doltlite` and
+`/adapters/drizzle/doltlite`, are not covered by semver either and may change
+in any release until the backend graduates.
+
 ## What a profile is
 
 A `SqlEngineProfile` is the data and dialect closures one SQL engine
