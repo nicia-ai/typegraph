@@ -1234,7 +1234,10 @@ by reopening an ended `oneActive` row (`clearValidTo`), while another
 branch's deletion removes one end of that attachment. Merged as-is, the
 attaching branch's composition edge would be dropped as
 `edge:endpoint-deleted` and its move would be lost. That conflict is refused too, and
-`details.branchId` names the attaching branch:
+`details.branchId` names the attaching branch. A reopen is judged as the
+reopening branch wrote it, even when the merge itself would not write that
+reopen because the incremental target's own end for the row, or a sibling
+branch's end, takes precedence over it:
 
 - `cause: "moved"`: the part is deleted (directly, or by its old whole's
   cascade) while the attaching branch put it under a whole that survives.

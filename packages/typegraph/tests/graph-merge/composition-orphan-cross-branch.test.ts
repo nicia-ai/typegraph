@@ -605,6 +605,125 @@ describe.each(backendMatrix())(
           await expectReopenForkPointState(forkPoint);
         },
       );
+
+      /**
+       * Moves the ended `w2` row's end one millisecond later, so `store`
+       * re-ends a row the attaching branch reopens: a different end, still
+       * past, still not attaching.
+       */
+      async function reEndW2(
+        store: Store<G>,
+        rows: Readonly<{ toW2: AttachEdgeId }>,
+      ): Promise<void> {
+        const row = await store.edges.attach.getById(rows.toW2, {
+          temporalMode: "includeEnded",
+        });
+        const end = row?.meta.validTo;
+        if (end === undefined) throw new Error("expected an ended w2 row");
+        await store.edges.attach.update(
+          rows.toW2,
+          {},
+          { validTo: new Date(Date.parse(end) + 1).toISOString() },
+        );
+      }
+
+      // The deletion of either end cascades to the reopened row, and the reopen
+      // contends with that deletion, so the row survives delete/modify. Window
+      // reconciliation then discards the reopen in favour of another end: the
+      // guard must still judge the branch's own reopen, not the end the plan
+      // writes (or does not write) for the row.
+      it.each(
+        SHAPES.flatMap((shape) =>
+          BRANCH_ORDERS.map((order) => ({ ...shape, ...order })),
+        ),
+      )(
+        "refuses a reopened attachment whose end the incremental target moved when another branch deletes $shape ($order)",
+        async ({ cause, deleteEnd, deleterFirst }) => {
+          const { forkPoint, ...rows } = await makeReopenForkPoint();
+          const deleter = await makeBranchOf(forkPoint, BRANCH_A);
+          await deleteEnd(deleter);
+          const attacher = await makeBranchOf(forkPoint, BRANCH_B);
+          await reopenUnderW2(attacher, rows);
+          const { store: target } = await makeBranchOf(
+            forkPoint,
+            asBranchId("window-target"),
+          );
+          await reEndW2(target, rows);
+
+          const expected = {
+            part: { kind: "Part", id: P1 },
+            whole: { kind: "Whole", id: W2 },
+            viaEdgeKind: "attach",
+            cause,
+            branchId: BRANCH_B,
+          } as const;
+          const incremental = {
+            forkPoint,
+            target,
+            branches: ordered(deleter, attacher, deleterFirst),
+          };
+          expectCompositionRefusal(
+            await planMergeIncremental<G>(incremental),
+            expected,
+            "planMergeIncremental",
+          );
+          expectCompositionRefusal(
+            await mergeIncremental<G>(incremental),
+            expected,
+            "mergeIncremental",
+          );
+          await expectReopenForkPointState(target);
+        },
+      );
+
+      it.each(
+        SHAPES.flatMap((shape) =>
+          BRANCH_ORDERS.map((order) => ({ ...shape, ...order })),
+        ),
+      )(
+        "refuses a reopened attachment a sibling branch re-ends when another branch deletes $shape ($order)",
+        async ({ cause, deleteEnd, deleterFirst }) => {
+          const { forkPoint, ...rows } = await makeReopenForkPoint();
+          const deleter = await makeBranchOf(forkPoint, BRANCH_A);
+          await deleteEnd(deleter);
+          const attacher = await makeBranchOf(forkPoint, BRANCH_B);
+          await reopenUnderW2(attacher, rows);
+          const reEnder = await makeBranchOf(forkPoint, asBranchId("branch-c"));
+          await reEndW2(reEnder.store, rows);
+
+          const expected = {
+            part: { kind: "Part", id: P1 },
+            whole: { kind: "Whole", id: W2 },
+            viaEdgeKind: "attach",
+            cause,
+            branchId: BRANCH_B,
+          } as const;
+          const branches = [
+            ...ordered(deleter, attacher, deleterFirst),
+            reEnder,
+          ];
+          expectCompositionRefusal(
+            await planMerge(forkPoint, branches),
+            expected,
+            "planMerge",
+          );
+          expectCompositionRefusal(
+            await planMergeIncremental<G>({
+              forkPoint,
+              target: forkPoint,
+              branches,
+            }),
+            expected,
+            "planMergeIncremental",
+          );
+          expectCompositionRefusal(
+            await merge(forkPoint, branches),
+            expected,
+            "merge",
+          );
+          await expectReopenForkPointState(forkPoint);
+        },
+      );
     });
 
     describe("every planning entry point", () => {
@@ -697,6 +816,58 @@ describe.each(backendMatrix())(
         );
         await expectForkPointState(forkPoint, "partOf");
       });
+
+      // A node's window is not part of any attachment, so a node reopen raises
+      // no cross-branch finding of its own. It does contend with the deletion,
+      // keeping the part exactly as a props edit would, while the deletion's
+      // cascade still removes the part's attachment: the required part is then
+      // refused as unattached rather than silently kept with no whole.
+      it.each([
+        {
+          shape: "its whole",
+          deleteEnd: (deleter: GraphBranch<G>) =>
+            deleter.store.nodes.Whole.delete(W1),
+        },
+        {
+          shape: "the part",
+          deleteEnd: (deleter: GraphBranch<G>) =>
+            deleter.store.nodes.Part.delete(P1),
+        },
+      ])(
+        "refuses a reopened part another branch deletes with $shape as unattached",
+        async ({ deleteEnd }) => {
+          const forkPoint = await makeForkPoint(graph);
+          await forkPoint.nodes.Part.update(
+            P1,
+            {},
+            { validTo: new Date().toISOString() },
+          );
+          const deleter = await makeBranchOf(forkPoint, BRANCH_A);
+          await deleteEnd(deleter);
+          const reopener = await makeBranchOf(forkPoint, BRANCH_B);
+          await reopener.store.nodes.Part.update(
+            P1,
+            {},
+            { clearValidTo: true },
+          );
+
+          expectCompositionRefusal(
+            await merge(forkPoint, [deleter, reopener]),
+            {
+              part: { kind: "Part", id: P1 },
+              viaEdgeKind: "attach",
+              cause: "unattached",
+            },
+            "merge",
+          );
+          await expect(
+            forkPoint.nodes.Part.getById(P1, { temporalMode: "includeEnded" }),
+          ).resolves.toBeDefined();
+          await expect(
+            forkPoint.nodes.Whole.getById(W1),
+          ).resolves.toBeDefined();
+        },
+      );
     });
   },
 );
