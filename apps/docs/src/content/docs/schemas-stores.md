@@ -2182,20 +2182,43 @@ writes with a TypeGraph savepoint inside your transaction, so that a failure
 you catch leaves none of that call's writes behind — `bulkHardDelete` and
 `applyMergePlanInTransaction` among them. A savepoint's rollback undoes every
 statement issued on the connection since it was taken, whoever issued it. So
-writes through `tx` take turns: each write call, and each savepoint, has the
-transaction to itself while it runs, and an overlapping write call waits for
-it to finish before it starts. A call made from inside the guarded work (such
-as a write a merge apply makes) is part of that work and does not wait. As a
-result, when one of two overlapping calls fails and you catch the error and
-commit, the other call's writes are kept exactly when it reported success.
+calls through `tx` take turns: each collection call (`tx.nodes.*`,
+`tx.edges.*`), `tx.writeNodeUpsertBatch`, `tx.assertUnchangedSince`,
+`applyMergePlanInTransaction`, and the provenance reads and assertions on
+`tx` has the transaction to itself from its first read to its return, and an
+overlapping call waits for it to finish before it starts. Whatever a call
+decides from what it reads — that an edge to delete is already gone, that a
+merge target has no pending writes — therefore cannot be changed by another
+call before the call acts on it. A call made from inside the guarded work
+(such as a write a merge apply makes) is part of that work and does not wait.
+As a result, when one of two overlapping calls fails and you catch the error
+and commit, the other call's writes are kept exactly when it reported success.
 
-A read through `tx` may run while a savepoint is open and observe writes that
-the guarded call's failure later rolls back. Writes take no turns on a backend
-without transaction-scoped statement execution, which takes no savepoints, or
-on a runtime without `AsyncLocalStorage` (`node:async_hooks`; on Cloudflare
-Workers, the `nodejs_als` compatibility flag), where a nested call cannot be
-told apart from an overlapping one. On such a runtime, await a
-savepoint-guarded call before starting another write in the same transaction.
+Every binding of one database transaction shares these turns: a context from
+`store.withTransaction(tx.sql)` inside a `store.transaction()` callback
+waits for, and is waited on by, calls through `tx`. A
+`store.withRecordedTransaction(externalTx, fn)` or
+`store.withEvolvedTransaction(externalTx, ...)` call is one turn as a whole,
+including its fences and its capture flush; calls `fn` makes run inside it.
+A callback you schedule from inside a call (a `.then` or timer that runs
+after the call returned) is no longer part of it: its calls take turns like
+any other call.
+
+`tx.requestRecordedRevision()` is synchronous, so it cannot wait: while
+another call on the transaction is in progress it throws a
+`ConfigurationError` with code `RECORDED_REVISION_REQUEST_OVERLAPS_CALL`
+instead of accepting a request that call's rollback could drop. Await the
+overlapping call first.
+
+Fluent queries (`tx.query(...)`, the batchable `batchFind*` builders) take
+no turn: such a read may run while a savepoint is open and observe writes
+that the guarded call's failure later rolls back. Calls take no turns on a
+backend without transaction-scoped statement execution, which takes no
+savepoints, or on a runtime without `AsyncLocalStorage`
+(`node:async_hooks`; on Cloudflare Workers, the `nodejs_als` compatibility
+flag), where a nested call cannot be told apart from an overlapping one. On
+such a runtime, await a savepoint-guarded call before starting another write
+in the same transaction.
 
 #### Return values
 
