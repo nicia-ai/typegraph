@@ -337,9 +337,17 @@ export function validateQueryRange(
   }
 }
 
+/**
+ * Whether a builder has a source. An unstarted builder carries `""` as its
+ * source alias and no source kinds; that placeholder names no alias.
+ */
+export function hasQuerySource(state: QueryBuilderState): boolean {
+  return state.startAlias !== "";
+}
+
 /** Validates the alias namespace and references once for every builder stage. */
 export function validateQueryState(state: QueryBuilderState): void {
-  if (state.startAlias === "") return;
+  if (!hasQuerySource(state)) return;
   const aliases = new Set<string>();
   const nodes = new Set<string>();
   const edges = new Set<string>();
@@ -413,7 +421,7 @@ export function validateQuerySource(
   state: QueryBuilderState,
   starting: boolean,
 ): void {
-  if (starting ? state.startAlias !== "" : state.startAlias === "") {
+  if (starting === hasQuerySource(state)) {
     throw new ValidationError(
       starting ?
         "A query can have only one source; start a new query instead."

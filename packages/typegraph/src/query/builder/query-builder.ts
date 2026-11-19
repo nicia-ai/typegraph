@@ -137,6 +137,7 @@ import {
   type UniqueAlias,
 } from "./types";
 import {
+  hasQuerySource,
   validateHybridFusionOptions,
   validateQueryRange,
   validateQuerySource,
@@ -2425,7 +2426,7 @@ export class QueryBuilder<
    * Gets all kind names for an alias.
    */
   #getKindNamesForAlias(alias: string): readonly string[] | undefined {
-    if (alias === this.#state.startAlias) {
+    if (hasQuerySource(this.#state) && alias === this.#state.startAlias) {
       return this.#state.startKinds;
     }
     for (const traversal of this.#state.traversals) {
