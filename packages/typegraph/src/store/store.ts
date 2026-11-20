@@ -4399,7 +4399,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * The receipt does not count writes that bypass the `tx.nodes.*` /
    * `tx.edges.*` collections, such as direct backend writes, raw SQL, or
-   * import helpers. The adopted-commit sibling
+   * import helpers. It does count the node deletions and revivals TypeGraph
+   * makes on the transaction outside those collections, each as one write of
+   * its node kind: a node graph-merge apply deletes, including the delete half
+   * of a recreation, through `applyMergePlan` (whose report carries the
+   * receipt) or `applyMergePlanInTransaction` (counted in the caller's
+   * receipt), and a fact a provenance retraction verb closes or reopens on
+   * the transaction. The adopted-commit sibling
    * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
