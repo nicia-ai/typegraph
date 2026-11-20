@@ -15,6 +15,7 @@
  * a new execution member cannot silently bypass the seam.
  */
 import { CompilerInvariantError } from "../../../errors";
+import { createDataKeyedBag } from "../../../utils/object";
 import { admitSessionStatement } from "../../savepoint-scope-exclusion";
 import type {
   CompiledSqlQuery,
@@ -123,7 +124,8 @@ export function guardSessionStatements<A extends SqlExecutionAdapter>(
   adapter: A,
   session: object,
 ): A {
-  const guarded: Record<string, unknown> = {};
+  // Keyed by whatever members the adapter has, so built without a prototype.
+  const guarded = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(adapter)) {
     if (typeof value !== "function" || NON_STATEMENT_MEMBERS.has(key)) {
       guarded[key] = value;
