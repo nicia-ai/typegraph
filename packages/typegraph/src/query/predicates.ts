@@ -7,6 +7,11 @@ import { type FulltextQueryMode } from "../backend/types";
 import { type NullCheckOp } from "../core/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../errors";
 import {
+  CANONICAL_DATE_OPERAND_EXPECTATION,
+  describeDateOperand,
+  isCanonicalDateOperand,
+} from "../utils/date";
+import {
   type ArrayOp,
   type ArrayPredicate,
   type BetweenPredicate,
@@ -39,6 +44,7 @@ import {
   type JsonPointerInput,
   type JsonPointerSegment,
   normalizeJsonPointer,
+  parseJsonPointer,
   type ResolveJsonPointer,
   type ResolveJsonPointerSegments,
 } from "./json-pointer";
@@ -467,6 +473,54 @@ function isFieldRef(value: unknown): value is FieldRef {
   );
 }
 
+/**
+ * A field reference as an error message names it: `alias.property` for a
+ * property (`d.publishedAt`, `d.metadata.publishedAt` for a nested one),
+ * not the `props` column every property is stored in.
+ */
+function describeFieldRef(field: FieldRef): string {
+  const pointerSegments =
+    field.jsonPointer === undefined ? [] : parseJsonPointer(field.jsonPointer);
+  const columnSegments =
+    (
+      field.path[0] === "props" &&
+      (field.path.length > 1 || pointerSegments.length > 0)
+    ) ?
+      field.path.slice(1)
+    : field.path;
+  return [field.alias, ...columnSegments, ...pointerSegments].join(".");
+}
+
+/**
+ * Refuses an operand compared with a date-typed property unless every
+ * backend compares it the same way — the decision `isCanonicalDateOperand`
+ * owns for `$meta` timestamps too. SQLite compares the stored text and
+ * PostgreSQL the parsed `timestamptz`, so `gte("2024-01-01")` matched on one
+ * and not the other. The store writes a date property as its canonical
+ * `toISOString()` text, so a canonical operand compares identically on both.
+ *
+ * The one check for a literal (the field builders call it before building the
+ * predicate), an expression-context literal, and a `param()` binding
+ * (prepared-query validation calls it for every value bound against the
+ * field), so each refuses before any SQL runs. A reference that is not
+ * date-typed is not checked here.
+ */
+export function assertDateFieldOperand(
+  field: FieldRef,
+  operand: unknown,
+): void {
+  if (field.valueType !== "date" || isCanonicalDateOperand(operand)) return;
+  const name = describeFieldRef(field);
+  throw new UnsupportedPredicateError(
+    `Invalid operand for date field "${name}": expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(operand)}.`,
+    { field: name, receivedValueType: typeof operand },
+    {
+      suggestion:
+        "Pass a Date, or convert the string with new Date(value).toISOString() after deciding which time zone it names.",
+    },
+  );
+}
+
 function assertCompatibleFieldReferences(
   left: FieldRef,
   right: FieldRef,
@@ -481,7 +535,7 @@ function assertCompatibleFieldReferences(
     leftType !== rightType
   ) {
     throw new UnsupportedPredicateError(
-      `Cannot compare ${leftType} field "${left.alias}.${left.path.join(".")}" with ${rightType} field "${right.alias}.${right.path.join(".")}".`,
+      `Cannot compare ${leftType} field "${describeFieldRef(left)}" with ${rightType} field "${describeFieldRef(right)}".`,
       { leftType, rightType },
     );
   }
@@ -505,7 +559,7 @@ function assertLiteralMatchesField(
   if (matches) return;
 
   throw new UnsupportedPredicateError(
-    `Expected a ${valueType} literal for field "${field.alias}.${field.path.join(".")}", got ${value instanceof Date ? "date" : typeof value}.`,
+    `Expected a ${valueType} literal for field "${describeFieldRef(field)}", got ${value instanceof Date ? "date" : typeof value}.`,
     { expectedValueType: valueType, receivedValueType: typeof value },
   );
 }
@@ -518,7 +572,7 @@ function assertComparisonSupported(field: FieldRef): void {
     valueType === "embedding"
   ) {
     throw new UnsupportedPredicateError(
-      `Comparison predicates are not supported for ${valueType} field "${field.alias}.${field.path.join(".")}".`,
+      `Comparison predicates are not supported for ${valueType} field "${describeFieldRef(field)}".`,
       { valueType },
     );
   }
@@ -591,6 +645,7 @@ function comparison(
     } satisfies ComparisonPredicate);
   }
   assertLiteralMatchesField(field, value, op !== "eq" && op !== "neq");
+  assertDateFieldOperand(field, value);
   const coercedValue = coerceLiteralValue(value);
   const expr: ComparisonPredicate = {
     __type: "comparison",
@@ -636,6 +691,7 @@ function inComparison(
       );
     }
     assertLiteralMatchesField(field, value);
+    assertDateFieldOperand(field, value);
     return literal(coerceLiteralValue(value));
   });
   const expr: ComparisonPredicate = {
@@ -713,6 +769,9 @@ function between(
   lower: string | number | boolean | Date | ParameterRef,
   upper: string | number | boolean | Date | ParameterRef,
 ): Predicate {
+  for (const bound of [lower, upper]) {
+    if (!isParameterRef(bound)) assertDateFieldOperand(field, bound);
+  }
   const expr: BetweenPredicate = {
     __type: "between",
     field,

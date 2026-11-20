@@ -1,8 +1,13 @@
 import { ConfigurationError, ValidationError } from "../../errors";
-import { validateCanonicalIsoDate } from "../../utils/date";
+import {
+  CANONICAL_DATE_OPERAND_EXPECTATION,
+  describeDateOperand,
+  isCanonicalDateOperand,
+  validateCanonicalIsoDate,
+} from "../../utils/date";
 import { type FieldRef, type OrderSpec, type SortDirection } from "../ast";
 import { jsonPointer } from "../json-pointer";
-import { fieldRef } from "../predicates";
+import { assertDateFieldOperand, fieldRef } from "../predicates";
 import {
   type FieldTypeInfo,
   type SchemaIntrospector,
@@ -237,12 +242,14 @@ function metadataFieldOfReference(
  *
  * - `version` takes a 32-bit integer. PostgreSQL rejects `1.5` or `2 ** 31`
  *   against its `integer` column, while SQLite compared them numerically.
- * - A timestamp takes a `Date` or a canonical UTC ISO-8601 string
- *   (`YYYY-MM-DDTHH:mm:ss.sssZ`, via `validateCanonicalIsoDate`). SQLite
+ * - A timestamp takes an operand `isCanonicalDateOperand` accepts: a
+ *   canonical UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ss.sssZ`), or a `Date`
+ *   whose ISO form is one (not the extended `+010000-…` year). SQLite
  *   compares the stored text and PostgreSQL the parsed instant, so
  *   `"2021-01-01T00:00:00Z"` — the instant of a stored
  *   `"2021-01-01T00:00:00.000Z"` but text that sorts after it — matched
- *   `lt` on SQLite and not on PostgreSQL.
+ *   `lt` on SQLite and not on PostgreSQL. A date-typed property shares the
+ *   decision (`assertDateFieldOperand`), so the two surfaces cannot drift.
  *
  * A reference to anything other than a metadata column is not checked here.
  */
@@ -254,16 +261,9 @@ export function assertMetadataOperand(
   if (field === undefined) return;
   const path = `${reference.alias}.$meta.${field.name}`;
   if (field.timestamp) {
-    if (operand instanceof Date && !Number.isNaN(operand.getTime())) return;
-    if (typeof operand === "string") {
-      validateCanonicalIsoDate(operand, path);
-      return;
-    }
-    refuseMetadataOperand(
-      path,
-      operand,
-      "a Date or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ)",
-    );
+    if (isCanonicalDateOperand(operand)) return;
+    if (typeof operand === "string") validateCanonicalIsoDate(operand, path);
+    refuseMetadataOperand(path, operand, CANONICAL_DATE_OPERAND_EXPECTATION);
   }
   if (
     field.integer &&
@@ -282,15 +282,28 @@ export function assertMetadataOperand(
   }
 }
 
+/**
+ * Refuses one operand compared against a field reference unless every backend
+ * compares it the same way: the metadata-column contract
+ * ({@link assertMetadataOperand}) first, then the date-property one
+ * (`assertDateFieldOperand`). The single check an expression-context literal
+ * and a `param()` binding get, so neither can skip a contract the
+ * predicate-builder literal is held to.
+ */
+export function assertComparedOperand(
+  reference: FieldRef,
+  operand: unknown,
+): void {
+  assertMetadataOperand(reference, operand);
+  assertDateFieldOperand(reference, operand);
+}
+
 function refuseMetadataOperand(
   path: string,
   operand: unknown,
   expected: string,
 ): never {
-  const received =
-    operand instanceof Date ? "an invalid Date" : (
-      `${typeof operand} ${String(operand)}`
-    );
+  const received = describeDateOperand(operand);
   throw new ValidationError(
     `Invalid operand for "${path}": expected ${expected}, got ${received}.`,
     { issues: [{ path, message: `Expected ${expected}, got ${received}` }] },

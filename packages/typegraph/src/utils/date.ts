@@ -146,6 +146,52 @@ export function isCanonicalIsoDate(value: string): boolean {
 }
 
 /**
+ * Whether a predicate operand compared against a stored timestamp compares
+ * the same way on every backend: a valid `Date` whose `toISOString()` is
+ * canonical, or a string that already is canonical
+ * ({@link isCanonicalIsoDate}).
+ *
+ * SQLite compares the stored text and PostgreSQL the parsed `timestamptz`
+ * instant. The two agree only when the operand is the same fixed-width UTC
+ * text the store writes, so a short form of a stored instant
+ * (`"2024-01-01T00:00:00Z"`), a date-only or zoneless string, an offset, or a
+ * `Date` whose ISO form uses the six-digit extended year (`+010000-…`, which
+ * sorts before every four-digit year as text) each matched different rows on
+ * the two engines. The one decision every timestamp operand check makes —
+ * `$meta` timestamps and date-typed properties alike — so the surfaces cannot
+ * disagree about which operands are comparable.
+ */
+export function isCanonicalDateOperand(
+  operand: unknown,
+): operand is Date | string {
+  if (operand instanceof Date) {
+    return (
+      !Number.isNaN(operand.getTime()) &&
+      isCanonicalIsoDate(operand.toISOString())
+    );
+  }
+  return typeof operand === "string" && isCanonicalIsoDate(operand);
+}
+
+/** What {@link isCanonicalDateOperand} accepts, as a refusal names it. */
+export const CANONICAL_DATE_OPERAND_EXPECTATION =
+  "a Date with a four-digit year or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ)";
+
+/**
+ * An operand {@link isCanonicalDateOperand} refused, as an error message
+ * should name it: an invalid `Date`, a `Date` by its ISO form, or any other
+ * value by its type and text.
+ */
+export function describeDateOperand(operand: unknown): string {
+  if (operand instanceof Date) {
+    return Number.isNaN(operand.getTime()) ? "an invalid Date" : (
+        `the Date ${operand.toISOString()}`
+      );
+  }
+  return `${typeof operand} ${String(operand)}`;
+}
+
+/**
  * Validates that a string is a canonical UTC ISO 8601 datetime with fixed
  * millisecond width. Stricter than {@link validateIsoDate} (which also
  * accepts missing or 1–2 digit milliseconds): required wherever the value

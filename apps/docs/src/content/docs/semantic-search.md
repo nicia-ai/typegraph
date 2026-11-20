@@ -681,7 +681,7 @@ const filteredSearch = await store
     d.embedding
       .similarTo(queryEmbedding, 20)
       .and(d.category.eq("technology"))
-      .and(d.publishedAt.gte("2024-01-01"))
+      .and(d.publishedAt.gte("2024-01-01T00:00:00.000Z"))
       .and(d.status.eq("published"))
   )
   .select((ctx) => ctx.d)

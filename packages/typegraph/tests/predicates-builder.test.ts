@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { UnsupportedPredicateError } from "../src/errors";
 import { type QueryAst } from "../src/query/ast";
 import { jsonPointer } from "../src/query/json-pointer";
 import {
@@ -264,8 +265,8 @@ describe("dateField", () => {
     expect(expr.op).toBe("gt");
   });
 
-  it("creates gt predicate with string", () => {
-    const pred = dateField(field).gt("2024-01-01T00:00:00Z");
+  it("creates gt predicate with a canonical string", () => {
+    const pred = dateField(field).gt("2024-01-01T00:00:00.000Z");
 
     expect(pred.__expr.__type).toBe("comparison");
     const expr = pred.__expr as { op: string };
@@ -286,13 +287,26 @@ describe("dateField", () => {
     expect(expr.upper.valueType).toBe("date");
   });
 
-  it("creates between predicate with string dates", () => {
+  it("creates between predicate with canonical string dates", () => {
     const pred = dateField(field).between(
-      "2024-01-01T00:00:00Z",
-      "2024-12-31T23:59:59Z",
+      "2024-01-01T00:00:00.000Z",
+      "2024-12-31T23:59:59.999Z",
     );
 
     expect(pred.__expr.__type).toBe("between");
+  });
+
+  it("refuses a non-canonical string or a non-date bound", () => {
+    expect(() => dateField(field).gt("2024-01-01T00:00:00Z")).toThrow(
+      UnsupportedPredicateError,
+    );
+    expect(() =>
+      dateField(field).between("2024-01-01", "2024-12-31T23:59:59.999Z"),
+    ).toThrow(UnsupportedPredicateError);
+    expect(() =>
+      // @ts-expect-error -- a date bound is a Date or a string
+      dateField(field).between(1, 2),
+    ).toThrow(UnsupportedPredicateError);
   });
 });
 

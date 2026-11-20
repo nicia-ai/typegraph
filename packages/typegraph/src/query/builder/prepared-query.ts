@@ -57,7 +57,7 @@ import {
 } from "../expressions";
 import { isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
-import { assertMetadataOperand } from "./order-by-field";
+import { assertComparedOperand } from "./order-by-field";
 import {
   assertListBinding,
   buildQueryTemplate,
@@ -705,7 +705,7 @@ export type ParameterMetadata = Readonly<{
   /**
    * The field references each comparison or `between` parameter is compared
    * against, so a binding can be checked against the field's own operand
-   * contract (`assertMetadataOperand`), the same check a literal gets.
+   * contract (`assertComparedOperand`), the same check a literal gets.
    */
   comparedFields: ReadonlyMap<string, readonly FieldRef[]>;
 }>;
@@ -1130,14 +1130,15 @@ function validateBindings(
     validateBindingValue(name, value, stringOpParameters.has(name));
   }
 
-  // A field with its own operand contract (a metadata column) refuses a
-  // bound value exactly as it refuses the same literal, on every backend.
+  // A field with its own operand contract (a metadata column, a date
+  // property) refuses a bound value exactly as it refuses the same literal,
+  // on every backend.
   for (const [name, fields] of comparedFields) {
     const value = readOwnProperty(bindings, name);
     const operands: readonly unknown[] =
       Array.isArray(value) ? (value as readonly unknown[]) : [value];
     for (const field of fields) {
-      for (const operand of operands) assertMetadataOperand(field, operand);
+      for (const operand of operands) assertComparedOperand(field, operand);
     }
   }
 }
@@ -1197,9 +1198,9 @@ function matchesElementType(value: unknown, elementType: ValueType): boolean {
       return typeof value === "boolean";
     }
     case "date": {
-      // Either a Date or the ISO text TypeGraph stores. Arbitrary strings are
-      // not parsed here: the literal form does not validate them either, and
-      // guessing which formats PostgreSQL accepts would reject valid input.
+      // Either a Date or a string. Whether the element compares the same way
+      // on every backend is the field's operand contract, which
+      // `assertComparedOperand` applies to every bound element afterwards.
       return value instanceof Date || typeof value === "string";
     }
     // No element cast is emitted for these, so there is no divergence to

@@ -274,12 +274,24 @@ Equality and membership (`eq`, `neq`, `in`, `notIn`) take a `Date`, not a string
 refused when the predicate is built, with `UnsupportedPredicateError`
 (`Expected a date literal for field "…", got string.`); convert it with `new Date(value)`.
 
-The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, which is passed to the
-database as written: PostgreSQL reads it as a `timestamptz` and compares instants (a string without a
-UTC offset, such as `"2024-01-01"`, is read in the session's time zone), while SQLite compares it with
-the stored value as text. A string that is not a canonical UTC ISO-8601 timestamp
-(`YYYY-MM-DDTHH:mm:ss.sssZ`) can therefore match different rows on the two backends. Pass a `Date` or a
-canonical string.
+The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, but only in the
+canonical form the store writes a date property in: UTC ISO-8601 with exactly three fractional
+digits, `YYYY-MM-DDTHH:mm:ss.sssZ` (`new Date(value).toISOString()` produces one). Any other string
+— `"2024-01-01"`, `"2024-01-01T00:00:00Z"`, an offset such as `"+01:00"`, a string with no zone, or an
+impossible date such as `"2024-02-30T00:00:00.000Z"` — is refused when the predicate is built, with
+`UnsupportedPredicateError`. SQLite compares the stored value as text and PostgreSQL as a
+`timestamptz` instant, and the two agree only on canonical text, so a refused string would have matched
+different rows on the two backends. Converting it yourself makes you choose the time zone it names;
+TypeGraph does not guess.
+
+A `Date` operand must fall in the four-digit years 0000 to 9999. Outside them its `toISOString()` is the
+extended `+010000-…` form, which sorts as text before every four-digit year, so it is refused the same
+way.
+
+The same check applies to every operator, to each bound of `between`, to each element of an `in` /
+`notIn` list, to a nested date property reached through `get()`, and to values bound to a `param()`
+when a prepared query executes, so a refused operand never reaches SQL. `$meta` timestamps make the
+same decision (refusing with `ValidationError`); see [Metadata](/queries/filter#metadata).
 
 ### Equality
 
