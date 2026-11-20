@@ -1457,10 +1457,13 @@ Like the other batch methods, it fires no operation hooks.
 On its own the call is one write transaction. Inside `store.transaction()` it
 runs in the caller's transaction, and its writes sit behind a savepoint: if one
 of them fails and the callback catches the error, the commit keeps none of the
-call's writes. On a raw store over a driver without interactive transactions
-(Cloudflare D1, `drizzle-orm/neon-http`) the statements run separately; every
-refusal still comes before the first delete, but a failure in a later statement
-leaves the earlier ones applied. As in `hardDelete()`, a node's row is removed
+call's writes. Await the call before starting other work on the transaction:
+work that overlaps its savepoint is refused (see
+[Overlapping calls](#overlapping-calls-and-batch-call-savepoints)). On a raw
+store over a driver without interactive transactions (Cloudflare D1,
+`drizzle-orm/neon-http`) the statements run separately; every refusal still
+comes before the first delete, but a failure in a later statement leaves the
+earlier ones applied. As in `hardDelete()`, a node's row is removed
 only after its uniqueness, fulltext and connected-edge rows, so repeating the
 call after such a failure finishes the delete and frees the node's unique keys.
 A schema-managed store on those drivers refuses
@@ -1992,10 +1995,12 @@ operation hooks.
 On its own the call is one write transaction. Inside `store.transaction()` it
 runs in the caller's transaction, and its deletes and claim releases sit behind
 a savepoint: if one of them fails and the callback catches the error, the
-commit keeps none of the call's writes. On a raw store over a driver without
-interactive transactions (Cloudflare D1, `drizzle-orm/neon-http`) the chunks
-run as separate statements, so a failure in a later chunk leaves the earlier
-chunks deleted; a schema-managed store on those drivers refuses the call before
+commit keeps none of the call's writes. Await the call before starting other
+work on the transaction: work that overlaps its savepoint is refused (see
+[Overlapping calls](#overlapping-calls-and-batch-call-savepoints)). On a raw
+store over a driver without interactive transactions (Cloudflare D1,
+`drizzle-orm/neon-http`) the chunks run as separate statements, so a failure in
+a later chunk leaves the earlier chunks deleted; a schema-managed store on those drivers refuses the call before
 it writes, as it refuses every write it cannot fence (see
 [Backend support](#backend-support)).
 
@@ -2237,6 +2242,56 @@ const personId = await store.transaction(async (tx) => {
 });
 // personId is available here
 ```
+
+#### Overlapping calls and batch-call savepoints
+
+Some calls made on `tx` run their writes behind a savepoint of their own, so
+that a failure the callback catches leaves none of them committed: node and
+edge `bulkHardDelete`, an interchange import into the transaction, and
+`applyMergePlanInTransaction`. Rolling back to a savepoint undoes everything
+issued on the transaction since it was taken, by anyone, so while one of these
+savepoints is open (around a bulk delete's or a merge apply's writes, or one
+import row or pass) TypeGraph refuses any other statement it would issue on the
+same transaction, reads included, with
+[`SavepointScopeConflictError`](/errors#savepointscopeconflicterror). The
+refusal is thrown before anything reaches the database, so the transaction
+stays usable; nothing is queued or retried for you.
+
+```typescript
+await store.transaction(async (tx) => {
+  // Refused: the create would run inside bulkHardDelete's savepoint, and a
+  // caught bulkHardDelete failure would silently roll it back.
+  // await Promise.all([
+  //   tx.edges.follows.bulkHardDelete(ids),
+  //   tx.nodes.Person.create({ name: "Alice" }),
+  // ]);
+
+  await tx.edges.follows.bulkHardDelete(ids);
+  await tx.nodes.Person.create({ name: "Alice" });
+});
+```
+
+Await a batch call before starting other work on the same transaction. Work
+started from inside the call (its own nested statements) is part of it and is
+not refused; work that only began inside a call and continues after the call
+returned is ordinary work again, and is refused only if another batch call is
+open by then. A second binding of the same native transaction,
+`store.withTransaction(tx.sql)`, is covered too. Calls that do not overlap a
+batch call are unaffected and may still run concurrently.
+
+A call that was already part-way through when the batch call started keeps the
+statements it issued before then; the refusal stops it at its next statement.
+As for any other failure of a call inside `store.transaction()`, let the error
+propagate so the transaction rolls back, or rethrow after handling it.
+
+The rule covers statements TypeGraph issues through a first-party SQLite or
+PostgreSQL adapter, on runtimes with `AsyncLocalStorage` (Node, and Workers
+with `nodejs_als`). Statements you issue yourself on the native handle
+(`tx.sql`, or the transaction you passed to `withTransaction`) do not pass
+through TypeGraph and cannot be refused: don't run them concurrently with a
+batch call. A custom backend's statements are not policed either, and a
+transaction without statement execution takes no savepoint, so nothing is
+refused on it.
 
 #### Transaction receipts
 

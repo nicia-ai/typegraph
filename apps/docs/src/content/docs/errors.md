@@ -2330,6 +2330,44 @@ the orphaned promise yourself. To avoid orphaning writes at all, use
 transaction ends — so this error cannot arise there. It remains the caller's
 job to await every graph write before committing.
 
+### `SavepointScopeConflictError`
+
+Code `SAVEPOINT_SCOPE_CONFLICT`, category `user`. Thrown when work on a
+transaction would reach the database while another call's TypeGraph
+savepoint is open on that same transaction, and the work is not part of that
+call.
+
+Node and edge `bulkHardDelete`, an interchange import into the transaction and
+`applyMergePlanInTransaction` run their writes behind a savepoint inside
+`store.transaction(...)`, so a failure you catch leaves none of them committed.
+Rolling back to a savepoint undoes every statement issued on the transaction
+since it was taken, whoever issued it. A call started alongside one of these
+without awaiting it would share that rollback, and a caught failure would
+silently undo writes the other call had already reported as successful, or
+invalidate rows it had read. TypeGraph refuses the other call's statement
+instead, reads included, before anything is sent, so the transaction is not
+aborted and stays usable.
+
+```typescript
+await store.transaction(async (tx) => {
+  const results = await Promise.allSettled([
+    tx.edges.follows.bulkHardDelete(ids),
+    tx.nodes.Person.create({ name: "Alice" }), // may be refused
+  ]);
+});
+```
+
+`details.holder` names the call whose savepoint was open (for example
+`edges.follows.bulkHardDelete`); `details.refused` names what was refused: the
+statement TypeGraph was about to send, by its leading keyword (`A SELECT
+statement`), or `Opening a savepoint for …` when two such calls overlap. Await
+the batch call before starting other work on the same transaction. Statements
+the refused call issued before the savepoint opened stay applied, as for any
+other failure of a call inside a transaction: let the error propagate so the
+transaction rolls back, or retry the refused call once the batch call has
+settled. Statements you issue yourself through `tx.sql` are never checked. See
+[Overlapping calls and batch-call savepoints](/schemas-stores#overlapping-calls-and-batch-call-savepoints).
+
 ### `TransactionConflictError`
 
 Thrown when a transaction was aborted by a serialization failure or deadlock
