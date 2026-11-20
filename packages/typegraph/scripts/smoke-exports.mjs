@@ -42,6 +42,11 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/maintenance", expectedExport: "listGraphIds" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteStore" },
   { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteStore" },
+  { subpath: "/doltlite", expectedExport: "createDoltliteStore" },
+  {
+    subpath: "/adapters/drizzle/doltlite",
+    expectedExport: "createDoltliteBackend",
+  },
   {
     subpath: "/adapters/drizzle/sqlite",
     expectedExport: "createSqliteBackend",

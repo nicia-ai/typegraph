@@ -31,6 +31,8 @@ const ENTRY = {
   "backend/postgres/working-copy": "src/backend/postgres/working-copy.ts",
   "backend/postgres/pglite": "src/backend/postgres/pglite.ts",
   "backend/postgres/pglite-store": "src/backend/postgres/pglite-store.ts",
+  "backend/doltlite/index": "src/backend/doltlite/index.ts",
+  "backend/doltlite/store": "src/backend/doltlite/store.ts",
   "backend/drizzle/engine/index": "src/backend/drizzle/engine/index.ts",
 } as const;
 
@@ -101,6 +103,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   external: [
+    "@dolthub/doltlite",
     "better-sqlite3",
     "@libsql/client",
     "bun:sqlite",

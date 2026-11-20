@@ -4,7 +4,8 @@
  * keeps equal to the build).
  *
  * Semver covers every entrypoint except the backend-authoring ones, `/backend`
- * and `/adapters/drizzle/engine` (README "Stability"). Two contracts follow:
+ * and `/adapters/drizzle/engine`, and the experimental DoltLite ones (README
+ * "Stability"). Two contracts follow:
  *
  * 1. `etc/root-export-moves.json`, the shipped record of where each name that
  *    left the root in 0.75.0 now lives, sends a consumer to an entrypoint that
@@ -65,6 +66,16 @@ const COVERED_ENTRYPOINTS = [
 const AUTHORING_ENTRYPOINTS = [
   "./backend",
   "./adapters/drizzle/engine",
+] as const;
+
+/**
+ * The experimental DoltLite entrypoints. Semver does not cover them until the
+ * backend graduates, so the covered-surface walk below does not read them;
+ * moving one into {@link COVERED_ENTRYPOINTS} subjects it to that walk.
+ */
+const EXPERIMENTAL_ENTRYPOINTS = [
+  "./doltlite",
+  "./adapters/drizzle/doltlite",
 ] as const;
 
 /**
@@ -380,8 +391,10 @@ function sorted(values: Iterable<string>): string[] {
 }
 
 describe("public type reachability", () => {
-  it("classifies every package entrypoint as covered or authoring", () => {
-    expect(sorted(packageExportKeys())).toEqual(sorted(ENTRYPOINTS));
+  it("classifies every package entrypoint as covered, authoring or experimental", () => {
+    expect(sorted(packageExportKeys())).toEqual(
+      sorted([...ENTRYPOINTS, ...EXPERIMENTAL_ENTRYPOINTS]),
+    );
   });
 
   it("routes every moved name to an entrypoint that exports it, covered first", () => {

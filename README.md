@@ -129,11 +129,12 @@ semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
 `/maintenance`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
 `/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
 `/postgres/pglite` and `/adapters/drizzle/...` subpaths other than
-`/adapters/drizzle/engine`. See
-[Stability](https://typegraph.dev/backend-authoring#stability).
+`/adapters/drizzle/engine` and the experimental DoltLite entrypoints
+(`/doltlite`, `/adapters/drizzle/doltlite`), which may also change in any
+release. See [Stability](https://typegraph.dev/backend-authoring#stability).
 
-`drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`
-and `@nicia-ai/typegraph/postgres/pglite` load it only when their factory is
+`drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`,
+`@nicia-ai/typegraph/postgres/pglite`, and `@nicia-ai/typegraph/doltlite` load it only when their factory is
 called and refuse with a typed `ConfigurationError`
 (`MISSING_PEER_DEPENDENCY`) naming the package and the install command
 (`npm install drizzle-orm`) when it is absent. The explicit

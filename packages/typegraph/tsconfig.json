@@ -5,6 +5,10 @@
     "baseUrl": ".",
     "outDir": "./dist",
     "paths": {
+      "@nicia-ai/typegraph/doltlite": ["./src/backend/doltlite/store.ts"],
+      "@nicia-ai/typegraph/adapters/drizzle/doltlite": [
+        "./src/backend/doltlite/index.ts"
+      ],
       "@/*": ["./src/*"],
       "@nicia-ai/typegraph": ["./src/index.ts"],
       "@nicia-ai/typegraph/backend": ["./src/backend/index.ts"],
