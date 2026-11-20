@@ -205,6 +205,14 @@ containers and volumes are removed before the next engine starts.
 | `typegraph-sqlite` | none | none | database file in the OS temp dir | page cache sized from host memory |
 | `ladybugdb` | none | none | staged CSVs and database in the OS temp dir | default buffer pool |
 
+The container path calls the `docker` CLI, so Docker or Podman behind a
+`docker` alias both work. Where the two differ the harness takes the portable
+path: the Neo4j `/data` volume is created once, before the import that first
+uses it, and only when `volume inspect` finds no volume of that name (Podman,
+unlike Docker, refuses to create one that exists); teardown removes only the
+containers and volumes that still exist; host memory is read from Docker's
+`info` field or, failing that, Podman's.
+
 The Graph Data Science jar is fetched with Node's `fetch`, which ignores
 `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set; on a proxied host set it,
 or place the pinned jar in `~/.cache/typegraph/neo4j-plugins/` beforehand

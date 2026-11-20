@@ -12,6 +12,7 @@
  * (`storage = dataDir ? PGDATA-on-disk : tmpfs`). `fsync=off` still labels
  * this as a fast, non-durable mode; only the RAM-vs-disk backing changed.
  */
+import { dockerCli, removeContainerIfPresent } from "./container-runtime";
 import { freePort, spawnCapture } from "./process";
 import { POSTGRES_IMAGE } from "./engine-pins";
 
@@ -57,9 +58,9 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
     // image declares. Without it the volume outlives the container and every
     // run leaks one — harmless at SF1 but at SF10 (~70GB each) they overflow
     // the host disk and starve later engines ("database or disk is full").
-    await spawnCapture("docker", ["rm", "-f", "-v", container]).catch(
-      () => undefined,
-    );
+    await removeContainerIfPresent(dockerCli, container, {
+      anonymousVolumes: true,
+    }).catch(() => undefined);
   };
 
   try {

@@ -32,6 +32,10 @@ import {
   type SnbPersonRow,
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
+import {
+  dockerCli,
+  removeContainerIfPresent,
+} from "../harness/container-runtime";
 import { PGGRAPH_IMAGE } from "../harness/engine-pins";
 import {
   EXTERNAL_PGGRAPH_URL_ENV,
@@ -199,9 +203,9 @@ async function startPgGraphContainer(): Promise<PgGraphTarget> {
     // `-v` reclaims the anonymous data volume (see postgres-container.ts) —
     // otherwise each pgGraph run leaks a large volume that overflows the host
     // disk at SF10.
-    await spawnCapture("docker", ["rm", "-f", "-v", name]).catch(
-      () => undefined,
-    );
+    await removeContainerIfPresent(dockerCli, name, {
+      anonymousVolumes: true,
+    }).catch(() => undefined);
   };
   try {
     await waitForPgGraphReady(connectionString);

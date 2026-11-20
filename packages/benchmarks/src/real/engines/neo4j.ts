@@ -103,6 +103,16 @@ import { join } from "node:path";
 import { once } from "node:events";
 
 import {
+  containerStateArgs,
+  type ContainerRuntime,
+  dockerCli,
+  ensureNamedVolume,
+  isStoppedContainerState,
+  removeContainerIfPresent,
+  removeVolumeIfPresent,
+  runtimeMemoryBytes,
+} from "../harness/container-runtime";
+import {
   spawnCapture,
   spawnStatus,
   stringifyError,
@@ -200,18 +210,9 @@ const IS2_MESSAGE_LIMIT = 10;
  * coincides with `os.totalmem()`.
  */
 async function resolveDockerVisibleMemoryBytes(): Promise<number> {
-  try {
-    const output = await spawnCapture("docker", [
-      "info",
-      "--format",
-      "{{.MemTotal}}",
-    ]);
-    const bytes = Number(output.trim());
-    if (Number.isFinite(bytes) && bytes > 0) return bytes;
-  } catch {
-    // Fall through to the Node-visible host total below.
-  }
-  return totalmem();
+  // Docker and Podman report it under different `info` fields; fall back to
+  // the Node-visible host total when neither answers.
+  return (await runtimeMemoryBytes(dockerCli)) ?? totalmem();
 }
 
 type Neo4jMemorySettings = Readonly<{
@@ -316,16 +317,20 @@ async function resolveNeo4jMemorySettings(
  * reason a reference Neo4j driver switches off
  * tmpfs for anything but its tiny synthetic profile. `/logs` and `/tmp`
  * stay tmpfs — their contents never scale with dataset size.
+ *
+ * Starts the server on `dataVolume`, which `runNeo4jAdminImport` created
+ * and filled. It must not create the volume again: on Podman, creating a
+ * volume that exists exits 125.
  */
-async function runNeo4jContainer(
+export async function runNeo4jContainer(
+  runtime: ContainerRuntime,
   containerName: string,
   dataVolume: string,
   pluginDir: string,
   port: number,
   memorySettings: Neo4jMemorySettings,
 ): Promise<void> {
-  await spawnCapture("docker", ["volume", "create", dataVolume]);
-  await spawnCapture("docker", [
+  await runtime([
     "run",
     "-d",
     "--name",
@@ -374,11 +379,11 @@ async function waitForNeo4jBolt(
   while (Date.now() < deadline) {
     const inspect = await spawnStatus(
       "docker",
-      ["inspect", "-f", "{{.State.Status}}", containerName],
+      containerStateArgs(containerName),
       10_000,
     );
     const state = inspect.stdout.trim();
-    if (state === "exited" || state === "dead") {
+    if (isStoppedContainerState(state)) {
       const logs = await spawnCapture("docker", [
         "logs",
         "--tail",
@@ -840,18 +845,21 @@ async function stageSnbDatasetForNeo4jImport(
  * non-existent or empty database directory. `--overwrite-destination=true`
  * is defensive (this benchmark's per-run `dataVolume` name is already
  * unique, so the volume is always fresh) rather than load-bearing.
+ * This is the volume's first use, so it is created here, once (see
+ * `ensureNamedVolume`); `runNeo4jContainer` reuses it.
  * `--id-type=string` is the CLI default; passed explicitly since every id
  * staged above is a prefixed string (`person:123`), never an integer.
  */
-async function runNeo4jAdminImport(
+export async function runNeo4jAdminImport(
+  runtime: ContainerRuntime,
   stageDir: string,
   dataVolume: string,
   log: (message: string) => void,
 ): Promise<void> {
-  await spawnCapture("docker", ["volume", "create", dataVolume]);
+  await ensureNamedVolume(runtime, dataVolume);
   const importPath = (name: string) => `/import/${name}`;
   log("neo4j-admin database import: starting offline bulk load");
-  await spawnCapture("docker", [
+  await runtime([
     "run",
     "--rm",
     "-v",
@@ -1450,6 +1458,22 @@ const QUERY_FAIRNESS =
 type EngineOptions = Parameters<SnbEngineFactory>[0];
 
 /**
+ * Teardown for the container path: the server container, then its data
+ * volume. Each step skips an object that is already gone, so it is safe after
+ * a load that failed part-way and safe to repeat.
+ */
+export async function removeNeo4jContainer(
+  runtime: ContainerRuntime,
+  containerName: string,
+  dataVolume: string,
+): Promise<void> {
+  await removeContainerIfPresent(runtime, containerName, {
+    anonymousVolumes: true,
+  });
+  await removeVolumeIfPresent(runtime, dataVolume);
+}
+
+/**
  * Container (default) or existing server (`TYPEGRAPH_BENCH_NEO4J_URL`). Both
  * build the same graph (`./neo4j-graph-shape.ts`), the same three
  * constraints and the same GDS projection before any query runs, and share
@@ -1484,10 +1508,7 @@ function createNeo4jContainerEngine(options: EngineOptions): SnbEngineHandle {
   async function cleanup(): Promise<void> {
     await session?.close().catch(() => undefined);
     await driver?.close().catch(() => undefined);
-    await spawnCapture("docker", ["rm", "-f", containerName]).catch(
-      () => undefined,
-    );
-    await spawnCapture("docker", ["volume", "rm", "-f", dataVolume]).catch(
+    await removeNeo4jContainer(dockerCli, containerName, dataVolume).catch(
       () => undefined,
     );
     await pluginDir?.cleanup().catch(() => undefined);
@@ -1534,7 +1555,12 @@ function createNeo4jContainerEngine(options: EngineOptions): SnbEngineHandle {
             options.datasetRoot,
             options.log,
           );
-          await runNeo4jAdminImport(stageDir, dataVolume, options.log);
+          await runNeo4jAdminImport(
+            dockerCli,
+            stageDir,
+            dataVolume,
+            options.log,
+          );
         } finally {
           await rm(stageDir, { recursive: true, force: true });
         }
@@ -1542,6 +1568,7 @@ function createNeo4jContainerEngine(options: EngineOptions): SnbEngineHandle {
         pluginDir = await stageGdsPluginDir(options.log);
         const port = await freePort();
         await runNeo4jContainer(
+          dockerCli,
           containerName,
           dataVolume,
           pluginDir.dir,
