@@ -1170,7 +1170,14 @@ level does with a write that commits concurrently.
 
 #### `hardDelete(id)`
 
-Permanently deletes a node. This is irreversible and should be used carefully.
+Removes a node's row, live or soft-deleted, with its uniqueness, fulltext and embedding rows, every
+connected edge, and the Operational Identity assertions and closure rows that name it. The store
+cannot undo it, but it does not remove every copy of the node: on a `history: true` store every
+recorded version of the node and of its connected edges stays readable with `asOfRecorded(T)` at
+an instant before the delete, the recorded identity assertions and transition log entries remain,
+the revision journal keeps the node's kind and ID, and a branch forked earlier keeps its own copy.
+See [Soft Delete vs Hard Delete](/core-concepts#soft-delete-vs-hard-delete) for the table per
+store configuration, and [Deleting is not erasure](/limitations#deleting-is-not-erasure).
 
 ```typescript
 store.nodes.Person.hardDelete(id: NodeId<Person>): Promise<void>;
@@ -1442,7 +1449,9 @@ cascade/disconnect work, use the transactional path instead.
 
 #### `bulkHardDelete(ids)`
 
-Permanently deletes multiple nodes. This is irreversible and should be used carefully.
+Hard-deletes multiple nodes. It removes and keeps exactly what `hardDelete()` does, so it is not an
+erasure either: recorded history, the revision journal and earlier branches keep their copies (see
+[`hardDelete(id)`](#harddeleteid)).
 
 ```typescript
 store.nodes.Person.bulkHardDelete(
@@ -1926,7 +1935,9 @@ store.edges.worksAt.delete(id: EdgeId<worksAt>): Promise<void>;
 
 #### `hardDelete(id)`
 
-Permanently deletes an edge. This is irreversible and should be used carefully.
+Removes an edge's row. The store cannot undo it, but on a `history: true` store the edge's recorded
+versions, with their properties, stay readable with `asOfRecorded(T)` at an instant before the
+delete.
 
 ```typescript
 store.edges.worksAt.hardDelete(id: EdgeId<worksAt>): Promise<void>;
@@ -1990,7 +2001,8 @@ when their optional batch ports are available.
 
 #### `bulkHardDelete(ids)`
 
-Permanently deletes multiple edges. This is irreversible and should be used carefully.
+Hard-deletes multiple edges. As with `hardDelete()`, a `history: true` store keeps their recorded
+versions.
 
 ```typescript
 store.edges.worksAt.bulkHardDelete(
@@ -2703,7 +2715,7 @@ the full list of affected backends and edge-runtime alternatives.
 
 #### `store.clear()`
 
-Hard-deletes the current graph's data: nodes, edges, uniqueness entries,
+Hard-deletes the current graph's data: nodes, edges, recorded history, uniqueness entries,
 embeddings, and schema versions. Contribution materialization markers are
 preserved by default so a clear does not invalidate their attestations. Pass
 `preserveContributionMaterializations: false` to remove those graph-local

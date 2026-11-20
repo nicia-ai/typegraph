@@ -274,6 +274,10 @@ async function deleteSetting(id: NodeId<typeof Setting>): Promise<void> {
 }
 ```
 
+The audit entry copies the setting's values into `changes`. Deleting the setting, soft or hard,
+does not remove those copies, and the logs [exported](#export-audit-logs) to another system are
+outside the store. See [Deleting is not erasure](/limitations#deleting-is-not-erasure).
+
 ### Create Audit Entry
 
 ```typescript

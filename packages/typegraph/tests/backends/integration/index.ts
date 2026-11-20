@@ -45,6 +45,7 @@ export { registerEdgePropertyIntegrationTests } from "./edge-properties";
 export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-advanced";
 export { registerEdgeTargetCardinalityIntegrationTests } from "./edge-target-cardinality";
 export { registerEdgeTargetCardinalityTemporalIntegrationTests } from "./edge-target-cardinality-temporal";
+export { registerErasureAuditIntegrationTests } from "./erasure-audit";
 export { registerExpressionSubqueryQueryIntegrationTests } from "./expression-subquery-queries";
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";

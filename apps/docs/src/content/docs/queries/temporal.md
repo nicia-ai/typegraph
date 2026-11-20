@@ -376,6 +376,13 @@ and candidate in one database snapshot.
 The existing time and revision indexes serve candidate selection and bounded deletion
 on SQLite and PostgreSQL, including custom table namespaces.
 
+Pruning removes allocation metadata only. It does not remove recorded node or edge versions, and
+neither does `pruneIdentityTransitions`, which removes transition log entries. A hard delete closes
+an entity's last recorded interval and keeps every earlier version, so `asOfRecorded(T)` at an
+instant before a `hardDelete()` still returns the deleted node, its properties and its edges. No
+operation removes the recorded versions of a single entity; see
+[Deleting is not erasure](/limitations#deleting-is-not-erasure).
+
 Among recorded-time APIs, only `pruneRecordedInstants` requires base-schema version 9.
 As with every base-schema bump, verified-schema loading, graph-template entry points,
 and working-copy cloning require adoption to the current version. Version 9 adds the nullable

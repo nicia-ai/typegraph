@@ -999,6 +999,38 @@ adopt a caller-owned transaction:
   `migrateRecordedAnchor()` for checkpoints held outside TypeGraph. See
   [Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 
+## Deleting Is Not Erasure
+
+`delete()`, `hardDelete()` and `bulkHardDelete()` remove a node from current reads, search and
+uniqueness lookups. None of them removes every copy of the node's data, and TypeGraph has no
+erasure operation yet ([#922](https://github.com/nicia-ai/typegraph/issues/922) tracks one). This
+is what a caller who needs to remove a node's data can and cannot do today:
+
+- **Hard delete on a store without `history: true`.** `hardDelete()` removes the node's row, its
+  incident edges, and its uniqueness, fulltext and embedding rows, and the Operational Identity
+  assertions and closure rows that name it. No row of the graph keeps the node's property values
+  afterwards. With `revisionTracking: true` the revision journal keeps the node's kind and ID, but
+  no property values. On PostgreSQL the journal is kept by database triggers once it is installed,
+  so it can hold the ID for a store that does not track revisions.
+- **Hard delete on a `history: true` store.** Every recorded version of the node and of its
+  incident edges stays in the recorded relations with its properties, and `asOfRecorded(T)` at an
+  instant before the delete still returns them. The recorded identity assertions and the identity
+  transition log entries that name the node also remain. `pruneRecordedInstants()` does not remove
+  recorded versions. `pruneIdentityTransitions()` removes the transition log entries but not the
+  recorded versions. There is no operation that removes one node's recorded versions.
+  `store.clear()` removes every row of the graph, recorded history included.
+- **Soft delete.** `delete()` keeps the node's row, its properties and its unique-key row, and ends
+  its identity assertions without removing them; `store.view({ mode: "includeTombstones" })` still
+  returns the node. It removes the fulltext and embedding rows.
+- **Branches and working copies.** A branch or working copy forked before the delete holds its own
+  copy of the node, and deleting the node on the base store does not change it.
+- **Copies outside the store.** Values the application has read, exports, archives and backups are
+  outside the store, and no store operation reaches them. A transaction receipt holds write counts,
+  not property values.
+
+TypeGraph does not decide what a regulation requires; this section only describes what each
+operation leaves behind.
+
 ## Schema Migration Constraints
 
 Automatic migrations (`createStoreWithSchema`) only handle additive changes:
