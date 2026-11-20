@@ -11447,6 +11447,7 @@ type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
+    candidateVersionColumn?: string;
 }>;
 
 // @public

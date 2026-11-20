@@ -679,7 +679,7 @@ const CASES: Record<keyof WriteSession, Case> = {
     run: async (raw) => {
       await seed(raw, "k");
       const candidates = asCompiledSelectSql(sql`
-        SELECT id AS n_id
+        SELECT id AS n_id, version AS n_version
         FROM ${createSqlSchema(raw.tableNames).nodesTable}
         WHERE graph_id = ${GRAPH_ID} AND kind = 'Doc' AND id = 'k'
       `);
@@ -700,6 +700,7 @@ const CASES: Record<keyof WriteSession, Case> = {
             unsetProperties: [],
             candidateIds: candidates,
             candidateIdColumn: "n_id",
+            candidateVersionColumn: "n_version",
           },
           { validityLowerBound: {} },
         );

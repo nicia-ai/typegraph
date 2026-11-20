@@ -386,14 +386,17 @@ export class ExecutableQuery<
   }
 
   /**
-   * Compiles only the root node identity for use by a set-based mutation.
-   * This deliberately ignores the JavaScript selector supplied to
-   * `.select(...)`: candidate identity is always the root id, so changing a
+   * Compiles only the root node identity for use by a set-based mutation: the
+   * root id and the version of the row the query read, in the
+   * `idColumn` / `versionColumn` that {@link toNodeCandidateSelection}
+   * names. This deliberately ignores the JavaScript selector supplied to
+   * `.select(...)`: candidate identity is always the root row, so changing a
    * result projection cannot make the mutation reference a missing column.
    */
   compileNodeCandidateIds(readInstant?: string): CompiledSelectSql {
     const ast = this.toAst();
     const idColumn = `${ast.start.alias}_id`;
+    const versionColumn = `${ast.start.alias}_version`;
     return compileQuery(
       {
         ...ast,
@@ -414,6 +417,15 @@ export class ExecutableQuery<
                 alias: ast.start.alias,
                 path: ["id"],
                 valueType: "string",
+              },
+            },
+            {
+              outputName: versionColumn,
+              source: {
+                __type: "field_ref",
+                alias: ast.start.alias,
+                path: ["version"],
+                valueType: "number",
               },
             },
           ],
@@ -876,6 +888,7 @@ export class ExecutableQuery<
         : backendDerivationRoot(this.#config.backend),
       kind,
       idColumn: `${ast.start.alias}_id`,
+      versionColumn: `${ast.start.alias}_version`,
       temporalMode: ast.temporalMode.mode,
       recordedAsOf: ast.recordedAsOf,
     };

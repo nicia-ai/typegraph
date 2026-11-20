@@ -136,11 +136,12 @@ function setUpdateWork(
     patch: { name: "Renamed" },
     unsetProperties: [],
     candidateIds: asCompiledSelectSql(sql`
-      SELECT id AS n_id
+      SELECT id AS n_id, version AS n_version
       FROM ${createSqlSchema(backend.tableNames).nodesTable}
       WHERE graph_id = ${GRAPH_ID} AND kind = 'Person'
     `),
     candidateIdColumn: "n_id",
+    candidateVersionColumn: "n_version",
   };
 }
 

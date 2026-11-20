@@ -1,0 +1,7 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+`updateWhere()` no longer goes super-linear on PostgreSQL when the nodes table's planner statistics predate the candidate rows, which is what a bulk load into a large shared table leaves behind because one import never reaches autovacuum's analyze threshold. The update matched `(id, version) IN (SELECT … FROM (candidates) JOIN nodes …)`; with statistics estimating the kind at one row, PostgreSQL drove a nested loop from the nodes table that rescanned the candidate subquery, and the join behind it, once per row: 1,000 freshly inserted ids took 259 s. The candidate query now runs once in its own statement and returns each matching row's id and the version it read, and the `UPDATE` matches bound id and `version:id` key lists, chunked to the backend's bind budget and planned for its actual parameters, so no plan can rescan the candidates. 20,000 stale ids now update in about a second. Rows changed after the candidate read, including while the write waits for a row lock, are still skipped, and `compareAndSet()` keeps matching on id with its `expected` values re-checked by the `UPDATE`.
+
+The candidate queries now project the root version: `compileNodeCandidateIds()` emits a `<alias>_version` column beside `<alias>_id`, `NodeCandidateSelection` names it as `versionColumn`, and `UpdateNodeSetParams` carries it as `candidateVersionColumn`. A custom backend implementing `updateNodeSet` must write a candidate only while its stored version equals that column's value.

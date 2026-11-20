@@ -1051,7 +1051,7 @@ type NodeSetUpdateCommonWork = Readonly<{
 
 export type NodeSetUpdateWork = NodeSetUpdateCommonWork &
   (
-    | Readonly<{ operation: "updateWhere" }>
+    | Readonly<{ operation: "updateWhere"; candidateVersionColumn: string }>
     | Readonly<{
         operation: "compareAndSet";
         expected: Readonly<Record<string, NodePropertyExpectation>>;
@@ -1123,7 +1123,11 @@ export async function applyNodeSetUpdate(
       );
     }
     executeNodeSetUpdate = () =>
-      updateNodeSet({ ...commonParams, operation: "updateWhere" });
+      updateNodeSet({
+        ...commonParams,
+        operation: "updateWhere",
+        candidateVersionColumn: args.candidateVersionColumn,
+      });
   }
   if (
     uniqueConstraints.length > 0 &&

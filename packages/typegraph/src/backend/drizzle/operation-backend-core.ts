@@ -18,7 +18,10 @@ import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
-import { asCompiledStatementSql } from "../../query/sql-intent";
+import {
+  asCompiledStatementSql,
+  markForceCustomPlan,
+} from "../../query/sql-intent";
 import {
   type ClaimOwner,
   compareClaimTargets,
@@ -188,6 +191,11 @@ import {
   ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
   claimPredicateShapeKey,
 } from "./operations/edge-claims";
+import {
+  decodeNodeSetCandidateKeys,
+  type NodeSetCandidateKey,
+  resolveNodeSetKeyRead,
+} from "./operations/nodes";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -4957,14 +4965,80 @@ export function createCommonOperationBackend(
 
   const commandsPort = { session: commandSession, execute: executeCommand };
 
+  /**
+   * Runs a set update in two statements: read the candidate keys once, then
+   * update the rows by bound key lists (see `buildSelectNodeSetCandidateKeys`
+   * for why the candidates are not semi-joined into the UPDATE). Both are
+   * planned for their actual parameters: a cached generic plan would see the
+   * key lists as opaque parameters and lose the constant-set membership the
+   * statement relies on. A strategy without the keyed builders, or an
+   * `updateWhere` that names no version column (`resolveNodeSetKeyRead`),
+   * runs the one-statement semi-join instead, decided before any statement.
+   */
   async function executeNodeSetUpdate(
     params: CompareAndSetNodeParams | UpdateNodeSetParams,
   ): Promise<UpdateNodeSetResult> {
     const timestamp = nowIso();
-    const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
-    const rows = await execution.execAll<Record<string, unknown>>(query);
-    const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+    const read = resolveNodeSetKeyRead(params);
+    const buildCandidateKeys = operationStrategy.buildSelectNodeSetCandidateKeys;
+    const buildKeyedUpdate = operationStrategy.buildUpdateNodeSetForKeys;
+    if (
+      read === undefined ||
+      buildCandidateKeys === undefined ||
+      buildKeyedUpdate === undefined
+    ) {
+      const rows = await execution.execAll<Record<string, unknown>>(
+        operationStrategy.buildUpdateNodeSet(params, timestamp),
+      );
+      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+      return { affectedCount: updatedRows.length, rows: updatedRows };
+    }
+    const candidateQuery = buildCandidateKeys(params.candidateIds, read);
+    markForceCustomPlan(candidateQuery);
+    const keys = decodeNodeSetCandidateKeys(
+      params,
+      read,
+      await execution.execAll<Record<string, unknown>>(candidateQuery),
+    );
+    if (keys.length === 0) return { affectedCount: 0, rows: [] };
+    const updatedRows: NodeRow[] = [];
+    for (const chunk of chunkArray(
+      keys,
+      nodeSetUpdateChunkSize(
+        (sampleKeys) => buildKeyedUpdate(params, timestamp, sampleKeys),
+        keys,
+      ),
+    )) {
+      const update = buildKeyedUpdate(params, timestamp, chunk);
+      markForceCustomPlan(update);
+      const rows = await execution.execAll<Record<string, unknown>>(update);
+      for (const row of rows) updatedRows.push(rowMappers.toNodeRow(row));
+    }
     return { affectedCount: updatedRows.length, rows: updatedRows };
+  }
+
+  /**
+   * Keys per set-update statement. The statement's bind cost per key is
+   * measured by compiling it for one and for two keys, so a dialect that packs
+   * each list into one bound value (SQLite) runs every key in one statement,
+   * and one that binds every element (PostgreSQL) fills the bind budget.
+   */
+  function nodeSetUpdateChunkSize(
+    buildKeyedUpdate: (keys: readonly NodeSetCandidateKey[]) => SQL,
+    keys: readonly NodeSetCandidateKey[],
+  ): number {
+    const sample = keys.slice(0, 2);
+    const [first] = sample;
+    if (first === undefined || sample.length < 2) return 1;
+    const bindsFor = (sampleKeys: readonly NodeSetCandidateKey[]): number =>
+      execution.compile(buildKeyedUpdate(sampleKeys)).params.length;
+    const fixedAndOne = bindsFor([first]);
+    const perKey = bindsFor(sample) - fixedAndOne;
+    if (perKey <= 0) return keys.length;
+    return Math.max(
+      1,
+      Math.floor((maxBindParameters - (fixedAndOne - perKey)) / perKey),
+    );
   }
 
   async function clearGraphWithOptions(

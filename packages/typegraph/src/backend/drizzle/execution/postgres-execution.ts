@@ -790,7 +790,7 @@ export function createPostgresExecutionAdapter(
       // client assigns each unique SQL a stable statement name.
       const compiled = compile(query);
       assertCompiledWithinBindParameterLimit(compiled);
-      if (isSqlFragment(query) && shouldForceCustomPlan(query)) {
+      if (shouldForceCustomPlan(query)) {
         const result = await pgQueryClient.queryUnnamed(
           compiled.sql,
           compiled.params,

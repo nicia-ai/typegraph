@@ -52,6 +52,16 @@ export type {
  */
 export type { FenceStatements, WriteFencePlan } from "../../capabilities/write-fence";
 /**
+ * The candidate-key read and the keys it yields — public here because the
+ * strategy's optional `buildSelectNodeSetCandidateKeys` /
+ * `buildUpdateNodeSetForKeys` members carry them, and a profile author
+ * implementing those members needs to name them.
+ */
+export type {
+  NodeSetCandidateKey,
+  NodeSetKeyRead,
+} from "../operations/nodes";
+/**
  * The PostgreSQL {@link SqlEngineProfile} builder — the derivation base
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL
  * profile from. Exported here, not from `./adapters/drizzle/postgres`: that

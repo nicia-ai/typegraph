@@ -19,6 +19,8 @@ import { rowPropsToObject } from "../../../src/backend/types";
 import type { QueryAst } from "../../../src/query/ast";
 import { compileQuery } from "../../../src/query/compiler";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledSelectSql } from "../../../src/query/sql-intent";
 import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write-pipeline";
 import { compareAndSetAbsent } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
@@ -854,6 +856,43 @@ export function registerSetNodeMutationIntegrationTests(
       });
     });
 
+    it("refuses a candidate selection that names no version column, writing nothing", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create({ name: "Unversioned" });
+      const query = store
+        .query()
+        .from("Person", "person", { expansion: "exact" })
+        .whereNode("person", (candidate) => candidate.id.eq(person.id))
+        .select((ctx) => ctx.person.id);
+      const candidates = {
+        compileNodeCandidateIds: (readInstant?: string) =>
+          query.compileNodeCandidateIds(readInstant),
+        toNodeCandidateSelection: () => {
+          const { versionColumn, ...selection } =
+            query.toNodeCandidateSelection();
+          expect(versionColumn).toBe("person_version");
+          return selection;
+        },
+      };
+
+      await expect(
+        store.nodes.Person.updateWhere({
+          candidates,
+          patch: { isActive: true },
+        }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "SET_UPDATE_CANDIDATE_VERSION_MISSING",
+          operation: "updateWhere",
+        },
+      });
+      const stored = requireDefined(
+        await store.nodes.Person.getById(person.id),
+      );
+      expect(stored.meta.version).toBe(1);
+    });
+
     it("refuses checked-read candidates before applying a set update", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create({
@@ -979,6 +1018,7 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
+        candidateVersionColumn: "person_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1043,6 +1083,7 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
+        candidateVersionColumn: "person_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1263,6 +1304,7 @@ export function registerSetNodeMutationIntegrationTests(
         },
         candidateIds,
         candidateIdColumn: "document_id",
+        candidateVersionColumn: "document_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1299,6 +1341,7 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { "0": "zero", "01": "zero-one" },
         candidateIds,
         candidateIdColumn: "document_id",
+        candidateVersionColumn: "document_version",
       });
 
       expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
@@ -1333,12 +1376,48 @@ export function registerSetNodeMutationIntegrationTests(
         patch,
         candidateIds,
         candidateIdColumn: "document_id",
+        candidateVersionColumn: "document_version",
       });
 
       expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
         title: "Draft",
         ...patch,
       });
+    });
+
+    it("writes a candidate only at the version its candidate column states, and reads the version itself when no column is named", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      // The projected version is deliberately not the stored one: a write
+      // keyed by it must skip the row, exactly as it skips a row a concurrent
+      // writer moved past the version the candidate query read.
+      const candidateIds = asCompiledSelectSql(sql`
+        SELECT id AS person_id, version + 1 AS person_version
+        FROM ${createSqlSchema(backend.tableNames).nodesTable}
+        WHERE graph_id = ${store.graphId} AND kind = 'Person' AND id = ${alice.id}
+      `);
+      const params = {
+        operation: "updateWhere",
+        graphId: store.graphId,
+        kind: "Person",
+        patch: { isActive: true },
+        candidateIds,
+        candidateIdColumn: "person_id",
+      } as const;
+
+      const keyed = await updateNodeSet(backend, {
+        ...params,
+        candidateVersionColumn: "person_version",
+      });
+      // Without a version column the backend reads the stored version itself
+      // (the one-statement semi-join), so the same candidate is written.
+      const unkeyed = await updateNodeSet(backend, params);
+
+      expect({
+        keyed: keyed.affectedCount,
+        unkeyed: unkeyed.rows.map((row) => [row.id, row.version]),
+      }).toEqual({ keyed: 0, unkeyed: [[alice.id, 2]] });
     });
 
     it("never resurrects tombstoned candidates", async () => {
@@ -1365,6 +1444,7 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
+        candidateVersionColumn: "person_version",
       });
 
       expect(result).toEqual({ affectedCount: 0, rows: [] });
@@ -1398,6 +1478,7 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
+        candidateVersionColumn: "person_version",
       });
       const afterUpdate = requireDefined(await store.recordedNow());
 
@@ -1434,6 +1515,7 @@ export function registerSetNodeMutationIntegrationTests(
           patch: {},
           candidateIds,
           candidateIdColumn: "person_id",
+          candidateVersionColumn: "person_version",
         }),
       ).rejects.toBeInstanceOf(ConfigurationError);
     });

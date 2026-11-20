@@ -3,6 +3,7 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
+import type { CompiledSelectSql } from "../../../query/sql-intent";
 import { type EdgeCardinalityAxisRef } from "../../../store/claims/edge-claims";
 import { isPresent, requireDefined } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
@@ -177,8 +178,12 @@ import {
   buildLockNodesForAtomicDeleteWithSchemaFence,
   buildReadAtomicNodeMutationPostimages,
   buildResolvedNodeUpdateBatch,
+  buildSelectNodeSetCandidateKeys,
   buildUpdateNode,
   buildUpdateNodeSet,
+  buildUpdateNodeSetForKeys,
+  type NodeSetCandidateKey,
+  type NodeSetKeyRead,
 } from "./nodes";
 import {
   buildGetActiveSchema,
@@ -409,9 +414,30 @@ export type CommonOperationStrategy = Readonly<{
     ids: readonly string[],
     schemaFence: SchemaWriteFenceParams,
   ) => SQL;
+  /**
+   * The one-statement set update, semi-joining the candidates into the
+   * UPDATE. Used when the two members below are absent, or when an
+   * `updateWhere` names no `candidateVersionColumn`.
+   */
   buildUpdateNodeSet: (
     params: CompareAndSetNodeParams | UpdateNodeSetParams,
     timestamp: string,
+  ) => SQL;
+  /**
+   * Reads a set update's candidate keys once. Optional, with
+   * {@link buildUpdateNodeSetForKeys}: together they replace
+   * {@link buildUpdateNodeSet} with a write whose plan cannot rescan the
+   * candidates.
+   */
+  buildSelectNodeSetCandidateKeys?: (
+    candidateIds: CompiledSelectSql,
+    read: NodeSetKeyRead,
+  ) => SQL;
+  /** Optional, with {@link buildSelectNodeSetCandidateKeys}. */
+  buildUpdateNodeSetForKeys?: (
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+    timestamp: string,
+    keys: readonly NodeSetCandidateKey[],
   ) => SQL;
   buildResolvedNodeUpdateBatch: (
     params: ResolvedNodeUpdateBatchParams,
@@ -1342,6 +1368,19 @@ function createCommonOperationStrategy(
       timestamp: string,
     ): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
+    buildSelectNodeSetCandidateKeys(
+      candidateIds: CompiledSelectSql,
+      read: NodeSetKeyRead,
+    ): SQL {
+      return buildSelectNodeSetCandidateKeys(dialect, candidateIds, read);
+    },
+    buildUpdateNodeSetForKeys(
+      params: CompareAndSetNodeParams | UpdateNodeSetParams,
+      timestamp: string,
+      keys: readonly NodeSetCandidateKey[],
+    ): SQL {
+      return buildUpdateNodeSetForKeys(tables, dialect, params, timestamp, keys);
     },
     buildResolvedNodeUpdateBatch(params, timestamp): SQL {
       return buildResolvedNodeUpdateBatch(

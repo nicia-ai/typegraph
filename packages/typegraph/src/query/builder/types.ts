@@ -159,6 +159,11 @@ export type NodeCandidateSelection = Readonly<{
   executionTarget: object | undefined;
   kind: string;
   idColumn: string;
+  /**
+   * Column {@link NodeCandidateQuery.compileNodeCandidateIds} projects the root
+   * version into. `updateWhere()` refuses a selection without one.
+   */
+  versionColumn?: string;
   temporalMode: "current" | "asOf" | "includeEnded" | "includeTombstones";
   recordedAsOf: string | undefined;
 }>;

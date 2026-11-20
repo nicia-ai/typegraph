@@ -8,6 +8,7 @@ import {
   sql as portableSql,
   type SqlFragment,
 } from "../../../query/sql-fragment";
+import type { CompiledSelectSql } from "../../../query/sql-intent";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   AtomicNodeBatchEntry,
@@ -1084,8 +1085,236 @@ function buildNodeExpectationPredicate(
 }
 
 /**
+ * One row a set update may write, read from its candidate query: the node id
+ * and, for `updateWhere`, the version of the row the candidate snapshot read,
+ * as the text {@link nodeSetVersionKeyExpression} renders for a stored row.
+ */
+export type NodeSetCandidateKey = Readonly<{
+  id: string;
+  versionKey: string | undefined;
+}>;
+
+const CANDIDATE_ID_ALIAS = "tg_set_candidate_id";
+const CANDIDATE_VERSION_ALIAS = "tg_set_candidate_version";
+
+/**
+ * What the candidate-key read projects: the candidate id column and, for
+ * `updateWhere`, the column holding the version each candidate read.
+ * `compareAndSet` matches by id, so it reads no version.
+ */
+export type NodeSetKeyRead = Readonly<{
+  idColumn: string;
+  versionColumn: string | undefined;
+}>;
+
+/**
+ * Decides whether a set update can run as a candidate-key read plus a keyed
+ * write, and what that read projects. `undefined` means it cannot: an
+ * `updateWhere` that names no `candidateVersionColumn` has no version to key
+ * the write by, so it must run as {@link buildUpdateNodeSet}, which joins the
+ * candidates back onto the nodes table for theirs.
+ */
+export function resolveNodeSetKeyRead(
+  params: CompareAndSetNodeParams | UpdateNodeSetParams,
+): NodeSetKeyRead | undefined {
+  if (params.operation === "compareAndSet") {
+    return { idColumn: params.candidateIdColumn, versionColumn: undefined };
+  }
+  const versionColumn = params.candidateVersionColumn;
+  if (versionColumn === undefined || versionColumn.length === 0) {
+    return undefined;
+  }
+  return { idColumn: params.candidateIdColumn, versionColumn };
+}
+
+/**
+ * Reads the distinct candidate keys a set update writes. The candidate query
+ * is evaluated once, in this statement's snapshot, and yields the root id and
+ * — for `updateWhere` — the version of the exact row its selectors matched.
+ *
+ * The keys are read rather than semi-joined into the UPDATE because no
+ * single-statement join from a candidate subquery onto the nodes table has a
+ * plan that is linear whatever the planner believes about row counts: with
+ * statistics that predate a bulk load, PostgreSQL estimates the target kind at
+ * one row and drives a nested loop from the nodes table, rescanning the
+ * candidate subquery per row (quadratic, cubic when the candidates are joined
+ * back onto the nodes table for their version), and an `= ANY(ARRAY(...))`
+ * InitPlan lands as a linear per-row filter instead of an index condition.
+ * {@link buildUpdateNodeSetForKeys} binds the keys instead, which every plan
+ * evaluates in constant time per row.
+ */
+export function buildSelectNodeSetCandidateKeys(
+  dialect: SqlDialect,
+  candidateIds: CompiledSelectSql,
+  read: NodeSetKeyRead,
+): SQL {
+  const candidates = sql.identifier("tg_set_candidates");
+  const versionProjection =
+    read.versionColumn === undefined ?
+      sql.empty()
+    : sql`, ${candidates}.${sql.identifier(read.versionColumn)} AS ${sql.identifier(CANDIDATE_VERSION_ALIAS)}`;
+  return sql`
+    SELECT DISTINCT ${candidates}.${sql.identifier(read.idColumn)} AS ${sql.identifier(CANDIDATE_ID_ALIAS)}${versionProjection}
+    FROM (${toDrizzleSql(candidateIds, dialect)}) AS ${candidates}
+  `;
+}
+
+/** Decodes the rows {@link buildSelectNodeSetCandidateKeys} returns. */
+export function decodeNodeSetCandidateKeys(
+  params: CompareAndSetNodeParams | UpdateNodeSetParams,
+  read: NodeSetKeyRead,
+  rows: readonly Record<string, unknown>[],
+): readonly NodeSetCandidateKey[] {
+  return rows.map((row) => {
+    const id = row[CANDIDATE_ID_ALIAS];
+    if (typeof id !== "string") {
+      throw new CompilerInvariantError(
+        "A set-update candidate query returned a non-text node id.",
+        { operation: params.operation, kind: params.kind },
+      );
+    }
+    if (read.versionColumn === undefined) {
+      return { id, versionKey: undefined };
+    }
+    const version = row[CANDIDATE_VERSION_ALIAS];
+    if (typeof version !== "number" && typeof version !== "string") {
+      throw new CompilerInvariantError(
+        "A set-update candidate query returned no node version.",
+        { operation: params.operation, kind: params.kind },
+      );
+    }
+    return { id, versionKey: nodeSetVersionKey(id, String(version)) };
+  });
+}
+
+/**
+ * The version key of one candidate: `<version>:<id>`. A version is decimal
+ * digits, so the first `:` always ends it and no two `(id, version)` pairs
+ * share a key. {@link nodeSetVersionKeyExpression} is the stored row's side.
+ */
+function nodeSetVersionKey(id: string, version: string): string {
+  return `${version}:${id}`;
+}
+
+/** The stored row's {@link nodeSetVersionKey}, as SQL over the target row. */
+function nodeSetVersionKeyExpression(tables: Tables): SqlFragment {
+  const { nodes } = tables;
+  return portableSql`CAST(${portableSql.identifier(nodes.version.name)} AS TEXT) || ':' || ${portableSql.identifier(nodes.id.name)}`;
+}
+
+/**
+ * Builds the set-based update for one chunk of candidate keys read by
+ * {@link buildSelectNodeSetCandidateKeys}. The outer graph/kind/live-row
+ * predicates are deliberate write fences and must not be delegated solely to
+ * the candidate query.
+ *
+ * The keys are bound literal lists (`DialectAdapter.inList`), so the engine
+ * evaluates membership against a constant set — PostgreSQL hashes it and,
+ * when the statement is planned for its actual parameters, can use the id
+ * list as a primary-key index condition — and no plan rescans the candidates.
+ */
+export function buildUpdateNodeSetForKeys(
+  tables: Tables,
+  dialect: SqlDialect,
+  params: CompareAndSetNodeParams | UpdateNodeSetParams,
+  timestamp: string,
+  keys: readonly NodeSetCandidateKey[],
+): SQL {
+  const { nodes } = tables;
+  const adapter = getDialect(dialect);
+  const patchedProps = toDrizzleSql(
+    adapter.jsonSetProperties(
+      portableSql.identifier(nodes.props.name),
+      params.patch,
+      params.unsetProperties ?? [],
+    ),
+    dialect,
+  );
+  const propsColumn = portableSql.identifier(nodes.props.name);
+  const expectedPredicates =
+    params.operation === "compareAndSet" ?
+      Object.entries(params.expected).map(([property, expectation]) =>
+        toDrizzleSql(
+          buildNodeExpectationPredicate(
+            adapter,
+            propsColumn,
+            property,
+            expectation,
+          ),
+          dialect,
+        ),
+      )
+    : [];
+  const expectedPredicate =
+    expectedPredicates.length === 0 ?
+      sql.empty()
+    : sql` AND ${sql.join(expectedPredicates, sql` AND `)}`;
+
+  const idMatch = toDrizzleSql(
+    adapter.inList(
+      portableSql.identifier(nodes.id.name),
+      keys.map((key) => key.id),
+      false,
+    ),
+    dialect,
+  );
+  // Under PostgreSQL READ COMMITTED the candidate query ran in an earlier
+  // snapshot than this statement, so a row a concurrent writer committed in
+  // between is seen here at its new state, and a row it changes while this
+  // UPDATE waits for its lock is re-checked against these predicates only.
+  // For `updateWhere`, whose `where` / `exists` / `candidates` selectors live
+  // in the candidate query, matching on the id alone would write a patch
+  // selected from the row's previous state. Matching the version the
+  // candidate snapshot read as well makes the write conditional on the row
+  // being exactly the one the selectors chose: every row write bumps
+  // `version` (a tombstone is fenced by `deleted_at IS NULL` above), so a row
+  // changed since the candidate snapshot is skipped and absent from the
+  // after-images.
+  //
+  // `compareAndSet` keeps the id match. Its candidate query selects by id,
+  // which a concurrent write cannot falsify, and its guard is the `expected`
+  // predicates above, which this UPDATE re-checks on the target row, so a
+  // concurrent change to an unrelated property must not fail it.
+  const versionMatch =
+    params.operation === "compareAndSet" ?
+      sql.empty()
+    : sql` AND ${toDrizzleSql(
+        adapter.inList(
+          nodeSetVersionKeyExpression(tables),
+          keys.map((key) => {
+            if (key.versionKey === undefined) {
+              throw new CompilerInvariantError(
+                "An updateWhere() candidate key carries no version.",
+                { kind: params.kind },
+              );
+            }
+            return key.versionKey;
+          }),
+          false,
+        ),
+        dialect,
+      )}`;
+  return sql`
+    UPDATE ${nodes}
+    SET ${quotedColumn(nodes.props)} = ${patchedProps},
+        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + 1
+    WHERE ${nodes.graphId} = ${params.graphId}
+      AND ${nodes.kind} = ${params.kind}
+      AND ${nodes.deletedAt} IS NULL
+      ${expectedPredicate}
+      AND ${idMatch}${versionMatch}
+    RETURNING *
+  `;
+}
+
+/**
  * Builds one set-based update over candidate ids selected by the shared query
- * compiler. The outer graph/kind/live-row predicates are deliberate write
+ * compiler, semi-joined into the UPDATE. This is the fallback for an engine
+ * strategy without {@link buildSelectNodeSetCandidateKeys} /
+ * {@link buildUpdateNodeSetForKeys} and for an `updateNodeSet` call that names
+ * no `candidateVersionColumn`; the planner may run it as a nested loop that
+ * rescans the candidates per row when the nodes table's statistics are stale. The outer graph/kind/live-row predicates are deliberate write
  * fences and must not be delegated solely to the candidate subquery.
  */
 export function buildUpdateNodeSet(

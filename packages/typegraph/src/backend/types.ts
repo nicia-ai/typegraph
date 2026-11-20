@@ -867,6 +867,19 @@ export type UpdateNodeSetParams = Readonly<{
   candidateIds: CompiledSelectSql;
   /** Projected SQL column holding the candidate node id (for example `n_id`). */
   candidateIdColumn: string;
+  /**
+   * Projected SQL column holding the version of the row the candidate query
+   * read (for example `n_version`). The update writes a candidate only while
+   * its stored version still equals this one, so a row a concurrent writer
+   * changed after the candidate snapshot is skipped rather than patched on the
+   * strength of predicates it no longer satisfies.
+   *
+   * The Store always states it. Omitted, the bundled backends read each
+   * candidate's version by joining the candidates back onto the nodes table
+   * inside the UPDATE, a plan PostgreSQL can run as a nested loop that rescans
+   * the candidates per row when its statistics predate them.
+   */
+  candidateVersionColumn?: string;
 }>;
 
 /**

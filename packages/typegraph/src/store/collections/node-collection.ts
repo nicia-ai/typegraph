@@ -107,7 +107,11 @@ type NodeUpsertOptions = Readonly<{
   ValidityEndMutation;
 
 export type NodeSetUpdateRequest =
-  | Readonly<{ operation: "updateWhere" }>
+  | Readonly<{
+      operation: "updateWhere";
+      /** Projected candidate column holding the version the candidate read. */
+      candidateVersionColumn: string;
+    }>
   | Readonly<{
       operation: "compareAndSet";
       expected: Record<string, unknown>;
@@ -603,6 +607,11 @@ export function createNodeCollection<
       const rootAlias = "update_candidate";
       const readInstant = nowIso();
       const candidateIdColumn = `${rootAlias}_id`;
+      const candidateVersionColumn = `${rootAlias}_version`;
+      // Every branch projects the root id AND the version of the row it read,
+      // so the intersection below keeps a candidate only when all branches
+      // read the same row version, and the backend can write exactly that
+      // version without joining the candidates back onto the nodes table.
       const compiledBranches: CompiledSelectSql[] = [];
 
       const candidateQuery = params.candidates;
@@ -648,11 +657,22 @@ export function createNodeCollection<
             { kind, operation: "updateWhere" },
           );
         }
+        const selectionVersionColumn = selection.versionColumn;
+        if (selectionVersionColumn === undefined) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must project the version of each candidate row.",
+            {
+              kind,
+              operation: "updateWhere",
+              code: "SET_UPDATE_CANDIDATE_VERSION_MISSING",
+            },
+          );
+        }
         const compiledCandidateQuery =
           candidateQuery.compileNodeCandidateIds(readInstant);
         compiledBranches.push(
           asCompiledSelectSql(
-            sql`SELECT ${sql.identifier(selection.idColumn)} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+            sql`SELECT ${sql.identifier(selection.idColumn)} AS ${sql.identifier(candidateIdColumn)}, ${sql.identifier(selectionVersionColumn)} AS ${sql.identifier(candidateVersionColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
           ),
         );
       }
@@ -700,7 +720,7 @@ export function createNodeCollection<
             .select(
               (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
             )
-            .compile(),
+            .compileNodeCandidateIds(),
         );
       }
       // A candidate selection is already constrained to this collection's
@@ -714,14 +734,14 @@ export function createNodeCollection<
             .select(
               (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
             )
-            .compile(),
+            .compileNodeCandidateIds(),
         );
       }
       const projectCandidateId = (
         branch: CompiledSelectSql,
         index: number,
       ): SqlFragment => sql`
-        SELECT ${sql.identifier(candidateIdColumn)}
+        SELECT ${sql.identifier(candidateIdColumn)}, ${sql.identifier(candidateVersionColumn)}
         FROM (${branch}) AS ${sql.identifier(`update_branch_${index}`)}
       `;
       let combinedCandidates = projectCandidateId(
@@ -742,7 +762,7 @@ export function createNodeCollection<
         compiledCandidates,
         candidateIdColumn,
         backend,
-        { operation: "updateWhere" },
+        { operation: "updateWhere", candidateVersionColumn },
       );
       await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
       return result;
