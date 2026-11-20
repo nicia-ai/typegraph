@@ -9,7 +9,7 @@ This example builds a product catalog system with:
 - **Product variants** (size, color, etc.)
 - **Inventory tracking** across warehouses
 - **Product relationships** (bundles, accessories, alternatives)
-- **Price history** using temporal queries
+- **Price history** using recorded time
 
 ## Schema Definition
 
@@ -824,44 +824,35 @@ async function getProductsInCategory(
 
 ## Price History
 
-### Track Price Changes
-
-TypeGraph's temporal model automatically tracks all changes:
-
-```typescript
-async function getPriceHistory(
-  sku: string
-): Promise<ReadonlyArray<{ price: number; validFrom: string | undefined; validTo: string | undefined }>> {
-  return store
-    .query()
-    .from("Product", "p")
-    .temporal("includeEnded")
-    .whereNode("p", (p) => p.sku.eq(sku))
-    .orderBy("p", "meta.validFrom", "desc")
-    .select((ctx) => ({
-      price: ctx.p.basePrice,
-      validFrom: ctx.p.meta.validFrom,
-      validTo: ctx.p.meta.validTo,
-    }))
-    .execute();
-}
-```
+A product has one stored row, so changing its `basePrice` with `update` overwrites the old price. No
+temporal mode returns it afterwards: `includeEnded` returns the same single row, and `asOf` returns
+the current price of a product that was valid at the instant. Earlier prices are kept by
+[recorded time](/queries/temporal#recorded-time-bitemporal): open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`) to record every committed write.
 
 ### Price at Point in Time
 
+Resolve the date to the recorded instant at or before it, and read the product there:
+
 ```typescript
 async function getPriceAsOf(sku: string, date: Date): Promise<number | undefined> {
-  const product = await store
+  const anchor = await store.resolveRecordedInstant(date.toISOString());
+  // undefined: nothing was recorded at or before that date.
+  if (anchor === undefined) return undefined;
+
+  return store
+    .asOfRecorded(anchor)
     .query()
     .from("Product", "p")
-    .temporal("asOf", date.toISOString())
     .whereNode("p", (p) => p.sku.eq(sku))
     .select((ctx) => ctx.p.basePrice)
     .first();
-
-  return product;
 }
 ```
+
+A recorded read answers for one instant. To list every price a product has had, keep the anchors of the
+price changes you care about (`store.recordedNow()` after each update) and read the product at each, or
+record each change as its own node when you need the list itself.
 
 ## Next Steps
 

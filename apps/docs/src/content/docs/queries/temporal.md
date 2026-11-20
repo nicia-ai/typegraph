@@ -8,14 +8,20 @@ at a point in time, audit changes, or access historical data.
 
 ## Temporal Modes
 
-The `temporal()` method controls which versions of data are returned:
+The `temporal()` method controls which rows are returned, by their validity window
+(`validFrom` / `validTo`) and soft-delete state:
 
 | Mode | Description |
 |------|-------------|
-| `"current"` | Only currently valid data (default behavior) |
-| `"asOf"` | Data as it existed at a specific timestamp |
-| `"includeEnded"` | All versions, including historical |
-| `"includeTombstones"` | All versions, including soft-deleted |
+| `"current"` | Rows valid now and not soft-deleted (default behavior) |
+| `"asOf"` | Rows valid at a specific timestamp and not soft-deleted |
+| `"includeEnded"` | Every row that is not soft-deleted, whatever its validity window |
+| `"includeTombstones"` | Every row, including soft-deleted ones |
+
+Each mode filters the one stored row of each node and edge. An update rewrites that row in place and
+raises `meta.version`; it does not keep the earlier version as a row, so no mode returns an earlier
+version of an id or its earlier property values. To read earlier versions, enable
+[recorded time](#recorded-time-bitemporal) with `history: true` and read at a recorded instant.
 
 ## Current State (Default)
 
@@ -52,26 +58,27 @@ const pastState = await store
   .execute();
 ```
 
-This returns nodes and edges that were valid at the specified timestamp, even if they've since been updated or deleted.
+This returns the nodes and edges whose validity window contains the timestamp and that are not
+soft-deleted. It filters on the window; it does not reconstruct earlier property values. A row updated
+since that instant is returned with its current properties, and a soft-deleted row is not returned at
+any instant. To see what a row looked like before an update or a delete, read it at a
+[recorded instant](#reading-at-a-recorded-instant) on a `history: true` store.
 
 ### Use Cases for asOf
 
-- **Auditing**: See what data looked like at a specific time
-- **Debugging**: Reproduce issues by querying historical state
-- **Compliance**: Generate point-in-time reports
-- **Recovery**: Find old values before an erroneous update
+- **Effective dating**: Find which contracts, prices, or memberships were in effect at an instant
+- **Compliance**: Generate point-in-time reports over validity windows
+- **Traversals at an instant**: Follow only the edges that were valid then (see
+  [Temporal Traversals](#temporal-traversals))
 
 ```typescript
-// What did the user's profile look like last week?
-const lastWeek = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-const historicalProfile = await store
+// Which subscriptions were in effect at the end of last quarter?
+const inEffect = await store
   .query()
-  .from("User", "u")
-  .temporal("asOf", lastWeek)
-  .whereNode("u", (u) => u.id.eq(userId))
-  .select((ctx) => ctx.u)
-  .first();
+  .from("Subscription", "s")
+  .temporal("asOf", "2024-03-31T23:59:59.999Z")
+  .select((ctx) => ctx.s)
+  .execute();
 ```
 
 ## Shared-Coordinate Views (store.asOf)
@@ -105,9 +112,9 @@ algorithms (`reachable`, `canReach`, `shortestPath`, `neighbors`, `degree`).
 For the other modes, use `store.view({ mode, asOf })`:
 
 ```typescript
-// A view over every version, including soft-deleted ones.
+// A view over every row, including soft-deleted ones.
 const audit = store.view({ mode: "includeTombstones" });
-const everyVersion = await audit.nodes.Document.find();
+const everyDocument = await audit.nodes.Document.find();
 ```
 
 A view is **read-only**: writes stay on the live `store`, and a view collection
@@ -679,56 +686,48 @@ for the anchor format.
 > PostgreSQL. Reach for `asOfRecorded` for audit and point-in-time
 > reconstruction, not hot-path reads.
 
-## Including Historical Data (includeEnded)
+## Including Ended Rows (includeEnded)
 
-View all versions, including superseded records:
+`includeEnded` drops the validity-window filter and keeps the soft-delete filter: it returns current
+rows, rows whose `validTo` has passed, and rows whose `validFrom` is still in the future, but no
+soft-deleted rows. It still returns one row per id, the row as last written, so it finds facts whose
+window has ended rather than a version history:
 
 ```typescript
-const history = await store
+// Every subscription whose validity window ended before now
+const ended = await store
   .query()
-  .from("Article", "a")
+  .from("Subscription", "s")
   .temporal("includeEnded")
-  .whereNode("a", (a) => a.id.eq(articleId))
-  .orderBy("a", "meta.validFrom", "desc")
+  .whereNode("s", (s) => s.$meta.validTo.lt(new Date()))
+  .orderBy("s", "meta.validTo", "desc")
   .select((ctx) => ({
-    title: ctx.a.title,
-    validFrom: ctx.a.meta.validFrom,
-    validTo: ctx.a.meta.validTo,
-    version: ctx.a.meta.version,
+    id: ctx.s.id,
+    validFrom: ctx.s.meta.validFrom,
+    validTo: ctx.s.meta.validTo,
   }))
   .execute();
-
-// Result shows all versions:
-// [
-//   { title: "Final Title", validFrom: "2024-03-01", validTo: undefined, version: 3 },
-//   { title: "Draft v2", validFrom: "2024-02-15", validTo: "2024-03-01", version: 2 },
-//   { title: "Initial Draft", validFrom: "2024-02-01", validTo: "2024-02-15", version: 1 },
-// ]
 ```
 
-### Audit Trail
+### Version History
 
-Build a complete change history:
+The earlier versions of a row exist only in recorded time. On a store created with `history: true`,
+every committed write is recorded, and a read at a recorded instant returns the row as it stood then.
+Pin the instant with a checkpoint from `recordedNow()` taken after the write, or resolve one from a
+wall-clock time with [`resolveRecordedInstant()`](#resolve-a-wall-clock-instant):
 
 ```typescript
-async function getAuditTrail(nodeId: string) {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(nodeId))
-    .select((ctx) => ({
-      version: ctx.d.meta.version,
-      title: ctx.d.title,
-      status: ctx.d.status,
-      validFrom: ctx.d.meta.validFrom,
-      validTo: ctx.d.meta.validTo,
-      updatedAt: ctx.d.meta.updatedAt,
-    }))
-    .orderBy("d", "meta.version", "asc")
-    .execute();
+async function getDocumentAt(docId: NodeId<typeof Document>, wallClock: string) {
+  const anchor = await store.resolveRecordedInstant(wallClock);
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Document.getById(docId);
 }
 ```
+
+Each recorded read is taken at one anchor, so to compare versions read the same id at each anchor you
+kept (see [Version Comparison](#version-comparison)). For a change log that also records who made each
+change and why, write it yourself as in the [Audit Trail example](/examples/audit-trail).
 
 ## Including Soft-Deleted Data (includeTombstones)
 
@@ -776,10 +775,10 @@ When querying with temporal context, these fields are available under `meta`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `validFrom` | `string \| undefined` | When this version became valid (`undefined` on an **open-left** row — see below) |
-| `validTo` | `string \| undefined` | When this version was superseded (undefined if current) |
+| `validFrom` | `string \| undefined` | When the row's validity window starts (`undefined` on an **open-left** row — see below) |
+| `validTo` | `string \| undefined` | When the row's validity window ends (undefined if it has no end; an update does not set it) |
 | `createdAt` | `string` | When the node was first created |
-| `updatedAt` | `string` | When this version was written |
+| `updatedAt` | `string` | When the row was last written |
 | `deletedAt` | `string \| undefined` | Soft-delete timestamp (undefined if not deleted) |
 | `version` | `number` | Optimistic concurrency version number (nodes only) |
 
@@ -924,24 +923,23 @@ async function generateQuarterlyReport(quarterEnd: string) {
 
 ### Undo/Recovery
 
-Find the previous value before an update:
+Find the value a document had before an update. The live row holds only the current value, so take a
+checkpoint before the update on a `history: true` store and read the document there:
 
 ```typescript
-async function getPreviousVersion(nodeId: string) {
-  const versions = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(nodeId))
-    .select((ctx) => ctx.d)
-    .orderBy("d", "meta.version", "desc")
-    .limit(2)
-    .execute();
+// Before an update you may need to undo:
+//   const beforeUpdate = await store.recordedNow();
+//   await store.nodes.Document.update(docId, { title: "Revised" });
+async function getPreviousVersion(
+  docId: NodeId<typeof Document>,
+  beforeUpdate: RecordedInstant,
+) {
+  const [current, previous] = await Promise.all([
+    store.nodes.Document.getById(docId),
+    store.asOfRecorded(beforeUpdate).nodes.Document.getById(docId),
+  ]);
 
-  return {
-    current: versions[0],
-    previous: versions[1],
-  };
+  return { current, previous };
 }
 ```
 

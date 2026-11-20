@@ -242,23 +242,41 @@ const past = await store
   .execute();
 ```
 
-### Audit Logs
+### Ended Rows
 
-To include rows whose validity window has already ended, use `includeEnded`.
+To include rows whose validity window has already ended, use `includeEnded`. It still returns one row
+per id, as last written: the update above left no "Draft 1" row behind.
 
 ```typescript
-const history = await store
+const withEnded = await store
   .query()
   .from("Article", "a")
-  .temporal("includeEnded") // Include historical rows
+  .temporal("includeEnded") // Also rows whose validity window has ended
   .whereNode("a", (a) => a.id.eq(article.id))
-  .orderBy("a", "meta.validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
     validFrom: ctx.a.meta.validFrom,
     validTo: ctx.a.meta.validTo,
   }))
   .execute();
+```
+
+### Audit Logs
+
+To read the "Draft 1" version back, the store has to record it: open the store with `history: true`,
+keep a checkpoint after the write you may need to read again, and read at that recorded instant (see
+[Recorded Time](/queries/temporal#recorded-time-bitemporal)):
+
+```typescript
+// With createStoreWithSchema(graph, backend, { history: true }):
+const draft = await store.nodes.Article.create({ title: "Draft 1", content: "..." });
+const afterDraft = await store.recordedNow();
+await store.nodes.Article.update(draft.id, { title: "Final Version" });
+
+if (afterDraft !== undefined) {
+  const asDrafted = await store.asOfRecorded(afterDraft).nodes.Article.getById(draft.id);
+  // asDrafted?.title === "Draft 1"
+}
 ```
 
 ### Replaying a Recorded Belief

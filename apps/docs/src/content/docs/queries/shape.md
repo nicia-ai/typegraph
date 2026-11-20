@@ -222,15 +222,15 @@ const results = await store
 When using [temporal queries](/queries/temporal), access validity information:
 
 ```typescript
-const history = await store
+const articles = await store
   .query()
   .from("Article", "a")
   .temporal("includeEnded")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.meta.validFrom,   // When this version became valid
-    validTo: ctx.a.meta.validTo,       // When superseded (undefined if current)
-    version: ctx.a.meta.version,       // Version number
+    validFrom: ctx.a.meta.validFrom,   // When the row's validity window starts
+    validTo: ctx.a.meta.validTo,       // When it ends (undefined if it has no end)
+    version: ctx.a.meta.version,       // Incremented by every update of the row
   }))
   .execute();
 ```
