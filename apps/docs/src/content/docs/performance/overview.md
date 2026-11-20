@@ -353,7 +353,7 @@ internally.
 | `bulkUpsertById(items)`                   | Yes             | Idempotent import (create or update by ID)           |
 | `bulkReplaceById(items)`                  | Yes             | Idempotent complete-document replacement by ID       |
 | `bulkDelete(ids)`                         | No              | Mass soft-delete                                     |
-| `bulkHardDelete(ids)`                     | No              | Mass permanent removal (retention, cleanup)          |
+| `bulkHardDelete(ids)`                     | No              | Mass hard delete (storage cleanup; not an erasure)   |
 | `trustedImportGraphStream(store, chunks)` | No              | Fastest initial load into a fresh dedicated database |
 
 The collection APIs remain the default: they validate data and maintain every

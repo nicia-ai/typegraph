@@ -130,7 +130,7 @@ const updated = await store.nodes.Person.update(alice.id, {
 // Delete (soft delete by default)
 await store.nodes.Person.delete(alice.id);
 
-// Hard delete (permanent removal) - use carefully!
+// Hard delete: removes the row and what is derived from it (see below)
 await store.nodes.Person.hardDelete(bob.id);
 ```
 
@@ -170,10 +170,10 @@ By default, `delete()` performs a **soft delete**—it sets the `deletedAt` time
 await store.nodes.Person.delete(alice.id); // Sets deletedAt, keeps the record
 ```
 
-For permanent removal, use `hardDelete()`:
+`hardDelete()` removes the node's row instead, together with what the store derives from it:
 
 ```typescript
-await store.nodes.Person.hardDelete(alice.id); // Removes from database
+await store.nodes.Person.hardDelete(alice.id); // Removes the live row and its derived rows
 ```
 
 **When to use each:**
@@ -181,10 +181,27 @@ await store.nodes.Person.hardDelete(alice.id); // Removes from database
 | Method | Use Case |
 |--------|----------|
 | `delete()` | Standard deletions, audit trails, undo capability |
-| `hardDelete()` | GDPR erasure, storage cleanup, removing test data |
+| `hardDelete()` | Storage cleanup, removing test data, freeing a unique key |
 
-**Warning:** `hardDelete()` is irreversible. It also removes associated uniqueness entries and
-embeddings. Consider using soft delete for most use cases.
+A soft delete keeps the node's row and its properties, readable with
+`store.view({ mode: "includeTombstones" })`; it removes the node's fulltext and embedding rows, ends
+its Operational Identity assertions, and applies the kind's `onDelete` behavior to its edges (with
+`cascade`, they are soft-deleted and stay readable the same way).
+`hardDelete()` cannot be undone through the store, but it is **not an erasure**: what it leaves
+depends on how the store was opened.
+
+| Store | `hardDelete()` removes | Kept after `hardDelete()` |
+|-------|------------------------|---------------------------|
+| Every store | The node's row (live or soft-deleted), every incident edge, its uniqueness, fulltext and embedding rows, and the Operational Identity assertions and closure rows that name it | A branch or working copy forked before the delete keeps its own copy. Values the application already read, exported or archived are outside the store. |
+| `revisionTracking: true` | The same | The revision journal keeps the node's kind and ID, without property values |
+| `history: true` | The same | Every recorded version of the node and of its incident edges, with their properties: `asOfRecorded(T)` at an instant before the delete still returns them. The recorded identity assertions, and the identity transition log entries that name the node (`identity.transitionsOf`), also remain. |
+
+`bulkHardDelete()` leaves the same state as calling `hardDelete()` once per ID. On PostgreSQL the
+revision journal is kept by database triggers once it is installed, so it can hold the ID
+for a store that does not track revisions. No operation removes recorded versions of a single node;
+[#922](https://github.com/nicia-ai/typegraph/issues/922) tracks an erasure operation that reaches
+recorded history and every derived copy. See [Limitations](/limitations#deleting-is-not-erasure) for
+what a caller can do today.
 
 ## Edges
 
