@@ -135,14 +135,62 @@ export function canonicalizeDatabaseTimestamp(
   return new Date(milliseconds).toISOString();
 }
 
+const DIGIT_ZERO = 0x30;
+
+/**
+ * The value of the ASCII decimal digits of `value` from `start` to `end`.
+ * Callers pass only positions the pattern has already proved are digits.
+ */
+function digitsAt(value: string, start: number, end: number): number {
+  let result = 0;
+  for (let index = start; index < end; index += 1) {
+    result =
+      result * 10 + ((value.codePointAt(index) ?? DIGIT_ZERO) - DIGIT_ZERO);
+  }
+  return result;
+}
+
+/** Proleptic Gregorian leap year, the calendar `Date` uses for every year. */
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) return 29;
+  return DAYS_IN_MONTH[month - 1] ?? 0;
+}
+
 /**
  * Checks if a string is a canonical UTC ISO 8601 datetime with fixed
  * millisecond width (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+ *
+ * Exactly the strings for which `new Date(value).toISOString() === value`
+ * holds, decided without building a `Date`: the pattern fixes every digit's
+ * position (so the year is 0000–9999, inside `Date`'s range, and
+ * `toISOString()` renders it back in four digits), and the fields must then
+ * name a real instant — month 1–12, a day that month has in that year, hour
+ * 0–23, minute and second 0–59. Any other field value is one `Date` either
+ * refuses or rolls over into a different string. The round trip cost ~20× the
+ * pattern test on every write that validates a timestamp;
+ * `tests/property/canonical-iso-date.test.ts` keeps it as the oracle this is
+ * proven equal to.
  */
 export function isCanonicalIsoDate(value: string): boolean {
   if (!CANONICAL_ISO_DATE_PATTERN.test(value)) return false;
-  const date = new Date(value);
-  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+  const year = digitsAt(value, 0, 4);
+  const month = digitsAt(value, 5, 7);
+  const day = digitsAt(value, 8, 10);
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth(year, month) &&
+    digitsAt(value, 11, 13) <= 23 &&
+    digitsAt(value, 14, 16) <= 59 &&
+    digitsAt(value, 17, 19) <= 59
+  );
 }
 
 /**
