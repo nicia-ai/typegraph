@@ -2272,6 +2272,10 @@ every node and edge collection write, every `tx.identity` write, `tx.writeNodeUp
 store on every backend, so the transaction stays usable: reads after it run, and the transaction
 commits.
 
+The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
+not checked: PostgreSQL rejects a write there and aborts the transaction, while SQLite, whose
+transaction is not read-only at the engine, runs it and commits it.
+
 #### Overlapping calls in one transaction
 
 Some calls take a TypeGraph savepoint inside the transaction they write to, so that a failure among their
