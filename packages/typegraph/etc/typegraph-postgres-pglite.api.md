@@ -7692,6 +7692,7 @@ type TransactionRuntime = Readonly<{
         suggestion: string;
     }>) => Promise<void>;
     acquireReadFences: () => Promise<void>;
+    assertWritable: (operation: string) => void;
 }>;
 
 // @public (undocumented)

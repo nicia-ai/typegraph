@@ -846,6 +846,18 @@ export function transactionAcquireWriteFences(
 }
 
 /**
+ * Passes THIS transaction's write gate ({@link TransactionRuntimePort}'s
+ * `assertWritable`) for a write that bypasses its collections, before any
+ * statement: refuses a read-only transaction, naming `operation`.
+ */
+export function transactionAssertWritable(
+  transaction: TransactionRuntimePort,
+  operation: string,
+): void {
+  requireTransactionRuntime(transaction).assertWritable(operation);
+}
+
+/**
  * Takes the fences a multi-statement read on THIS transaction needs, without
  * writing: {@link transactionAcquireWriteFences}'s schema-version fence and
  * per-graph write lock in a transaction that can write, or the per-graph write

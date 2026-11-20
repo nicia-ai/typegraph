@@ -3140,6 +3140,15 @@ export type TransactionRuntime = Readonly<{
    * provenance's `holding(tx)`.
    */
   acquireReadFences: () => Promise<void>;
+  /**
+   * The write gate every write on this transaction's collections and
+   * identity facade passes first (the receipt recorder's `assertWritable`),
+   * for a caller that writes through the transaction's backend directly —
+   * today, `applyMergePlanInTransaction`. Refuses, naming `operation`,
+   * a transaction opened with `accessMode: "read_only"` and one whose
+   * callback has returned; issues no statement either way.
+   */
+  assertWritable: (operation: string) => void;
 }>;
 
 /**

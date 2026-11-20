@@ -164,6 +164,7 @@ export {
   storeCaptureEnabled,
   storeQueryBackend,
   storeRuntime,
+  transactionAssertWritable,
   transactionBackend,
   type TransactionDeleteNodeWithPolicy,
   transactionDeleteNodeWithPolicy,

@@ -34,6 +34,14 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -74,6 +82,14 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -114,6 +130,14 @@
   {
     "entrypoint": "typegraph-identity.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -154,6 +178,14 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -190,6 +222,14 @@
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
   },
   {
     "entrypoint": "typegraph-maintenance.api.md",
@@ -230,6 +270,14 @@
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
@@ -270,6 +318,14 @@
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
@@ -310,6 +366,14 @@
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
@@ -362,6 +426,14 @@
   {
     "entrypoint": "typegraph-schema.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -402,6 +474,14 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -442,6 +522,14 @@
   {
     "entrypoint": "typegraph-store.api.md",
     "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionRuntime",
     "member": "acquireWriteFences",
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
@@ -478,6 +566,14 @@
     "kind": "required-member-added",
     "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
     "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
   },
   {
     "entrypoint": "typegraph.api.md",

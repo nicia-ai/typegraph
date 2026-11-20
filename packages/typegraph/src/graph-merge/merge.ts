@@ -311,6 +311,7 @@ import {
   storeBackend,
   storeCaptureEnabled,
   storeRuntime,
+  transactionAssertWritable,
   transactionBackend,
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
@@ -6301,6 +6302,10 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
         { cause: error, details: { capability: "mergeTransactionStore" } },
       );
     }
+    // The apply writes through the transaction's backend, not its
+    // collections, so it passes their write gate itself, before any read:
+    // a read-only transaction is refused rather than written to.
+    transactionAssertWritable(tx, "applyMergePlanInTransaction()");
     const artifact = await validateMergePlanForTarget(effectiveTarget, input);
     assertPublicPlanCapability(effectiveTarget);
     if (artifact.provenance.persist) {
