@@ -1,7 +1,7 @@
 /**
- * Evokoa pgGraph engine driver — a PostgreSQL extension that builds a derived
+ * pgGraph engine driver — a PostgreSQL extension that builds a derived
  * CSR graph index over ordinary SQL tables and exposes traversal/pathfinding
- * as `graph.*` SQL functions (docs.evokoa.com/pggraph). It is NOT a storage
+ * as `graph.*` SQL functions. It is NOT a storage
  * engine of its own: PostgreSQL stays the system of record, so this driver
  * loads the LDBC dataset into its own normalized relational tables, registers
  * the `person` node table + `knows` edge with pgGraph, and builds the index.

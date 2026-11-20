@@ -10,7 +10,7 @@
  *   launches one imperatively (docker run + tmpfs), so it needs Docker.
  * - `neo4j` — imperative Docker container (docker run + tmpfs/named volume).
  * - `ladybugdb` — embedded (`@ladybugdb/core`), no external dependency.
- * - `pggraph` — imperative Docker container running the Evokoa pgGraph
+ * - `pggraph` — imperative Docker container running the pgGraph
  *   PostgreSQL extension image; driven over `pg` like typegraph-postgres.
  */
 import { createRequire } from "node:module";
@@ -47,7 +47,7 @@ export const POSTGRES_IMAGE =
 export const NEO4J_IMAGE =
   process.env["TYPEGRAPH_BENCH_NEO4J_IMAGE"] ?? "neo4j:2026.05.0";
 /**
- * Evokoa pgGraph extension image (bundles PostgreSQL 17 + the `graph`
+ * pgGraph extension image (bundles PostgreSQL 17 + the `graph`
  * extension + pg_cron). Pinned to a released version tag for reproducibility;
  * override via env for a newer build.
  */
