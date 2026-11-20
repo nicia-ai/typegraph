@@ -2265,6 +2265,18 @@ await store.transaction(async (tx) => {
 });
 ```
 
+#### Read-only transactions
+
+`store.transaction(fn, { accessMode: "read_only" })` opens a transaction for reads only. Every
+write its context offers is refused before it issues any statement, with an
+`UnsupportedBackendCapabilityError` whose `details` carry `capability: "write transaction access"`,
+`accessMode: "read_only"` and the `operation` refused (for example `tx.nodes.Person.hardDelete()`):
+every node and edge collection write, every `tx.identity` write, `tx.writeNodeUpsertBatch()`,
+`tx.nodes.<Kind>.planDelete()` (which takes the delete's lock), `tx.assertUnchangedSince()`,
+`tx.requestRecordedRevision()` and `applyMergePlanInTransaction()`. The refusal comes from the
+store on every backend, so the transaction stays usable: reads after it run, and the transaction
+commits.
+
 #### Overlapping calls in one transaction
 
 Some calls take a TypeGraph savepoint inside the transaction they write to, so that a failure among their

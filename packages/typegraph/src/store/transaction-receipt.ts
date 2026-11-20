@@ -13,6 +13,7 @@ import type {
   IDENTITY_WRITE_NAMES,
 } from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
+import { refuseReadOnlyTransactionWrite } from "./operations/write-transaction";
 import type {
   CompositionCascadedPart,
   EdgeWrites,
@@ -106,12 +107,28 @@ export type TransactionReceiptRecorder = Readonly<{
    */
   seal: () => void;
   /**
-   * Throws {@link ConfigurationError} once {@link seal} has been called. Invoked
-   * at the top of every wrapped write method, before the live write runs, so a
-   * post-seal write never reaches the backend.
+   * The one gate in front of every write a transaction context offers, named
+   * by `operation` (`tx.nodes.<Kind>.create()`, `tx.identity.assertSame()`,
+   * …). Throws {@link ConfigurationError} once {@link seal} has been called,
+   * and refuses every write of a transaction opened with
+   * `accessMode: "read_only"` (`refuseReadOnlyTransactionWrite`). Invoked
+   * at the top of every wrapped write method, before the live write issues
+   * any statement, so neither write reaches the backend: a post-seal write
+   * would persist uncounted, and a read-only one would write on SQLite and
+   * abort the caller's transaction with the engine's error on PostgreSQL.
    */
-  assertWritable: () => void;
+  assertWritable: (operation: string) => void;
 }>;
+
+/**
+ * The access a transaction was opened with, as the receipt recorder gates
+ * writes on it: read-only only when the transaction was opened with
+ * `accessMode: "read_only"`, for the graph the refusal names.
+ */
+export type TransactionWriteAccess =
+  Readonly<{ readOnly: false }> | Readonly<{ readOnly: true; graphId: string }>;
+
+const READ_WRITE_ACCESS: TransactionWriteAccess = { readOnly: false };
 
 type WrappedMethod = (...args: unknown[]) => Promise<unknown>;
 
@@ -212,7 +229,9 @@ interface WriteCounters {
   readonly cascadedParts: CompositionCascadedPart[];
 }
 
-export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
+export function createTransactionReceiptRecorder(
+  access: TransactionWriteAccess = READ_WRITE_ACCESS,
+): TransactionReceiptRecorder {
   const counters: WriteCounters = {
     nodes: createCountBucket(),
     edges: createCountBucket(),
@@ -294,7 +313,7 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
       sealed = true;
     },
 
-    assertWritable(): void {
+    assertWritable(operation): void {
       if (sealed) {
         throw new ConfigurationError(
           "Transaction context is sealed: a write happened through the receipt-tracked collections after the transaction callback returned.",
@@ -303,6 +322,13 @@ export function createTransactionReceiptRecorder(): TransactionReceiptRecorder {
             suggestion:
               "Perform all writes inside the transactionWithReceipt / withRecordedTransaction callback; do not reuse the transaction context after it returns.",
           },
+        );
+      }
+      if (access.readOnly) {
+        refuseReadOnlyTransactionWrite(
+          operation,
+          access.graphId,
+          'Remove accessMode: "read_only" from the store.transaction options when the transaction must write.',
         );
       }
     },
@@ -325,19 +351,19 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
     replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.assertSame()");
       const result = await identity.assertSame(a, b);
       recorder.recordIdentity("sameAssertions", 1);
       return result;
     },
     async assertDifferent(a, b) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.assertDifferent()");
       const result = await identity.assertDifferent(a, b);
       recorder.recordIdentity("differentAssertions", 1);
       return result;
     },
     async bulkAssertSame(pairs) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.bulkAssertSame()");
       // Pin the intent count before awaiting: the caller may mutate the input
       // array while the write is in flight (matches the node/edge wrappers).
       const count = pairs.length;
@@ -346,32 +372,32 @@ export function wrapTransactionIdentity<G extends GraphDef>(
       return result;
     },
     async bulkAssertDifferent(pairs) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.bulkAssertDifferent()");
       const count = pairs.length;
       const result = await identity.bulkAssertDifferent(pairs);
       recorder.recordIdentity("differentAssertions", count);
       return result;
     },
     async retractAssertion(id) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.retractAssertion()");
       const result = await identity.retractAssertion(id);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async retractSameAssertion(a, b) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.retractSameAssertion()");
       const result = await identity.retractSameAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async retractDifferentAssertion(a, b) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.retractDifferentAssertion()");
       const result = await identity.retractDifferentAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async bulkRetractAssertions(ids) {
-      recorder.assertWritable();
+      recorder.assertWritable("tx.identity.bulkRetractAssertions()");
       const count = ids.length;
       const result = await identity.bulkRetractAssertions(ids);
       recorder.recordIdentity("retractions", count);
@@ -397,16 +423,20 @@ function isObject(value: unknown): value is object {
  * counter table.
  */
 type WriteIntentSurface<M extends string> = Readonly<{
+  /** The transaction context's key for these collections, as refusals name it. */
+  entity: "nodes" | "edges";
   methodNames: ReadonlySet<string>;
   counters: Record<M, WriteIntentCounter>;
 }>;
 
 const NODE_WRITE_SURFACE: WriteIntentSurface<NodeWriteMethodName> = {
+  entity: "nodes",
   methodNames: new Set(NODE_WRITE_NAMES),
   counters: NODE_WRITE_INTENT_COUNTERS,
 };
 
 const EDGE_WRITE_SURFACE: WriteIntentSurface<EdgeWriteMethodName> = {
+  entity: "edges",
   methodNames: new Set(EDGE_WRITE_NAMES),
   counters: EDGE_WRITE_INTENT_COUNTERS,
 };
@@ -446,7 +476,7 @@ function memoizedProxyGet<T extends object>(
 
 /**
  * Wraps one node/edge collection so every write method on it (per
- * `surface.methodNames`) fails loud once the recorder is sealed, then counts
+ * `surface.methodNames`) passes the recorder's write gate first, then counts
  * its intent through `record` on resolution.
  */
 function wrapWriteCollection<T extends object, M extends string>(
@@ -454,7 +484,7 @@ function wrapWriteCollection<T extends object, M extends string>(
   kind: string,
   surface: WriteIntentSurface<M>,
   record: (kind: string, count: number) => void,
-  assertWritable: () => void,
+  assertWritable: (operation: string) => void,
 ): T {
   return memoizedProxyGet(
     collection,
@@ -466,7 +496,7 @@ function wrapWriteCollection<T extends object, M extends string>(
       const wrapped: WrappedMethod = async (...args) => {
         // Reject before the live write: a context retained past its callback
         // must not persist a row the already-snapshotted receipt cannot count.
-        assertWritable();
+        assertWritable(`tx.${surface.entity}.${kind}.${property}()`);
         // Pin the intent count at call time: a caller may mutate a bulk input
         // array while the write is in flight, and the backend has already
         // snapshotted the items. Recording still waits for resolution so a

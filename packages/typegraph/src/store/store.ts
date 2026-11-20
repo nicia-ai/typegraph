@@ -510,6 +510,7 @@ import {
 import {
   createTransactionReceiptRecorder,
   type TransactionReceiptRecorder,
+  type TransactionWriteAccess,
   wrapTransactionCollections,
   wrapTransactionIdentity,
 } from "./transaction-receipt";
@@ -4480,7 +4481,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
     options: StoreTransactionOptions | undefined,
-    createReceiptRecorder: (() => TransactionReceiptRecorder) | undefined,
+    createReceiptRecorder:
+      | ((access: TransactionWriteAccess) => TransactionReceiptRecorder)
+      | undefined,
     operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
@@ -4505,6 +4508,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // backend sees; every other field forwards verbatim. This is the one
     // place that strips it.
     const { retry, ...backendOptions } = options ?? {};
+    // THE read-only fact of this transaction: the receipt recorder's write
+    // gate refuses every write the context offers with it, and the context's
+    // fence and preview paths read the same value.
+    const writeAccess: TransactionWriteAccess =
+      backendOptions.accessMode === "read_only" ?
+        { readOnly: true, graphId: this.graphId }
+      : { readOnly: false };
     const attempts = retry?.attempts ?? 1;
 
     // #134/#135: no gate here. The backend's transaction() wraps the
@@ -4557,7 +4567,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const receiptRequested = createReceiptRecorder !== undefined;
       const receiptRecorder = (
         createReceiptRecorder ?? createTransactionReceiptRecorder
-      )();
+      )(writeAccess);
       let recordedByGraph: RecordedFlushInstants | undefined;
       const transactionOptions = beginPreCommitHookAttempt(
         receiptRequested && this.#captureEnabled ?
@@ -4621,7 +4631,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 receiptRecorder,
                 runBulkHooks,
                 frame.attempt,
-                backendOptions.accessMode === "read_only",
+                writeAccess.readOnly,
                 receiptRequested,
               ),
               async (activeContext) => {
@@ -5219,6 +5229,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     entries: Entries,
     receiptRecorder: TransactionReceiptRecorder | undefined,
   ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    // The transaction's write gate first, as every collection write passes it.
+    receiptRecorder?.assertWritable("tx.writeNodeUpsertBatch()");
     if (entries.length === 0)
       return [] as HeterogeneousNodeUpsertResult<G, Entries>;
     if (!this.#captureEnabled) {
@@ -5319,7 +5331,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    receiptRecorder?.assertWritable();
     if (txBackend.upsertHeterogeneousNodes === undefined) {
       throw new UnsupportedBackendCapabilityError(
         "tx.writeNodeUpsertBatch()",
@@ -5483,6 +5494,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               return;
             }
             await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
+          assertWritable: (operation) => {
+            for (const recorder of receiptRecorders) {
+              recorder.assertWritable(operation);
+            }
           },
         },
         nodes: createNodeCollectionsProxy(
