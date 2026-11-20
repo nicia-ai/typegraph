@@ -330,7 +330,7 @@ Exposes the full `NodeCollection` API (`create`, `getById`, `find`, `count`,
 parameters since the concrete node type is not known at compile time.
 
 ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
-`bulkDelete`) accept plain `string` instead of branded `NodeId<N>`, since the
+`bulkDelete`, `bulkHardDelete`) accept plain `string` instead of branded `NodeId<N>`, since the
 dynamic path typically receives IDs from edge metadata, snapshots, or external
 input where the brand is not available.
 

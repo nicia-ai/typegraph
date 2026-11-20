@@ -224,10 +224,21 @@ transaction: a refusal or failure, including one raised after some of the
 plan's rows were written, rolls every merge row back before the error reaches
 the caller, so the merge never leaves a half-applied state — such as a
 required part whose old attachment is gone and whose new one was never
-written — even if the error is caught and the transaction committed. Let the
+written — even if the error is caught and the transaction committed. A
+rolled-back apply also reports nothing for itself: no `onOperationEnd` fires
+for its rows (each row write it had completed is reported to `onError` with
+the refusal as the error, as for any
+[savepoint rollback](/schemas-stores#observability-hooks)), the enclosing
+transaction's receipt counts none of its writes, and it does not advance the
+revision clock, so `receipt.recorded` and `revisionNow()` reflect only the
+transaction's other writes. Let the
 exception reject the outer callback anyway, so the application writes that
-depended on the merge roll back with it. A target whose transactions expose no
-statement execution cannot take the savepoint and is refused with
+depended on the merge roll back with it. Await the apply before starting
+other calls on the same transaction: the savepoint's rollback undoes every
+statement issued on the transaction since the apply began, including those of
+an overlapping call (see
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
+A target whose transactions expose no statement execution cannot take the savepoint and is refused with
 `MergePlanCapabilityError` (`details.capability: "mergeTransactionSavepoint"`)
 before anything is applied. When the driver reports a retryable transaction failure, retry
 the entire outer transaction, including the application writes; do not add an
@@ -3373,7 +3384,7 @@ caller-owned transaction callback rejects by default:
 | Error                        | When                                                                                                                                                                                                                                                                          |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BranchError`                | `branch()` or `ingestionBranch()` could not materialize a working copy.                                                                                                                                                                                                        |
-| `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. |
+| `BaseVersionMismatchError`   | A branch forked from a different `base@V` than the target now has (snapshot `merge()`). Also the typed replan error `mergeIncremental()`'s in-transaction guards raise, and the by-ID freshness check both commit modes run, when the target moved in the plan→commit window. A `merge()` through a target handle whose schema another handle has since advanced is refused with it too, with the `StaleVersionError` as its `cause`, before the commit's first read and with nothing written; the commit does not retry it. Re-open the store against the current schema, then branch and merge again. |
 | `IdentityMergeConflictError` | Code `GRAPH_MERGE_IDENTITY_CONFLICT` by default. Thrown by both `merge()` and `mergeIncremental()` for identity contradictions, assertion-ID collisions, opposing relations, and retract/reassert races — see [Identity conflicts](#identity-conflicts) and the [identity guide](/identity/#interchange-and-branch-merge). One related code on the same error class names a more specific cause: `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` (a definitional match or a transitive cluster crosses a class-lifted `different` assertion — see [Identity separation veto](#identity-separation-veto)). |
 | `AcyclicityMergeConflictError` | Code `GRAPH_MERGE_ACYCLICITY_CONFLICT`. Thrown at plan time by every entry point (`merge()`, `planMerge()`, `planMergeIncremental()`, `mergeIncremental()`) when the resolved plan's edge writes — after canonicalization and repointing — would close a cycle in a declared `acyclic: true` relation. Its `details` name the relation and every offending edge, and `details.witness` gives one return path (see [`AcyclicityMergeConflictError`](/errors#acyclicitymergeconflicterror)). |
 | `CardinalityMergeConflictError` | Code `GRAPH_MERGE_CARDINALITY_CONFLICT`. Returned at plan time by every planning entry point when the resolved plan would leave two live edges holding one part's whole or one declared `cardinality` / `targetCardinality` slot — two branches reparenting one part to different wholes, or a branch and the incremental target each adding an edge to a `targetCardinality: "one"` endpoint. Its `cause` is the `CompositionError` or `CardinalityError` apply would raise and `details.edges` names both edges. See [Structural conflicts](#structural-conflicts). |

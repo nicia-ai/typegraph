@@ -50,6 +50,7 @@ null semantics.
 | Array | `contains`, `containsAll`, `containsAny`, `isEmpty`, `isNotEmpty`, `lengthEq/Gt/Gte/Lt/Lte` | [Array](#array) |
 | Object | `get`, `field`, `hasKey`, `hasPath`, `pathEquals`, `pathContains`, `pathIsNull`, `pathIsNotNull` | [Object](#object) |
 | Embedding | `similarTo` | [Embedding](#embedding) |
+| System metadata (`$meta`) | Date operators on timestamps, number operators on `version` | [Metadata](/queries/filter#metadata) |
 | Subquery | `exists`, `notExists`, `inSubquery`, `notInSubquery` | [Subqueries](/queries/advanced) |
 
 ## Combining Predicates
@@ -266,34 +267,46 @@ typical cases.
 
 ## Date
 
-Date predicates for temporal comparisons. Accepts `Date` objects or ISO 8601 strings.
+Date predicates for fields whose schema type is a date (`z.date()`). A `Date` operand is compared as
+its `toISOString()` value.
+
+Equality and membership (`eq`, `neq`, `in`, `notIn`) take a `Date`, not a string. A string operand is
+refused when the predicate is built, with `UnsupportedPredicateError`
+(`Expected a date literal for field "…", got string.`); convert it with `new Date(value)`.
+
+The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, which is passed to the
+database as written: PostgreSQL reads it as a `timestamptz` and compares instants (a string without a
+UTC offset, such as `"2024-01-01"`, is read in the session's time zone), while SQLite compares it with
+the stored value as text. A string that is not a canonical UTC ISO-8601 timestamp
+(`YYYY-MM-DDTHH:mm:ss.sssZ`) can therefore match different rows on the two backends. Pass a `Date` or a
+canonical string.
 
 ### Equality
 
 ```typescript
-p.createdAt.eq("2024-01-01")
-p.createdAt.neq(new Date("2024-01-01"))
+p.createdAt.eq(new Date("2024-01-01T00:00:00.000Z"))
+p.createdAt.neq(new Date("2024-01-01T00:00:00.000Z"))
 ```
 
 ### Comparisons
 
 ```typescript
-p.createdAt.gt("2024-01-01")         // After
-p.createdAt.gte("2024-01-01")        // On or after
-p.createdAt.lt(new Date())           // Before now
-p.createdAt.lte("2024-12-31")        // On or before
+p.createdAt.gt("2024-01-01T00:00:00.000Z")   // After
+p.createdAt.gte("2024-01-01T00:00:00.000Z")  // On or after
+p.createdAt.lt(new Date())                   // Before now
+p.createdAt.lte("2024-12-31T23:59:59.999Z")  // On or before
 ```
 
 ### Range
 
 ```typescript
-p.createdAt.between("2024-01-01", "2024-12-31")
+p.createdAt.between("2024-01-01T00:00:00.000Z", "2024-12-31T23:59:59.999Z")
 ```
 
 ### List Membership
 
 ```typescript
-p.birthday.in(["2024-01-01", "2024-07-04"])
+p.birthday.in([new Date("2024-01-01T00:00:00.000Z"), new Date("2024-07-04T00:00:00.000Z")])
 ```
 
 ### Null Checks
@@ -307,15 +320,15 @@ p.verifiedAt.isNotNull()
 
 | Predicate | Accepts | Description | SQL |
 |-----------|---------|-------------|-----|
-| `eq(value)` | `Date \| string \| param()` | Equals | `=` |
-| `neq(value)` | `Date \| string \| param()` | Not equals | `!=` |
+| `eq(value)` | `Date \| param()` | Equals | `=` |
+| `neq(value)` | `Date \| param()` | Not equals | `!=` |
 | `gt(value)` | `Date \| string \| param()` | After | `>` |
 | `gte(value)` | `Date \| string \| param()` | On or after | `>=` |
 | `lt(value)` | `Date \| string \| param()` | Before | `<` |
 | `lte(value)` | `Date \| string \| param()` | On or before | `<=` |
 | `between(lo, hi)` | `Date \| string \| param()` | Inclusive range | `BETWEEN lo AND hi` |
-| `in(values[])` | `(Date \| string)[]` | In array | `IN (...)` |
-| `notIn(values[])` | `(Date \| string)[]` | Not in array | `NOT IN (...)` |
+| `in(values[])` | `Date[] \| param()` | In array | `IN (...)` |
+| `notIn(values[])` | `Date[] \| param()` | Not in array | `NOT IN (...)` |
 | `isNull()` | — | Is null | `IS NULL` |
 | `isNotNull()` | — | Is not null | `IS NOT NULL` |
 

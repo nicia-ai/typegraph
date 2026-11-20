@@ -15,8 +15,11 @@ This example shows how to build a comprehensive audit system that:
 
 TypeGraph's temporal model provides built-in auditing capabilities:
 
-1. **Every update creates a new version** - Old data is preserved with `valid_to` timestamp
-2. **Temporal queries** - Query any point in time with `asOf` or get full history with `includeEnded`
+1. **Recorded time** - On a store opened with `history: true`, every committed write is recorded, and
+   `asOfRecorded` reads the graph as it stood at an earlier recorded instant
+2. **Valid time** - `asOf` and `includeEnded` filter rows by their validity window
+   (`validFrom` / `validTo`). An update rewrites a row in place, so these read only its current
+   properties, not earlier versions
 3. **Metadata fields** - `createdAt`, `updatedAt`, `version` are tracked automatically
 
 This example extends the built-in capabilities with:
@@ -461,49 +464,24 @@ async function getChangesInRange(
 
 ## Using TypeGraph's Built-in Temporal Features
 
+A setting has one stored row: `update` rewrites it in place and raises `meta.version`, so neither
+`asOf` nor `includeEnded` returns an earlier version. The audit entries above are this example's
+version history (see [Get Entity History](#get-entity-history)). To reconstruct a setting's complete
+state at an earlier time as well, open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`) and read it at a
+[recorded instant](/queries/temporal#reading-at-a-recorded-instant).
+
 ### View Entity at Point in Time
 
 ```typescript
-type SettingProps = Node<typeof Setting>;
-
 async function getSettingAsOf(
   id: NodeId<typeof Setting>,
   timestamp: Date
-): Promise<SettingProps | undefined> {
-  return store
-    .query()
-    .from("Setting", "s")
-    .temporal("asOf", timestamp.toISOString())
-    .whereNode("s", (s) => s.id.eq(id))
-    .select((ctx) => ctx.s)
-    .first();
-}
-```
-
-### Get All Versions
-
-```typescript
-interface SettingVersion {
-  props: SettingProps;
-  validFrom: string | undefined;
-  validTo: string | undefined;
-  version: number;
-}
-
-async function getSettingVersions(id: NodeId<typeof Setting>): Promise<readonly SettingVersion[]> {
-  return store
-    .query()
-    .from("Setting", "s")
-    .temporal("includeEnded")
-    .whereNode("s", (s) => s.id.eq(id))
-    .orderBy("s", "meta.validFrom", "desc")
-    .select((ctx) => ({
-      props: ctx.s,
-      validFrom: ctx.s.meta.validFrom,
-      validTo: ctx.s.meta.validTo,
-      version: ctx.s.meta.version,
-    }))
-    .execute();
+): Promise<Node<typeof Setting> | undefined> {
+  const anchor = await store.resolveRecordedInstant(timestamp.toISOString());
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Setting.getById(id);
 }
 ```
 
@@ -518,37 +496,22 @@ interface VersionDiff {
 
 async function compareVersions(
   id: NodeId<typeof Setting>,
-  version1: number,
-  version2: number
+  before: Date,
+  after: Date
 ): Promise<readonly VersionDiff[]> {
-  const history = await store
-    .query()
-    .from("Setting", "s")
-    .temporal("includeEnded")
-    .whereNode("s", (s) => s.id.eq(id))
-    .orderBy("s", "meta.version", "asc")
-    .select((ctx) => ({ props: ctx.s, version: ctx.s.meta.version }))
-    .execute();
+  const [earlier, later] = await Promise.all([
+    getSettingAsOf(id, before),
+    getSettingAsOf(id, after),
+  ]);
 
-  const versions = history
-    .filter((row) => row.version === version1 || row.version === version2)
-    .map((row) => row.props);
-
-  if (versions.length !== 2) {
-    throw new Error("Versions not found");
+  if (earlier === undefined || later === undefined) {
+    throw new Error("Setting not recorded at both times");
   }
 
-  const [before, after] = versions;
   const diffs: VersionDiff[] = [];
-
-  const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
-
-  for (const key of allKeys) {
-    const beforeVal = before[key as keyof typeof before];
-    const afterVal = after[key as keyof typeof after];
-
-    if (JSON.stringify(beforeVal) !== JSON.stringify(afterVal)) {
-      diffs.push({ field: key, before: beforeVal, after: afterVal });
+  for (const field of ["key", "value", "category", "description"] as const) {
+    if (earlier[field] !== later[field]) {
+      diffs.push({ field, before: earlier[field], after: later[field] });
     }
   }
 

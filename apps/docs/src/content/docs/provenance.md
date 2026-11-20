@@ -334,6 +334,11 @@ reads in its own transaction.
 - Inside a transaction, use `holding(tx)`, not `holding()`. The no-argument
   form opens its own transaction and waits for a graph lock that yours already
   holds.
+- `retract`, `retractMany`, `unRetract` and `unRetractMany` each run in a
+  transaction of their own and take the schema-version fence and then the graph
+  write lock before their first read. On a store handle whose schema version is
+  no longer the active one they throw `StaleVersionError`, even when the call
+  would have changed nothing or would have reported a missing source.
 - Reacquiring a lock the transaction already holds reuses it.
 - `assertHolds` reads only what is behind the named facts, not the whole
   provenance graph, so its cost follows the size of their derivations.

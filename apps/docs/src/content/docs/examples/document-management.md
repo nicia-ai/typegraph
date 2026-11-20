@@ -7,7 +7,7 @@ This example builds a document management system with:
 
 - **Document hierarchy** (folders, documents, sections)
 - **Semantic search** with vector embeddings
-- **Version history** using temporal queries
+- **Version history** using recorded time
 - **Access control** with permission inheritance
 - **Related documents** discovery
 
@@ -268,7 +268,7 @@ async function updateDocument(
     embedding = await generateEmbedding(text);
   }
 
-  // Update creates a new version automatically
+  // Update rewrites the document in place and increments meta.version
   return store.nodes.Document.update(documentId, {
     ...updates,
     embedding,
@@ -484,53 +484,31 @@ async function findRelatedDocuments(
 
 ## Version History
 
-### Get Document History
-
-```typescript
-interface DocumentVersion {
-  title: string;
-  content: string;
-  status: string;
-  validFrom: string | undefined;
-  validTo: string | undefined;
-  version: number;
-}
-
-async function getDocumentHistory(documentId: NodeId<typeof Document>): Promise<readonly DocumentVersion[]> {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(documentId))
-    .orderBy("d", "meta.validFrom", "desc")
-    .select((ctx) => ({
-      title: ctx.d.title,
-      content: ctx.d.content,
-      status: ctx.d.status,
-      validFrom: ctx.d.meta.validFrom,
-      validTo: ctx.d.meta.validTo,
-      version: ctx.d.meta.version,
-    }))
-    .execute();
-}
-```
+A document has one stored row. An update rewrites it in place and raises `meta.version`, so no
+temporal mode returns an earlier version: `includeEnded` widens the validity-window filter, not the
+history, and `asOf` returns the current properties of a row that was valid at the instant. Earlier
+versions are kept by [recorded time](/queries/temporal#recorded-time-bitemporal). Open the store with
+`history: true` (`createStoreWithSchema(graph, backend, { history: true })`) to record every
+committed write, then read the document at a recorded instant.
 
 ### View Document at Point in Time
+
+Resolve the wall-clock time to the recorded instant at or before it, and read the document there:
 
 ```typescript
 async function getDocumentAsOf(
   documentId: NodeId<typeof Document>,
   timestamp: Date
 ): Promise<Node<typeof Document> | undefined> {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("asOf", timestamp.toISOString())
-    .whereNode("d", (d) => d.id.eq(documentId))
-    .select((ctx) => ctx.d)
-    .first();
+  const anchor = await store.resolveRecordedInstant(timestamp.toISOString());
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Document.getById(documentId);
 }
 ```
+
+The result carries the `meta.version` the document had then, or is `undefined` when the document did
+not exist (or was deleted) at that instant.
 
 ### Compare Versions
 

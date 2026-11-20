@@ -428,7 +428,8 @@ async function executeTransition(
       .select((ctx) => ctx.s)
       .first();
 
-    // Remove current state edge
+    // End the current state edge. Ending it, rather than deleting it, keeps it
+    // readable under includeEnded, which the instance timeline below relies on.
     const currentStateEdge = await tx
       .query()
       .from("WorkflowInstance", "i")
@@ -438,12 +439,17 @@ async function executeTransition(
       .select((ctx) => ctx.e.id)
       .first();
 
+    const transitionedAt = new Date().toISOString();
     if (currentStateEdge) {
-      await tx.edges.currentState.delete(asEdgeId<typeof currentState>(currentStateEdge));
+      await tx.edges.currentState.update(
+        asEdgeId<typeof currentState>(currentStateEdge),
+        {},
+        { validTo: transitionedAt },
+      );
     }
 
-    // Add new state edge
-    await tx.edges.currentState.create(instance, targetState!, {});
+    // Add new state edge, valid from the instant the old one ended
+    await tx.edges.currentState.create(instance, targetState!, {}, { validFrom: transitionedAt });
 
     // Update instance data
     const updatedData = { ...instance.data, lastTransition: transition.name, ...result };

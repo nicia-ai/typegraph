@@ -358,6 +358,7 @@ For advanced use cases, TypeGraph exports fragment type definitions:
 
 ```typescript
 import type {
+  FragmentRequiredAliases,
   FragmentRequirements,
   QueryFragment,
   QueryFragmentBody,
@@ -372,6 +373,8 @@ import type {
   adds nothing. The annotation must state the fragment's shape exactly: one that drops a requirement,
   widens a kind or names another graph is a compile error
 - **`FragmentRequirements<G>`** - The shape of a declaration: alias name to node kind name
+- **`FragmentRequiredAliases<G, Requires>`** - The alias map a fragment body is typed against: each
+  required alias as `from(kind, alias)` types it
 - **`QueryFragmentBody<G, Requires, ...>`** - The function a fragment is written as, typed against the
   declared aliases only
 - **`QueryFragmentFactory<G>`** - The `fragment` function `createFragment<G>()` returns

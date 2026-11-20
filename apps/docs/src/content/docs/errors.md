@@ -1781,6 +1781,7 @@ rather than silently sorting or matching differently:
 | `ORDER_ALIAS_UNKNOWN` | `orderBy(alias, field)` names an alias the query does not have. |
 | `METADATA_FIELD_UNKNOWN` | A predicate accessor or expression context reads `$meta.<name>` for a name the alias stores no metadata for, such as `$meta.version` on an edge. The typed accessors make this a compile error; untyped code reaches the refusal. `details.available` lists the alias's metadata fields. |
 | `LIKE_PATTERN_TRAILING_ESCAPE` | A `like()` / `ilike()` pattern ends with an escape character that escapes nothing. `details.operator` and `details.pattern` carry the call. Remove the trailing `\`, or double it to match a literal backslash. |
+| `QUERY_FRAGMENT_REQUIREMENT_UNMET` | `pipe()` applies a fragment whose required alias the query does not bind as a node of the declared kind or a subclass of it. Typed code gets a compile error instead; a caller the compile-time check cannot reach gets this refusal. `details.alias`, `details.requiredKind` and `details.boundKinds` name the mismatch. See [Fragment Composition](/queries/compose). |
 
 #### Operational Identity guard codes
 
