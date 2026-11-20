@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createPgGraphQueries, type QueryRunner } from "./pggraph";
+import {
+  buildPgGraphProjection,
+  createPgGraphQueries,
+  type QueryRunner,
+} from "./pggraph";
 
 /** A runner that answers every statement with the given rows and records its name. */
 function fakeRunner(rows: readonly Record<string, unknown>[]): Readonly<{
@@ -47,5 +51,34 @@ describe("pgGraph traversal circuit breakers", () => {
     );
     assert.equal((await aggregate.GA_BFS("person:0")).rowCount, 10);
     assert.equal((await aggregate.GA_SSSP("person:0")).rowCount, 10);
+  });
+});
+
+describe("pgGraph projection build", () => {
+  it("gives knows its primary key before graph.add_edge registers it", async () => {
+    const statements: string[] = [];
+    await buildPgGraphProjection(
+      (text) => {
+        statements.push(text.replaceAll(/\s+/g, " ").trim());
+        return Promise.resolve(
+          text.includes("graph.build()") ?
+            [{ nodes_loaded: "3", edges_loaded: "4" }]
+          : [],
+        );
+      },
+      () => undefined,
+    );
+    const primaryKey = statements.indexOf(
+      "ALTER TABLE knows ADD PRIMARY KEY (from_id, to_id)",
+    );
+    const addEdge = statements.findIndex((statement) =>
+      statement.includes("graph.add_edge( from_table := 'public.knows'"),
+    );
+    const build = statements.findIndex((statement) =>
+      statement.includes("FROM graph.build()"),
+    );
+    assert.ok(primaryKey >= 0, "knows has no primary key");
+    assert.ok(addEdge > primaryKey, "graph.add_edge ran before the knows key");
+    assert.ok(build > addEdge, "graph.build() ran before the registrations");
   });
 });

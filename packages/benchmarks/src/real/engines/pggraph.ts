@@ -19,7 +19,7 @@
  * with the `graph` extension available instead (see
  * `startExternalPgGraphDatabase`). `knows` is registered
  * `bidirectional := false` over a table that already holds both directed
- * rows per friendship (see `registerAndBuildGraph`), so the CSR is the same
+ * rows per friendship (see `buildPgGraphProjection`), so the CSR is the same
  * undirected knows graph every other engine sees.
  */
 import { Client, Pool, type PoolClient } from "pg";
@@ -303,16 +303,28 @@ const SCHEMA_DDL = [
   `CREATE TABLE reply_of (child_id text, parent_id text, parent_kind text)`,
 ] as const;
 
+/**
+ * pgGraph 1.x identifies every edge of an edge-table relationship by its
+ * source row's primary key ("composite relationship primary keys are
+ * preserved as the source identity used by later hydration and deletion"),
+ * so `graph.add_edge` over a table without one fails inside the extension
+ * with `Internal error: primary-key read failed: SpiTupleTable positioned
+ * before the start or after the end`. One `knows` row per directed
+ * friendship makes (from_id, to_id) that key; its index also serves the
+ * `from_id` lookups of IS3, IS7, IC2 and GA_DEGREE.
+ */
+const KNOWS_PRIMARY_KEY_DDL = `ALTER TABLE knows ADD PRIMARY KEY (from_id, to_id)`;
+
 // Created AFTER bulk load (matching every engine driver's "indexes
 // materialized after load" fairness label): the point reads' access paths,
-// never touched by pgGraph's own CSR index.
+// plus the `knows` key pgGraph's edge registration requires.
 const POST_LOAD_INDEX_DDL = [
   `CREATE INDEX has_creator_person_idx ON has_creator (person_id, message_kind)`,
   `CREATE INDEX has_creator_message_idx ON has_creator (message_id)`,
   `CREATE INDEX container_of_post_idx ON container_of (post_id)`,
   `CREATE INDEX reply_of_parent_idx ON reply_of (parent_id)`,
   `CREATE INDEX reply_of_child_idx ON reply_of (child_id)`,
-  `CREATE INDEX knows_from_idx ON knows (from_id)`,
+  KNOWS_PRIMARY_KEY_DDL,
 ] as const;
 
 type Inserter = Readonly<{
@@ -466,54 +478,62 @@ async function loadPgGraphDataset(
   return result.pools;
 }
 
-async function registerAndBuildGraph(
-  pool: Pool,
+/** One SQL session: every statement runs on the same connection. */
+export type PgGraphSession = (
+  text: string,
+  values?: readonly unknown[],
+) => Promise<readonly Readonly<Record<string, unknown>>[]>;
+
+/**
+ * Everything between the bulk load and the first query: the post-load
+ * indexes (including the `knows` primary key), the pgGraph registrations,
+ * and `graph.build()`, in that order on one session. `sync_mode` is a
+ * session GUC that must be set on the connection that builds, and the key
+ * must exist before `graph.add_edge` reads it.
+ */
+export async function buildPgGraphProjection(
+  session: PgGraphSession,
   log: (message: string) => void,
 ): Promise<void> {
-  // Registration, `graph.sync_mode`, and `graph.build()` all run on one
-  // client: `sync_mode` is a session GUC that must be set on the same
-  // connection that builds, and the whole sequence is one-shot anyway.
-  const client = await pool.connect();
-  try {
-    await client.query("CREATE EXTENSION IF NOT EXISTS graph");
-    // The dataset is static after load, so opt out of pgGraph's trigger-based
-    // incremental sync (which build() would otherwise install on every
-    // registered table, with a warning) — a single post-load build is all we
-    // need.
-    await client.query("SET graph.sync_mode = 'manual'");
-    await client.query(
-      "SELECT graph.add_table($1::regclass, id_column := 'id')",
-      [PERSON_TABLE],
-    );
-    // The `knows` relationship table already carries BOTH directed rows per
-    // undirected friendship (see dataset/ldbc-csv.ts), exactly like every
-    // other engine's edge set — so `bidirectional := false` yields a CSR with
-    // those same two directed edges per pair. `bidirectional := true` would
-    // instead quadruple each pair (two rows x two directions), an unfair CSR
-    // inflation. A forward (`direction := 'out'`) traversal over the two
-    // directed rows is already undirected reachability.
-    await client.query(
-      `SELECT graph.add_edge(
-         from_table := 'public.knows'::regclass,
-         from_column := 'from_id',
-         to_table := $1::regclass,
-         to_column := 'to_id',
-         label := 'knows',
-         bidirectional := false
-       )`,
-      [PERSON_TABLE],
-    );
-    const build = await client.query<{
-      nodes_loaded: string;
-      edges_loaded: string;
-    }>("SELECT nodes_loaded, edges_loaded FROM graph.build()");
-    const row = build.rows[0];
-    log(
-      `graph.build(): ${row?.nodes_loaded ?? "?"} nodes, ${row?.edges_loaded ?? "?"} edges`,
-    );
-  } finally {
-    client.release();
+  for (const ddl of POST_LOAD_INDEX_DDL) {
+    await session(ddl);
   }
+  await session("CREATE EXTENSION IF NOT EXISTS graph");
+  // The dataset is static after load, so opt out of pgGraph's trigger-based
+  // incremental sync (which build() would otherwise install on every
+  // registered table, with a warning) — a single post-load build is all we
+  // need.
+  await session("SET graph.sync_mode = 'manual'");
+  await session("SELECT graph.add_table($1::regclass, id_column := 'id')", [
+    PERSON_TABLE,
+  ]);
+  // The `knows` relationship table already carries BOTH directed rows per
+  // undirected friendship (see dataset/ldbc-csv.ts), exactly like every
+  // other engine's edge set — so `bidirectional := false` yields a CSR with
+  // those same two directed edges per pair. `bidirectional := true` would
+  // instead quadruple each pair (two rows x two directions), an unfair CSR
+  // inflation. A forward (`direction := 'out'`) traversal over the two
+  // directed rows is already undirected reachability. `knows` is not a
+  // registered node table, so 1.x treats it as an edge table: both
+  // endpoints are read from it (`from_id` -> `to_id`).
+  await session(
+    `SELECT graph.add_edge(
+       from_table := 'public.knows'::regclass,
+       from_column := 'from_id',
+       to_table := $1::regclass,
+       to_column := 'to_id',
+       label := 'knows',
+       bidirectional := false
+     )`,
+    [PERSON_TABLE],
+  );
+  const build = await session(
+    "SELECT nodes_loaded, edges_loaded FROM graph.build()",
+  );
+  const row = build[0];
+  log(
+    `graph.build(): ${String(row?.["nodes_loaded"] ?? "?")} nodes, ${String(row?.["edges_loaded"] ?? "?")} edges`,
+  );
 }
 
 /**
@@ -902,7 +922,7 @@ export function createPgGraphQueries(run: QueryRunner): SnbQueries {
   // BFS3 (traversal): distinct persons within BFS3_HOPS hops of a seed over
   // `knows` via `graph.traverse`. `direction := 'out'` follows the forward CSR
   // — already undirected because both directed rows exist per pair (see
-  // registerAndBuildGraph). include_start := false excludes the seed;
+  // buildPgGraphProjection). include_start := false excludes the seed;
   // reachableSetResult de-dupes/sorts for the canonical digest.
   async function BFS3(personId: string) {
     const rows = await run<{ node_id: string; capped: boolean }>(
@@ -1242,10 +1262,18 @@ export const createPgGraphEngine: SnbEngineFactory = async (
           options.datasetRoot,
           options.log,
         );
-        for (const ddl of POST_LOAD_INDEX_DDL) {
-          await pool.query(ddl);
+        const buildClient = await pool.connect();
+        try {
+          await buildPgGraphProjection(async (text, values) => {
+            const result = await buildClient.query(
+              text,
+              values === undefined ? undefined : [...values],
+            );
+            return result.rows;
+          }, options.log);
+        } finally {
+          buildClient.release();
         }
-        await registerAndBuildGraph(pool, options.log);
         await pool.query("VACUUM ANALYZE");
         // Acquire the dedicated query connection only after the graph is
         // built, then warm it with a throwaway 1-hop traversal: pgGraph loads
