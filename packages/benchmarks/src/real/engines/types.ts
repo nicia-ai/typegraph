@@ -385,6 +385,18 @@ export type SnbQueries = Readonly<{
 export type SnbCapabilityGaps = Partial<Record<SnbQueryId, string>>;
 
 /**
+ * One component version an engine reported about itself while it was
+ * running (a version query, an extension catalog row, a native call), as
+ * opposed to the pin the harness asked for. `detail` carries settings that
+ * change what was measured (edition, default language, memory sizing).
+ */
+export type EngineRuntimeVersion = Readonly<{
+  component: string;
+  version: string;
+  detail?: string;
+}>;
+
+/**
  * A loaded, query-ready engine handle. `load()` streams the dataset (via
  * `streamSnbCsvDataset` and the engine's own `SnbRowSink`) and must be
  * called exactly once before `queries` are used.
@@ -397,6 +409,22 @@ export type SnbEngineHandle = Readonly<{
   queries: SnbQueries;
   /** Queries this engine cannot run, with reasons. Absent = runs everything. */
   unsupported?: SnbCapabilityGaps;
+  /**
+   * Where the engine runs: the pinned container it launched, or the existing
+   * server it was pointed at (credentials redacted).
+   */
+  target: string;
+  /**
+   * How `load()` gets the dataset in (e.g. offline bulk import vs online
+   * batched writes). Load times are only comparable between runs that used
+   * the same load path.
+   */
+  loadPath: string;
+  /**
+   * Versions read from the running engine. Called after `load()` and before
+   * `close()`.
+   */
+  versions(): Promise<readonly EngineRuntimeVersion[]>;
   close(): Promise<void>;
 }>;
 

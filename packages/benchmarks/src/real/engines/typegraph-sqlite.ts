@@ -15,6 +15,7 @@ import { createStoreWithSchema } from "@nicia-ai/typegraph";
 import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
+import { packageVersion } from "../harness/doctor";
 import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
@@ -124,6 +125,24 @@ export const createTypegraphSqliteEngine: SnbEngineFactory = async (
         return pools;
       },
       queries: createSnbQueries(store),
+      target: "in-process better-sqlite3, temporary database file",
+      loadPath: "TypeGraph trusted initial import",
+      async versions() {
+        const sqliteVersion = sqliteClient
+          .prepare("select sqlite_version() as version")
+          .get() as { version: string };
+        return [
+          {
+            component: "@nicia-ai/typegraph",
+            version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+          },
+          { component: "SQLite", version: sqliteVersion.version },
+          {
+            component: "better-sqlite3",
+            version: (await packageVersion("better-sqlite3")) ?? "unknown",
+          },
+        ];
+      },
       async close() {
         await backend.close();
         rmSync(tempDir, { recursive: true, force: true });

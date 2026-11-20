@@ -29,7 +29,8 @@ import {
   type SnbPersonRow,
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
-import { PGGRAPH_IMAGE } from "../harness/doctor";
+import { PGGRAPH_IMAGE } from "../harness/engine-pins";
+import { packageVersion } from "../harness/doctor";
 import { freePort, spawnCapture } from "../harness/process";
 import {
   BFS3_HOPS,
@@ -39,6 +40,7 @@ import {
   compareMessageRecencyDesc,
   componentSizesResult,
   degreeResult,
+  type EngineRuntimeVersion,
   GA_MAX_HOPS,
   IC13_MAX_HOPS,
   IC9_MAX_DATE,
@@ -78,6 +80,8 @@ const PGGRAPH_PASSWORD = "bench";
 
 type PgGraphContainer = Readonly<{
   connectionString: string;
+  /** Where the server runs, for the run header (credentials redacted). */
+  target: string;
   close: () => Promise<void>;
 }>;
 
@@ -110,7 +114,7 @@ async function startPgGraphContainer(): Promise<PgGraphContainer> {
     await close();
     throw error;
   }
-  return { connectionString, close };
+  return { connectionString, target: `container ${PGGRAPH_IMAGE}`, close };
 }
 
 // The image runs a temporary init server (unix-socket only) before restarting
@@ -141,6 +145,45 @@ async function waitForPgGraphReady(connectionString: string): Promise<void> {
       lastError instanceof Error ? lastError.message : String(lastError)
     }`,
   );
+}
+
+/**
+ * The PostgreSQL server and `graph` extension versions the run actually
+ * used, plus the pgGraph resource settings that bound traversal and build
+ * (1.x defaults; an existing server may have changed them).
+ */
+async function readPgGraphVersions(
+  pool: Pool,
+): Promise<readonly EngineRuntimeVersion[]> {
+  const server = await pool.query<{ server_version: string }>(
+    "SHOW server_version",
+  );
+  const extension = await pool.query<{ extversion: string }>(
+    "SELECT extversion FROM pg_extension WHERE extname = 'graph'",
+  );
+  const settings = await pool.query<{ name: string; setting: string }>(
+    `SELECT name, setting FROM pg_settings
+      WHERE name IN ('graph.memory_limit_mb', 'graph.query_memory_mb',
+                     'graph.query_work_limit', 'shared_buffers', 'work_mem')
+      ORDER BY name`,
+  );
+  return [
+    {
+      component: "pgGraph",
+      version: extension.rows[0]?.extversion ?? "not installed",
+      detail: settings.rows
+        .map((row) => `${row.name}=${row.setting}`)
+        .join(", "),
+    },
+    {
+      component: "PostgreSQL",
+      version: server.rows[0]?.server_version ?? "unknown",
+    },
+    {
+      component: "pg",
+      version: (await packageVersion("pg")) ?? "unknown",
+    },
+  ];
 }
 
 const SCHEMA_DDL = [
@@ -373,13 +416,36 @@ async function registerAndBuildGraph(
   }
 }
 
-type QueryRunner = <Row>(
+/**
+ * pgGraph 1.x governs every traversal with circuit breakers
+ * (`graph.max_nodes`, `graph.max_frontier`, default 100,000 each) and marks a
+ * truncated result `capped` instead of failing. The query session raises
+ * both to the documented maximum (`TRAVERSAL_CIRCUIT_BREAKER_SETTINGS`), so
+ * the whole-component queries see the whole component; this turns any
+ * remaining truncation into a failed request rather than a silently smaller
+ * answer that only a cross-engine parity check could notice.
+ */
+function assertTraversalNotCapped(queryId: string, capped: boolean): void {
+  if (capped) {
+    throw new Error(
+      `pgGraph ${queryId}: graph.traverse reported capped=true, so the result is truncated by a traversal circuit breaker`,
+    );
+  }
+}
+
+/** Session settings applied to the query connection before any timed request. */
+const TRAVERSAL_CIRCUIT_BREAKER_SETTINGS = [
+  "SET graph.max_nodes = 10000000",
+  "SET graph.max_frontier = 10000000",
+] as const;
+
+export type QueryRunner = <Row>(
   name: string,
   text: string,
   values: readonly unknown[],
 ) => Promise<readonly Row[]>;
 
-function createPgGraphQueries(run: QueryRunner): SnbQueries {
+export function createPgGraphQueries(run: QueryRunner): SnbQueries {
   // Walks the reply chain from a comment up to its root Post via a recursive
   // CTE over `reply_of` (a plain-SQL walk — pgGraph's shortest_path is for
   // person<->person, not this tree climb). Post has no outgoing reply_of, so
@@ -739,9 +805,9 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
   // registerAndBuildGraph). include_start := false excludes the seed;
   // reachableSetResult de-dupes/sorts for the canonical digest.
   async function BFS3(personId: string) {
-    const rows = await run<{ node_id: string }>(
+    const rows = await run<{ node_id: string; capped: boolean }>(
       "pggraph_bfs3",
-      `SELECT node_id FROM graph.traverse(
+      `SELECT node_id, capped FROM graph.traverse(
          $1::regclass, $2,
          max_depth := ${BFS3_HOPS},
          edge_types := ARRAY['knows'],
@@ -752,6 +818,10 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
          max_rows := 100000000
        )`,
       [PERSON_TABLE, personId],
+    );
+    assertTraversalNotCapped(
+      "BFS3",
+      rows.some((row) => row.capped),
     );
     return reachableSetResult(rows.map((row) => row.node_id));
   }
@@ -962,9 +1032,9 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
   // depths from the seed via `graph.traverse` (BFS; `depth` is the shortest
   // distance). max_depth GA_MAX_HOPS reaches the entire component.
   async function GA_BFS(seedPersonId: string) {
-    const rows = await run<{ reachable: string }>(
+    const rows = await run<{ reachable: string; capped: boolean | null }>(
       "pggraph_ga_bfs",
-      `SELECT count(*) AS reachable FROM graph.traverse(
+      `SELECT count(*) AS reachable, bool_or(capped) AS capped FROM graph.traverse(
          'public.person'::regclass, $1,
          max_depth := ${GA_MAX_HOPS}, edge_types := ARRAY['knows'], direction := 'out',
          node_tables := ARRAY['public.person'::regclass::oid],
@@ -972,12 +1042,18 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
        )`,
       [seedPersonId],
     );
+    assertTraversalNotCapped("GA_BFS", rows[0]?.capped === true);
     return bfsReachResult(Number(rows[0]?.reachable ?? 0));
   }
   async function GA_SSSP(seedPersonId: string) {
-    const rows = await run<{ reachable: string; depth_sum: string | null }>(
+    const rows = await run<{
+      reachable: string;
+      depth_sum: string | null;
+      capped: boolean | null;
+    }>(
       "pggraph_ga_sssp",
-      `SELECT count(*) AS reachable, coalesce(sum(depth), 0) AS depth_sum
+      `SELECT count(*) AS reachable, coalesce(sum(depth), 0) AS depth_sum,
+              bool_or(capped) AS capped
          FROM graph.traverse(
            'public.person'::regclass, $1,
            max_depth := ${GA_MAX_HOPS}, edge_types := ARRAY['knows'], direction := 'out',
@@ -986,6 +1062,7 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
          )`,
       [seedPersonId],
     );
+    assertTraversalNotCapped("GA_SSSP", rows[0]?.capped === true);
     return ssspResult(
       Number(rows[0]?.reachable ?? 0),
       Number(rows[0]?.depth_sum ?? 0),
@@ -1014,12 +1091,14 @@ function createPgGraphQueries(run: QueryRunner): SnbQueries {
 }
 
 /**
- * pgGraph runs every lane query except IC14: `graph.shortest_path` is hop-only
- * (a `max_depth` bound, no edge-weight/cost argument), so the weighted shortest
- * path IC14 exercises has no native primitive here.
+ * pgGraph runs every lane query except IC14. `graph.shortest_path` is
+ * hop-only; 1.x also ships `graph.weighted_shortest_path` over a registered
+ * `weight_column`, but this driver's `knows` table carries no weight column
+ * (the synthetic IC14 weight is materialized only by TypeGraph's loader), so
+ * IC14 is not wired here rather than impossible.
  */
 const PGGRAPH_UNSUPPORTED: SnbCapabilityGaps = {
-  IC14: "graph.shortest_path is hop-only (no edge weights)",
+  IC14: "not wired: knows carries no weight column for graph.weighted_shortest_path",
 };
 
 export const createPgGraphEngine: SnbEngineFactory = async (
@@ -1073,6 +1152,9 @@ export const createPgGraphEngine: SnbEngineFactory = async (
         // the mmap'd CSR lazily per backend, so without this the first timed
         // traversal request would pay that one-off per-connection load cost.
         queryClient = await pool.connect();
+        for (const setting of TRAVERSAL_CIRCUIT_BREAKER_SETTINGS) {
+          await queryClient.query(setting);
+        }
         const warmSeed = pools.persons[0];
         if (warmSeed !== undefined) {
           await queryClient.query(
@@ -1086,6 +1168,11 @@ export const createPgGraphEngine: SnbEngineFactory = async (
       },
       queries: createPgGraphQueries(runQuery),
       unsupported: PGGRAPH_UNSUPPORTED,
+      target: container.target,
+      loadPath: "batched multi-row INSERT, then graph.build()",
+      async versions() {
+        return readPgGraphVersions(pool);
+      },
       async close() {
         queryClient?.release();
         await pool.end();

@@ -19,6 +19,7 @@ import { createPgGraphEngine } from "./engines/pggraph";
 import { createTypegraphPostgresEngine } from "./engines/typegraph-postgres";
 import { createTypegraphSqliteEngine } from "./engines/typegraph-sqlite";
 import {
+  type EngineRuntimeVersion,
   type MessageRef,
   type PersonPair,
   type SnbEngineFactory,
@@ -26,9 +27,7 @@ import {
   type SnbQueryResult,
 } from "./engines/types";
 import {
-  NEO4J_IMAGE,
   packageVersion,
-  PGGRAPH_IMAGE,
   runDoctor,
   writeDoctorResult,
   type SnbEngineName,
@@ -61,6 +60,10 @@ type EngineQueryMeasurement = Readonly<{
 type EngineRun = Readonly<{
   name: SnbEngineName;
   fairness: string;
+  target: string;
+  loadPath: string;
+  /** Read from the running engine after load, not from the pin. */
+  versions: readonly EngineRuntimeVersion[];
   loadMs: number;
   /** Only the queries this engine actually ran (unsupported ones are absent). */
   queries: Partial<Record<SnbQueryId, EngineQueryMeasurement>>;
@@ -91,52 +94,40 @@ async function measureQuery<Request>(
   return { samplesMs, rowCounts, digests };
 }
 
+/**
+ * summary.json's engine versions: what each engine reported while it ran
+ * (see `SnbEngineHandle.versions`), one row per component, plus the
+ * TypeGraph build the harness itself resolved.
+ */
 async function collectEngineVersions(
-  engines: readonly SnbEngineName[],
+  runs: readonly EngineRun[],
 ): Promise<readonly EngineVersion[]> {
-  const versions: EngineVersion[] = [];
-  if (
-    engines.includes("typegraph-sqlite") ||
-    engines.includes("typegraph-postgres")
-  ) {
-    versions.push({
-      engine: "@nicia-ai/typegraph",
-      version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
-    });
-  }
-  if (engines.includes("typegraph-sqlite")) {
-    versions.push({
-      engine: "better-sqlite3",
-      version: (await packageVersion("better-sqlite3")) ?? "unknown",
-    });
-  }
-  if (engines.includes("typegraph-postgres")) {
-    versions.push({
-      engine: "pg",
-      version: (await packageVersion("pg")) ?? "unknown",
-    });
-  }
-  if (engines.includes("neo4j")) {
-    versions.push({
-      engine: "neo4j",
-      version: NEO4J_IMAGE,
-      detail: `neo4j-driver ${(await packageVersion("neo4j-driver")) ?? "unknown"}`,
-    });
-  }
-  if (engines.includes("ladybugdb")) {
-    versions.push({
-      engine: "@ladybugdb/core",
-      version: (await packageVersion("@ladybugdb/core")) ?? "unknown",
-    });
-  }
-  if (engines.includes("pggraph")) {
-    versions.push({
-      engine: "pggraph",
-      version: PGGRAPH_IMAGE,
-      detail: `pg ${(await packageVersion("pg")) ?? "unknown"}`,
-    });
-  }
-  return versions;
+  const harness: EngineVersion = {
+    engine: "harness/@nicia-ai/typegraph",
+    version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+    detail: `git ${resolveGitSha()}`,
+  };
+  return [
+    harness,
+    ...runs.flatMap((run) =>
+      run.versions.map((version) => ({
+        engine: `${run.name}/${version.component}`,
+        version: version.version,
+        ...(version.detail === undefined ? {} : { detail: version.detail }),
+      })),
+    ),
+  ];
+}
+
+function formatEngineVersions(
+  versions: readonly EngineRuntimeVersion[],
+): string {
+  return versions
+    .map(
+      (version) =>
+        `${version.component} ${version.version}${version.detail === undefined ? "" : ` (${version.detail})`}`,
+    )
+    .join("; ");
 }
 
 type RunEngineOptions = Readonly<{
@@ -167,9 +158,12 @@ async function runEngine(
     const pools = await handle.load();
     const loadMs = nowMs() - loadStarted;
     console.log(
-      `${engineName} loaded in ${formatMs(loadMs)} ` +
+      `${engineName} loaded in ${formatMs(loadMs)} via ${handle.loadPath} ` +
         `(${pools.counts.persons} persons, ${pools.counts.posts} posts, ${pools.counts.comments} comments)`,
     );
+    const versions = await handle.versions();
+    console.log(`  target: ${handle.target}`);
+    console.log(`  versions: ${formatEngineVersions(versions)}`);
 
     const requestPlan = getOrBuildRequestPlan(pools);
 
@@ -243,6 +237,9 @@ async function runEngine(
     return {
       name: engineName,
       fairness: handle.fairness,
+      target: handle.target,
+      loadPath: handle.loadPath,
+      versions,
       loadMs,
       queries,
       unsupported,
@@ -265,6 +262,10 @@ async function main(argv: readonly string[]): Promise<void> {
   // library entry so a run against another checkout's build is visible.
   console.log(
     `@nicia-ai/typegraph resolved to ${fileURLToPath(import.meta.resolve("@nicia-ai/typegraph"))}`,
+  );
+  console.log(
+    `TypeGraph ${(await packageVersion("@nicia-ai/typegraph")) ?? "unknown"} at git ${resolveGitSha()}` +
+      `${resolveGitRefName() === undefined ? "" : ` (${resolveGitRefName()})`}`,
   );
 
   const doctorResult = await runDoctor({ engines: options.engines });
@@ -427,6 +428,15 @@ async function main(argv: readonly string[]): Promise<void> {
     }
   }
 
+  console.log("\n=== Engines (versions read from the running engine) ===");
+  for (const run of runs) {
+    console.log(`  ${run.name}: ${formatEngineVersions(run.versions)}`);
+    console.log(`    target: ${run.target}`);
+    console.log(
+      `    load path: ${run.loadPath} (${formatMs(run.loadMs)}; load times compare only across runs with the same load path)`,
+    );
+  }
+
   if (failures.length > 0) {
     console.log("\n=== Engine failures ===");
     for (const failure of failures) {
@@ -442,6 +452,9 @@ async function main(argv: readonly string[]): Promise<void> {
     engines: runs.map((run) => ({
       name: run.name,
       fairness: run.fairness,
+      target: run.target,
+      loadPath: run.loadPath,
+      versions: run.versions,
       loadMs: run.loadMs,
       unsupported: run.unsupported,
     })),
@@ -455,7 +468,7 @@ async function main(argv: readonly string[]): Promise<void> {
     commands: [`tsx src/real/snb-short-reads.ts ${argv.join(" ")}`],
     gitSha: resolveGitSha(),
     gitRefName: resolveGitRefName(),
-    engineVersions: await collectEngineVersions(engineNames),
+    engineVersions: await collectEngineVersions(runs),
     dataset: { profile: options.profile, datasetRoot },
     warmupIterations: options.warmupRequests,
     sampleIterations: options.requestsPerQuery,

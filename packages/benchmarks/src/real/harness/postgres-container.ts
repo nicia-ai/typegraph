@@ -13,12 +13,14 @@
  * this as a fast, non-durable mode; only the RAM-vs-disk backing changed.
  */
 import { freePort, spawnCapture } from "./process";
-import { POSTGRES_IMAGE } from "./doctor";
+import { POSTGRES_IMAGE } from "./engine-pins";
 
 export type PostgresContainer = Readonly<{
   connectionString: string;
   /** e.g. "disk, fsync=off" — for the results doc's durability labels. */
   durabilityLabel: string;
+  /** Where the server runs, for the run header (credentials redacted). */
+  target: string;
   close(): Promise<void>;
 }>;
 
@@ -71,6 +73,7 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
     connectionString,
     durabilityLabel:
       "disk (container writable layer), fsync=off (fast mode — not a durability guarantee)",
+    target: `container ${POSTGRES_IMAGE}`,
     close,
   };
 }

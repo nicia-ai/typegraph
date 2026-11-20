@@ -18,6 +18,7 @@ import { createServer } from "node:net";
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { NEO4J_IMAGE, PGGRAPH_IMAGE, POSTGRES_IMAGE } from "./engine-pins";
 import { readExternalPostgresUrl } from "./postgres-server";
 import { spawnStatus, stringifyError, writeJsonFile } from "./process";
 
@@ -35,26 +36,6 @@ export type SnbEngineName = (typeof SNB_ENGINE_NAMES)[number];
 export function isSnbEngineName(value: string): value is SnbEngineName {
   return (SNB_ENGINE_NAMES as readonly string[]).includes(value);
 }
-
-/**
- * Docker image tags pinned for reproducibility (also recorded in
- * summary.json). TypeGraph's Postgres migration unconditionally enables the
- * `vector` extension regardless of whether the graph declares any embedding
- * fields, so the image must be pgvector-enabled — matching the image this
- * repo's own CI already uses for Postgres tests (.github/workflows/ci.yml).
- */
-export const POSTGRES_IMAGE =
-  process.env["TYPEGRAPH_BENCH_POSTGRES_IMAGE"] ?? "pgvector/pgvector:pg18";
-export const NEO4J_IMAGE =
-  process.env["TYPEGRAPH_BENCH_NEO4J_IMAGE"] ?? "neo4j:2026.05.0";
-/**
- * pgGraph extension image (bundles PostgreSQL 17 + the `graph`
- * extension + pg_cron). Pinned to a released version tag for reproducibility;
- * override via env for a newer build.
- */
-export const PGGRAPH_IMAGE =
-  process.env["TYPEGRAPH_BENCH_PGGRAPH_IMAGE"] ??
-  "ghcr.io/evokoa/pggraph:0.1.8";
 
 type CheckStatus = "ok" | "failed" | "skipped";
 

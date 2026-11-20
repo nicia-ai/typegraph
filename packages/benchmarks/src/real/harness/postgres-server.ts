@@ -11,23 +11,39 @@
  * needs `CREATEDB`.
  */
 import {
+  EXTERNAL_POSTGRES_URL_ENV,
+  readExternalUrl,
+  redactUrl,
+} from "./external-servers";
+import {
   type PostgresContainer,
   startPostgresContainer,
 } from "./postgres-container";
 
-export const EXTERNAL_POSTGRES_URL_ENV = "TYPEGRAPH_BENCH_POSTGRES_URL";
+export { EXTERNAL_POSTGRES_URL_ENV } from "./external-servers";
 
 /** Returns the external server URL, or `undefined` when the container path applies. */
 export function readExternalPostgresUrl(
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-  const raw = env[EXTERNAL_POSTGRES_URL_ENV]?.trim();
-  return raw === undefined || raw === "" ? undefined : raw;
+  return readExternalUrl(env, EXTERNAL_POSTGRES_URL_ENV);
 }
 
-/** A per-run database name that is a plain lowercase identifier. */
-export function benchDatabaseName(processId: number, nowMs: number): string {
-  return `typegraph_bench_snb_${processId}_${nowMs}`;
+/**
+ * A per-run database name that is a plain lowercase identifier. `engine`
+ * distinguishes engines sharing one server (`pggraph` gets its own prefix so
+ * a leftover database says which engine left it).
+ */
+export function benchDatabaseName(
+  processId: number,
+  nowMs: number,
+  engine?: "pggraph",
+): string {
+  const prefix =
+    engine === undefined ?
+      "typegraph_bench_snb"
+    : `typegraph_bench_snb_${engine}`;
+  return `${prefix}_${processId}_${nowMs}`;
 }
 
 /** The same server URL (credentials, host, port, query) with its database replaced. */
@@ -71,6 +87,7 @@ async function startExternalPostgresDatabase(
   return {
     connectionString: withDatabase(serverUrl, database),
     durabilityLabel: `external server (${EXTERNAL_POSTGRES_URL_ENV}), per-run database, fsync=${fsync}`,
+    target: `existing server ${redactUrl(serverUrl)}, per-run database ${database}`,
     async close() {
       await withAdminClient(async (client) => {
         await client.query(

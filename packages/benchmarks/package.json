@@ -80,11 +80,11 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@ladybugdb/core": "^0.20.4",
+    "@ladybugdb/core": "0.22.3",
     "@nicia-ai/typegraph": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.3",
-    "neo4j-driver": "^6.2.0",
+    "neo4j-driver": "6.3.2",
     "pg": "^8.23.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",

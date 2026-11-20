@@ -101,7 +101,9 @@ import {
   stringifyError,
   freePort,
 } from "../harness/process";
-import { NEO4J_IMAGE } from "../harness/doctor";
+import { packageVersion } from "../harness/doctor";
+import { NEO4J_IMAGE, PINNED_NEO4J_GDS_PLUGIN } from "../harness/engine-pins";
+import { type GdsPluginDir, stageGdsPluginDir } from "../harness/gds-plugin";
 import {
   streamSnbCsvDataset,
   type SnbCommentRow,
@@ -118,6 +120,7 @@ import {
   compareMessageRecencyDesc,
   componentSizesResult,
   degreeResult,
+  type EngineRuntimeVersion,
   IC13_MAX_HOPS,
   IC9_MAX_DATE,
   IC_MESSAGE_LIMIT,
@@ -298,6 +301,7 @@ async function resolveNeo4jMemorySettings(
 async function runNeo4jContainer(
   containerName: string,
   dataVolume: string,
+  pluginDir: string,
   port: number,
   memorySettings: Neo4jMemorySettings,
 ): Promise<void> {
@@ -315,16 +319,16 @@ async function runNeo4jContainer(
     "/logs:rw,size=256m",
     "--tmpfs",
     "/tmp:rw,exec,size=256m",
+    // The pinned Graph Data Science jar (`stageGdsPluginDir`). GDS is
+    // Neo4j's native answer to graph algorithms (WCC/BFS/SSSP); without it
+    // plain Cypher has no connected-components and unbounded variable-length
+    // paths enumerate (explode). Loading it makes the GA lane a fair fight
+    // rather than testing the absence of a plugin. Mounted instead of
+    // `NEO4J_PLUGINS`, which would let the entrypoint pick the build.
+    "-v",
+    `${pluginDir}:/plugins`,
     "-e",
     "NEO4J_AUTH=none",
-    // Auto-download the Graph Data Science library. GDS is Neo4j's native
-    // answer to graph algorithms (WCC/BFS/SSSP); without it plain Cypher has
-    // no connected-components and unbounded variable-length paths enumerate
-    // (explode). Loading it makes the GA lane a fair fight rather than testing
-    // the absence of a plugin. The image resolves a GDS build for its version
-    // and auto-configures the procedure allowlist.
-    "-e",
-    'NEO4J_PLUGINS=["graph-data-science"]',
     "-e",
     "NEO4J_dbms_security_procedures_unrestricted=gds.*",
     "-e",
@@ -429,6 +433,68 @@ async function ensureSchema(session: Session): Promise<void> {
     "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
   );
   await session.run("CALL db.awaitIndexes(600)");
+}
+
+/**
+ * What the running server reports about itself: kernel version and edition,
+ * the GDS build actually loaded, the database's default Cypher language (the
+ * queries without a `CYPHER 5` prefix run in it) and the memory settings
+ * that shape query latency. Every probe beyond the kernel version tolerates
+ * failure, since an existing server may restrict `SHOW` commands.
+ */
+async function readNeo4jVersions(
+  session: Session,
+  database: string,
+): Promise<readonly EngineRuntimeVersion[]> {
+  const components = await runRows<{
+    name: string;
+    version: string;
+    edition: string;
+  }>(
+    session,
+    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions[0] AS version, edition",
+  );
+  const kernel = components.find((row) => row.name === "Neo4j Kernel");
+  const gds = await runRows<{ version: string }>(
+    session,
+    "RETURN gds.version() AS version",
+  ).catch(() => []);
+  const language = await runRows<{ defaultLanguage: unknown }>(
+    session,
+    "SHOW DATABASES YIELD name, defaultLanguage WHERE name = $database RETURN defaultLanguage",
+    { database },
+  ).catch(() => []);
+  const settings = await runRows<{ name: string; value: string }>(
+    session,
+    `SHOW SETTINGS YIELD name, value
+     WHERE name IN ['server.memory.heap.max_size', 'server.memory.pagecache.size']
+     RETURN name, value`,
+  ).catch(() => []);
+  const settingsDetail = settings
+    .map((row) => `${row.name}=${row.value}`)
+    .join(", ");
+  const languageValue = language[0]?.defaultLanguage;
+  return [
+    {
+      component: "Neo4j",
+      version: kernel?.version ?? "unknown",
+      detail: [
+        `edition=${kernel?.edition ?? "unknown"}`,
+        `database=${database}`,
+        `defaultLanguage=${languageValue === undefined ? "unknown" : String(languageValue)}`,
+        ...(settingsDetail === "" ? [] : [settingsDetail]),
+      ].join(", "),
+    },
+    {
+      component: "Neo4j Graph Data Science",
+      version: gds[0]?.version ?? "not loaded",
+      detail: `pinned ${PINNED_NEO4J_GDS_PLUGIN.version}`,
+    },
+    {
+      component: "neo4j-driver",
+      version: (await packageVersion("neo4j-driver")) ?? "unknown",
+    },
+  ];
 }
 
 /** Name of the in-memory GDS projection the GA_* algorithms run against. */
@@ -1283,6 +1349,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
   const dataVolume = `${containerName}-data`;
   let driver: Driver | undefined;
   let session: Session | undefined;
+  let pluginDir: GdsPluginDir | undefined;
 
   function requireSession(): Session {
     if (session === undefined) {
@@ -1302,6 +1369,7 @@ export const createNeo4jEngine: SnbEngineFactory = async (
     await spawnCapture("docker", ["volume", "rm", "-f", dataVolume]).catch(
       () => undefined,
     );
+    await pluginDir?.cleanup().catch(() => undefined);
   }
 
   return {
@@ -1358,10 +1426,12 @@ export const createNeo4jEngine: SnbEngineFactory = async (
           await rm(stageDir, { recursive: true, force: true });
         }
 
+        pluginDir = await stageGdsPluginDir(options.log);
         const port = await freePort();
         await runNeo4jContainer(
           containerName,
           dataVolume,
+          pluginDir.dir,
           port,
           memorySettings,
         );
@@ -1377,6 +1447,11 @@ export const createNeo4jEngine: SnbEngineFactory = async (
       }
     },
     queries: createNeo4jQueries(requireSession),
+    target: `container ${NEO4J_IMAGE} with Graph Data Science ${PINNED_NEO4J_GDS_PLUGIN.version} mounted from the pinned jar`,
+    loadPath: "offline neo4j-admin database import full",
+    async versions() {
+      return readNeo4jVersions(requireSession(), NEO4J_DATABASE);
+    },
     async close() {
       await cleanup();
     },

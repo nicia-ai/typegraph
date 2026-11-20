@@ -16,6 +16,7 @@ import {
   generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
+import { packageVersion } from "../harness/doctor";
 import { startPostgresTarget } from "../harness/postgres-server";
 import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
@@ -80,6 +81,28 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
         return pools;
       },
       queries: createSnbQueries(store),
+      target: container.target,
+      loadPath: "TypeGraph trusted initial import over node-postgres",
+      async versions() {
+        const server = await pool.query<{ server_version: string }>(
+          "SHOW server_version",
+        );
+        return [
+          {
+            component: "@nicia-ai/typegraph",
+            version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+          },
+          {
+            component: "PostgreSQL",
+            version: server.rows[0]?.server_version ?? "unknown",
+            detail: container.durabilityLabel,
+          },
+          {
+            component: "pg",
+            version: (await packageVersion("pg")) ?? "unknown",
+          },
+        ];
+      },
       async close() {
         await backend.close();
         await pool.end();

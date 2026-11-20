@@ -55,6 +55,7 @@ import {
   type SnbPersonRow,
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
+import { packageVersion } from "../harness/doctor";
 import {
   BFS3_HOPS,
   canonicalDigest,
@@ -1020,8 +1021,10 @@ export const createLadybugEngine: SnbEngineFactory = async (
         "each entity/edge kind to a CSV file and issues one COPY FROM per file (Ladybug's CSR " +
         "adjacency structure scales badly with incremental MATCH+CREATE edge writes — COPY FROM " +
         "builds it once from the whole file); IS1-IS7 point queries run through " +
-        "conn.prepare()+execute() (cached query plan reused per request), matching TypeGraph's " +
-        ".prepare()/.execute() split and Neo4j's server-side statement cache.",
+        "conn.prepare()+execute() (statements are prepared without parameter values, the " +
+        "shape whose plan 0.22 reuses across executions), matching TypeGraph's " +
+        ".prepare()/.execute() split and Neo4j's server-side statement cache; default buffer " +
+        "pool and thread count.",
       unsupported: LADYBUG_UNSUPPORTED,
       async load() {
         return await loadSnbDataset(
@@ -1032,6 +1035,27 @@ export const createLadybugEngine: SnbEngineFactory = async (
         );
       },
       queries,
+      target: "in-process @ladybugdb/core, temporary database directory",
+      loadPath: "COPY FROM staged CSV files",
+      async versions() {
+        const engine = await rowsOf(
+          await conn.query("CALL db_version() RETURN *"),
+        );
+        const threads = await rowsOf(
+          await conn.query("CALL current_setting('threads') RETURN *"),
+        );
+        return [
+          {
+            component: "LadybugDB",
+            version: String(engine[0]?.["version"] ?? "unknown"),
+            detail: `threads=${String(threads[0]?.["threads"] ?? "unknown")}`,
+          },
+          {
+            component: "@ladybugdb/core",
+            version: (await packageVersion("@ladybugdb/core")) ?? "unknown",
+          },
+        ];
+      },
       async close() {
         await conn.close();
         await database.close();
