@@ -5,6 +5,30 @@
 // Not wired into CI: it needs that server, and the spike is exploratory.
 // DOLTGRES_PORT overrides the port, so several builds can be measured side by side.
 //
+// RE-MEASURED 2026-11-20 on TypeGraph main 3e927804 against 1.5.2 (still the latest
+// release), doltgresql main 6a1a6ddc, and two open PRs: #3921 (aliased insert) at
+// a2e82068 and #3915 (row-level locking) at c9be7f74.
+//   - 1.5.2 64 passed, 0 failed, 2 skipped; main with the commit-time expectation the same.
+//   - `ANALYZE` options are fixed on main (#3920, closes doltgresql#3918), so that pin is
+//     `fixed-unreleased` again: it passes on both and names which it saw. With it,
+//     `materializeIndexes()` refreshes statistics without the warning.
+//   - #3921 (approved, unmerged; closes doltgresql#3917) accepts `INSERT INTO t AS alias`:
+//     63 / 1 / 2 there, the one failure being the alias pin turning red. Measured with a
+//     typed probe beside a materialized `props` expression index: `bulkUpsertById`
+//     updating an existing node and inserting a new one, then resurrecting a deleted one,
+//     returns and stores the right props and versions. That is the statement #3789 would
+//     have corrupted, so with 1.5.2 and #3921 the bulk upsert path is sound.
+//   - #3915 gained a `dolt_row_level_locking` variable, on by default. Default: 60 / 4 / 2,
+//     unchanged from 42cf7ebd, under either expectation. The snapshot is still
+//     transaction-scoped: the lock-count-insert repro leaves two rows under FOR UPDATE and
+//     under the one-argument advisory lock, also with `BEGIN ISOLATION LEVEL READ COMMITTED`;
+//     the maintainer said READ COMMITTED is a follow-up. The endpoint race is SOUND there
+//     (no dangling edge, bob deleted) but fails because the edge writer now blocks at its
+//     statement and the two writers never rendezvous. With `dolt_row_level_locking = 0`,
+//     FOR UPDATE is accepted and does not block, so a lock-based declaration would
+//     construct unfenced; the advisory lock still excludes. Two-argument advisory lock and
+//     LOCK TABLE are still missing.
+//
 // RE-MEASURED 2026-11-19 on TypeGraph main 3e4979b5 against 1.5.2 (released 2026-11-18),
 // doltgresql main ff035fd1 and the open row-level locking PR #3915 at 42cf7ebd.
 //   - 1.5.2 scores 64 passed, 0 failed, 2 skipped and is the floor. It fixes the
@@ -672,9 +696,19 @@ const FORMAT_BIND_SUBSTITUTION = 'at or near "{": syntax error';
 type Expectation =
   | Readonly<{ kind: "supported" }>
   /** The engine must reject it, with an error containing `message`. */
-  | Readonly<{ kind: "unsupported"; message: string; issue: string }>;
+  | Readonly<{ kind: "unsupported"; message: string; issue: string }>
+  /**
+   * Rejected by the latest release with `message`, accepted by a build of main. Passes on
+   * both and names which one it observed, so the battery is right against the published
+   * image while tracking main.
+   */
+  | Readonly<{ kind: "fixed-unreleased"; message: string; issue: string }>;
 
 const SUPPORTED: Expectation = { kind: "supported" };
+
+function fixedUnreleased(message: string, issue: string): Expectation {
+  return { kind: "fixed-unreleased", message, issue };
+}
 
 function unsupported(message: string, issue: string): Expectation {
   return { kind: "unsupported", message, issue };
@@ -731,12 +765,21 @@ async function probe(
       );
       return;
     }
+    const fixedOnMain = expectation.kind === "fixed-unreleased";
     if (failure === undefined) {
-      results.push({
-        step: name,
-        outcome: "fail",
-        detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
-      });
+      results.push(
+        fixedOnMain ?
+          {
+            step: name,
+            outcome: "pass",
+            detail: `supported on this build (${expectation.issue}, fixed on main, unreleased)`,
+          }
+        : {
+            step: name,
+            outcome: "fail",
+            detail: `NOW SUPPORTED — ${expectation.issue} looks fixed; re-run the walk`,
+          },
+      );
       return;
     }
     const detail = describeError(failure);
@@ -745,7 +788,10 @@ async function probe(
         {
           step: name,
           outcome: "pass",
-          detail: `unsupported as pinned (${expectation.issue})`,
+          detail:
+            fixedOnMain ?
+              `unsupported on this build as pinned (${expectation.issue}, fixed on main, unreleased)`
+            : `unsupported as pinned (${expectation.issue})`,
         }
       : {
           step: name,
@@ -1331,10 +1377,11 @@ async function runDeviationBattery(): Promise<void> {
     [String.raw`SELECT 'Alice' ILIKE 'a%' ESCAPE '\' AS matched`],
   );
   // `materializeIndexes()` refreshes statistics this way after it creates an index, and
-  // degrades to a warning when the statement fails. Plain `ANALYZE t` is accepted.
+  // degrades to a warning when the statement fails. Plain `ANALYZE t` is accepted. Fixed
+  // on main by #3920, after 1.5.2.
   await probe(
     "statistics: ANALYZE (SKIP_LOCKED)",
-    unsupported('at or near "(": syntax error', "doltgresql#3918"),
+    fixedUnreleased('at or near "(": syntax error', "doltgresql#3918"),
     [...PROBE_SETUP, `ANALYZE (SKIP_LOCKED) "probe_rows"`],
   );
 }
