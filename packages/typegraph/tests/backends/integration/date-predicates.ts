@@ -17,6 +17,7 @@ import { TrustedImportError } from "../../../src/errors-entry";
 import {
   FORMAT_VERSION,
   type GraphData,
+  importGraph,
   trustedImportGraph,
 } from "../../../src/interchange";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
@@ -542,6 +543,9 @@ const Stamp = defineNode("DatePredicateStamp", {
     at: z.date().optional(),
     history: z.array(z.date()).optional(),
     nested: z.object({ at: z.date().optional() }).optional(),
+    // Coerces interchange text, which `importGraph` then stores verbatim under
+    // `onUnknownProperty: "allow"`.
+    coerced: z.coerce.date().optional(),
   }),
 });
 const stampedBy = defineEdge("datePredicateStampedBy", {
@@ -865,6 +869,178 @@ export function registerDatePredicateIntegrationTests(
     });
   });
 
+  describe("Stored date values through import", () => {
+    it("refuses a Date outside the years 0001 to 9999 under every unknown-property strategy, writing nothing", async () => {
+      const store = await context.createStore(stampGraph);
+      /** A document whose one node (or edge) states `date` at `position`. */
+      function importDocument(
+        id: string,
+        position: "node" | "arrayElement" | "nested" | "edge" | "coerced",
+        date: Date | string,
+        unknownProperties: Readonly<Record<string, unknown>> = {},
+      ): GraphData {
+        return {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "stored date values" },
+          nodes: [
+            {
+              kind: "DatePredicateStamp",
+              id,
+              properties: {
+                key: id,
+                at: position === "node" ? date : STAMPED_AT,
+                history:
+                  position === "arrayElement" ?
+                    [STAMPED_AT, date]
+                  : [STAMPED_AT],
+                nested: { at: position === "nested" ? date : STAMPED_AT },
+                ...(position === "coerced" && { coerced: date }),
+                ...unknownProperties,
+              },
+            },
+          ],
+          edges: [
+            {
+              kind: "datePredicateStampedBy",
+              id: `${id}-link`,
+              from: { kind: "DatePredicateStamp", id },
+              to: { kind: "DatePredicateStamp", id },
+              properties: {
+                at: position === "edge" ? date : STAMPED_AT,
+                ...unknownProperties,
+              },
+            },
+          ],
+        };
+      }
+
+      /** `"refused"` when the first error refuses the stated entity's date. */
+      function rangeRefusal(
+        errors: readonly Readonly<{ entityType: string; error: string }>[],
+        entityType: "node" | "edge",
+      ): string {
+        const [first] = errors;
+        return (
+            first?.entityType === entityType &&
+              first.error.includes("in the years 0001 to 9999")
+          ) ?
+            "refused"
+          : JSON.stringify(errors);
+      }
+      const positions = ["node", "arrayElement", "nested", "edge"] as const;
+      const outcomes: Record<string, Readonly<Record<string, string>>> = {};
+      for (const strategy of ["error", "strip", "allow"] as const) {
+        // "strip" and "allow" act only on a row stating an unknown property:
+        // "allow" then stores the original props verbatim.
+        const unknownProperties =
+          strategy === "error" ? {} : { unrecognized: "kept" };
+        const results: Record<string, string> = {};
+        for (const [name, date] of Object.entries(UNSTORABLE_DATES)) {
+          for (const position of positions) {
+            const result = await importGraph(
+              store,
+              importDocument(
+                `${strategy}-${name}-${position}`,
+                position,
+                date,
+                unknownProperties,
+              ),
+              { onConflict: "error", onUnknownProperty: strategy },
+            );
+            results[`${name}.${position}`] = rangeRefusal(
+              result.errors,
+              position === "edge" ? "edge" : "node",
+            );
+          }
+        }
+        // A coercing schema turns year-0000 text into a year-0000 Date, which
+        // "allow" would otherwise store as the original text.
+        const coerced = await importGraph(
+          store,
+          importDocument(
+            `${strategy}-coerced`,
+            "coerced",
+            "0000-06-01T00:00:00.000Z",
+            unknownProperties,
+          ),
+          { onConflict: "error", onUnknownProperty: strategy },
+        );
+        results["coerced"] = rangeRefusal(coerced.errors, "node");
+        outcomes[strategy] = results;
+      }
+
+      // An unknown property holding such a Date: "allow" stores it verbatim and
+      // refuses it, "strip" drops it and stores the rest.
+      const unknownDate = { unrecognized: UNSTORABLE_DATES.yearZero };
+      const allowedUnknown = await importGraph(
+        store,
+        importDocument("allow-unknown", "node", STAMPED_AT, unknownDate),
+        { onConflict: "error", onUnknownProperty: "allow" },
+      );
+      const strippedUnknown = await importGraph(
+        store,
+        importDocument("strip-unknown", "node", STAMPED_AT, unknownDate),
+        { onConflict: "error", onUnknownProperty: "strip" },
+      );
+      const unknownDateOutcomes = {
+        allow: rangeRefusal(allowedUnknown.errors, "node"),
+        strip: strippedUnknown.errors,
+      };
+      expect(unknownDateOutcomes).toEqual({ allow: "refused", strip: [] });
+
+      const refusedEverywhere: Readonly<Record<string, string>> =
+        Object.fromEntries([
+          ...Object.keys(UNSTORABLE_DATES).flatMap((name) =>
+            positions.map(
+              (position) => [`${name}.${position}`, "refused"] as const,
+            ),
+          ),
+          ["coerced", "refused"] as const,
+        ]);
+      expect(outcomes).toEqual({
+        error: refusedEverywhere,
+        strip: refusedEverywhere,
+        allow: refusedEverywhere,
+      });
+
+      // Nothing stored holds a date outside the range: every stamp written
+      // (the nodes of the edge cases) holds only the storable instant, read
+      // back as its stored text.
+      const stored = await storedStamps(store);
+      for (const node of stored.nodes) {
+        expect({
+          at: node.at,
+          history: node.history,
+          nested: node.nested,
+        }).toEqual({
+          at: MIDNIGHT,
+          history: [MIDNIGHT],
+          nested: { at: MIDNIGHT },
+        });
+      }
+      expect(stored.edges.map((edge) => edge.id)).toEqual([
+        "strip-unknown-link",
+      ]);
+
+      // The same document with storable Dates imports, and a date predicate
+      // over it runs on every backend.
+      const imported = await importGraph(
+        store,
+        importDocument("storable", "node", new Date(MIDYEAR)),
+        { onConflict: "error", onUnknownProperty: "error" },
+      );
+      expect(imported.errors).toEqual([]);
+      const matched = await store
+        .query()
+        .from("DatePredicateStamp", "s")
+        .whereNode("s", (s) => s.at.gte(MIDYEAR))
+        .select((ctx) => ctx.s.key)
+        .execute();
+      expect(matched).toEqual(["storable"]);
+    });
+  });
+
   describe("Stored date values through trusted import", () => {
     it("refuses a date property that is not a canonical instant in the years 0001 to 9999, writing nothing", async () => {
       if (context.getStore().backend.trustedImport === undefined) return;
@@ -918,6 +1094,22 @@ export function registerDatePredicateIntegrationTests(
           unstorable.map((value) => [value, refusedEverywhere]),
         ),
       );
+      // A value whose own conversion throws (a parsed JSON object with
+      // non-function toString and valueOf) is refused with the typed error,
+      // not a TypeError raised while the refusal names it.
+      const unprintable = await trustedImportGraph(
+        store,
+        stampDocument({
+          nodeProperties: { at: { toString: 4, valueOf: 5 } },
+        }),
+      ).then(
+        () => "ran",
+        (error: unknown) =>
+          error instanceof TrustedImportError ?
+            error.details["reason"]
+          : String(error),
+      );
+      expect(unprintable).toBe("invalid_stream");
       // A validity bound in year 0000 is refused the same way: PostgreSQL's
       // timestamptz column cannot hold it.
       const boundedDocument = stampDocument({});

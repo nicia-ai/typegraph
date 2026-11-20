@@ -106,7 +106,10 @@ import {
   UniquenessError,
   ValidationError,
 } from "../errors";
-import { zodIssuesToValidationIssues } from "../errors/validation";
+import {
+  unstorableDateIssue,
+  zodIssuesToValidationIssues,
+} from "../errors/validation";
 import {
   createIdentityTransitionShapeCheck,
   IDENTITY_IMPORT_FAILED_ASSERTION,
@@ -6067,6 +6070,27 @@ function importEdgeInsertWork(
 // Property Validation
 // ============================================================
 
+/**
+ * The props an import strategy persists, refused when they hold a `Date` no
+ * backend can store as a date (`unstorableDateIssue`, the decision the
+ * store's own writes make). `persisted` is what the strategy writes — the
+ * parsed props, or under `onUnknownProperty: "allow"` the original ones
+ * verbatim — and `parsed` is the schema's reading of them, so a year-0000
+ * `Date` stated in memory and one a coercing schema produces from text are
+ * both refused. Once stored, such a value made every date predicate,
+ * ordering or typed read of the property fail on PostgreSQL.
+ */
+function storableImportProperties(
+  persisted: Record<string, unknown>,
+  parsed: unknown,
+):
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string } {
+  const issue = unstorableDateIssue(persisted) ?? unstorableDateIssue(parsed);
+  if (issue === undefined) return { success: true, data: persisted };
+  return { success: false, error: `${issue.path}: ${issue.message}` };
+}
+
 export function validateImportProperties(
   properties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
@@ -6108,10 +6132,7 @@ export function validateImportProperties(
               error: formatZodError(result.error),
             };
           }
-          return {
-            success: true,
-            data: result.data,
-          };
+          return storableImportProperties(result.data, result.data);
         }
         case "allow": {
           // Validate the known fields, then return the ORIGINAL properties
@@ -6128,7 +6149,7 @@ export function validateImportProperties(
               error: formatZodError(result.error),
             };
           }
-          return { success: true, data: properties };
+          return storableImportProperties(properties, result.data);
         }
       }
     }
@@ -6139,7 +6160,7 @@ export function validateImportProperties(
       return { success: false, error: formatZodError(result.error) };
     }
 
-    return { success: true, data: result.data };
+    return storableImportProperties(result.data, result.data);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: `Validation error: ${message}` };

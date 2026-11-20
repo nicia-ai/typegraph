@@ -315,11 +315,12 @@ the latter two out of chronological order). Every write that stores props — `c
 years 0001 to 9999 anywhere in the props, including inside arrays and nested objects, with
 `ValidationError` naming its path. Trusted import, which stores props verbatim, refuses a date property
 that is not a canonical UTC instant in those years with `TrustedImportError`
-(`details.reason === "invalid_stream"`). `importGraph` and merge apply validate props with the schema,
-which does not accept the interchange text of a `z.date()` property at all. Validity bounds
-(`validFrom`, `validTo`), `asOf` and recorded-time coordinates, and the timestamps of interchange and
-merge documents refuse year 0000 the same way: they are stored in, or compared with, PostgreSQL
-`timestamptz` columns.
+(`details.reason === "invalid_stream"`). `importGraph` refuses such a `Date` in the props each
+`onUnknownProperty` strategy stores (including one a coercing schema produces from text, and, under
+`"allow"`, one at an unknown property), reporting the row in `errors`. Validity bounds (`validFrom`,
+`validTo`), `asOf` and recorded-time coordinates, the timestamps of interchange and merge documents,
+and an archived identity transition's `recordedAt` and retention cut's `prunedBeforeRecordedAt` refuse
+year 0000 the same way: they are stored in, or compared with, PostgreSQL `timestamptz` columns.
 
 The refusal does not repair rows written before it. On such a row:
 

@@ -42,15 +42,19 @@ export const FORMAT_VERSION = "3.0" as const;
 const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0", "3.0"]);
 
 /**
- * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
- * canonical fixed-width UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ss.sssZ`) — the
- * same contract `create` / `update` enforce — because temporal filters compare
- * it as text against the `asOf` read coordinate, and a variable-width value
- * (date-only, offset, missing/variable milliseconds) would mis-sort and
- * silently include or exclude the wrong rows. Convert non-canonical inputs with
- * `new Date(value).toISOString()`.
+ * A timestamp a restore stores in a timestamp column: a validity bound
+ * (`validFrom` / `validTo`, `validAt`), and an archived transition's
+ * `recordedAt` or the retention cut's `prunedBeforeRecordedAt`. Must be a
+ * canonical fixed-width UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ss.sssZ`) in the
+ * years 0001 to 9999 (`isPortableTimestamp`) — the same contract `create` /
+ * `update` enforce — because temporal filters compare it as text against a
+ * read coordinate, where a variable-width value (date-only, offset,
+ * missing/variable milliseconds) would mis-sort and silently include or
+ * exclude the wrong rows, and PostgreSQL's `timestamptz` column refuses year
+ * 0000 that SQLite stores. Exports always write this form. Convert
+ * non-canonical inputs with `new Date(value).toISOString()`.
  */
-const ValidityTimestampSchema = z.iso
+const PortableTimestampSchema = z.iso
   .datetime()
   .refine((value) => isPortableTimestamp(value), {
     message:
@@ -86,8 +90,8 @@ export const InterchangeNodeSchema = z.object({
    * defaults to creation time" fix) — import preserves that open-left validity
    * instead of re-stamping it.
    */
-  validFrom: ValidityTimestampSchema.nullable().optional(),
-  validTo: ValidityTimestampSchema.optional(),
+  validFrom: PortableTimestampSchema.nullable().optional(),
+  validTo: PortableTimestampSchema.optional(),
   meta: z
     .object({
       version: z.number().int().positive().optional(),
@@ -116,8 +120,8 @@ export const InterchangeEdgeSchema = z.object({
   to: InterchangeNodeRefSchema,
   properties: z.record(z.string(), z.unknown()).default({}),
   /** See {@link InterchangeNodeSchema}'s `validFrom` for the null/undefined contract. */
-  validFrom: ValidityTimestampSchema.nullable().optional(),
-  validTo: ValidityTimestampSchema.optional(),
+  validFrom: PortableTimestampSchema.nullable().optional(),
+  validTo: PortableTimestampSchema.optional(),
   meta: z
     .object({
       createdAt: z.iso.datetime().optional(),
@@ -142,8 +146,8 @@ export const InterchangeIdentityAssertionSchema = z.object({
   relation: z.enum(["same", "different"]),
   a: InterchangeNodeRefSchema,
   b: InterchangeNodeRefSchema,
-  validFrom: ValidityTimestampSchema,
-  validTo: ValidityTimestampSchema.optional(),
+  validFrom: PortableTimestampSchema,
+  validTo: PortableTimestampSchema.optional(),
   /**
    * The node whose soft-delete cascade ended this assertion — the ledger's
    * stored cause, carried so an `archival` round-trip preserves WHY each
@@ -218,8 +222,8 @@ export const InterchangeIdentityTransitionSchema = z.object({
     .refine((revision) => isRecordedRevision(revision), {
       message: "recordedRevision is outside the recorded-revision range",
     }),
-  recordedAt: z.iso.datetime(),
-  validAt: ValidityTimestampSchema,
+  recordedAt: PortableTimestampSchema,
+  validAt: PortableTimestampSchema,
   class: InterchangeNodeRefSchema,
   priorClass: InterchangeNodeRefSchema.optional(),
   assertionIds: z.array(z.string().min(1)),
@@ -244,7 +248,7 @@ export type InterchangeIdentityTransition = z.infer<
  */
 export const InterchangeIdentityRetentionSchema = z.object({
   prunedBeforeRevision: z.number().int().nonnegative(),
-  prunedBeforeRecordedAt: z.iso.datetime(),
+  prunedBeforeRecordedAt: PortableTimestampSchema,
 });
 export type InterchangeIdentityRetention = z.infer<
   typeof InterchangeIdentityRetentionSchema

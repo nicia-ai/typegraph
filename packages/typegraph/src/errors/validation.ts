@@ -97,6 +97,25 @@ function buildLocationString(context: ValidationContext): string {
 }
 
 /**
+ * The issue a props value raises when it holds a `Date` no backend can store
+ * as a date — one outside the years 0001 to 9999 (`findUnstorableDate`,
+ * deciding through `canonicalDateOperandText` like every date operand) — or
+ * `undefined` when it holds none. The one decision every write that stores
+ * props makes: the store's own writes ({@link validateProps}) and
+ * `importGraph`, on the props each import strategy persists.
+ */
+export function unstorableDateIssue(
+  props: unknown,
+): ValidationIssue | undefined {
+  const unstorable = findUnstorableDate(props);
+  if (unstorable === undefined) return undefined;
+  return {
+    path: unstorable.path,
+    message: `Expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(unstorable.value)}`,
+  };
+}
+
+/**
  * Validates props with full context for error messages.
  *
  * Props the schema accepts must also be storable on every backend: a `Date`
@@ -130,17 +149,16 @@ export function validateProps<T>(
   const location = buildLocationString(context);
 
   if (result.success) {
-    const unstorable = findUnstorableDate(result.data);
+    const unstorable = unstorableDateIssue(result.data);
     if (unstorable === undefined) return result.data;
-    const message = `Expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(unstorable.value)}`;
     throw new ValidationError(
-      `Invalid ${context.entityType} props for ${location}: ${unstorable.path}: ${message}`,
+      `Invalid ${context.entityType} props for ${location}: ${unstorable.path}: ${unstorable.message}`,
       {
         entityType: context.entityType,
         kind: context.kind,
         operation: context.operation,
         ...(context.id !== undefined && { id: context.id }),
-        issues: [{ path: unstorable.path, message }],
+        issues: [unstorable],
       },
       {
         suggestion:

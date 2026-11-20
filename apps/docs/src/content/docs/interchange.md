@@ -132,6 +132,14 @@ at or before that instant, in which case it is imported with no lower bound
 (open-left validity) — import preserves that instead of re-stamping it. A
 **string** is an explicit value, carried through unchanged.
 
+Every timestamp import stores — `validFrom`, `validTo`, an identity assertion's
+bounds, a transition's `validAt` and `recordedAt`, and the retention cut's
+`prunedBeforeRecordedAt` — must be a canonical UTC ISO-8601 instant
+(`YYYY-MM-DDTHH:mm:ss.sssZ`) in the years 0001 to 9999, the form exports always
+write. Any other value fails `GraphDataSchema` with a `ValidationError` before
+anything is written. A `Date` in a row's properties outside those years refuses
+that row, reported in `errors`.
+
 ### Format Version Compatibility
 
 Exports always write `formatVersion: "3.0"`. The read side — both

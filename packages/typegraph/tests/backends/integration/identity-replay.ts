@@ -39,6 +39,7 @@ import {
   type GraphInterchangeChunk,
   importGraph,
   importGraphStream,
+  InterchangeIdentityRetentionSchema,
 } from "../../../src/interchange";
 import { getActiveSchema, migrateSchema } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
@@ -371,6 +372,73 @@ export function registerIdentityReplayIntegrationTests(
       expect(archive.identity?.retention?.prunedBeforeRevision).toBe(
         laterRevision,
       );
+    });
+
+    it("refuses an archived transition or retention cut timestamp a timestamp column cannot hold, on every backend, before writing", async () => {
+      // A recorded time in year 0000 restored on SQLite (which stores the
+      // text) and failed the transition insert on PostgreSQL, whose
+      // timestamptz column refuses it. A short or zoned form compared with a
+      // recorded-time coordinate as text on SQLite and as an instant on
+      // PostgreSQL.
+      const source = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_archive_timestamp_source"),
+      );
+      for (const id of ["at-a", "at-b"])
+        await source.nodes.Person.create({}, { id });
+      await source.identity.assertSame(personRef("at-a"), personRef("at-b"));
+      const archive = await exportGraph(source, { identityMode: "archival" });
+      const identity = requireDefined(archive.identity);
+      const transitions = identity.transitions ?? [];
+      expect(transitions.length).toBeGreaterThan(0);
+
+      const refused = ["0000-06-01T00:00:00.000Z", "2024-01-01T00:00:00Z"];
+      const outcomes: Record<string, string> = {};
+      for (const [index, recordedAt] of refused.entries()) {
+        const target = await provisionDepartedLineageStore(
+          context,
+          departedLineageGraph(`identity_archive_timestamp_target_${index}`),
+        );
+        outcomes[recordedAt] = await importGraph(
+          target,
+          {
+            ...archive,
+            identity: {
+              ...identity,
+              transitions: transitions.map((transition, position) =>
+                position === 0 ? { ...transition, recordedAt } : transition,
+              ),
+            },
+          },
+          { onConflict: "skip" },
+        ).then(
+          (result) => `ran with ${result.errors.length} errors`,
+          (error: unknown) => (error instanceof Error ? error.name : "thrown"),
+        );
+        expect(await target.nodes.Person.find()).toEqual([]);
+      }
+      expect(outcomes).toEqual(
+        Object.fromEntries(
+          refused.map((recordedAt) => [recordedAt, "ValidationError"]),
+        ),
+      );
+      for (const prunedBeforeRecordedAt of refused)
+        expect(
+          InterchangeIdentityRetentionSchema.safeParse({
+            prunedBeforeRevision: 1,
+            prunedBeforeRecordedAt,
+          }).success,
+        ).toBe(false);
+
+      // The unmodified archive restores on every backend.
+      const target = await provisionDepartedLineageStore(
+        context,
+        departedLineageGraph("identity_archive_timestamp_target_valid"),
+      );
+      const restored = await importGraph(target, archive, {
+        onConflict: "skip",
+      });
+      expect(restored.errors).toEqual([]);
     });
 
     it("prunes restored transitions whose revisions sit above the destination clock, without raising the watermark past it", async () => {

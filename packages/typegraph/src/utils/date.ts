@@ -307,7 +307,10 @@ export const CANONICAL_DATE_OPERAND_EXPECTATION =
 /**
  * An operand {@link isCanonicalDateOperand} refused, as an error message
  * should name it: an invalid `Date`, a `Date` by its ISO form, or any other
- * value by its type and text.
+ * value by its type and text. Total: it runs while a refusal is being built,
+ * so a value whose own conversion throws — a parsed JSON object such as
+ * `{"toString": 4, "valueOf": 5}`, which `String()` cannot convert — is named
+ * by its type rather than turning the refusal into a raw `TypeError`.
  */
 export function describeDateOperand(operand: unknown): string {
   if (operand instanceof Date) {
@@ -315,7 +318,16 @@ export function describeDateOperand(operand: unknown): string {
         `the Date ${operand.toISOString()}`
       );
   }
-  return `${typeof operand} ${String(operand)}`;
+  return `${typeof operand} ${operandText(operand)}`;
+}
+
+/** `String(operand)`, or the object tag when the value refuses conversion. */
+function operandText(operand: unknown): string {
+  try {
+    return String(operand);
+  } catch {
+    return Object.prototype.toString.call(operand);
+  }
 }
 
 /**
