@@ -3764,9 +3764,10 @@ store.snapshot(): StoreView<G>;
   point-in-time value where every surface observes the same instant. Mirrors
   Datomic's `(d/db conn)`.
 
-`asOf` must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) —
-a date-only, zoned-offset, or natural-language string is rejected with a
-`ValidationError`, because the temporal filters compare it as text.
+`asOf` must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) in
+the years 0001 to 9999 — a date-only, zoned-offset, or natural-language string,
+or one in year 0000, is rejected with a `ValidationError`, because the temporal
+filters compare it as text and PostgreSQL cannot cast year 0000.
 
 ```typescript
 const past = store.asOf("2026-01-01T00:00:00.000Z");

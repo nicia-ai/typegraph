@@ -11,7 +11,7 @@ import { z } from "zod";
 
 import { isRecordedRevision } from "../core/temporal";
 import type { IdentityTransitionCause } from "../identity";
-import { isCanonicalIsoDate } from "../utils/date";
+import { isPortableTimestamp } from "../utils/date";
 import { type Assert, type Equal } from "../utils/type-assert";
 
 // ============================================================
@@ -52,9 +52,9 @@ const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0", "3.0"]);
  */
 const ValidityTimestampSchema = z.iso
   .datetime()
-  .refine((value) => isCanonicalIsoDate(value), {
+  .refine((value) => isPortableTimestamp(value), {
     message:
-      "Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ); convert with new Date(value).toISOString().",
+      "Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999; convert with new Date(value).toISOString().",
   });
 
 // ============================================================

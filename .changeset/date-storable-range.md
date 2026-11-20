@@ -1,0 +1,11 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+A date property can no longer be written with a `Date` that PostgreSQL cannot store as a date. `z.date()` accepts any valid `Date` and the store writes it as its `toISOString()` text, but PostgreSQL cannot cast the text of a `Date` in year 0000 (`date/time field value out of range`), before the common era (`-000001-…`) or after 9999 (`+010000-…`) to `timestamptz`. Once stored, such a value made every date predicate, `orderBy` and typed read of the property fail on PostgreSQL for the whole query, while SQLite answered and compared the latter two out of chronological order.
+
+- Every store write that validates props — node and edge `create`, `update`, `upsertById`, the `*FromRecord` forms, `bulkCreate`, `bulkReplaceById`, `bulkUpsertById`, `bulkInsert` and the get-or-create methods — now refuses a `Date` outside the years 0001 to 9999 anywhere in the props, including array elements and nested object fields, with `ValidationError` naming its path. The decision is `canonicalDateOperandText`, the one every date predicate operand already passes.
+- `trustedImportGraph` / `trustedImportGraphStream`, which store props verbatim, refuse a property the schema types as a date (including an array element or nested field) unless it is a canonical UTC instant in those years, with `TrustedImportError` (`details.reason === "invalid_stream"`) before the chunk is written. This also refuses a short or zoned form such as `"2024-01-01T00:00:00Z"`, which SQLite (comparing text) and PostgreSQL (comparing the instant) would have compared with a cutoff differently.
+- Validity bounds (`validFrom`, `validTo`), `asOf` and recorded-time coordinates, and the timestamps of interchange documents, merge plans and candidate write sets now refuse year 0000 as well. A year-0000 `validFrom` previously stored on SQLite and failed the insert on PostgreSQL with a raw driver error; a year-0000 `asOf` ran on SQLite and failed on PostgreSQL.
+
+The refusal does not repair rows written before it. `getById`, `find` and a whole-node select still return the stored text on every backend; on PostgreSQL a query that filters, orders by or selects the property still fails with the cast error. Repair such a row by writing a valid `Date` to the property, for example `update(id, { at: new Date(…) })`.

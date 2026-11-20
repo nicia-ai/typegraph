@@ -268,7 +268,7 @@ export function registerValidityLowerBoundIntegrationTests(
           await expect(write()).rejects.toMatchObject({
             name: "ValidationError",
             message:
-              'Invalid canonical ISO 8601 datetime for "validTo": "null". Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ',
+              'Invalid canonical ISO 8601 datetime for "validTo": "null". Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ, in the years 0001 to 9999',
           });
           const storedPerson = await store.nodes.Person.getById(alice.id);
           const storedEdge = await store.edges.knows.getById(edge.id);

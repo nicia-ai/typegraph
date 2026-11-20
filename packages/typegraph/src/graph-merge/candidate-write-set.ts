@@ -7,7 +7,7 @@ import {
   InterchangeIdentitySchema,
 } from "../interchange";
 import type { EvolutionPlan } from "../schema/evolution-plan";
-import { isCanonicalIsoDate } from "../utils/date";
+import { isPortableTimestamp } from "../utils/date";
 import { readOwnProperty } from "../utils/object";
 import { computeSchemaComponent } from "./base-version";
 import {
@@ -54,8 +54,9 @@ export const CANDIDATE_WRITE_SET_FORMAT_VERSION = 1 as const;
 const nonEmptyStringSchema = z.string().min(1);
 const validityTimestampSchema = z.iso
   .datetime()
-  .refine((value) => isCanonicalIsoDate(value), {
-    message: "Expected canonical UTC ISO 8601 with fixed milliseconds.",
+  .refine((value) => isPortableTimestamp(value), {
+    message:
+      "Expected canonical UTC ISO 8601 with fixed milliseconds in the years 0001 to 9999.",
   });
 const entityReferenceSchema = z.object({
   kind: nonEmptyStringSchema,

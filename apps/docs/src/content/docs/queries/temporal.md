@@ -124,7 +124,7 @@ state only). A view's coordinate is sealed: a view read that states its own
 `temporalMode`, `asOf` or `recordedAsOf` (reachable only from untyped code)
 rejects with `ConfigurationError` `STORE_VIEW_SEALED_COORDINATE`. Read at
 another coordinate through the live store or a second `store.view(...)`. `asOf`
-must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) in the years 0001 to 9999.
 
 See the [`store.asOf` / `store.view`
 reference](/schemas-stores#temporal-views-storeasof-and-storeview) for the full

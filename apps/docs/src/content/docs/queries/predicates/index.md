@@ -288,9 +288,6 @@ A `Date` or string operand must fall in the years 0001 to 9999. After 9999 a `Da
 the extended `+010000-…` form, which sorts as text before every four-digit year. Year 0000 is canonical
 text that SQLite compares, but PostgreSQL's `timestamptz` cast refuses it (`date/time field value out of
 range`), so `gte("0000-01-01T00:00:00.000Z")` failed there. Both are refused the same way.
-The check covers operands, not stored values: a date property stored in year 0000, which `z.date()`
-accepts, is written on every backend, but on PostgreSQL a predicate that casts that row, such as
-`gte(cutoff)`, fails with the same error.
 
 The same check applies to every operator, to each bound of `between`, to each element of an `in` /
 `notIn` list, to a nested date property reached through `get()`, to values bound to a `param()` when a
@@ -305,6 +302,33 @@ states no type). A refused operand never reaches SQL. An accepted string and a
 `Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
 `param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
 see [Metadata](/queries/filter#metadata).
+
+### Stored date values
+
+The same range applies to the values a date property stores. `z.date()` accepts any valid `Date`, and
+the store writes it as its `toISOString()` text, but PostgreSQL cannot cast the text of a `Date` in year
+0000 (`date/time field value out of range`), before the common era (`-000001-…`), or after 9999
+(`+010000-…`) to `timestamptz`. Once stored, such a value made every date predicate, `orderBy`, and
+typed read of that property fail on PostgreSQL for the whole query, while SQLite answered (and compared
+the latter two out of chronological order). Every write that stores props — `create`, `update`,
+`upsertById`, the bulk and get-or-create methods, on nodes and edges — now refuses a `Date` outside the
+years 0001 to 9999 anywhere in the props, including inside arrays and nested objects, with
+`ValidationError` naming its path. Trusted import, which stores props verbatim, refuses a date property
+that is not a canonical UTC instant in those years with `TrustedImportError`
+(`details.reason === "invalid_stream"`). `importGraph` and merge apply validate props with the schema,
+which does not accept the interchange text of a `z.date()` property at all. Validity bounds
+(`validFrom`, `validTo`), `asOf` and recorded-time coordinates, and the timestamps of interchange and
+merge documents refuse year 0000 the same way: they are stored in, or compared with, PostgreSQL
+`timestamptz` columns.
+
+The refusal does not repair rows written before it. On such a row:
+
+- `getById`, `find`, and a query that selects the whole node still return the stored text, on every
+  backend.
+- On PostgreSQL, a query that filters, orders by, or selects that property fails with the database's
+  cast error (`22008`, `22007` or `22009`). On SQLite it runs, comparing the stored text.
+- Repair the row by writing a valid `Date` to the property, for example
+  `store.nodes.Event.update(id, { at: new Date(…) })`. That write runs on every backend.
 
 ### Equality
 

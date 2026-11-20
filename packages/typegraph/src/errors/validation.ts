@@ -16,6 +16,11 @@
 import { type ZodError, type ZodType } from "zod";
 
 import type { KindEntity } from "../core/types";
+import {
+  CANONICAL_DATE_OPERAND_EXPECTATION,
+  describeDateOperand,
+  findUnstorableDate,
+} from "../utils/date";
 import { ValidationError, type ValidationIssue } from "./index";
 
 // ============================================================
@@ -94,6 +99,13 @@ function buildLocationString(context: ValidationContext): string {
 /**
  * Validates props with full context for error messages.
  *
+ * Props the schema accepts must also be storable on every backend: a `Date`
+ * anywhere in them is written as its `toISOString()` text, so one outside the
+ * years 0001 to 9999 is refused (`findUnstorableDate`, deciding through
+ * `canonicalDateOperandText` like every date operand). PostgreSQL could not
+ * cast such a stored value to `timestamptz`, so it broke every later date
+ * predicate, ordering or typed read of the property there.
+ *
  * @param schema - Zod schema to validate against
  * @param props - Properties to validate
  * @param context - Context about the entity and operation
@@ -115,13 +127,29 @@ export function validateProps<T>(
   context: ValidationContext,
 ): T {
   const result = schema.safeParse(props);
+  const location = buildLocationString(context);
 
   if (result.success) {
-    return result.data;
+    const unstorable = findUnstorableDate(result.data);
+    if (unstorable === undefined) return result.data;
+    const message = `Expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(unstorable.value)}`;
+    throw new ValidationError(
+      `Invalid ${context.entityType} props for ${location}: ${unstorable.path}: ${message}`,
+      {
+        entityType: context.entityType,
+        kind: context.kind,
+        operation: context.operation,
+        ...(context.id !== undefined && { id: context.id }),
+        issues: [{ path: unstorable.path, message }],
+      },
+      {
+        suggestion:
+          "A Date outside the years 0001 to 9999 cannot be stored as a date on every backend.",
+      },
+    );
   }
 
   const issues = zodIssuesToValidationIssues(result.error);
-  const location = buildLocationString(context);
 
   throw new ValidationError(
     `Invalid ${context.entityType} props for ${location}: ${result.error.message}`,

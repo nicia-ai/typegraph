@@ -602,6 +602,12 @@ The contract is deliberately narrow:
   checked. Trusted import still derives each declared edge identity and stores
   it with the row, so a collision reaches the database arbiter and rolls back
   the complete trusted-import transaction.
+- A property the schema types as a date (`z.date()`, including an array
+  element or a nested object field) must be a canonical UTC ISO-8601 instant
+  (`YYYY-MM-DDTHH:mm:ss.sssZ`) in the years 0001 to 9999, the only form every
+  backend stores and compares as a date. Any other value is refused with
+  `details.reason === "invalid_stream"` before the chunk is written. Validity
+  bounds are held to the same form.
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.

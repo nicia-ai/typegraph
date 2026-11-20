@@ -1,17 +1,35 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type EdgeId,
   expr,
   inSubquery,
+  type Node,
   notInSubquery,
   param as parameter,
 } from "../../../src";
+import { TrustedImportError } from "../../../src/errors-entry";
+import {
+  FORMAT_VERSION,
+  type GraphData,
+  trustedImportGraph,
+} from "../../../src/interchange";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { jsonPointer } from "../../../src/query/json-pointer";
 import { fieldRef } from "../../../src/query/predicates";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { createStatementCounter } from "./statement-counter";
-import { type IntegrationTestContext } from "./test-context";
+import {
+  type InspectableStore,
+  type IntegrationTestContext,
+} from "./test-context";
 
 const MIDNIGHT = "2024-01-01T00:00:00.000Z";
 const JUST_BEFORE = "2023-12-31T23:59:59.999Z";
@@ -503,9 +521,435 @@ async function membershipDateOutcomes(
   };
 }
 
+/**
+ * Valid `Date`s whose `toISOString()` text the store would write but
+ * PostgreSQL's `timestamptz` cast refuses: year 0000 (`22008`), a year before
+ * the common era in its six-digit form (`22007`), and a five-digit year
+ * (`22009`). On SQLite the latter two also sort out of chronological order as
+ * text.
+ */
+const UNSTORABLE_DATES = {
+  yearZero: new Date("0000-06-01T00:00:00.000Z"),
+  beforeCommonEra: new Date("-000001-01-01T00:00:00.000Z"),
+  extendedYear: new Date("+010000-01-01T00:00:00.000Z"),
+} as const;
+
+const STAMPED_AT = new Date(MIDNIGHT);
+
+const Stamp = defineNode("DatePredicateStamp", {
+  schema: z.object({
+    key: z.string(),
+    at: z.date().optional(),
+    history: z.array(z.date()).optional(),
+    nested: z.object({ at: z.date().optional() }).optional(),
+  }),
+});
+const stampedBy = defineEdge("datePredicateStampedBy", {
+  schema: z.object({ at: z.date().optional() }),
+});
+const STAMP_KEY = {
+  name: "date_predicate_stamp_key",
+  fields: ["key"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+const stampGraph = defineGraph({
+  id: "date_predicate_stamps",
+  nodes: { DatePredicateStamp: { type: Stamp, unique: [STAMP_KEY] } },
+  edges: {
+    datePredicateStampedBy: {
+      type: stampedBy,
+      from: [Stamp],
+      to: [Stamp],
+      cardinality: "many",
+    },
+  },
+});
+
+/**
+ * The same kinds without the uniqueness constraint, which trusted import
+ * refuses to load (it maintains no claims).
+ */
+const importStampGraph = defineGraph({
+  id: "date_predicate_imported_stamps",
+  nodes: { DatePredicateStamp: { type: Stamp } },
+  edges: {
+    datePredicateStampedBy: {
+      type: stampedBy,
+      from: [Stamp],
+      to: [Stamp],
+      cardinality: "many",
+    },
+  },
+});
+
+/**
+ * Every node and edge write path that can store a `Date`, each writing `date`
+ * into a date property. `compareAndSet` and `updateWhere` are absent: their
+ * patches are JSON-only and refuse a `Date`, so they cannot write a date
+ * property at all.
+ */
+function stampWrites(
+  store: InspectableStore<typeof stampGraph>,
+  existing: Readonly<{
+    first: Node<typeof Stamp>;
+    second: Node<typeof Stamp>;
+    edgeId: EdgeId<typeof stampedBy>;
+  }>,
+  date: Date,
+): Readonly<Record<string, () => Promise<unknown>>> {
+  const stamps = store.nodes.DatePredicateStamp;
+  const links = store.edges.datePredicateStampedBy;
+  const { first, second, edgeId } = existing;
+  return {
+    create: () => stamps.create({ key: "create", at: date }),
+    createArrayElement: () =>
+      stamps.create({ key: "array", history: [STAMPED_AT, date] }),
+    createNested: () => stamps.create({ key: "nested", nested: { at: date } }),
+    createFromRecord: () =>
+      stamps.createFromRecord({ key: "record", at: date }),
+    update: () => stamps.update(first.id, { at: date }),
+    upsertByIdCreate: () =>
+      stamps.upsertById("upserted", { key: "upserted", at: date }),
+    upsertByIdUpdate: () =>
+      stamps.upsertById(first.id, { key: "first", at: date }),
+    upsertByIdFromRecord: () =>
+      stamps.upsertByIdFromRecord("upserted-record", {
+        key: "upserted-record",
+        at: date,
+      }),
+    bulkCreate: () =>
+      stamps.bulkCreate([{ props: { key: "bulk-created", at: date } }]),
+    bulkReplaceById: () =>
+      stamps.bulkReplaceById([
+        { id: first.id, props: { key: "first", at: date } },
+      ]),
+    bulkUpsertById: () =>
+      stamps.bulkUpsertById([
+        { id: "bulk-upserted", props: { key: "bulk-upserted", at: date } },
+        { id: first.id, props: { key: "first", at: date } },
+      ]),
+    bulkInsert: () =>
+      stamps.bulkInsert([{ props: { key: "bulk-inserted", at: date } }]),
+    getOrCreateByConstraint: () =>
+      stamps.getOrCreateByConstraint(STAMP_KEY.name, {
+        key: "got",
+        at: date,
+      }),
+    bulkGetOrCreateByConstraint: () =>
+      stamps.bulkGetOrCreateByConstraint(STAMP_KEY.name, [
+        { props: { key: "bulk-got", at: date } },
+      ]),
+    edgeCreate: () => links.create(first, second, { at: date }),
+    edgeUpdate: () => links.update(edgeId, { at: date }),
+    edgeBulkCreate: () =>
+      links.bulkCreate([{ from: first, to: second, props: { at: date } }]),
+    edgeBulkUpsertById: () =>
+      links.bulkUpsertById([
+        { id: edgeId, from: first, to: second, props: { at: date } },
+      ]),
+    edgeBulkInsert: () =>
+      links.bulkInsert([{ from: first, to: second, props: { at: date } }]),
+    edgeGetOrCreateByEndpoints: () =>
+      links.getOrCreateByEndpoints(second, first, { at: date }),
+    edgeBulkGetOrCreateByEndpoints: () =>
+      links.bulkGetOrCreateByEndpoints([
+        { from: second, to: first, props: { at: date } },
+      ]),
+  };
+}
+
+/** Every stored stamp and link, as the property values a read returns. */
+async function storedStamps(store: InspectableStore<typeof stampGraph>) {
+  const nodes = await store.nodes.DatePredicateStamp.find();
+  const edges = await store.edges.datePredicateStampedBy.find();
+  return {
+    nodes: nodes
+      .map((node) => ({
+        id: node.id,
+        key: node.key,
+        at: node.at,
+        history: node.history,
+        nested: node.nested,
+      }))
+      .toSorted((left, right) => left.id.localeCompare(right.id)),
+    edges: edges.map((edge) => ({ id: edge.id, at: edge.at })),
+  };
+}
+
+async function seedStamps(store: InspectableStore<typeof stampGraph>) {
+  const first = await store.nodes.DatePredicateStamp.create({
+    key: "first",
+    at: STAMPED_AT,
+  });
+  const second = await store.nodes.DatePredicateStamp.create({
+    key: "second",
+  });
+  const edge = await store.edges.datePredicateStampedBy.create(first, second, {
+    at: STAMPED_AT,
+  });
+  return { first, second, edgeId: edge.id };
+}
+
+/** A trusted-import document of one stamp and one link, with `override` applied. */
+function stampDocument(
+  override: Readonly<{
+    nodeProperties?: Record<string, unknown>;
+    edgeProperties?: Record<string, unknown>;
+  }>,
+): GraphData {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external", description: "stored date values" },
+    nodes: [
+      {
+        kind: "DatePredicateStamp",
+        id: "imported",
+        properties: {
+          key: "imported",
+          at: MIDNIGHT,
+          history: [MIDNIGHT],
+          nested: { at: MIDNIGHT },
+          ...override.nodeProperties,
+        },
+      },
+    ],
+    edges: [
+      {
+        kind: "datePredicateStampedBy",
+        id: "imported-link",
+        from: { kind: "DatePredicateStamp", id: "imported" },
+        to: { kind: "DatePredicateStamp", id: "imported" },
+        properties: { at: MIDNIGHT, ...override.edgeProperties },
+      },
+    ],
+  };
+}
+
 export function registerDatePredicateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("Stored date values", () => {
+    it("refuses a Date outside the years 0001 to 9999 on every node and edge write path, writing nothing", async () => {
+      const store = await context.createStore(stampGraph);
+      const existing = await seedStamps(store);
+      const before = await storedStamps(store);
+
+      const outcomes: Record<string, Readonly<Record<string, string>>> = {};
+      for (const [name, date] of Object.entries(UNSTORABLE_DATES)) {
+        const results: Record<string, string> = {};
+        for (const [write, run] of Object.entries(
+          stampWrites(store, existing, date),
+        )) {
+          results[write] = await refusal(run);
+        }
+        outcomes[name] = results;
+      }
+
+      const writes = Object.keys(stampWrites(store, existing, STAMPED_AT));
+      const refusedEverywhere = Object.fromEntries(
+        writes.map((write) => [write, "ValidationError"]),
+      );
+      expect(outcomes).toEqual({
+        yearZero: refusedEverywhere,
+        beforeCommonEra: refusedEverywhere,
+        extendedYear: refusedEverywhere,
+      });
+      expect(await storedStamps(store)).toEqual(before);
+
+      // Every path writes the same property with a storable Date.
+      const accepted: Record<string, string> = {};
+      for (const [write, run] of Object.entries(
+        stampWrites(store, existing, new Date(MIDYEAR)),
+      )) {
+        accepted[write] = await refusal(run);
+      }
+      expect(accepted).toEqual(
+        Object.fromEntries(writes.map((write) => [write, "ran"])),
+      );
+    });
+
+    it("refuses a year-0000 validity bound or asOf coordinate on every backend, before any SQL runs", async () => {
+      const store = await context.createStore(stampGraph);
+      const existing = await seedStamps(store);
+      const before = await storedStamps(store);
+      const { store: counted, counter } = await countedStore(context, "packed");
+      const yearZero = UNSTORABLE_DATES.yearZero.toISOString();
+
+      const outcomes = {
+        createValidFrom: await refusal(() =>
+          store.nodes.DatePredicateStamp.create(
+            { key: "bounded" },
+            { validFrom: yearZero },
+          ),
+        ),
+        createValidTo: await refusal(() =>
+          store.nodes.DatePredicateStamp.create(
+            { key: "ended" },
+            // eslint-disable-next-line unicorn/no-null -- null states an open-left window, so only the year-0000 end is stated
+            { validFrom: null, validTo: yearZero },
+          ),
+        ),
+        upsertValidFrom: await refusal(() =>
+          store.nodes.DatePredicateStamp.upsertById(
+            existing.first.id,
+            { key: "first" },
+            { validFrom: yearZero },
+          ),
+        ),
+        edgeValidFrom: await refusal(() =>
+          store.edges.datePredicateStampedBy.create(
+            existing.first,
+            existing.second,
+            {},
+            { validFrom: yearZero },
+          ),
+        ),
+        asOf: await refusal(() =>
+          queryDocuments(counted)
+            .temporal("asOf", yearZero)
+            .select((ctx) => ctx.d.title)
+            .execute(),
+        ),
+      };
+
+      expect(outcomes).toEqual({
+        createValidFrom: "ValidationError",
+        createValidTo: "ValidationError",
+        upsertValidFrom: "ValidationError",
+        edgeValidFrom: "ValidationError",
+        asOf: "ValidationError",
+      });
+      expect(counter.count()).toBe(0);
+      expect(await storedStamps(store)).toEqual(before);
+    });
+
+    it("refuses to re-state a year-0000 validity bound a row stored before the check, even when nothing else changes", async () => {
+      const store = await context.createStore(stampGraph);
+      const { first } = await seedStamps(store);
+      const yearZero = UNSTORABLE_DATES.yearZero.toISOString();
+      const executeStatement = store.backend.executeStatement;
+      if (executeStatement === undefined)
+        throw new Error("Integration backend does not support raw statements");
+      const nodes = createSqlSchema(store.backend.tableNames).nodesTable;
+      const planted = await executeStatement(
+        asCompiledStatementSql(
+          sql`UPDATE ${nodes} SET valid_from = ${yearZero} WHERE graph_id = ${store.graphId} AND id = ${first.id}`,
+        ),
+      ).then(
+        () => true,
+        () => false,
+      );
+
+      // The upsert restates the stored props and bound exactly, so it would
+      // coalesce as unchanged; the stated bound is refused before that.
+      const restated =
+        planted ?
+          await refusal(() =>
+            store.nodes.DatePredicateStamp.upsertById(
+              first.id,
+              { key: "first", at: STAMPED_AT },
+              { validFrom: yearZero },
+            ),
+          )
+        : "not planted";
+
+      // Only SQLite can hold such a bound: PostgreSQL's timestamptz column
+      // refuses the planting write itself.
+      expect({ planted, restated }).toEqual(
+        store.backend.dialect === "postgres" ?
+          { planted: false, restated: "not planted" }
+        : { planted: true, restated: "ValidationError" },
+      );
+    });
+  });
+
+  describe("Stored date values through trusted import", () => {
+    it("refuses a date property that is not a canonical instant in the years 0001 to 9999, writing nothing", async () => {
+      if (context.getStore().backend.trustedImport === undefined) return;
+      const store = await context.createStore(importStampGraph);
+      async function storedCount(): Promise<number> {
+        const nodes = await store.nodes.DatePredicateStamp.find();
+        const edges = await store.edges.datePredicateStampedBy.find();
+        return nodes.length + edges.length;
+      }
+      const unstorable = [
+        "0000-06-01T00:00:00.000Z",
+        "-000001-01-01T00:00:00.000Z",
+        "+010000-01-01T00:00:00.000Z",
+        "2024-01-01T00:00:00Z",
+        "2024-01-01",
+      ] as const;
+
+      const outcomes: Record<string, Readonly<Record<string, unknown>>> = {};
+      for (const value of unstorable) {
+        const documents = {
+          nodeProperty: stampDocument({ nodeProperties: { at: value } }),
+          arrayElement: stampDocument({
+            nodeProperties: { history: [MIDNIGHT, value] },
+          }),
+          nestedProperty: stampDocument({
+            nodeProperties: { nested: { at: value } },
+          }),
+          edgeProperty: stampDocument({ edgeProperties: { at: value } }),
+        };
+        const results: Record<string, unknown> = {};
+        for (const [position, document] of Object.entries(documents)) {
+          results[position] = await trustedImportGraph(store, document).then(
+            () => "ran",
+            (error: unknown) =>
+              error instanceof TrustedImportError ?
+                error.details["reason"]
+              : String(error),
+          );
+        }
+        outcomes[value] = results;
+      }
+
+      const refusedEverywhere = {
+        nodeProperty: "invalid_stream",
+        arrayElement: "invalid_stream",
+        nestedProperty: "invalid_stream",
+        edgeProperty: "invalid_stream",
+      };
+      expect(outcomes).toEqual(
+        Object.fromEntries(
+          unstorable.map((value) => [value, refusedEverywhere]),
+        ),
+      );
+      // A validity bound in year 0000 is refused the same way: PostgreSQL's
+      // timestamptz column cannot hold it.
+      const boundedDocument = stampDocument({});
+      const yearZeroBound = await trustedImportGraph(store, {
+        ...boundedDocument,
+        nodes: boundedDocument.nodes.map((node) => ({
+          ...node,
+          validFrom: "0000-06-01T00:00:00.000Z",
+        })),
+      }).then(
+        () => "ran",
+        (error: unknown) =>
+          error instanceof TrustedImportError ?
+            error.details["reason"]
+          : String(error),
+      );
+      expect(yearZeroBound).toBe("invalid_stream");
+      expect(await storedCount()).toBe(0);
+
+      // The same document with canonical instants imports, and a date
+      // predicate over it runs on every backend.
+      await trustedImportGraph(store, stampDocument({}));
+      const matched = await store
+        .query()
+        .from("DatePredicateStamp", "s")
+        .whereNode("s", (s) => s.at.gte(MIDNIGHT))
+        .select((ctx) => ctx.s.key)
+        .execute();
+      expect(matched).toEqual(["imported"]);
+    });
+  });
+
   describe("Date property predicates", () => {
     beforeEach(async () => {
       await seedDatedDocuments(context.getStore());
