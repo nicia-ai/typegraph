@@ -31,6 +31,7 @@ import {
   isPortableTimestamp,
   type PropsDateValue,
 } from "../utils/date";
+import { readOwnProperty } from "../utils/object";
 import { serializedStreamRefusal, withImportStreamLease } from "./import";
 import { exportStreamBackend } from "./stream-source";
 import type {
@@ -335,7 +336,7 @@ function findUnstorableDateProperty<Entity extends StreamedEntity>(
   for (const entity of entities) {
     for (const [fieldName, info] of datedFields(entity.kind)) {
       const found = findUnstorableDateValue(
-        entity.properties[fieldName],
+        readOwnProperty(entity.properties, fieldName),
         info,
         fieldName,
       );

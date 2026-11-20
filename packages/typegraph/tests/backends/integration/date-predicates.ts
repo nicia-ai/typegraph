@@ -574,6 +574,40 @@ const stampGraph = defineGraph({
  * The same kinds without the uniqueness constraint, which trusted import
  * refuses to load (it maintains no claims).
  */
+/**
+ * A kind whose optional date field is named like an inherited
+ * `Object.prototype` member, for the trusted-import check that an omitted
+ * field reads as absent.
+ */
+const InheritedNameStamp = defineNode("DatePredicateInheritedNameStamp", {
+  schema: z.object({
+    key: z.string(),
+    toString: z.date().optional(),
+  }),
+});
+
+const inheritedNameStampGraph = defineGraph({
+  id: "date_predicate_inherited_name_stamps",
+  nodes: { DatePredicateInheritedNameStamp: { type: InheritedNameStamp } },
+  edges: {},
+});
+
+function inheritedNameDocument(properties: Record<string, unknown>): GraphData {
+  return {
+    formatVersion: FORMAT_VERSION,
+    exportedAt: new Date().toISOString(),
+    source: { type: "external", description: "inherited property names" },
+    nodes: [
+      {
+        kind: "DatePredicateInheritedNameStamp",
+        id: "inherited-name",
+        properties,
+      },
+    ],
+    edges: [],
+  };
+}
+
 const importStampGraph = defineGraph({
   id: "date_predicate_imported_stamps",
   nodes: { DatePredicateStamp: { type: Stamp } },
@@ -1139,6 +1173,34 @@ export function registerDatePredicateIntegrationTests(
         .select((ctx) => ctx.s.key)
         .execute();
       expect(matched).toEqual(["imported"]);
+    });
+  });
+
+  describe("Stored date values through trusted import, inherited names", () => {
+    it("reads an omitted date field named like an Object.prototype member as absent", async () => {
+      if (context.getStore().backend.trustedImport === undefined) return;
+      const store = await context.createStore(inheritedNameStampGraph);
+
+      // A value actually stated under that name is checked, and refused
+      // before anything is written.
+      const stated = await trustedImportGraph(
+        store,
+        inheritedNameDocument({ key: "stated", toString: "2024-01-01" }),
+      ).then(
+        () => "ran",
+        (error: unknown) =>
+          error instanceof TrustedImportError ?
+            error.details["reason"]
+          : String(error),
+      );
+      expect(stated).toBe("invalid_stream");
+
+      await trustedImportGraph(
+        store,
+        inheritedNameDocument({ key: "omitted" }),
+      );
+      const stored = await store.nodes.DatePredicateInheritedNameStamp.find();
+      expect(stored.map((node) => node.key)).toEqual(["omitted"]);
     });
   });
 
