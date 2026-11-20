@@ -7,7 +7,7 @@
 import { type EngineRuntimeVersion } from "../engines/types";
 import { type LatencyStats } from "./stats";
 
-export type ReportEngine = Readonly<{
+type ReportEngine = Readonly<{
   name: string;
   versions: readonly EngineRuntimeVersion[];
   target: string;
@@ -16,7 +16,7 @@ export type ReportEngine = Readonly<{
   unsupported: Readonly<Partial<Record<string, string>>>;
 }>;
 
-export type ReportQueryRow = Readonly<{
+type ReportQueryRow = Readonly<{
   queryId: string;
   /** Per engine that ran the query. */
   results: readonly Readonly<{ engine: string; stats: LatencyStats }>[];
