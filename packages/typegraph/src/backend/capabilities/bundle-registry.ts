@@ -895,6 +895,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.",
     accesses: 2,
   },
+  findEdgesConnectedToNodes: {
+    kind: "reasoned",
+    reason:
+      "Optional kind-blind set read of the live edges connected to one kind's nodes, judged by node bulkHardDelete. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.",
+    accesses: 1,
+  },
   findEdgesByMatchIdentity: {
     kind: "reasoned",
     reason:
@@ -1328,6 +1334,14 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "batchEntityWrite",
     ceiling: 5,
   },
+  hardDeleteNodesBatch: {
+    kind: "deferred",
+    workstream: "WS5b",
+    bundle: "batchEntityWrite",
+    // The node batch hard delete's one call site, plus the guard and call in
+    // each of the two recorded-capture write overlays.
+    ceiling: 5,
+  },
   hybridSearch: {
     kind: "deferred",
     workstream: "WS5b",
@@ -1476,6 +1490,7 @@ export const WS5B_SEED_BUNDLES = {
     "insertEdgesDurableBatchReturning",
     "deleteEdgesBatch",
     "hardDeleteEdgesBatch",
+    "hardDeleteNodesBatch",
     "insertNodeNoReturn",
     "insertNodeIfAbsent",
     "insertEdgeNoReturn",

@@ -18,6 +18,7 @@ import type {
   DeleteEdgesBatchParams,
   EdgeConvergenceMatch,
   EdgeExistsBetweenParams,
+  FindEdgesConnectedToNodesParams,
   FindEdgesConnectedToParams,
   HardDeleteEdgeParams,
   InsertEdgeParams,
@@ -1428,6 +1429,69 @@ export function buildHardDeleteEdgesByNode(
   return sql`
     DELETE FROM ${edges}
     WHERE ${edgeAtEitherEndpoint(edges, { graphId, kind: nodeKind, id: nodeId })}
+  `;
+}
+
+/**
+ * The either-endpoint predicate over a SET of one kind's nodes: an edge whose
+ * source or target is one of `nodeIds` of `nodeKind`, of any edge kind.
+ * Binds the graph id, then the kind and the id list once per endpoint arm.
+ */
+function edgeAtEitherEndpointOfNodes(
+  edges: Tables["edges"],
+  graphId: string,
+  nodeKind: string,
+  nodeIds: readonly string[],
+): SQL {
+  const idList = sql.join(
+    nodeIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  return sql`
+    ${edges.graphId} = ${graphId}
+          AND (
+            (${edges.fromKind} = ${nodeKind} AND ${edges.fromId} IN (${idList}))
+            OR (${edges.toKind} = ${nodeKind} AND ${edges.toId} IN (${idList}))
+          )
+  `;
+}
+
+/**
+ * Builds a hard DELETE for every edge incident to one bind-budget chunk of a
+ * kind's nodes — either endpoint, any edge kind, live or tombstoned —
+ * returning the id of every row it removed.
+ */
+export function buildHardDeleteEdgesByNodes(
+  tables: Tables,
+  graphId: string,
+  nodeKind: string,
+  nodeIds: readonly string[],
+): SQL {
+  const { edges } = tables;
+
+  return sql`
+    DELETE FROM ${edges}
+    WHERE ${edgeAtEitherEndpointOfNodes(edges, graphId, nodeKind, nodeIds)}
+    RETURNING ${edges.id}
+  `;
+}
+
+/**
+ * Builds a query for every live edge, of any edge kind, with either endpoint
+ * among one bind-budget chunk of a kind's nodes. An edge between two listed
+ * nodes appears once.
+ */
+export function buildFindEdgesConnectedToNodes(
+  tables: Tables,
+  params: FindEdgesConnectedToNodesParams,
+  nodeIds: readonly string[],
+): SQL {
+  const { edges } = tables;
+
+  return sql`
+    SELECT * FROM ${edges}
+    WHERE ${edgeAtEitherEndpointOfNodes(edges, params.graphId, params.nodeKind, nodeIds)}
+      AND ${edges.deletedAt} IS NULL
   `;
 }
 

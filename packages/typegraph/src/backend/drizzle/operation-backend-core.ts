@@ -134,6 +134,7 @@ import type {
   FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
   FindEdgesByMatchIdentityParams,
+  FindEdgesConnectedToNodesParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
   FindRowsAcrossKindsParams,
@@ -143,6 +144,8 @@ import type {
   GraphCommandSession,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteNodesBatchParams,
+  HardDeleteNodesBatchResult,
   HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
@@ -214,6 +217,26 @@ const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
 // resulting budget, so a future strategy cannot silently invalidate this cost.
 const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
 const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
+
+/**
+ * The binds a node-set edge statement spends besides its id list: the graph
+ * id, and the node kind once per endpoint arm (`edgeAtEitherEndpointOfNodes`).
+ */
+const NODE_SET_EDGE_FIXED_PARAM_COUNT = 3;
+
+/**
+ * Ids per chunk for the statements that bind a node id list twice — once per
+ * edge endpoint arm — which is the widest statement `hardDeleteNodesBatch` and
+ * `findEdgesConnectedToNodes` issue. Every other statement of a chunk (the
+ * node, uniqueness and fulltext deletes) binds the list once and fits within
+ * the same chunk.
+ */
+function nodeSetEdgeChunkSize(maxBindParameters: number): number {
+  return Math.max(
+    1,
+    Math.floor((maxBindParameters - NODE_SET_EDGE_FIXED_PARAM_COUNT) / 2),
+  );
+}
 
 function claimTargetKey(axis: string, key: string): string {
   return encodeTupleKey([axis, key]);
@@ -645,6 +668,7 @@ export type CommonOperationBackend = Pick<
   | "findEdgesByEndpointSet"
   | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
+  | "findEdgesConnectedToNodes"
   | "findNodesByKind"
   | "findNodesAcrossKinds"
   | "getActiveSchema"
@@ -657,6 +681,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "hardDeleteNodesBatch"
   | "claimEdgeCardinality"
   | "claimEdgeCardinalityGuarded"
   | "claimEdgeCardinalityBatch"
@@ -3288,8 +3313,9 @@ export function createCommonOperationBackend(
           );
           if (input.resultMode === "count") {
             const edgeSlotIndexes: number[] = [];
-            const slots: AtomicSqlProgram<number, number>["slots"][number][] =
-              [...fenceSlots(endpointFences, 0)];
+            const slots: AtomicSqlProgram<number, number>["slots"][number][] = [
+              ...fenceSlots(endpointFences, 0),
+            ];
             appendClaimSlots(slots, input.claims, (rows) => rows.length);
             for (const chunk of chunks) {
               edgeSlotIndexes.push(slots.length);
@@ -4953,6 +4979,11 @@ export function createCommonOperationBackend(
 
   const buildFindNodesAcrossKinds = operationStrategy.buildFindNodesAcrossKinds;
   const buildFindEdgesAcrossKinds = operationStrategy.buildFindEdgesAcrossKinds;
+  const buildHardDeleteNodesBatch = operationStrategy.buildHardDeleteNodesBatch;
+  const buildHardDeleteEdgesByNodes =
+    operationStrategy.buildHardDeleteEdgesByNodes;
+  const buildFindEdgesConnectedToNodes =
+    operationStrategy.buildFindEdgesConnectedToNodes;
   const buildFindActiveEdgesBySourceV1 =
     operationStrategy.buildFindActiveEdgesBySourceV1;
 
@@ -5274,6 +5305,60 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
+    // Not atomic either: the store runs it inside its write frame. Each chunk
+    // deletes in `hardDeleteNode`'s order — uniqueness, fulltext, incident
+    // edges, then the node row last — all scoped to the requested ids, so a
+    // failure part-way (on a backend without interactive transactions, say)
+    // leaves the node row in place and a retry clears whatever it owns, never
+    // a claim behind an already-removed row. The edge and node DELETEs RETURN
+    // what they removed, which is all the call reports.
+    // Present only when the strategy supplies both of its builders.
+    ...((
+      buildHardDeleteNodesBatch === undefined ||
+      buildHardDeleteEdgesByNodes === undefined
+    ) ?
+      {}
+    : {
+        async hardDeleteNodesBatch(
+          params: HardDeleteNodesBatchParams,
+        ): Promise<HardDeleteNodesBatchResult> {
+          const removedNodeIds: string[] = [];
+          const removedEdgeIds: string[] = [];
+          for (const chunk of chunkArray(
+            [...new Set(params.ids)],
+            nodeSetEdgeChunkSize(maxBindParameters),
+          )) {
+            await execution.execRun(
+              operationStrategy.buildHardDeleteUniquesByNodeIds({
+                graphId: params.graphId,
+                concreteKind: params.kind,
+                nodeIds: chunk,
+              }),
+            );
+            for (const statement of operationStrategy.buildDeleteFulltextBatch({
+              graphId: params.graphId,
+              nodeKind: params.kind,
+              nodeIds: chunk,
+            })) {
+              await execution.execRun(statement);
+            }
+            const removedEdges = await execution.execAll<{ id: string }>(
+              buildHardDeleteEdgesByNodes(params.graphId, params.kind, chunk),
+            );
+            for (const row of removedEdges) removedEdgeIds.push(row.id);
+            const removedNodes = await execution.execAll<{ id: string }>(
+              buildHardDeleteNodesBatch({
+                graphId: params.graphId,
+                kind: params.kind,
+                ids: chunk,
+              }),
+            );
+            for (const row of removedNodes) removedNodeIds.push(row.id);
+          }
+          return { removedNodeIds, removedEdgeIds };
+        },
+      }),
+
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertEdge(params, timestamp);
@@ -5521,6 +5606,31 @@ export function createCommonOperationBackend(
       const rows = await execution.execAll<Record<string, unknown>>(query);
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
+
+    ...(buildFindEdgesConnectedToNodes === undefined ?
+      {}
+    : {
+        async findEdgesConnectedToNodes(
+          params: FindEdgesConnectedToNodesParams,
+        ): Promise<readonly EdgeRow[]> {
+          // An edge between two nodes in different chunks is read by both
+          // chunks; keyed by id, it is reported once.
+          const edgesById = new Map<string, EdgeRow>();
+          for (const chunk of chunkArray(
+            [...new Set(params.nodeIds)],
+            nodeSetEdgeChunkSize(maxBindParameters),
+          )) {
+            const rows = await execution.execAll<Record<string, unknown>>(
+              buildFindEdgesConnectedToNodes(params, chunk),
+            );
+            for (const row of rows) {
+              const edge = rowMappers.toEdgeRow(row);
+              if (!edgesById.has(edge.id)) edgesById.set(edge.id, edge);
+            }
+          }
+          return [...edgesById.values()];
+        },
+      }),
 
     async findNodesByKind(
       params: FindNodesByKindParams,

@@ -271,9 +271,11 @@ import {
   cascadedPartReferences,
   type CascadeMemberRowReader,
   type CompositionCascadePlan,
+  fenceCompositionCascadeSnapshot,
   planCompositionCascade,
   readCascadeMemberRows,
   requireCompositionPairVia,
+  wholeCascadesToParts,
 } from "./composition-cascade";
 import {
   assertCompositionExistencePreserved,
@@ -313,6 +315,7 @@ import {
 import { assertNodeDeletePlanExpected } from "./node-delete-expectation";
 import { lockNodeRow, lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
+  decideNodeDeleteBehavior,
   judgeNodeDeleteBehavior,
   nodeClaimTransition,
   type NodeDeleteMode,
@@ -320,6 +323,7 @@ import {
   type NodeDeleteRequest,
   nodeDeleteRequiresPortablePath,
   type NodeInsertSyncItem,
+  readEdgesConnectedToNodes,
 } from "./node-write-pipeline";
 import {
   atomicResolvedUpdateAttemptBudget,
@@ -353,6 +357,7 @@ import {
   memoizeLeasedSchemaFence,
   refuseReadOnlyTransactionWrite,
   resolveWriteTransactionMode,
+  runFrameWritesAsUnit,
   runOwnedMutationSetTransaction,
   type WriteTransactionMode,
 } from "./write-transaction";
@@ -460,6 +465,17 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
       mode: "soft" | "hard",
       assertionEnds: ReadonlyMap<string, string> | undefined,
     ) => Promise<void>;
+    /**
+     * The ids, among `ids` of `kind`, whose hard delete owes
+     * {@link detachDeleted} any work: an assertion names them or the closure
+     * holds them. Read set-wise; the node batch hard delete sends exactly these
+     * through the single-node path and skips the detach for the rest.
+     */
+    participants: (
+      target: IdentityTarget,
+      kind: string,
+      ids: readonly string[],
+    ) => Promise<ReadonlySet<string>>;
     /**
      * Moves `ref`'s identity view along with its own window end: refuses a
      * `validTo` that would strand identity assertion history and notes the
@@ -7792,6 +7808,276 @@ export async function executeNodeHardDelete<G extends GraphDef>(
     { operationFacts: nodeDeleteOperationFacts },
   );
   ctx.recordCascadedParts?.(outcome.cascadedParts);
+}
+
+/**
+ * One node of a batch hard delete, judged: either a node that needs neither a
+ * composition cascade nor an identity detach, with the edges its
+ * delete-behavior verdict removes, or a node that takes the single-node hard
+ * delete path with its judged cascade plan.
+ */
+type PlannedNodeHardDelete =
+  | Readonly<{ path: "batched"; id: string; removedEdgeIds: readonly string[] }>
+  | Readonly<{
+      path: "single";
+      id: string;
+      cascadePlan: CompositionCascadePlan;
+    }>;
+
+/**
+ * Hard-deletes a batch of one collection's nodes as ONE write frame: the state
+ * {@link executeNodeHardDelete} leaves when called once per id, in
+ * first-occurrence order, inside one transaction — without per-item operation
+ * hooks — and the same first refusal, with nothing deleted.
+ *
+ * Every node is judged before the first write, in that order, each against
+ * the graph the earlier nodes' deletes leave ({@link PlannedDeleteEffects}).
+ * A composition whole whose delete cascades to parts, or a node that takes
+ * part in Operational Identity, is planned exactly as the single path plans it
+ * ({@link planCascadingNodeDelete}); every other node is judged by
+ * {@link decideNodeDeleteBehavior} over one set-wise connected-edge read. The
+ * writes then run in the same order behind the frame's savepoint seam
+ * ({@link runFrameWritesAsUnit}): each consecutive run of the second kind as
+ * set-wise statements (`session.purgeNodes`), each node of the first kind
+ * through {@link deleteRootWithCascade}, the single path's own write half.
+ *
+ * Ids absent under this kind are ignored, as single `hardDelete` ignores them;
+ * an all-absent batch opens no transaction.
+ */
+export async function executeNodeHardDeleteBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const statedIds = [...new Set(ids)];
+  // Gate outside the frame, as single hardDelete gates each id: a batch that
+  // names no present node takes no lock and opens no transaction.
+  const gate = await getNodeRowsByIds(
+    backend,
+    ctx.batchPointRead,
+    ctx.graphId,
+    kind,
+    statedIds,
+  );
+  if (gate.size === 0) return;
+
+  const outcome = await runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeWritePlan(
+      nodeDeleteConstraintProbe(ctx, kind),
+      nodeRequiresIdentityLock(ctx),
+    ),
+    backend,
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      transactionMode,
+    ): Promise<NodeDeleteBatchOutcome> => {
+      // One delete-lock statement for the whole batch, in id order, before
+      // any connected-edge read — as the soft batch takes it.
+      const lockedRows = await lockNodeRowsById(
+        target,
+        ctx.graphId,
+        kind,
+        statedIds,
+        "delete",
+      );
+      const planned = await planNodeHardDeleteBatch(
+        ctx,
+        kind,
+        statedIds.filter((id) => lockedRows.has(id)),
+        target,
+        lock,
+      );
+      // Every refusal is behind us. What is left are writes a caller catching
+      // a failure among them inside its own transaction must keep none of.
+      const cascadedParts = await runFrameWritesAsUnit(
+        ctx,
+        target,
+        transactionMode,
+        () => applyPlannedNodeHardDeletes(ctx, session, target, kind, planned),
+      );
+      return { affectedCount: planned.length, cascadedParts };
+    },
+    { didWrite: (result) => result.affectedCount > 0 },
+  );
+  ctx.recordCascadedParts?.(outcome.cascadedParts);
+}
+
+/**
+ * The read half of {@link executeNodeHardDeleteBatch}: judges `ids` (present,
+ * distinct, in stated order) without writing, reaching every refusal the
+ * per-id loop would reach first.
+ */
+async function planNodeHardDeleteBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  target: WriteTarget,
+  lock: GraphWriteLock,
+): Promise<readonly PlannedNodeHardDelete[]> {
+  if (ids.length === 0) return [];
+  const isWholeKind = ctx.registry.isCompositionWhole(kind);
+  // The parts closure is a lock-only read, so the connected edges the
+  // classification below reads must be a snapshot taken behind the same
+  // fence every single-path cascade of this kind takes.
+  if (isWholeKind)
+    await fenceCompositionCascadeSnapshot({ ...ctx, lock }, target);
+  const connectedEdges = await readEdgesConnectedToNodes(
+    ctx.graphId,
+    target,
+    kind,
+    ids,
+  );
+  const participants =
+    ctx.identity === undefined ?
+      new Set<string>()
+    : await ctx.identity.participants(target, kind, ids);
+  const singlePathIds = new Set(
+    ids.filter(
+      (id) =>
+        participants.has(id) ||
+        (isWholeKind &&
+          wholeCascadesToParts(
+            ctx.registry,
+            { kind, id },
+            requireDefined(connectedEdges.get(id)),
+          )),
+    ),
+  );
+  const onDelete = getNodeRegistration(ctx.graph, kind).onDelete;
+  const effects = noPlannedDeleteEffects();
+  // Every plain node is judged against the edges the earlier deletes remove.
+  // The policy reads the accumulated set itself, read-only, as it grows: a
+  // copy per node would make planning quadratic in the batch.
+  const earlierDeletesPolicy: NodeDeletePolicy = {
+    enforceDeleteBehavior: true,
+    consumedEdgeIds: effects.removedEdgeIds,
+  };
+  const planned: PlannedNodeHardDelete[] = [];
+  for (const id of ids) {
+    const node = { kind, id };
+    // An earlier node's cascade already deletes it: its own turn in the loop
+    // would find it gone.
+    if (effects.deletedNodeKeys.has(nodeRefKey(node))) continue;
+    if (singlePathIds.has(id)) {
+      planned.push({
+        path: "single",
+        id,
+        // `judgeRoot`, so the root's own verdict joins `effects` and a later
+        // node is judged against the graph this delete leaves.
+        cascadePlan: await planCascadingNodeDelete(
+          ctx,
+          node,
+          target,
+          lock,
+          undefined,
+          effects,
+          { judgeRoot: true, lockMembers: true },
+        ),
+      });
+      continue;
+    }
+    const verdict = decideNodeDeleteBehavior(
+      ctx,
+      { kind, id, onDelete },
+      requireDefined(connectedEdges.get(id)),
+      earlierDeletesPolicy,
+    );
+    for (const edgeId of verdict.removedEdgeIds) {
+      effects.removedEdgeIds.add(edgeId);
+    }
+    effects.deletedNodeKeys.add(nodeRefKey(node));
+    planned.push({
+      path: "batched",
+      id,
+      removedEdgeIds: verdict.removedEdgeIds,
+    });
+  }
+  return planned;
+}
+
+/**
+ * The write half of {@link executeNodeHardDeleteBatch}, in planned order:
+ * each consecutive run of batched nodes through `session.purgeNodes`, each
+ * single-path node through {@link deleteRootWithCascade}. Returns the parts the
+ * cascades deleted, in deletion order.
+ */
+async function applyPlannedNodeHardDeletes<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: NodeWriteSession,
+  target: WriteTarget,
+  kind: string,
+  planned: readonly PlannedNodeHardDelete[],
+): Promise<readonly CompositionCascadedPart[]> {
+  const schema = getNodeRegistration(ctx.graph, kind).type.schema;
+  const cascadedParts: CompositionCascadedPart[] = [];
+  for (const segment of consecutiveHardDeleteSegments(planned)) {
+    if (segment.path === "single") {
+      cascadedParts.push(
+        ...(await deleteRootWithCascade(
+          ctx,
+          session,
+          target,
+          "hard",
+          { kind, id: segment.delete.id },
+          undefined,
+          segment.delete.cascadePlan,
+        )),
+      );
+      continue;
+    }
+    await session.purgeNodes({
+      kind,
+      schema,
+      ids: segment.deletes.map((batchedDelete) => batchedDelete.id),
+      removedEdgeIds: segment.deletes.flatMap(
+        (batchedDelete) => batchedDelete.removedEdgeIds,
+      ),
+    });
+  }
+  return cascadedParts;
+}
+
+type BatchedNodeHardDelete = Extract<
+  PlannedNodeHardDelete,
+  { path: "batched" }
+>;
+
+type NodeHardDeleteSegment =
+  | Readonly<{ path: "batched"; deletes: readonly BatchedNodeHardDelete[] }>
+  | Readonly<{
+      path: "single";
+      delete: Extract<PlannedNodeHardDelete, { path: "single" }>;
+    }>;
+
+/**
+ * `planned`, in order, with each maximal run of consecutive batched nodes
+ * gathered into one segment and each single-path node a segment of its own.
+ */
+function consecutiveHardDeleteSegments(
+  planned: readonly PlannedNodeHardDelete[],
+): readonly NodeHardDeleteSegment[] {
+  const segments: NodeHardDeleteSegment[] = [];
+  // The run being gathered; a single-path node closes it.
+  const run: BatchedNodeHardDelete[] = [];
+  const closeRun = (): void => {
+    if (run.length === 0) return;
+    segments.push({ path: "batched", deletes: run.splice(0) });
+  };
+  for (const item of planned) {
+    if (item.path === "batched") {
+      run.push(item);
+      continue;
+    }
+    closeRun();
+    segments.push({ path: "single", delete: item });
+  }
+  closeRun();
+  return segments;
 }
 
 // ============================================================

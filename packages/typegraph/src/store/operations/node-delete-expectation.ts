@@ -71,14 +71,14 @@ export function readNodeDeleteOptions(
 
 /**
  * Refuses an options argument passed to a node delete that takes none
- * (`hardDelete`, `bulkDelete`). Their types accept no options, so this only
+ * (`hardDelete`, `bulkDelete`, `bulkHardDelete`). Their types accept no options, so this only
  * reaches an untyped caller, who would otherwise get an unguarded delete for
  * an `expect` the method silently dropped.
  */
 export function refuseNodeDeleteArguments(
   extraArguments: readonly unknown[],
   target: Readonly<{ kind: string; id?: string }>,
-  method: "hardDelete" | "bulkDelete",
+  method: "hardDelete" | "bulkDelete" | "bulkHardDelete",
 ): void {
   if (extraArguments.every((argument) => argument === undefined)) return;
   throw new ValidationError(
@@ -87,7 +87,7 @@ export function refuseNodeDeleteArguments(
       entityType: "node",
       kind: target.kind,
       ...(target.id === undefined ? {} : { id: target.id }),
-      operation: method === "hardDelete" ? "hardDelete" : "delete",
+      operation: method === "bulkDelete" ? "delete" : "hardDelete",
       issues: [
         {
           path: "options",

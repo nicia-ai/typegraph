@@ -149,6 +149,7 @@ const NODE_WRITE_INTENT_COUNTERS = {
   bulkUpsertById: countBulkInputAt(0),
   bulkInsert: countBulkInputAt(0),
   bulkDelete: countBulkInputAt(0),
+  bulkHardDelete: countBulkInputAt(0),
   getOrCreateByConstraint: countSingleWrite,
   bulkGetOrCreateByConstraint: countBulkInputAt(1),
 } as const satisfies Record<NodeWriteMethodName, WriteIntentCounter>;

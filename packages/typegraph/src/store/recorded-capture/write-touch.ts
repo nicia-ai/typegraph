@@ -37,6 +37,8 @@ import {
   type GraphCommandPort,
   type GraphCommandResult,
   type HardDeleteNodeParams,
+  type HardDeleteNodesBatchParams,
+  type HardDeleteNodesBatchResult,
   type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
@@ -177,6 +179,7 @@ export type RecordedWriteMembersOverlay = Pick<
       | "insertEdgesDurableBatchReturning"
       | "deleteEdgesBatch"
       | "hardDeleteEdgesBatch"
+      | "hardDeleteNodesBatch"
     >
   >;
 
@@ -400,6 +403,29 @@ export function buildRecordedWriteMembers(
         sink.touchEdge(params.graphId, edgeId);
       }
     },
+
+    // The batch reports what it removed, so — unlike `hardDeleteNode` — no
+    // connected-edge read precedes it: the removed incident edges are touched
+    // from its own result.
+    ...(target.hardDeleteNodesBatch === undefined ?
+      {}
+    : {
+        async hardDeleteNodesBatch(
+          params: HardDeleteNodesBatchParams,
+        ): Promise<HardDeleteNodesBatchResult> {
+          await hooks.beforeOne?.(params.graphId);
+          const removed = await requireDefined(target.hardDeleteNodesBatch)(
+            params,
+          );
+          for (const id of removed.removedNodeIds) {
+            sink.touchNode(params.graphId, params.kind, id);
+          }
+          for (const id of removed.removedEdgeIds) {
+            sink.touchEdge(params.graphId, id);
+          }
+          return removed;
+        },
+      }),
 
     async insertEdge(params) {
       await hooks.beforeOne?.(params.graphId);

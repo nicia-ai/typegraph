@@ -59,6 +59,7 @@ export const NODE_WRITE_NAMES = [
   "bulkUpsertById",
   "bulkInsert",
   "bulkDelete",
+  "bulkHardDelete",
   "getOrCreateByConstraint",
   "bulkGetOrCreateByConstraint",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];

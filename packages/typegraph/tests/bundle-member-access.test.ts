@@ -54,7 +54,9 @@ const STATICALLY_REQUIRED_COUNT = 2;
 // composition relations through one table-name read (-1): 131 -> 132.
 // Recorded pruning requires one backend-owned base-schema assertion: 132 -> 133.
 // Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
-const REASONED_FLOOR = 132;
+// Node bulkHardDelete (#460) reads the optional `findEdgesConnectedToNodes`
+// once, in its connected-edge read: 132 -> 133.
+const REASONED_FLOOR = 133;
 // Cached projection/relation rows and scalar terminals use executeRaw through
 // the rawStatementReuse bundle; bulk import also adds one endpoint-set read.
 // Adopted vector evolution checks the root capability before fencing and
@@ -82,13 +84,20 @@ const REASONED_FLOOR = 132;
 // Same-kind soft-delete sets go through one dispatcher, so the edge write
 // pipeline reads the optional `deleteEdgesBatch` once instead of twice:
 // 240 -> 239 live; its declared ceiling is unchanged.
-const DEFERRED_LIVE_TOTAL = 239;
-const DEFERRED_DECLARED_TOTAL = 245;
+// Node bulkHardDelete (#460) adds `hardDeleteNodesBatch`: its one call site
+// in the node write pipeline plus a guard and a call in each recorded-capture
+// write overlay, declared at its live count: 239 -> 244 live, 245 -> 250
+// declared. Its batch embedding delete shares the batch sync's
+// `deleteEmbedding`/`deleteEmbeddingBatch` choice, so those counts hold.
+const DEFERRED_LIVE_TOTAL = 244;
+const DEFERRED_DECLARED_TOTAL = 250;
 const EXCLUDED_COUNT = 5;
 // Lineage source selection reads the backend's own `lineage` once instead of
 // twice (the read-set fence binds it for its key-delta filter): 387 -> 386.
 // One `deleteEdgesBatch` read left the edge write pipeline: 386 -> 385.
-const TOTAL_ROW_COUNT = 385;
+// Node bulkHardDelete (#460): one `findEdgesConnectedToNodes` and five
+// `hardDeleteNodesBatch` reads: 385 -> 391.
+const TOTAL_ROW_COUNT = 391;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",

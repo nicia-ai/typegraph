@@ -28,6 +28,8 @@ import {
   type GraphBackend,
   type GraphCommand,
   type GraphCommandResult,
+  type HardDeleteNodesBatchParams,
+  type HardDeleteNodesBatchResult,
   type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
@@ -1319,6 +1321,18 @@ export function createRecordedBackend(
     async hardDeleteNode(params) {
       await capture((target) => target.hardDeleteNode(params));
     },
+
+    ...(backend.hardDeleteNodesBatch === undefined ?
+      {}
+    : {
+        async hardDeleteNodesBatch(
+          params: HardDeleteNodesBatchParams,
+        ): Promise<HardDeleteNodesBatchResult> {
+          return capture((target) =>
+            requireDefined(target.hardDeleteNodesBatch)(params),
+          );
+        },
+      }),
 
     async insertEdge(params) {
       return capture((target) => target.insertEdge(params));

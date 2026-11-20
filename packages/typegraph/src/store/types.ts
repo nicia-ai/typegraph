@@ -1899,6 +1899,40 @@ export type NodeCollection<
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
 
   /**
+   * Permanently delete multiple nodes by ID.
+   *
+   * Leaves exactly the state that calling `hardDelete()` once per id, in
+   * first-occurrence order, inside one transaction leaves, and fails with the
+   * refusal that loop would reach first (`RestrictedDeleteError`,
+   * `CompositionCycleError`, …) with nothing deleted. Absent ids, ids present
+   * only under another node kind, and repeated ids are ignored. Each node's
+   * `onDelete` applies as in `hardDelete()`, against the graph the earlier ids'
+   * deletes leave: a `restrict` node connected to a later node of the batch
+   * refuses, while one connected only to an earlier node does not. A history
+   * store captures each removed row's pre-image without recording a delete
+   * row.
+   *
+   * Every node is judged before the first row is removed. A node whose delete
+   * cascades to no composition parts and that no identity assertion or class
+   * names is removed set-wise, with its connected edges, uniqueness, fulltext
+   * and embedding rows, in a bounded number of statements per bind-budget
+   * chunk; a composition whole with parts and an Operational Identity
+   * participant go through the same path as `hardDelete()` and cost what it
+   * costs. On its own the call is one write transaction; inside
+   * `store.transaction()` its writes run behind a savepoint, so a caught
+   * failure among them keeps none of them. On a raw store over a driver
+   * without interactive transactions the statements are separate, and a later
+   * statement's failure leaves the earlier ones applied. Like every batch
+   * method it fires no operation hooks. Takes no options; an options argument
+   * (from an untyped caller) is refused with `ValidationError` rather than
+   * ignored.
+   *
+   * **Warning:** This operation is irreversible. Consider `bulkDelete()` for
+   * most use cases.
+   */
+  bulkHardDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+
+  /**
    * Find a node by uniqueness constraint.
    *
    * Looks up a live node by the named constraint key computed from `props`.

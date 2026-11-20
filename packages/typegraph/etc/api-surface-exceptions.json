@@ -496,11 +496,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   },
   {
@@ -512,11 +528,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   },
   {
@@ -528,11 +560,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   },
   {
@@ -544,11 +592,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   },
   {
@@ -560,11 +624,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   },
   {
@@ -576,11 +656,27 @@
     "issue": "#460"
   },
   {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
     "entrypoint": "typegraph.api.md",
     "declaration": "EdgeCollection",
     "member": "bulkHardDelete",
     "kind": "required-member-added",
     "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
     "issue": "#460"
   }
 ]

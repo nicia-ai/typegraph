@@ -34,6 +34,7 @@ export const WRITE_MEMBER_NAMES = [
   "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",
+  "hardDeleteNodesBatch",
   "insertEdge",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
@@ -160,6 +161,7 @@ export const WRITE_PIPELINE_INTERNAL_IMPORT_NAMES = [
   "applyNodeUpdate",
   "applyNodeSoftDelete",
   "applyNodeHardDelete",
+  "applyNodeHardDeleteBatch",
   "applyNodeResurrect",
   "applyNodeSetUpdate",
   "applyNodeInsertSyncFans",
@@ -210,7 +212,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/operations/node-write-pipeline.ts",
     reason:
-      "The node step bodies themselves (updateNode, deleteNode, hardDeleteNode), reachable only through the session. The delete-behavior edge cascade writes its rows through the edge step module.",
+      "The node step bodies themselves (updateNode, deleteNode, hardDeleteNode/hardDeleteNodesBatch), reachable only through the session. The delete-behavior edge cascade writes its rows through the edge step module.",
     permanent: true,
     allowedMembers: [
       "updateNode",
@@ -219,6 +221,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "updateNodeSet",
       "deleteNode",
       "hardDeleteNode",
+      "hardDeleteNodesBatch",
     ],
     allowedImports: ["softDeleteEdgeRows", "hardDeleteEdgeRows"],
   },
@@ -303,6 +306,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "updateNodeSet",
       "deleteNode",
       "hardDeleteNode",
+      "hardDeleteNodesBatch",
       "insertEdge",
       "insertEdgesDurableBatchReturning",
       "updateEdge",
@@ -337,6 +341,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "updateNodeSet",
       "deleteNode",
       "hardDeleteNode",
+      "hardDeleteNodesBatch",
       "insertEdge",
       "insertEdgesDurableBatchReturning",
       "updateEdge",

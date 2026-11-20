@@ -392,6 +392,7 @@ import {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeHardDeleteBatch,
   executeNodeReparent,
   executeNodeReparentBatch,
   executeNodeReplacementBatch,
@@ -407,6 +408,7 @@ import {
   prepareNodeReplacement,
 } from "./operations";
 import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
+import { readIdentityParticipants } from "./operations/identity-participation";
 import {
   acquireManagedWriteFences,
   batchRefusalDetails,
@@ -3061,6 +3063,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
+      executeHardDeleteBatch: (kind, ids, backend) =>
+        executeNodeHardDeleteBatch(ctx, kind, ids, backend),
       executeDeletePlan: (kind, id, backend) =>
         executeNodeDeletePlan(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
@@ -7841,6 +7845,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 ref,
                 mode,
                 assertionEnds,
+              ),
+            participants: (
+              target: IdentityTarget,
+              kind: string,
+              ids: readonly string[],
+            ) =>
+              readIdentityParticipants(
+                { graphId: this.graphId, schema: this.#sqlSchema() },
+                target,
+                kind,
+                ids,
               ),
             requireValidityEndCompatible: this.#requireValidityEndCompatible,
           },
