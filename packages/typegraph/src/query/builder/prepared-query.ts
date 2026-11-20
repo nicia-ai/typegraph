@@ -61,7 +61,11 @@ import {
   isCollectRecordOperand,
   normalizeDatabaseLiteral,
 } from "../expressions";
-import { comparedOperandLiteral, isParameterRef } from "../predicates";
+import {
+  comparedOperandLiteral,
+  inSubqueryComparedField,
+  isParameterRef,
+} from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import { assertComparedOperand } from "./order-by-field";
 import {
@@ -1061,10 +1065,15 @@ function collectParameterMetadataFromExpression(
     }
     case "in_subquery": {
       // The subquery compares the field with each value it projects, so a
-      // parameter it projects gets the field's operand contract.
+      // parameter it projects gets the field's operand contract, typed as the
+      // compiler compares the two (`inSubqueryComparedField`).
+      const compared = inSubqueryComparedField(
+        expression.field,
+        expression.subquery,
+      );
       for (const operand of subqueryProjectedValueLeaves(expression.subquery)) {
         if (operand.node.kind === "parameter")
-          recordComparedField(accumulator, operand.node.name, expression.field);
+          recordComparedField(accumulator, operand.node.name, compared);
       }
       collectParameterMetadataFromAst(expression.subquery, accumulator);
       return;

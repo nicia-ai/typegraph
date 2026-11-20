@@ -323,12 +323,11 @@ Semantics:
   support SQL window functions the cap is applied in-database (`ROW_NUMBER()`); on backends without
   them (`capabilities.windowFunctions: false`) it degrades to an in-memory cap after fetching the
   matching ids — same result, but it transfers all matching ids for low-selectivity keys.
-- **Key field types:** string, number, boolean, and date keys are supported. A date probe must be a
-  `Date` or a canonical UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ss.sssZ`) in the years 0001 to 9999,
-  and binds as that canonical text; any other probe throws `ValidationError`. SQLite compares a
-  stored date key as text and PostgreSQL as a `timestamptz` instant, and the two agree only on the
-  canonical text the store writes, so a short or zoned form of the same instant would match on one
-  backend and not the other.
+- **Key field types:** string, number, and boolean keys are supported. **Date-typed key fields are
+  not** — they throw `ConfigurationError`, because SQLite compares stored ISO text byte-wise while
+  PostgreSQL compares `timestamptz` instants, so the same instant in different ISO forms would match
+  on one backend but not the other. Use a string-encoded key, or `store.query(...).where(...)` for
+  date predicates.
 
 The lookup is correct whether or not the physical index has been materialized; materialize it (see
 below) for the query planner to actually use it. Null-safe predicates may be less reliably

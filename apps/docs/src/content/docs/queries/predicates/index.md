@@ -300,8 +300,8 @@ date-valued expression, including one a `coalesce` or `when` forwards
 checks both `fallback` and `from`). It also applies to a value tested for membership in a date array —
 `expr.arrayContains`, `contains`, `containsAll`, `containsAny`, and `pathContains` on a date-array JSON
 path — to `pathEquals` on a date JSON path, to a date a `$scalar()` or `in` / `notIn` subquery projects
-and compares with a date property, and to a `bulkFindByIndex` probe of a date key (which refuses with
-`ValidationError`). A refused operand never reaches SQL. An accepted string and a
+and compares with a date property (typed by the projected date when an `inSubquery` field reference
+states no type). A refused operand never reaches SQL. An accepted string and a
 `Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
 `param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
 see [Metadata](/queries/filter#metadata).

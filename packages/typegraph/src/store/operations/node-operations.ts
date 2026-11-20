@@ -152,9 +152,6 @@ import { compareCodePoints, compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
-  CANONICAL_DATE_OPERAND_EXPECTATION,
-  canonicalDateOperandText,
-  describeDateOperand,
   nowIso,
   preservesImmutableLowerBound,
   resolveStampedValidityLowerBound,
@@ -8392,23 +8389,18 @@ const INDEX_PROBE_EXPECTED_TYPEOF: Partial<Record<ValueType, string>> = {
 };
 
 /**
- * Validates a single probe value against its declared index-field type and
- * returns the value the probe binds. Missing/null values are valid (null
- * probes); only a present, scalar value of the wrong type is rejected.
- *
- * A date key is extracted as text on SQLite and as a `timestamptz` instant
- * on PostgreSQL, so a probe is bound only as the canonical text both agree on
- * — the decision `canonicalDateOperandText` owns for every date operand. Any
- * other date probe (a short or zoned form of a stored instant, a date-only
- * string, a year outside 0001–9999) would match different rows on the two.
+ * Validates a single probe value against its declared index-field type.
+ * Missing/null values are valid (null probes); only a present, scalar
+ * value of the wrong type is rejected. A date-typed key never reaches here:
+ * {@link executeNodeBulkFindByIndex} refuses an index with one first.
  */
-function indexProbeValue(
+function validateIndexProbeValue(
   value: unknown,
   valueType: ValueType | undefined,
   pointer: JsonPointer,
   kind: string,
-): unknown {
-  if (value === undefined || value === null) return value;
+): void {
+  if (value === undefined || value === null) return;
 
   // Index keys are scalar; a non-scalar probe can't be bound and must fail
   // with a typed error rather than a cryptic driver bind error downstream.
@@ -8426,23 +8418,11 @@ function indexProbeValue(
     );
   }
 
-  if (valueType === "date") {
-    const text = canonicalDateOperandText(value);
-    if (text !== undefined) return text;
-    throw indexProbeTypeError(
-      pointer,
-      kind,
-      CANONICAL_DATE_OPERAND_EXPECTATION,
-      value,
-      describeDateOperand(value),
-    );
-  }
-
   const expected = INDEX_PROBE_EXPECTED_TYPEOF[valueType ?? "unknown"];
-  if (expected !== undefined && typeof value !== expected) {
+  if (expected === undefined) return;
+  if (typeof value !== expected) {
     throw indexProbeTypeError(pointer, kind, expected, value);
   }
-  return value;
 }
 
 function indexProbeTypeError(
@@ -8450,7 +8430,6 @@ function indexProbeTypeError(
   kind: string,
   expected: string,
   value: unknown,
-  received: string = typeof value,
 ): ValidationError {
   return new ValidationError(
     `Index probe value for "${pointer}" on node kind "${kind}" has an incompatible type`,
@@ -8460,7 +8439,7 @@ function indexProbeTypeError(
       issues: [
         {
           path: pointer,
-          message: `Expected ${expected}, received ${received}`,
+          message: `Expected ${expected}, received ${typeof value}`,
           code: "invalid_type",
         },
       ],
@@ -8538,6 +8517,23 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
     );
   }
 
+  // Date-typed lookup keys can't satisfy the cross-backend parity guarantee:
+  // SQLite compares stored ISO text byte-wise while Postgres compares
+  // timestamptz instants, so equal instants in different ISO forms diverge.
+  // PostgreSQL also cannot build the expression index such a key needs (its
+  // text-to-timestamptz cast is not immutable). Declare the gap rather than
+  // return backend-dependent results.
+  if (index.fieldValueTypes.includes("date")) {
+    throw new ConfigurationError(
+      `bulkFindByIndex does not support date-typed key fields on index "${indexName}" (node kind "${kind}")`,
+      { indexName, kind },
+      {
+        suggestion:
+          "Date index keys compare differently across SQLite and PostgreSQL. Use a string-encoded key field, or query date predicates via store.query(...).where(...).",
+      },
+    );
+  }
+
   const limitPerInput = options?.limitPerInput;
   if (
     limitPerInput !== undefined &&
@@ -8563,14 +8559,16 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
 
   // 1. Extract + validate each input's indexed-field probe tuple.
   const probes: unknown[][] = items.map((item) =>
-    index.fields.map((pointer, position) =>
-      indexProbeValue(
-        resolveJsonPointer(item.props, pointer),
+    index.fields.map((pointer, position) => {
+      const value = resolveJsonPointer(item.props, pointer);
+      validateIndexProbeValue(
+        value,
         index.fieldValueTypes[position],
         pointer,
         kind,
-      ),
-    ),
+      );
+      return value;
+    }),
   );
 
   // 2. Dedupe probe tuples; map each distinct tuple to its input positions.

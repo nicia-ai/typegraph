@@ -155,7 +155,7 @@ const documentAuthorIndex = defineNodeIndex(Document, {
   fields: [["metadata", "author"] as const],
 });
 
-// Date-typed key — bulkFindByIndex probes it by canonical instant only.
+// Date-typed key — bulkFindByIndex rejects this (no cross-backend parity).
 const documentPublishedAtIndex = defineNodeIndex(Document, {
   name: "document_published_at",
   fields: ["publishedAt"],

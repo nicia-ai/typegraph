@@ -244,33 +244,15 @@ export function registerBulkFindByIndexIntegrationTests(
       ).rejects.toBeInstanceOf(ValidationError);
     });
 
-    it("probes a date-typed index key by its canonical instant, refusing any other form", async () => {
+    it("rejects a date-typed index key with ConfigurationError", async () => {
       const store = context.getStore();
-      const published = await store.nodes.Document.create({
-        title: "dated",
-        publishedAt: new Date("2024-01-01T00:00:00.000Z"),
-      });
-      // A date key is text on SQLite and an instant on PostgreSQL; they agree
-      // on the canonical text the store writes, so that is the only form a
-      // probe binds. The full operand matrix is in the date predicate suite.
-      const [byDate, byText] = await store.nodes.Document.bulkFindByIndex(
-        "document_published_at",
-        [
-          { props: { publishedAt: new Date("2024-01-01T00:00:00.000Z") } },
-          {
-            props: {
-              publishedAt: "2024-01-01T00:00:00.000Z" as unknown as Date,
-            },
-          },
-        ],
-      );
-      expect(byDate?.map((node) => node.id)).toEqual([published.id]);
-      expect(byText?.map((node) => node.id)).toEqual([published.id]);
+      // Date keys can't satisfy cross-backend parity (byte-text vs instant),
+      // so the lookup declares the gap instead of returning divergent results.
       await expect(
         store.nodes.Document.bulkFindByIndex("document_published_at", [
-          { props: { publishedAt: "2024-01-01T00:00:00Z" as unknown as Date } },
+          { props: { publishedAt: new Date("2024-01-01T00:00:00.000Z") } },
         ]),
-      ).rejects.toBeInstanceOf(ValidationError);
+      ).rejects.toBeInstanceOf(ConfigurationError);
     });
 
     it("rejects a fields-less (keySystemColumns-only) index with ConfigurationError", async () => {

@@ -4,6 +4,7 @@ import {
   createStoreWithSchema,
   expr,
   inSubquery,
+  notInSubquery,
   param as parameter,
 } from "../../../src";
 import { jsonPointer } from "../../../src/query/json-pointer";
@@ -335,18 +336,17 @@ const PUBLISHED_AT_FIELD = fieldRef("d", ["props"], {
 });
 
 /**
- * Every membership, subquery and index-probe position a date operand takes,
+ * Every membership and subquery position a date operand takes,
  * refused or run: a membership test against a date array (the expression
  * context's `arrayContains`, directly or through a `coalesce`, and the
  * predicate builder's `contains`, `containsAll`, `containsAny` and
  * `pathContains`), a JSON-path equality with a date value, a date projected by
- * a `$scalar()` or an `in` subquery, and a `bulkFindByIndex` date probe.
+ * a `$scalar()` or an `in` subquery.
  */
 async function membershipOperandOutcomes(
   store: Pick<IntegrationStore, "query" | "nodes">,
   operand: string,
 ): Promise<Readonly<Record<string, string>>> {
-  const asDate = operand as unknown as Date;
   const boundArrayContains = queryDocuments(store)
     .where((ctx) =>
       expr.arrayContains(ctx.d.revisedAt, expr.param("at", "date")),
@@ -396,21 +396,21 @@ async function membershipOperandOutcomes(
 
   return {
     boundArrayContains: await refusal(() =>
-      boundArrayContains.execute({ at: asDate }),
+      boundArrayContains.execute({ at: operand }),
     ),
     boundComposedArrayContains: await refusal(() =>
-      boundComposedArrayContains.execute({ at: asDate }),
+      boundComposedArrayContains.execute({ at: operand }),
     ),
     contains: await refusal(() =>
       queryDocuments(store)
-        .whereNode("d", (d) => d.revisedAt.contains(asDate))
+        .whereNode("d", (d) => d.revisedAt.contains(operand))
         .select((ctx) => ctx.d.title)
         .execute(),
     ),
     containsAll: await refusal(() =>
       queryDocuments(store)
         .whereNode("d", (d) =>
-          d.revisedAt.containsAll([new Date(MIDNIGHT), asDate]),
+          d.revisedAt.containsAll([new Date(MIDNIGHT), operand]),
         )
         .select((ctx) => ctx.d.title)
         .execute(),
@@ -418,14 +418,14 @@ async function membershipOperandOutcomes(
     containsAny: await refusal(() =>
       queryDocuments(store)
         .whereNode("d", (d) =>
-          d.revisedAt.containsAny([new Date(MIDNIGHT), asDate]),
+          d.revisedAt.containsAny([new Date(MIDNIGHT), operand]),
         )
         .select((ctx) => ctx.d.title)
         .execute(),
     ),
     pathContains: await refusal(() =>
       queryDocuments(store)
-        .whereNode("d", (d) => d.metadata.pathContains("/revisedAt", asDate))
+        .whereNode("d", (d) => d.metadata.pathContains("/revisedAt", operand))
         .select((ctx) => ctx.d.title)
         .execute(),
     ),
@@ -435,14 +435,9 @@ async function membershipOperandOutcomes(
         .select((ctx) => ctx.d.title)
         .execute(),
     ),
-    boundScalar: await refusal(() => boundScalar.execute({ from: asDate })),
+    boundScalar: await refusal(() => boundScalar.execute({ from: operand })),
     boundInSubquery: await refusal(() =>
-      boundInSubquery.execute({ at: asDate }),
-    ),
-    indexProbe: await refusal(() =>
-      store.nodes.Document.bulkFindByIndex("document_published_at", [
-        { props: { publishedAt: asDate } },
-      ]),
+      boundInSubquery.execute({ at: operand }),
     ),
   };
 }
@@ -504,11 +499,6 @@ async function membershipDateOutcomes(
         )
         .select((ctx) => ctx.d.title)
         .execute(),
-    ),
-    indexProbe: await refusal(() =>
-      store.nodes.Document.bulkFindByIndex("document_published_at", [
-        { props: { publishedAt: operand } },
-      ]),
     ),
   };
 }
@@ -762,7 +752,7 @@ export function registerDatePredicateIntegrationTests(
     );
 
     it.each(["packed", "fallback"] as const)(
-      "refuses a non-canonical or uncastable string in every membership, subquery and index-probe position, before any SQL runs (%s prepared path)",
+      "refuses a non-canonical or uncastable string in every membership and subquery position, before any SQL runs (%s prepared path)",
       async (path) => {
         const { store, counter } = await countedStore(context, path);
 
@@ -782,7 +772,6 @@ export function registerDatePredicateIntegrationTests(
           pathEquals: "UnsupportedPredicateError",
           boundScalar: "UnsupportedPredicateError",
           boundInSubquery: "UnsupportedPredicateError",
-          indexProbe: "ValidationError",
         };
         expect(outcomes).toEqual(
           Object.fromEntries(
@@ -795,12 +784,12 @@ export function registerDatePredicateIntegrationTests(
         // with a canonical operand all run, each through SQL.
         expect(
           Object.values(await membershipOperandOutcomes(store, MIDNIGHT)),
-        ).toEqual(Array.from({ length: 10 }, () => "ran"));
-        expect(counter.count()).toBeGreaterThanOrEqual(10);
+        ).toEqual(Array.from({ length: 9 }, () => "ran"));
+        expect(counter.count()).toBeGreaterThanOrEqual(9);
       },
     );
 
-    it("refuses a Date outside the years 0001 to 9999 in every membership, subquery and index-probe position, before any SQL runs", async () => {
+    it("refuses a Date outside the years 0001 to 9999 in every membership and subquery position, before any SQL runs", async () => {
       const { store, counter } = await countedStore(context, "packed");
 
       const outcomes = {
@@ -817,7 +806,6 @@ export function registerDatePredicateIntegrationTests(
         pathEquals: "UnsupportedPredicateError",
         scalar: "UnsupportedPredicateError",
         inSubquery: "UnsupportedPredicateError",
-        indexProbe: "ValidationError",
       };
       expect(outcomes).toEqual({
         extendedYear: refusedEverywhere,
@@ -826,7 +814,7 @@ export function registerDatePredicateIntegrationTests(
       expect(counter.count()).toBe(0);
     });
 
-    it("matches the same rows for a canonical string and the equivalent Date in membership, subquery and index-probe positions on every backend", async () => {
+    it("matches the same rows for a canonical string and the equivalent Date in membership and subquery positions on every backend", async () => {
       const store = context.getStore();
       const boundArrayContains = queryDocuments(store)
         .where((ctx) =>
@@ -876,16 +864,6 @@ export function registerDatePredicateIntegrationTests(
       }
       const boundScalar = scalarCutoff("param").prepare();
       const boundInSubquery = inSubqueryOf("param").prepare();
-      const [byDate, byString] = await Promise.all([
-        store.nodes.Document.bulkFindByIndex("document_published_at", [
-          { props: { publishedAt: new Date(MIDNIGHT) } },
-          { props: { publishedAt: MIDNIGHT as unknown as Date } },
-        ]),
-        store.nodes.Document.bulkFindByIndex("document_published_at", [
-          { props: { publishedAt: new Date(MIDYEAR) } },
-        ]),
-      ]);
-
       const rows = {
         arrayContainsString: titlesOf(
           await boundArrayContains.execute({
@@ -907,9 +885,7 @@ export function registerDatePredicateIntegrationTests(
             .execute(),
         ),
         containsString: await queryDocuments(store)
-          .whereNode("d", (d) =>
-            d.revisedAt.contains(MIDNIGHT as unknown as Date),
-          )
+          .whereNode("d", (d) => d.revisedAt.contains(MIDNIGHT))
           .select((ctx) => ctx.d.title)
           .execute(),
         containsAll: await queryDocuments(store)
@@ -920,10 +896,7 @@ export function registerDatePredicateIntegrationTests(
           .execute(),
         containsAny: await queryDocuments(store)
           .whereNode("d", (d) =>
-            d.revisedAt.containsAny([
-              new Date(JUST_BEFORE),
-              MIDYEAR as unknown as Date,
-            ]),
+            d.revisedAt.containsAny([new Date(JUST_BEFORE), MIDYEAR]),
           )
           .select((ctx) => ctx.d.title)
           .execute(),
@@ -954,11 +927,8 @@ export function registerDatePredicateIntegrationTests(
         ),
         inSubqueryLiteral: await inSubqueryOf(new Date(MIDYEAR)).execute(),
         inSubqueryBound: await boundInSubquery.execute({
-          at: MIDNIGHT as unknown as Date,
+          at: MIDNIGHT,
         }),
-        indexProbeDate: (byDate[0] ?? []).map((node) => node.title),
-        indexProbeString: (byDate[1] ?? []).map((node) => node.title),
-        indexProbeMidyear: (byString[0] ?? []).map((node) => node.title),
       };
 
       expect(sortedRows(rows)).toEqual({
@@ -976,30 +946,162 @@ export function registerDatePredicateIntegrationTests(
         scalarBoundDate: ["midnight", "midyear"],
         inSubqueryLiteral: ["midyear"],
         inSubqueryBound: ["midnight"],
-        indexProbeDate: ["midnight"],
-        indexProbeString: ["midnight"],
-        indexProbeMidyear: ["midyear"],
       });
     });
 
-    it("projects a date a $scalar() subquery selects as the same value on every backend", async () => {
+    it("compares a date property with the date a $scalar() subquery projects, in a projection, on every backend", async () => {
+      // A subquery types its projected literal as text on PostgreSQL, so the
+      // comparison failed there ("operator does not exist: timestamp with
+      // time zone >= text") while SQLite answered.
       const rows = await queryDocuments(context.getStore())
-        .whereNode("d", (d) => d.title.eq("midnight"))
         .project((ctx) => ({
-          cutoff: ctx.$scalar((subquery) =>
-            subquery
-              .from("Document", "x")
-              .project(() => ({ cutoff: expr.literal(new Date(MIDYEAR)) }))
-              .limit(1),
+          title: ctx.d.title,
+          afterCutoff: expr.gte(
+            ctx.d.publishedAt,
+            ctx.$scalar((subquery) =>
+              subquery
+                .from("Document", "x")
+                .project(() => ({ cutoff: expr.literal(new Date(MIDNIGHT)) }))
+                .limit(1),
+            ),
           ),
-          published: ctx.d.publishedAt,
         }))
         .execute();
 
-      expect(rows).toEqual([
-        { cutoff: new Date(MIDYEAR), published: new Date(MIDNIGHT) },
+      expect(
+        rows.toSorted((left, right) => left.title.localeCompare(right.title)),
+      ).toEqual([
+        { title: "just-before", afterCutoff: false },
+        { title: "midnight", afterCutoff: true },
+        { title: "midyear", afterCutoff: true },
       ]);
     });
+
+    it("projects a date no comparison takes as the Date it states on every backend, typing only compared dates", async () => {
+      // Only a date compared with a date is typed as one. A projected date is
+      // compared with nothing, so a year PostgreSQL cannot cast still
+      // projects, as it did before compared dates were typed.
+      const store = context.getStore();
+      const yearZero = REFUSED_DATES.yearZero;
+      const boundProjection = queryDocuments(store)
+        .whereNode("d", (d) => d.title.eq("midnight"))
+        .project(() => ({ bound: expr.param("at", "date") }))
+        .prepare();
+      const rows = await queryDocuments(store)
+        .whereNode("d", (d) => d.title.eq("midnight"))
+        .project((ctx) => ({
+          literal: expr.literal(yearZero),
+          scalar: ctx.$scalar((subquery) =>
+            subquery
+              .from("Document", "x")
+              .project(() => ({ value: expr.literal(yearZero) }))
+              .limit(1),
+          ),
+          canonical: ctx.$scalar((subquery) =>
+            subquery
+              .from("Document", "x")
+              .project(() => ({ value: expr.literal(new Date(MIDYEAR)) }))
+              .limit(1),
+          ),
+        }))
+        .execute();
+
+      expect({
+        rows,
+        bound: await boundProjection.execute({ at: yearZero }),
+      }).toEqual({
+        rows: [
+          { literal: yearZero, scalar: yearZero, canonical: new Date(MIDYEAR) },
+        ],
+        bound: [{ bound: yearZero }],
+      });
+    });
+
+    it.each(["packed", "fallback"] as const)(
+      "checks a value an in() / notIn() subquery projects as the date it is compared as when the field reference states no type (%s prepared path)",
+      async (path) => {
+        const { store, counter } = await countedStore(context, path);
+        // No valueType: the comparison takes the subquery column's date type.
+        const untypedPublishedAt = fieldRef("d", ["props"], {
+          jsonPointer: jsonPointer(["publishedAt"]),
+        });
+        function projecting(value: Date | "param") {
+          return store
+            .query()
+            .from("Document", "x")
+            .project(() => ({
+              instant:
+                value === "param" ?
+                  expr.param("at", "date")
+                : expr.literal(value),
+            }))
+            .limit(1)
+            .toAst();
+        }
+        const boundIn = queryDocuments(store)
+          .whereNode("d", () =>
+            inSubquery(untypedPublishedAt, projecting("param")),
+          )
+          .select((ctx) => ctx.d.title)
+          .prepare();
+        const boundNotIn = queryDocuments(store)
+          .whereNode("d", () =>
+            notInSubquery(untypedPublishedAt, projecting("param")),
+          )
+          .select((ctx) => ctx.d.title)
+          .prepare();
+
+        const refused = {
+          boundIn: await refusal(() =>
+            boundIn.execute({ at: "2024-01-01T00:00:00Z" }),
+          ),
+          boundNotIn: await refusal(() =>
+            boundNotIn.execute({ at: "2024-01-01T00:00:00Z" }),
+          ),
+          boundYearZero: await refusal(() =>
+            boundIn.execute({ at: REFUSED_DATES.yearZero }),
+          ),
+          literalYearZero: await refusal(() =>
+            queryDocuments(store)
+              .whereNode("d", () =>
+                inSubquery(
+                  untypedPublishedAt,
+                  projecting(REFUSED_DATES.yearZero),
+                ),
+              )
+              .select((ctx) => ctx.d.title)
+              .execute(),
+          ),
+        };
+        const refusedStatements = counter.count();
+
+        expect(refused).toEqual({
+          boundIn: "UnsupportedPredicateError",
+          boundNotIn: "UnsupportedPredicateError",
+          boundYearZero: "UnsupportedPredicateError",
+          literalYearZero: "UnsupportedPredicateError",
+        });
+        expect(refusedStatements).toBe(0);
+
+        const rows = {
+          boundIn: await boundIn.execute({ at: MIDNIGHT }),
+          boundInDate: await boundIn.execute({ at: new Date(MIDNIGHT) }),
+          boundNotIn: await boundNotIn.execute({ at: MIDNIGHT }),
+          literal: await queryDocuments(store)
+            .whereNode("d", () =>
+              inSubquery(untypedPublishedAt, projecting(new Date(MIDYEAR))),
+            )
+            .select((ctx) => ctx.d.title)
+            .execute(),
+        };
+        expect(sortedRows(rows)).toEqual({
+          boundIn: ["midnight"],
+          boundInDate: ["midnight"],
+          boundNotIn: ["just-before", "midyear"],
+          literal: ["midyear"],
+        });
+      },
+    );
 
     it("names the property, not the props column, when it refuses a date operand", () => {
       const messages = {
