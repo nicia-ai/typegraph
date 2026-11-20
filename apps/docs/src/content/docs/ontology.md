@@ -1198,8 +1198,8 @@ The plan is plain data and survives a JSON round trip. Once you pass options,
 options of the wrong shape. A guarded delete always takes the portable delete
 path. `hardDelete` takes no `expect`, because it also purges a tombstoned node
 and the soft-deleted edge rows at each deleted node, which the plan does not
-name. `bulkDelete` takes no `expect` either. Both refuse any options argument
-with `ValidationError` rather than run unguarded.
+name. `bulkDelete` and `bulkHardDelete` take no `expect` either. All three refuse
+any options argument with `ValidationError` rather than run unguarded.
 
 The comparison covers the parts and edges the delete planned. For a
 composition whole, no concurrent attach or reparent can change that plan
