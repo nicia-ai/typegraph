@@ -15,14 +15,40 @@
 import { param } from "@nicia-ai/typegraph";
 
 import {
+  BFS3_HOPS,
+  bfsReachResult,
   canonicalDigest,
   compareIdsAscending,
+  compareMessageRecencyDesc,
+  componentSizesResult,
+  degreeResult,
+  GA_MAX_HOPS,
+  IC13_MAX_HOPS,
+  IC9_MAX_DATE,
+  IC_MESSAGE_LIMIT,
+  KNOWS_WEIGHT_PROPERTY,
   type MessageRef,
+  type PersonPair,
+  reachableSetResult,
+  shortestPathDistanceResult,
+  weightedShortestPathResult,
   type SnbQueries,
+  ssspResult,
 } from "./types";
 import { type SnbStore } from "../schema/snb-graph";
 
 const ROOT_WALK_MAX_HOPS = 100;
+
+/**
+ * Transaction-scoped `work_mem` for the iterative graph algorithms. As of
+ * typegraph#285 the library no longer defaults this — an unset value inherits
+ * the server's `work_mem` (Postgres' 4MB default), which forces the
+ * label-propagation / BFS working tables to spill to disk on the SF1 `knows`
+ * graph. Setting it back to 64MB restores the previous behavior and is the
+ * fair server-config choice for a benchmark host. A documented no-op on
+ * SQLite, so it is safe on this shared (SQLite + Postgres) query path.
+ */
+const ALGORITHM_WORKING_MEMORY = "64MB";
 
 export function createSnbQueries(store: SnbStore): SnbQueries {
   const personById = store
@@ -426,5 +452,345 @@ export function createSnbQueries(store: SnbStore): SnbQueries {
     };
   }
 
-  return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
+  // IC13 (traversal): shortest-path hop distance between two persons over the
+  // `knows` graph, via TypeGraph's native `shortestPath` — the correct
+  // targeted primitive for this question, matching every other engine's
+  // targeted BFS pathfinder. `knows` is loaded in both directions (see
+  // dataset/ldbc-csv.ts), so `direction: "out"` is undirected reachability.
+  //
+  // KNOWN LIMITATION (typegraph#271): `shortestPath`/`reachable`/`neighbors`
+  // compile to a recursive CTE that enumerates paths (UNION ALL, per-path
+  // cycle check), not a set-based BFS — cost grows ~7x per hop regardless of
+  // the reachable-set size, so this is infeasible past ~4-5 hops on a dense
+  // graph (measured: 44s for one pair at maxHops=8 on the 31-person smoke
+  // fixture). IC13 therefore cannot run on TypeGraph at realistic `knows`
+  // distances until that algorithm is reworked; this driver is written for
+  // the fixed API and will run once the CTE does per-node dedup.
+  async function IC13(pair: PersonPair) {
+    const path = await store.algorithms.shortestPath(
+      pair.sourceId,
+      pair.targetId,
+      {
+        edges: ["knows"],
+        maxHops: IC13_MAX_HOPS,
+        direction: "out",
+        workingMemory: ALGORITHM_WORKING_MEMORY,
+      },
+    );
+    return shortestPathDistanceResult(path?.depth);
+  }
+
+  // IC14 (traversal): the minimum-total-weight route between two persons over
+  // `knows`, where each edge carries the synthetic `weight` materialized at
+  // load. Exercises TypeGraph's weightedShortestPath (#288) — a cost-ordered
+  // Dijkstra on the D2 iterative substrate, so it takes the same 64MB
+  // work_mem as the other iterative algorithms. No competitor runs this
+  // (see the per-engine capability gaps), so it is a SQLite-vs-Postgres
+  // comparison of the weighted-path primitive.
+  async function IC14(pair: PersonPair) {
+    const path = await store.algorithms.weightedShortestPath(
+      pair.sourceId,
+      pair.targetId,
+      {
+        edges: ["knows"],
+        weightProperty: KNOWS_WEIGHT_PROPERTY,
+        direction: "out",
+        workingMemory: ALGORITHM_WORKING_MEMORY,
+      },
+    );
+    return weightedShortestPathResult(path?.totalWeight);
+  }
+
+  // BFS3 (traversal): the distinct persons within BFS3_HOPS hops of a seed
+  // over `knows`, via the native neighborhood algorithm (source excluded by
+  // contract). Same undirected-via-bidirectional-edges reasoning as IC13.
+  async function BFS3(personId: string) {
+    const reached = await store.algorithms.neighbors(personId, {
+      edges: ["knows"],
+      depth: BFS3_HOPS,
+      direction: "out",
+      workingMemory: ALGORITHM_WORKING_MEMORY,
+    });
+    return reachableSetResult(reached.map((node) => node.id));
+  }
+
+  // IC2 (complex read): the given person's friends' most recent messages.
+  // Post/Comment are split node types, so — like IS2 — the true top-K across
+  // the union is the top-K of (top-K posts ∪ top-K comments): any message in
+  // the true top-K has at most K-1 messages of its own type above it, so it
+  // is in that type's own top-K. Each side carries its friend (creator).
+  const ic2Posts = store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (person) => person.id.eq(param("id")))
+    .traverse("knows", "k", { expand: "none" })
+    .to("Person", "friend")
+    .traverse("hasCreator", "hc", { expand: "none", direction: "in" })
+    .to("Post", "post")
+    .select((ctx) => ({
+      friendId: ctx.friend.id,
+      friendFirstName: ctx.friend.firstName,
+      friendLastName: ctx.friend.lastName,
+      id: ctx.post.id,
+      content: ctx.post.content,
+      creationDate: ctx.post.creationDate,
+    }))
+    .orderBy("post", "creationDate", "desc")
+    .orderBy("post", "id", "desc")
+    .limit(IC_MESSAGE_LIMIT)
+    .prepare();
+  const ic2Comments = store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (person) => person.id.eq(param("id")))
+    .traverse("knows", "k", { expand: "none" })
+    .to("Person", "friend")
+    .traverse("hasCreator", "hc", { expand: "none", direction: "in" })
+    .to("Comment", "comment")
+    .select((ctx) => ({
+      friendId: ctx.friend.id,
+      friendFirstName: ctx.friend.firstName,
+      friendLastName: ctx.friend.lastName,
+      id: ctx.comment.id,
+      content: ctx.comment.content,
+      creationDate: ctx.comment.creationDate,
+    }))
+    .orderBy("comment", "creationDate", "desc")
+    .orderBy("comment", "id", "desc")
+    .limit(IC_MESSAGE_LIMIT)
+    .prepare();
+
+  async function IC2(personId: string) {
+    const [posts, comments] = await Promise.all([
+      ic2Posts.execute({ id: personId }),
+      ic2Comments.execute({ id: personId }),
+    ]);
+    const canonicalRows = [...posts, ...comments]
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        friendId: row.friendId,
+        friendFirstName: row.friendFirstName,
+        friendLastName: row.friendLastName,
+        messageId: row.id,
+        messageContent: row.content,
+        messageCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC8 (complex read): the most recent replies to the given person's own
+  // messages. Replies to Posts and replies to Comments are disjoint (a reply
+  // targets exactly one message), so the same top-K-of-union split as IC2
+  // applies. A reply is always a Comment; carry its author.
+  const ic8RepliesToPosts = store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (person) => person.id.eq(param("id")))
+    .traverse("hasCreator", "hc1", { expand: "none", direction: "in" })
+    .to("Post", "post")
+    .traverse("replyOf", "ro", { expand: "none", direction: "in" })
+    .to("Comment", "reply")
+    .traverse("hasCreator", "hc2", { expand: "none" })
+    .to("Person", "author")
+    .select((ctx) => ({
+      authorId: ctx.author.id,
+      authorFirstName: ctx.author.firstName,
+      authorLastName: ctx.author.lastName,
+      id: ctx.reply.id,
+      content: ctx.reply.content,
+      creationDate: ctx.reply.creationDate,
+    }))
+    .orderBy("reply", "creationDate", "desc")
+    .orderBy("reply", "id", "desc")
+    .limit(IC_MESSAGE_LIMIT)
+    .prepare();
+  const ic8RepliesToComments = store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (person) => person.id.eq(param("id")))
+    .traverse("hasCreator", "hc1", { expand: "none", direction: "in" })
+    .to("Comment", "message")
+    .traverse("replyOf", "ro", { expand: "none", direction: "in" })
+    .to("Comment", "reply")
+    .traverse("hasCreator", "hc2", { expand: "none" })
+    .to("Person", "author")
+    .select((ctx) => ({
+      authorId: ctx.author.id,
+      authorFirstName: ctx.author.firstName,
+      authorLastName: ctx.author.lastName,
+      id: ctx.reply.id,
+      content: ctx.reply.content,
+      creationDate: ctx.reply.creationDate,
+    }))
+    .orderBy("reply", "creationDate", "desc")
+    .orderBy("reply", "id", "desc")
+    .limit(IC_MESSAGE_LIMIT)
+    .prepare();
+
+  async function IC8(personId: string) {
+    const [toPosts, toComments] = await Promise.all([
+      ic8RepliesToPosts.execute({ id: personId }),
+      ic8RepliesToComments.execute({ id: personId }),
+    ]);
+    const canonicalRows = [...toPosts, ...toComments]
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        replyAuthorId: row.authorId,
+        replyAuthorFirstName: row.authorFirstName,
+        replyAuthorLastName: row.authorLastName,
+        commentId: row.id,
+        commentContent: row.content,
+        commentCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC9 (complex read): the most recent messages by the person's friends and
+  // friends-of-friends (2-hop `knows`, source excluded) created before
+  // IC9_MAX_DATE. Resolve the 2-hop person set first (bounded, `neighbors`
+  // handles depth 2 fine — it's the deep traversals that hit typegraph#271),
+  // then their messages, filtered + top-K per message type and merged.
+  async function ic9MessagesOf(
+    kind: "Post" | "Comment",
+    personIds: readonly string[],
+  ) {
+    return store
+      .query()
+      .from("Person", "creator")
+      .whereNode("creator", (creator) => creator.id.in(personIds))
+      .traverse("hasCreator", "hc", { expand: "none", direction: "in" })
+      .to(kind, "message")
+      .whereNode("message", (message) => message.creationDate.lt(IC9_MAX_DATE))
+      .select((ctx) => ({
+        creatorId: ctx.creator.id,
+        creatorFirstName: ctx.creator.firstName,
+        creatorLastName: ctx.creator.lastName,
+        id: ctx.message.id,
+        content: ctx.message.content,
+        creationDate: ctx.message.creationDate,
+      }))
+      .orderBy("message", "creationDate", "desc")
+      .orderBy("message", "id", "desc")
+      .limit(IC_MESSAGE_LIMIT)
+      .execute();
+  }
+
+  async function IC9(personId: string) {
+    const fof = await store.algorithms.neighbors(personId, {
+      edges: ["knows"],
+      depth: 2,
+      direction: "out",
+      workingMemory: ALGORITHM_WORKING_MEMORY,
+    });
+    const fofIds = fof.map((node) => node.id);
+    if (fofIds.length === 0) {
+      return { rowCount: 0, digest: canonicalDigest([]) };
+    }
+    const [posts, comments] = await Promise.all([
+      ic9MessagesOf("Post", fofIds),
+      ic9MessagesOf("Comment", fofIds),
+    ]);
+    const canonicalRows = [...posts, ...comments]
+      .toSorted((left, right) => compareMessageRecencyDesc(left, right))
+      .slice(0, IC_MESSAGE_LIMIT)
+      .map((row) => ({
+        personId: row.creatorId,
+        personFirstName: row.creatorFirstName,
+        personLastName: row.creatorLastName,
+        messageId: row.id,
+        messageContent: row.content,
+        messageCreationDate: row.creationDate,
+      }));
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // GA_DEGREE (algorithm): the seed's `knows` degree via the native primitive.
+  async function GA_DEGREE(seedPersonId: string) {
+    const degree = await store.algorithms.degree(seedPersonId, {
+      edges: ["knows"],
+      direction: "out",
+    });
+    return degreeResult(degree);
+  }
+
+  // GA_BFS / GA_SSSP (algorithms): whole-component reachability / shortest-path
+  // depths from the seed via `reachable`. Correct, but declared unsupported by
+  // the SQLite/Postgres factories until typegraph#271 lands — `reachable`
+  // path-enumerates, so at GA_MAX_HOPS on a dense graph it is infeasible today.
+  // The code is written for the fixed (set-based BFS) API so this flips on with
+  // a one-line factory change post-fix.
+  async function GA_BFS(seedPersonId: string) {
+    const reached = await store.algorithms.reachable(seedPersonId, {
+      edges: ["knows"],
+      maxHops: GA_MAX_HOPS,
+      direction: "out",
+      workingMemory: ALGORITHM_WORKING_MEMORY,
+    });
+    const reachedCount = reached.filter(
+      (node) => node.id !== seedPersonId,
+    ).length;
+    return bfsReachResult(reachedCount);
+  }
+  async function GA_SSSP(seedPersonId: string) {
+    const reached = await store.algorithms.reachable(seedPersonId, {
+      edges: ["knows"],
+      maxHops: GA_MAX_HOPS,
+      direction: "out",
+      workingMemory: ALGORITHM_WORKING_MEMORY,
+    });
+    const others = reached.filter((node) => node.id !== seedPersonId);
+    const depthSum = others.reduce((sum, node) => sum + node.depth, 0);
+    return ssspResult(others.length, depthSum);
+  }
+
+  // GA_WCC (algorithm): weakly connected components of the `knows` social graph
+  // via TypeGraph's native exact WCC (label-min on the D2 iterative substrate;
+  // typegraph#272). Restrict the induced subgraph to Person so unrelated SNB
+  // entities are neither seeded nor returned as singleton components.
+  async function GA_WCC(_seedPersonId: string) {
+    const memberships = await store.algorithms.weaklyConnectedComponents({
+      edges: ["knows"],
+      nodeKinds: ["Person"],
+      workingMemory: ALGORITHM_WORKING_MEMORY,
+    });
+    const sizeByComponent = new Map<string, number>();
+    for (const membership of memberships) {
+      sizeByComponent.set(
+        JSON.stringify([membership.componentKind, membership.componentId]),
+        membership.size,
+      );
+    }
+    return componentSizesResult([...sizeByComponent.values()]);
+  }
+
+  return {
+    IS1,
+    IS2,
+    IS3,
+    IS4,
+    IS5,
+    IS6,
+    IS7,
+    IC13,
+    IC14,
+    BFS3,
+    IC2,
+    IC8,
+    IC9,
+    GA_DEGREE,
+    GA_WCC,
+    GA_BFS,
+    GA_SSSP,
+  };
 }

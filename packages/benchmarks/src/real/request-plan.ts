@@ -7,7 +7,7 @@
  * index N.
  */
 import { type SnbIdPools } from "./dataset/ldbc-csv";
-import { type MessageRef } from "./engines/types";
+import { type MessageRef, type PersonPair } from "./engines/types";
 
 /** xorshift32 PRNG, matching packages/benchmarks/src/seed.ts's generator. */
 function createRng(seed_: number): () => number {
@@ -36,6 +36,16 @@ export type SnbRequestPlan = Readonly<{
   IS5: readonly MessageRef[];
   IS6: readonly MessageRef[];
   IS7: readonly MessageRef[];
+  IC13: readonly PersonPair[];
+  IC14: readonly PersonPair[];
+  BFS3: readonly string[];
+  IC2: readonly string[];
+  IC8: readonly string[];
+  IC9: readonly string[];
+  GA_DEGREE: readonly string[];
+  GA_WCC: readonly string[];
+  GA_BFS: readonly string[];
+  GA_SSSP: readonly string[];
 }>;
 
 export type BuildRequestPlanOptions = Readonly<{
@@ -59,6 +69,20 @@ export function buildRequestPlan(
     Array.from({ length: requestCount }, () => pick(pools.persons, random));
   const messageRequests = (): readonly MessageRef[] =>
     Array.from({ length: requestCount }, () => pick(messages, random));
+  // IC13's distance is only meaningful for two *different* persons (a
+  // person's distance to itself is trivially 0), so each pair re-rolls its
+  // target until it differs from the source. With more than one person in
+  // the pool this terminates immediately in practice; the length guard keeps
+  // a degenerate single-person pool from looping forever.
+  const pairRequests = (): readonly PersonPair[] =>
+    Array.from({ length: requestCount }, () => {
+      const sourceId = pick(pools.persons, random);
+      let targetId = pick(pools.persons, random);
+      while (targetId === sourceId && pools.persons.length > 1) {
+        targetId = pick(pools.persons, random);
+      }
+      return { sourceId, targetId };
+    });
 
   return {
     IS1: personRequests(),
@@ -68,5 +92,15 @@ export function buildRequestPlan(
     IS5: messageRequests(),
     IS6: messageRequests(),
     IS7: messageRequests(),
+    IC13: pairRequests(),
+    IC14: pairRequests(),
+    BFS3: personRequests(),
+    IC2: personRequests(),
+    IC8: personRequests(),
+    IC9: personRequests(),
+    GA_DEGREE: personRequests(),
+    GA_WCC: personRequests(),
+    GA_BFS: personRequests(),
+    GA_SSSP: personRequests(),
   };
 }

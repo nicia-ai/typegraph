@@ -100,8 +100,8 @@ importers:
   packages/benchmarks:
     dependencies:
       '@ladybugdb/core':
-        specifier: ^0.20.4
-        version: 0.20.4
+        specifier: 0.22.3
+        version: 0.22.3
       '@nicia-ai/typegraph':
         specifier: workspace:*
         version: link:../typegraph
@@ -112,8 +112,8 @@ importers:
         specifier: ^0.45.3
         version: 0.45.3(@cloudflare/workers-types@4.20260307.1)(@electric-sql/pglite@0.5.8)(@libsql/client@0.18.0)(@neondatabase/serverless@1.1.0)(@types/better-sqlite3@9.6.0)(@types/pg@8.23.1)(better-sqlite3@13.0.3)(pg@8.23.0)(postgres@3.4.9)
       neo4j-driver:
-        specifier: ^6.2.0
-        version: 6.2.0
+        specifier: 6.3.2
+        version: 6.3.2
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -2170,33 +2170,33 @@ packages:
   '@keyv/serialize@1.1.1':
     resolution: {integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==}
 
-  '@ladybugdb/core-darwin-arm64@0.20.4':
-    resolution: {integrity: sha512-dFQC85hYo5PdDzU0tM2UNi/XWbgBeoguXtEFJvdGLHRHfT7VbW7FzhSXw2F5dgxqNsPJZUOB+si+U8GOxzbntQ==}
+  '@ladybugdb/core-darwin-arm64@0.22.3':
+    resolution: {integrity: sha512-Q6R3042M5nfflchy+d6/HSd1ZfkXcgZZ7DypbmTp9IqYIua0Ky2Oiwimoofo2FS7Eeuw4kKnce4WpLfwbGv5Vw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@ladybugdb/core-darwin-x64@0.20.4':
-    resolution: {integrity: sha512-p9bSfD7Kr/8vDjkUDa2q2nmuP/ru1St4buzU03QsjSSFrzRPDmGwgTdWTG5KlhqEdy5p7rkSLm1qkOVj7Ui/+w==}
+  '@ladybugdb/core-darwin-x64@0.22.3':
+    resolution: {integrity: sha512-ZRg/+u4E+rplYc73aIvW+krBZwn9Aa5bhbTLMzdrMCdFS74MONIL4CHCB6fSUOerlDjNfnwG/XMU6CizXqnPMQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@ladybugdb/core-linux-arm64@0.20.4':
-    resolution: {integrity: sha512-TfSavLHPgW9XgDbpvzzj7WgX/haMwx/gVt90BdIGPFUI7GeJmtdOZeRzlNo5SQvU/OYzKjVGQ8orKmYX2eMyJQ==}
+  '@ladybugdb/core-linux-arm64@0.22.3':
+    resolution: {integrity: sha512-1Ti+I+O+ii4dAs61rOS0ak7yFzTlxOaXqjN3RXW0diJ9HfaaUuWOxz4UcMAyzPX2N7nf4YanKbgejqbiXHnpmA==}
     cpu: [arm64]
     os: [linux]
 
-  '@ladybugdb/core-linux-x64@0.20.4':
-    resolution: {integrity: sha512-xfCyzIJuGz2dQqWXiw1otKILhbiJT2AZqYxv5dFW4HexSvnWUnu9wildWm7p8Lrw+7lA604XnC3zs2TKZBQ3/A==}
+  '@ladybugdb/core-linux-x64@0.22.3':
+    resolution: {integrity: sha512-41DFK3WvbVYJlIpiwg5g7f2IGULOdu2QrPVEZW+AU1NPnu0OehEMsodsKV/9XQkO9EYUMi6qe1/Kbj+Fgmv84g==}
     cpu: [x64]
     os: [linux]
 
-  '@ladybugdb/core-win32-x64@0.20.4':
-    resolution: {integrity: sha512-6mxm/G5TKC4wq9SQ92w1oCmQDQSh2JG+7oV6mykm3+d1Tx5bg6wz2zSOSjxZC+BpBKTskvaUBtlbrUihnz2K4g==}
+  '@ladybugdb/core-win32-x64@0.22.3':
+    resolution: {integrity: sha512-kmwUCKIOb3mt5dgH55f4mGvvCbxaQesb55BVZ96KnlreD9xotTsIGxeESUcFa8ioqWylWol/gdLB2nFBwY17FA==}
     cpu: [x64]
     os: [win32]
 
-  '@ladybugdb/core@0.20.4':
-    resolution: {integrity: sha512-4FZNrQHATBE6+9qbTPQBq0KLcY4QZgePjGZBgss+E4pchqav46lLd0iqeoDM0P3KBJtu9MTIgZXCvE80/mjwTg==}
+  '@ladybugdb/core@0.22.3':
+    resolution: {integrity: sha512-bjaG0kguhdz9dH29AhXSoEkLcrYLGM+r5B1kHvMTteTbjj+FvpOaUj1DWHcSu+XwymOW14BeQFgcL1j15IQuxg==}
 
   '@libsql/client@0.17.4':
     resolution: {integrity: sha512-lYayFWasDV78A+TjlEhr6ubb3odBV6OHjb+wdp8VQcyWWAEIjuwbCHaraEUS4m4yWoo0BvZo96It4VdzZRmRWw==}
@@ -5265,14 +5265,14 @@ packages:
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
 
-  neo4j-driver-bolt-connection@6.2.0:
-    resolution: {integrity: sha512-SEnFSBfumleDxmDAZKkjXxZ5LgL2iZSTx08sO+qXX45ZKaxZJOcg9oxwoXACXZ1RbIq3XbDfHU8I5tExanYEOA==}
+  neo4j-driver-bolt-connection@6.3.2:
+    resolution: {integrity: sha512-YZ3kMSOi12xWvouAuCFrDdHbtN6XdSdg2WQEUhtu2kA3MYLDCbdIIJA3aUUVw3hHL0J1+JKHtvsPT4VDXWDXKQ==}
 
-  neo4j-driver-core@6.2.0:
-    resolution: {integrity: sha512-U8PSdvDECWmCgSWyhqNNVzMONXFHWPcTd5gqi12+EDxxt0aETA0m+XCXf9H7q6qQXdisc40rUJEOcVQOu6peEA==}
+  neo4j-driver-core@6.3.2:
+    resolution: {integrity: sha512-ZUhY1hon81bdsFeYsPqlngKOCEZPbmaUeJADyyYBLHMFYF9vpxRxN1Fdig2pLZCTySKq6L9nxxdcAwk60kwrqw==}
 
-  neo4j-driver@6.2.0:
-    resolution: {integrity: sha512-9W/Tk7EyjZHtv87NFpqoIbl0mlQx8bX8phUFzAM9xmeJrRpGDvqkpdQzc11DjwzywQCdhifaZPSvokSnAp7YTg==}
+  neo4j-driver@6.3.2:
+    resolution: {integrity: sha512-rc4R6KpTG+a434toE9iFYQhsBqs2pvp4FlGXSA6eW3jGZQNe5g12FhE/ZjetfMUnXI9bxjWPaw0JOUiM9svl3Q==}
     engines: {node: '>=18.0.0'}
 
   neotraverse@1.0.2:
@@ -8565,32 +8565,32 @@ snapshots:
 
   '@keyv/serialize@1.1.1': {}
 
-  '@ladybugdb/core-darwin-arm64@0.20.4':
+  '@ladybugdb/core-darwin-arm64@0.22.3':
     optional: true
 
-  '@ladybugdb/core-darwin-x64@0.20.4':
+  '@ladybugdb/core-darwin-x64@0.22.3':
     optional: true
 
-  '@ladybugdb/core-linux-arm64@0.20.4':
+  '@ladybugdb/core-linux-arm64@0.22.3':
     optional: true
 
-  '@ladybugdb/core-linux-x64@0.20.4':
+  '@ladybugdb/core-linux-x64@0.22.3':
     optional: true
 
-  '@ladybugdb/core-win32-x64@0.20.4':
+  '@ladybugdb/core-win32-x64@0.22.3':
     optional: true
 
-  '@ladybugdb/core@0.20.4':
+  '@ladybugdb/core@0.22.3':
     dependencies:
       apache-arrow: 21.2.0
       cmake-js: 8.0.0
       node-addon-api: 6.1.0
     optionalDependencies:
-      '@ladybugdb/core-darwin-arm64': 0.20.4
-      '@ladybugdb/core-darwin-x64': 0.20.4
-      '@ladybugdb/core-linux-arm64': 0.20.4
-      '@ladybugdb/core-linux-x64': 0.20.4
-      '@ladybugdb/core-win32-x64': 0.20.4
+      '@ladybugdb/core-darwin-arm64': 0.22.3
+      '@ladybugdb/core-darwin-x64': 0.22.3
+      '@ladybugdb/core-linux-arm64': 0.22.3
+      '@ladybugdb/core-linux-x64': 0.22.3
+      '@ladybugdb/core-win32-x64': 0.22.3
     transitivePeerDependencies:
       - supports-color
 
@@ -9801,7 +9801,7 @@ snapshots:
       '@types/node': 25.9.8
       flatbuffers: 25.9.23
       json-with-bigint: 3.5.12
-      tslib: 2.8.1
+      tslib: 2.9.1
 
   argparse@1.0.10:
     dependencies:
@@ -10090,7 +10090,7 @@ snapshots:
       fs-extra: 11.4.1
       node-api-headers: 1.9.0
       rc: 1.2.8
-      semver: 7.8.5
+      semver: 7.8.6
       tar: 7.5.22
       url-join: 4.0.1
       which: 6.0.1
@@ -10777,7 +10777,7 @@ snapshots:
 
   fs-extra@11.4.1:
     dependencies:
-      graceful-fs: 4.2.11
+      graceful-fs: 4.2.12
       jsonfile: 6.2.1
       universalify: 2.0.1
 
@@ -12144,18 +12144,18 @@ snapshots:
 
   natural-compare@1.4.0: {}
 
-  neo4j-driver-bolt-connection@6.2.0:
+  neo4j-driver-bolt-connection@6.3.2:
     dependencies:
       buffer: 6.0.3
-      neo4j-driver-core: 6.2.0
+      neo4j-driver-core: 6.3.2
       string_decoder: 1.3.0
 
-  neo4j-driver-core@6.2.0: {}
+  neo4j-driver-core@6.3.2: {}
 
-  neo4j-driver@6.2.0:
+  neo4j-driver@6.3.2:
     dependencies:
-      neo4j-driver-bolt-connection: 6.2.0
-      neo4j-driver-core: 6.2.0
+      neo4j-driver-bolt-connection: 6.3.2
+      neo4j-driver-core: 6.3.2
       rxjs: 7.8.2
 
   neotraverse@1.0.2: {}

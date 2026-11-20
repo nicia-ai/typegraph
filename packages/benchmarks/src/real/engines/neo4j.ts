@@ -10,6 +10,13 @@
  * laptop-sized Docker VM's RAM (observed on an 8GB VM), the same lesson
  * a reference Neo4j driver documents.
  *
+ * Setting `TYPEGRAPH_BENCH_NEO4J_URL` runs the same queries against an
+ * existing server instead (`createNeo4jExternalEngine`): an empty database
+ * it owns for the run, loaded online by `./neo4j-online-load.ts` because the
+ * offline import below needs a stopped server and an empty store directory.
+ * Everything below about the offline import and container sizing applies to
+ * the container path only.
+ *
  * Unlike TypeGraph (which needs an artificial ontological `Message`
  * supertype so the polymorphic replyOf chain can be walked with one
  * recursive query — see `../schema/snb-graph.ts`), Neo4j nodes carry BOTH
@@ -96,28 +103,79 @@ import { join } from "node:path";
 import { once } from "node:events";
 
 import {
+  containerStateArgs,
+  type ContainerRuntime,
+  dockerCli,
+  ensureNamedVolume,
+  isStoppedContainerState,
+  removeContainerIfPresent,
+  removeVolumeIfPresent,
+  runtimeMemoryBytes,
+} from "../harness/container-runtime";
+import {
   spawnCapture,
   spawnStatus,
   stringifyError,
   freePort,
 } from "../harness/process";
-import { NEO4J_IMAGE } from "../harness/doctor";
+import { packageVersion } from "../harness/doctor";
+import { NEO4J_IMAGE, PINNED_NEO4J_GDS_PLUGIN } from "../harness/engine-pins";
 import {
-  streamSnbCsvDataset,
-  type SnbCommentRow,
-  type SnbForumRow,
-  type SnbIdPools,
-  type SnbPersonRow,
-  type SnbPostRow,
-} from "../dataset/ldbc-csv";
+  EXTERNAL_NEO4J_DATABASE_ENV,
+  EXTERNAL_NEO4J_URL_ENV,
+  type Neo4jServerAddress,
+  parseNeo4jServerAddress,
+  readExternalUrl,
+} from "../harness/external-servers";
+import { type GdsPluginDir, stageGdsPluginDir } from "../harness/gds-plugin";
 import {
+  importHeader,
+  NEO4J_EDGE_KINDS,
+  NEO4J_NODE_KINDS,
+  type Neo4jNodeKind,
+  type Neo4jNodeRow,
+  nodeValues,
+} from "./neo4j-graph-shape";
+import {
+  loadSnbDatasetOnline,
+  ONLINE_LOAD_BATCH_ROWS,
+} from "./neo4j-online-load";
+import { streamSnbCsvDataset, type SnbIdPools } from "../dataset/ldbc-csv";
+import {
+  BFS3_HOPS,
+  bfsReachResult,
   canonicalDigest,
   compareIdsAscending,
+  compareMessageRecencyDesc,
+  componentSizesResult,
+  degreeResult,
+  type EngineRuntimeVersion,
+  IC13_MAX_HOPS,
+  IC9_MAX_DATE,
+  IC_MESSAGE_LIMIT,
   type MessageRef,
+  type PersonPair,
+  reachableSetResult,
+  shortestPathDistanceResult,
+  type SnbCapabilityGaps,
   type SnbEngineFactory,
   type SnbEngineHandle,
   type SnbQueries,
+  ssspResult,
+  unsupportedQuery,
 } from "./types";
+
+/**
+ * Neo4j's one remaining gap: IC14 weighted shortest path. GDS *does* offer
+ * `gds.shortestPath.dijkstra` with a relationship weight, but the SNB `knows`
+ * graph has no stored weight to project (TypeGraph's IC14 uses a synthetic
+ * per-edge weight materialized only in its own loader), so there is nothing to
+ * project weights from here. The whole-graph algorithms (GA_WCC/BFS/SSSP) now
+ * run through GDS (see `projectGdsGraph`) — Neo4j's native answer.
+ */
+const NEO4J_UNSUPPORTED: SnbCapabilityGaps = {
+  IC14: "no stored knows weight to project for gds.shortestPath.dijkstra",
+};
 
 // The published `neo4j-driver` .d.ts hand-rolls a subset of the driver
 // surface (e.g. its `auth` export omits `auth.none()`, which the underlying
@@ -152,18 +210,9 @@ const IS2_MESSAGE_LIMIT = 10;
  * coincides with `os.totalmem()`.
  */
 async function resolveDockerVisibleMemoryBytes(): Promise<number> {
-  try {
-    const output = await spawnCapture("docker", [
-      "info",
-      "--format",
-      "{{.MemTotal}}",
-    ]);
-    const bytes = Number(output.trim());
-    if (Number.isFinite(bytes) && bytes > 0) return bytes;
-  } catch {
-    // Fall through to the Node-visible host total below.
-  }
-  return totalmem();
+  // Docker and Podman report it under different `info` fields; fall back to
+  // the Node-visible host total when neither answers.
+  return (await runtimeMemoryBytes(dockerCli)) ?? totalmem();
 }
 
 type Neo4jMemorySettings = Readonly<{
@@ -268,15 +317,20 @@ async function resolveNeo4jMemorySettings(
  * reason a reference Neo4j driver switches off
  * tmpfs for anything but its tiny synthetic profile. `/logs` and `/tmp`
  * stay tmpfs — their contents never scale with dataset size.
+ *
+ * Starts the server on `dataVolume`, which `runNeo4jAdminImport` created
+ * and filled. It must not create the volume again: on Podman, creating a
+ * volume that exists exits 125.
  */
-async function runNeo4jContainer(
+export async function runNeo4jContainer(
+  runtime: ContainerRuntime,
   containerName: string,
   dataVolume: string,
+  pluginDir: string,
   port: number,
   memorySettings: Neo4jMemorySettings,
 ): Promise<void> {
-  await spawnCapture("docker", ["volume", "create", dataVolume]);
-  await spawnCapture("docker", [
+  await runtime([
     "run",
     "-d",
     "--name",
@@ -289,8 +343,18 @@ async function runNeo4jContainer(
     "/logs:rw,size=256m",
     "--tmpfs",
     "/tmp:rw,exec,size=256m",
+    // The pinned Graph Data Science jar (`stageGdsPluginDir`). GDS is
+    // Neo4j's native answer to graph algorithms (WCC/BFS/SSSP); without it
+    // plain Cypher has no connected-components and unbounded variable-length
+    // paths enumerate (explode). Loading it makes the GA lane a fair fight
+    // rather than testing the absence of a plugin. Mounted instead of
+    // `NEO4J_PLUGINS`, which would let the entrypoint pick the build.
+    "-v",
+    `${pluginDir}:/plugins`,
     "-e",
     "NEO4J_AUTH=none",
+    "-e",
+    "NEO4J_dbms_security_procedures_unrestricted=gds.*",
     "-e",
     `NEO4J_server_memory_heap_initial__size=${memorySettings.heapSize}`,
     "-e",
@@ -315,11 +379,11 @@ async function waitForNeo4jBolt(
   while (Date.now() < deadline) {
     const inspect = await spawnStatus(
       "docker",
-      ["inspect", "-f", "{{.State.Status}}", containerName],
+      containerStateArgs(containerName),
       10_000,
     );
     const state = inspect.stdout.trim();
-    if (state === "exited" || state === "dead") {
+    if (isStoppedContainerState(state)) {
       const logs = await spawnCapture("docker", [
         "logs",
         "--tail",
@@ -382,17 +446,205 @@ async function waitForNeo4jBolt(
  * ordering happens over an already-small, already-fetched per-person
  * candidate set, not as an index-driven scan.
  */
+const SNB_CONSTRAINTS = [
+  { name: "snb_person_id", label: "Person" },
+  { name: "snb_message_id", label: "Message" },
+  { name: "snb_forum_id", label: "Forum" },
+] as const;
+
+/**
+ * The online load path (`./neo4j-online-load.ts`) creates the same
+ * constraints BEFORE it writes, because its relationship writes look their
+ * endpoints up by id; either way the queries run against exactly these three.
+ */
 async function ensureSchema(session: Session): Promise<void> {
-  await session.run(
-    "CREATE CONSTRAINT snb_person_id IF NOT EXISTS FOR (p:Person) REQUIRE p.id IS UNIQUE",
-  );
-  await session.run(
-    "CREATE CONSTRAINT snb_message_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
-  );
-  await session.run(
-    "CREATE CONSTRAINT snb_forum_id IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
-  );
+  for (const constraint of SNB_CONSTRAINTS) {
+    await session.run(
+      `CREATE CONSTRAINT ${constraint.name} IF NOT EXISTS FOR (n:${constraint.label}) REQUIRE n.id IS UNIQUE`,
+    );
+  }
   await session.run("CALL db.awaitIndexes(600)");
+}
+
+/** What an existing database already holds, as far as a run could collide with it. */
+export type Neo4jDatabaseContents = Readonly<{
+  nodeCount: number;
+  constraintNames: readonly string[];
+  /** Non-lookup indexes (the two built-in token lookup indexes are ignored). */
+  indexNames: readonly string[];
+  /** GDS projections already in the catalog. */
+  gdsGraphNames: readonly string[];
+}>;
+
+/**
+ * Why an existing database cannot host a run, or `undefined` if it can. A
+ * Neo4j server cannot always create a database per run (Community Edition
+ * has exactly one), so the run requires an empty one instead: no nodes, no
+ * constraints, no indexes beyond the built-in token lookups. That is what
+ * lets cleanup delete every Person/Forum/Message node and the three
+ * `snb_*` constraints knowing the run created all of them. A database with
+ * GDS projections is refused too: a run must not share the GDS catalog's
+ * memory with projections it does not own.
+ */
+export function describeNonEmptyNeo4jDatabase(
+  contents: Neo4jDatabaseContents,
+): string | undefined {
+  const reasons = [
+    ...(contents.nodeCount > 0 ? [`${contents.nodeCount} nodes`] : []),
+    ...(contents.constraintNames.length > 0 ?
+      [`constraints ${contents.constraintNames.join(", ")}`]
+    : []),
+    ...(contents.indexNames.length > 0 ?
+      [`indexes ${contents.indexNames.join(", ")}`]
+    : []),
+    ...(contents.gdsGraphNames.length > 0 ?
+      [`GDS projections ${contents.gdsGraphNames.join(", ")}`]
+    : []),
+  ];
+  return reasons.length === 0 ? undefined : reasons.join("; ");
+}
+
+async function readNeo4jDatabaseContents(
+  session: Session,
+): Promise<Neo4jDatabaseContents> {
+  const nodes = await runRows<{ count: unknown }>(
+    session,
+    "MATCH (n) RETURN count(n) AS count",
+  );
+  const constraints = await runRows<{ name: string }>(
+    session,
+    "SHOW CONSTRAINTS YIELD name RETURN name",
+  );
+  const indexes = await runRows<{ name: string }>(
+    session,
+    "SHOW INDEXES YIELD name, type WHERE type <> 'LOOKUP' RETURN name",
+  );
+  const gdsGraphs = await runRows<{ graphName: string }>(
+    session,
+    "CALL gds.graph.list() YIELD graphName RETURN graphName",
+  );
+  const rawCount = nodes[0]?.count;
+  return {
+    nodeCount: neo4j.isInt(rawCount) ? rawCount.toNumber() : Number(rawCount),
+    constraintNames: constraints.map((row) => row.name),
+    indexNames: indexes.map((row) => row.name),
+    gdsGraphNames: gdsGraphs.map((row) => row.graphName),
+  };
+}
+
+/**
+ * Removes what an existing-server run created, and nothing else: its own GDS
+ * projection (by its per-run name), every node carrying one of the lane's
+ * labels (the database was verified empty before the run wrote anything),
+ * and the three `snb_*` constraints. Deletion runs in batched transactions so
+ * an SF1-sized graph does not need one huge transaction.
+ */
+async function removeRunData(
+  session: Session,
+  gdsGraph: string,
+  log: (message: string) => void,
+): Promise<void> {
+  await session.run("CALL gds.graph.drop($name, false) YIELD graphName", {
+    name: gdsGraph,
+  });
+  await session.run(
+    `CYPHER 5
+     MATCH (n) WHERE n:Person OR n:Forum OR n:Message
+     CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS`,
+  );
+  for (const constraint of SNB_CONSTRAINTS) {
+    await session.run(`DROP CONSTRAINT ${constraint.name} IF EXISTS`);
+  }
+  log("removed the run's nodes, relationships, constraints and GDS projection");
+}
+
+/**
+ * What the running server reports about itself: kernel version and edition,
+ * the GDS build actually loaded, the database's default Cypher language (the
+ * queries without a `CYPHER 5` prefix run in it) and the memory settings
+ * that shape query latency. Every probe beyond the kernel version tolerates
+ * failure, since an existing server may restrict `SHOW` commands.
+ */
+async function readNeo4jVersions(
+  session: Session,
+  database: string,
+): Promise<readonly EngineRuntimeVersion[]> {
+  const components = await runRows<{
+    name: string;
+    version: string;
+    edition: string;
+  }>(
+    session,
+    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions[0] AS version, edition",
+  );
+  const kernel = components.find((row) => row.name === "Neo4j Kernel");
+  const gds = await runRows<{ version: string }>(
+    session,
+    "RETURN gds.version() AS version",
+  ).catch(() => []);
+  const language = await runRows<{ defaultLanguage: unknown }>(
+    session,
+    "SHOW DATABASES YIELD name, defaultLanguage WHERE name = $database RETURN defaultLanguage",
+    { database },
+  ).catch(() => []);
+  const settings = await runRows<{ name: string; value: string }>(
+    session,
+    `SHOW SETTINGS YIELD name, value
+     WHERE name IN ['server.memory.heap.max_size', 'server.memory.pagecache.size']
+     RETURN name, value`,
+  ).catch(() => []);
+  const settingsDetail = settings
+    .map((row) => `${row.name}=${row.value}`)
+    .join(", ");
+  const languageValue = language[0]?.defaultLanguage;
+  return [
+    {
+      component: "Neo4j",
+      version: kernel?.version ?? "unknown",
+      detail: [
+        `edition=${kernel?.edition ?? "unknown"}`,
+        `database=${database}`,
+        `defaultLanguage=${languageValue === undefined ? "unknown" : String(languageValue)}`,
+        ...(settingsDetail === "" ? [] : [settingsDetail]),
+      ].join(", "),
+    },
+    {
+      component: "Neo4j Graph Data Science",
+      version: gds[0]?.version ?? "not loaded",
+      detail: `pinned ${PINNED_NEO4J_GDS_PLUGIN.version}`,
+    },
+    {
+      component: "neo4j-driver",
+      version: (await packageVersion("neo4j-driver")) ?? "unknown",
+    },
+  ];
+}
+
+/**
+ * Name of the in-memory GDS projection the GA_* algorithms run against —
+ * unique per run, so a run never drops or reads a projection it did not
+ * create, even on a shared server.
+ */
+function gdsGraphName(processId: number, nowMs: number): string {
+  return `snb_knows_${processId}_${nowMs}`;
+}
+
+/**
+ * Project the Person + undirected-KNOWS graph into GDS once, after load — the
+ * same subgraph TypeGraph scopes its GA_WCC/GA_BFS/GA_SSSP to (Person nodes,
+ * undirected `knows`, isolated persons as singletons). GA queries then run the
+ * `gds.*` algorithm on this projection, so the measured latency is the
+ * algorithm, not a per-call projection (mirroring how TypeGraph runs against
+ * its already-loaded store).
+ */
+async function projectGdsGraph(
+  session: Session,
+  gdsGraph: string,
+): Promise<void> {
+  await session.run(
+    `CALL gds.graph.project($name, 'Person', {KNOWS: {orientation: 'UNDIRECTED'}})`,
+    { name: gdsGraph },
+  );
 }
 
 // ---- Offline bulk load: neo4j-admin database import ----
@@ -478,49 +730,21 @@ const NEO4J_IMPORT_FILES = {
 type KnowsStageRow = Readonly<{ fromId: string; toId: string; since: string }>;
 type EdgeStageRow = Readonly<{ fromId: string; toId: string }>;
 
+function createNodeStager(stageDir: string, kind: Neo4jNodeKind) {
+  return createCsvStager<Neo4jNodeRow>(
+    join(stageDir, NEO4J_IMPORT_FILES[kind]),
+    importHeader(kind),
+    (row) => nodeValues(kind, row),
+  );
+}
+
 function createNeo4jStagers(stageDir: string) {
   const filePath = (name: string) => join(stageDir, name);
   return {
-    person: createCsvStager<SnbPersonRow>(
-      filePath(NEO4J_IMPORT_FILES.person),
-      [
-        "id:ID",
-        "firstName:string",
-        "lastName:string",
-        "gender:string",
-        "birthday:string",
-        "creationDate:string",
-        "locationIp:string",
-        "browserUsed:string",
-        "cityId:string",
-      ],
-      (row) => [
-        row.id,
-        row.firstName,
-        row.lastName,
-        row.gender,
-        row.birthday,
-        row.creationDate,
-        row.locationIp,
-        row.browserUsed,
-        row.cityId,
-      ],
-    ),
-    forum: createCsvStager<SnbForumRow>(
-      filePath(NEO4J_IMPORT_FILES.forum),
-      ["id:ID", "title:string", "creationDate:string", "moderatorId:string"],
-      (row) => [row.id, row.title, row.creationDate, row.moderatorId],
-    ),
-    post: createCsvStager<SnbPostRow>(
-      filePath(NEO4J_IMPORT_FILES.post),
-      ["id:ID", "content:string", "creationDate:string"],
-      (row) => [row.id, row.content, row.creationDate],
-    ),
-    comment: createCsvStager<SnbCommentRow>(
-      filePath(NEO4J_IMPORT_FILES.comment),
-      ["id:ID", "content:string", "creationDate:string"],
-      (row) => [row.id, row.content, row.creationDate],
-    ),
+    person: createNodeStager(stageDir, "person"),
+    forum: createNodeStager(stageDir, "forum"),
+    post: createNodeStager(stageDir, "post"),
+    comment: createNodeStager(stageDir, "comment"),
     knows: createCsvStager<KnowsStageRow>(
       filePath(NEO4J_IMPORT_FILES.knows),
       [":START_ID", ":END_ID", "since:string"],
@@ -621,18 +845,21 @@ async function stageSnbDatasetForNeo4jImport(
  * non-existent or empty database directory. `--overwrite-destination=true`
  * is defensive (this benchmark's per-run `dataVolume` name is already
  * unique, so the volume is always fresh) rather than load-bearing.
+ * This is the volume's first use, so it is created here, once (see
+ * `ensureNamedVolume`); `runNeo4jContainer` reuses it.
  * `--id-type=string` is the CLI default; passed explicitly since every id
  * staged above is a prefixed string (`person:123`), never an integer.
  */
-async function runNeo4jAdminImport(
+export async function runNeo4jAdminImport(
+  runtime: ContainerRuntime,
   stageDir: string,
   dataVolume: string,
   log: (message: string) => void,
 ): Promise<void> {
-  await spawnCapture("docker", ["volume", "create", dataVolume]);
+  await ensureNamedVolume(runtime, dataVolume);
   const importPath = (name: string) => `/import/${name}`;
   log("neo4j-admin database import: starting offline bulk load");
-  await spawnCapture("docker", [
+  await runtime([
     "run",
     "--rm",
     "-v",
@@ -646,14 +873,14 @@ async function runNeo4jAdminImport(
     "full",
     "--id-type=string",
     `--delimiter=${CSV_DELIMITER}`,
-    `--nodes=Person=${importPath(NEO4J_IMPORT_FILES.person)}`,
-    `--nodes=Forum=${importPath(NEO4J_IMPORT_FILES.forum)}`,
-    `--nodes=Post:Message=${importPath(NEO4J_IMPORT_FILES.post)}`,
-    `--nodes=Comment:Message=${importPath(NEO4J_IMPORT_FILES.comment)}`,
-    `--relationships=KNOWS=${importPath(NEO4J_IMPORT_FILES.knows)}`,
-    `--relationships=HAS_CREATOR=${importPath(NEO4J_IMPORT_FILES.hasCreator)}`,
-    `--relationships=CONTAINER_OF=${importPath(NEO4J_IMPORT_FILES.containerOf)}`,
-    `--relationships=REPLY_OF=${importPath(NEO4J_IMPORT_FILES.replyOf)}`,
+    ...(["person", "forum", "post", "comment"] as const).map(
+      (kind) =>
+        `--nodes=${NEO4J_NODE_KINDS[kind].labels.join(":")}=${importPath(NEO4J_IMPORT_FILES[kind])}`,
+    ),
+    ...(["knows", "hasCreator", "containerOf", "replyOf"] as const).map(
+      (kind) =>
+        `--relationships=${NEO4J_EDGE_KINDS[kind].type}=${importPath(NEO4J_IMPORT_FILES[kind])}`,
+    ),
     "--overwrite-destination=true",
     NEO4J_DATABASE,
   ]);
@@ -680,7 +907,10 @@ async function runRows<Row extends Record<string, unknown>>(
  * multi-label nodes make the kind-specific TypeGraph dispatch unnecessary
  * (see module doc).
  */
-function createNeo4jQueries(getSession: () => Session): SnbQueries {
+function createNeo4jQueries(
+  getSession: () => Session,
+  gdsGraph: string,
+): SnbQueries {
   async function IS1(personId: string) {
     const rows = await runRows<{
       firstName: string;
@@ -952,18 +1182,319 @@ function createNeo4jQueries(getSession: () => Session): SnbQueries {
     };
   }
 
-  return { IS1, IS2, IS3, IS4, IS5, IS6, IS7 };
+  // IC13 (traversal): shortest-path hop distance between two persons over
+  // `knows`, via Neo4j's native `shortestPath`. KNOWS is imported in both
+  // directions (see dataset/ldbc-csv.ts), so the directed pattern reaches the
+  // same set an undirected one would. `length(path)` is the hop count; no
+  // path within the cap yields zero rows -> undefined distance. `CYPHER 5`
+  // pins the same planner the id-seek IS queries rely on (see IS2/IS3).
+  async function IC13(pair: PersonPair) {
+    const rows = await runRows<{ distance: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (source:Person {id: $sourceId}), (target:Person {id: $targetId})
+       MATCH path = shortestPath((source)-[:KNOWS*..${IC13_MAX_HOPS}]->(target))
+       RETURN length(path) AS distance`,
+      { sourceId: pair.sourceId, targetId: pair.targetId },
+    );
+    // `length(path)` comes back as a neo4j Integer ({low, high}), not a JS
+    // number — coerce so the digest is a plain integer like every other
+    // engine's (otherwise it stringifies as {"low":1,"high":0}).
+    const raw = rows[0]?.distance;
+    const distance =
+      raw === undefined ? undefined
+      : neo4j.isInt(raw) ? raw.toNumber()
+      : Number(raw);
+    return shortestPathDistanceResult(distance);
+  }
+
+  // BFS3 (traversal): distinct persons within BFS3_HOPS hops of a seed over
+  // `knows`, seed excluded (`friend.id <> $id`) to match every engine's
+  // source-excluding neighborhood contract. Directed `*1..N` over the
+  // bidirectionally-loaded KNOWS graph is the undirected reachable set.
+  async function BFS3(personId: string) {
+    const rows = await runRows<{ id: string }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..${BFS3_HOPS}]->(friend:Person)
+       WHERE friend.id <> $id
+       RETURN DISTINCT friend.id AS id`,
+      { id: personId },
+    );
+    return reachableSetResult(rows.map((row) => row.id));
+  }
+
+  // IC2 (complex read): the given person's friends' most recent messages.
+  // Neo4j's dual `:Message` label covers Post ∪ Comment in one match, so no
+  // per-type split is needed (unlike TypeGraph/Ladybug's separate node tables).
+  async function IC2(personId: string) {
+    const rows = await runRows<{
+      friendId: string;
+      friendFirstName: string;
+      friendLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(friend:Person)<-[:HAS_CREATOR]-(message:Message)
+       RETURN friend.id AS friendId, friend.firstName AS friendFirstName,
+              friend.lastName AS friendLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY message.creationDate DESC, message.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        friendId: row.friendId,
+        friendFirstName: row.friendFirstName,
+        friendLastName: row.friendLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC8 (complex read): the most recent replies to the person's own messages.
+  async function IC8(personId: string) {
+    const rows = await runRows<{
+      replyAuthorId: string;
+      replyAuthorFirstName: string;
+      replyAuthorLastName: string;
+      commentId: string;
+      commentContent: string;
+      commentCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})<-[:HAS_CREATOR]-(message:Message)<-[:REPLY_OF]-(reply:Comment)-[:HAS_CREATOR]->(author:Person)
+       RETURN author.id AS replyAuthorId, author.firstName AS replyAuthorFirstName,
+              author.lastName AS replyAuthorLastName, reply.id AS commentId,
+              reply.content AS commentContent, reply.creationDate AS commentCreationDate
+       ORDER BY reply.creationDate DESC, reply.id DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        replyAuthorId: row.replyAuthorId,
+        replyAuthorFirstName: row.replyAuthorFirstName,
+        replyAuthorLastName: row.replyAuthorLastName,
+        commentId: row.commentId,
+        commentContent: row.commentContent,
+        commentCreationDate: row.commentCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.commentCreationDate, id: left.commentId },
+          { creationDate: right.commentCreationDate, id: right.commentId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // IC9 (complex read): the most recent messages by the person's friends and
+  // friends-of-friends (2-hop KNOWS, self excluded) before the cutoff. DISTINCT
+  // collapses the duplicate (fof, message) rows the variable-length match
+  // produces; ORDER BY uses the projected aliases (post-DISTINCT scope).
+  async function IC9(personId: string) {
+    const rows = await runRows<{
+      personId: string;
+      personFirstName: string;
+      personLastName: string;
+      messageId: string;
+      messageContent: string;
+      messageCreationDate: string;
+    }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS*1..2]->(fof:Person)
+       WHERE fof.id <> $id
+       MATCH (fof)<-[:HAS_CREATOR]-(message:Message)
+       WHERE message.creationDate < $maxDate
+       RETURN DISTINCT fof.id AS personId, fof.firstName AS personFirstName,
+              fof.lastName AS personLastName, message.id AS messageId,
+              message.content AS messageContent, message.creationDate AS messageCreationDate
+       ORDER BY messageCreationDate DESC, messageId DESC
+       LIMIT ${IC_MESSAGE_LIMIT}`,
+      { id: personId, maxDate: IC9_MAX_DATE },
+    );
+    const canonicalRows = rows
+      .map((row) => ({
+        personId: row.personId,
+        personFirstName: row.personFirstName,
+        personLastName: row.personLastName,
+        messageId: row.messageId,
+        messageContent: row.messageContent,
+        messageCreationDate: row.messageCreationDate,
+      }))
+      .toSorted((left, right) =>
+        compareMessageRecencyDesc(
+          { creationDate: left.messageCreationDate, id: left.messageId },
+          { creationDate: right.messageCreationDate, id: right.messageId },
+        ),
+      )
+      .slice(0, IC_MESSAGE_LIMIT);
+    return {
+      rowCount: canonicalRows.length,
+      digest: canonicalDigest(canonicalRows),
+    };
+  }
+
+  // GA_DEGREE (algorithm): the seed's KNOWS degree. `count(*)` returns a neo4j
+  // Integer — coerce so the digest is a plain number (see IC13).
+  async function GA_DEGREE(seedPersonId: string) {
+    const rows = await runRows<{ degree: unknown }>(
+      getSession(),
+      `CYPHER 5
+       MATCH (:Person {id: $id})-[:KNOWS]->(:Person)
+       RETURN count(*) AS degree`,
+      { id: seedPersonId },
+    );
+    const raw = rows[0]?.degree;
+    const degree = neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+    return degreeResult(degree);
+  }
+
+  const toNumber = (raw: unknown): number =>
+    neo4j.isInt(raw) ? raw.toNumber() : Number(raw);
+
+  // GA_WCC (algorithm): weakly connected components of the Person `knows`
+  // subgraph via GDS. `gds.wcc.stream` over the undirected projection yields a
+  // componentId per Person (isolated persons form singletons — the projection
+  // carries every Person node), grouped into the same size multiset TypeGraph's
+  // native WCC produces.
+  async function GA_WCC(_seedPersonId: string) {
+    const rows = await runRows<{ size: unknown }>(
+      getSession(),
+      `CALL gds.wcc.stream($graph) YIELD componentId
+       RETURN componentId, count(*) AS size`,
+      { graph: gdsGraph },
+    );
+    return componentSizesResult(rows.map((row) => toNumber(row.size)));
+  }
+
+  // GA_BFS / GA_SSSP (algorithms): whole-component reachability / min-depth sums
+  // from the seed. `gds.allShortestPaths.dijkstra` from the seed over the
+  // undirected, unit-weight projection is BFS distance to every reachable node;
+  // the source (cost 0) is excluded. BFS is the reached count; SSSP adds the
+  // depth sum — matching TypeGraph's `reachable`-based results.
+  async function GA_BFS(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode WHERE targetNode <> id(source)
+       RETURN count(*) AS reached`,
+      { id: seedPersonId, graph: gdsGraph },
+    );
+    return bfsReachResult(toNumber(rows[0]?.reached));
+  }
+  async function GA_SSSP(seedPersonId: string) {
+    const rows = await runRows<{ reached: unknown; depthSum: unknown }>(
+      getSession(),
+      `MATCH (source:Person {id: $id})
+       CALL gds.allShortestPaths.dijkstra.stream($graph, {sourceNode: id(source)})
+       YIELD targetNode, totalCost
+       WITH source, targetNode, totalCost WHERE targetNode <> id(source)
+       RETURN count(*) AS reached, sum(totalCost) AS depthSum`,
+      { id: seedPersonId, graph: gdsGraph },
+    );
+    return ssspResult(toNumber(rows[0]?.reached), toNumber(rows[0]?.depthSum));
+  }
+
+  return {
+    IS1,
+    IS2,
+    IS3,
+    IS4,
+    IS5,
+    IS6,
+    IS7,
+    IC13,
+    BFS3,
+    IC2,
+    IC8,
+    IC9,
+    GA_DEGREE,
+    GA_WCC,
+    GA_BFS,
+    GA_SSSP,
+    IC14: unsupportedQuery("IC14"),
+  };
 }
 
 // ---- Factory ----
 
-export const createNeo4jEngine: SnbEngineFactory = async (
-  options,
-): Promise<SnbEngineHandle> => {
+/** The query-side half of the fairness note, identical in both modes. */
+const QUERY_FAIRNESS =
+  "unique constraints on Person/Message/Forum(id) and nothing else (no " +
+  "Post/Comment(id) constraints — every by-id query matches the shared " +
+  ":Message label, so Message(id) alone covers them; no " +
+  "Message(creationDate) index — a query-plan audit confirmed it's never " +
+  "used); the Person/undirected-KNOWS GDS projection built once after load; " +
+  "official LDBC SNB Interactive v1 Cypher for IS1-IS7, using native " +
+  "multi-label (:Message:Post/:Message:Comment) polymorphism instead of " +
+  "TypeGraph's ontological supertype workaround.";
+
+type EngineOptions = Parameters<SnbEngineFactory>[0];
+
+/**
+ * Teardown for the container path: the server container, then its data
+ * volume. Each step skips an object that is already gone, so it is safe after
+ * a load that failed part-way and safe to repeat.
+ */
+export async function removeNeo4jContainer(
+  runtime: ContainerRuntime,
+  containerName: string,
+  dataVolume: string,
+): Promise<void> {
+  await removeContainerIfPresent(runtime, containerName, {
+    anonymousVolumes: true,
+  });
+  await removeVolumeIfPresent(runtime, dataVolume);
+}
+
+/**
+ * Container (default) or existing server (`TYPEGRAPH_BENCH_NEO4J_URL`). Both
+ * build the same graph (`./neo4j-graph-shape.ts`), the same three
+ * constraints and the same GDS projection before any query runs, and share
+ * one query implementation; only the load path and memory sizing differ.
+ */
+export const createNeo4jEngine: SnbEngineFactory = async (options) => {
+  const externalUrl = readExternalUrl(process.env, EXTERNAL_NEO4J_URL_ENV);
+  if (externalUrl === undefined) return createNeo4jContainerEngine(options);
+  return createNeo4jExternalEngine(
+    options,
+    parseNeo4jServerAddress(externalUrl, process.env),
+  );
+};
+
+function createNeo4jContainerEngine(options: EngineOptions): SnbEngineHandle {
   const containerName = `typegraph-bench-snb-neo4j-${process.pid}-${Date.now()}`;
   const dataVolume = `${containerName}-data`;
+  const gdsGraph = gdsGraphName(process.pid, Date.now());
   let driver: Driver | undefined;
   let session: Session | undefined;
+  let pluginDir: GdsPluginDir | undefined;
 
   function requireSession(): Session {
     if (session === undefined) {
@@ -977,39 +1508,30 @@ export const createNeo4jEngine: SnbEngineFactory = async (
   async function cleanup(): Promise<void> {
     await session?.close().catch(() => undefined);
     await driver?.close().catch(() => undefined);
-    await spawnCapture("docker", ["rm", "-f", containerName]).catch(
+    await removeNeo4jContainer(dockerCli, containerName, dataVolume).catch(
       () => undefined,
     );
-    await spawnCapture("docker", ["volume", "rm", "-f", dataVolume]).catch(
-      () => undefined,
-    );
+    await pluginDir?.cleanup().catch(() => undefined);
   }
 
   return {
     name: "neo4j",
     fairness:
       `${NEO4J_IMAGE}, imperative docker container (named volume for /data, ` +
-      "tmpfs for /logs + /tmp, harness-allocated port, NEO4J_AUTH=none); " +
+      "tmpfs for /logs + /tmp, harness-allocated port, NEO4J_AUTH=none, " +
+      `Graph Data Science ${PINNED_NEO4J_GDS_PLUGIN.version} from the pinned jar); ` +
       "bulk load stages the LDBC CSVs into neo4j-admin's own CSV header " +
       "conventions and runs `neo4j-admin database import full` OFFLINE " +
       "(one-off docker run against the same named volume, before the " +
       "server starts) for every profile (smoke/SF1/SF10) — Neo4j's own documented " +
-      "bulk-load path above roughly 10M records into an empty database, " +
-      "replacing the batched online `UNWIND ... IN TRANSACTIONS` writes " +
-      "this driver used previously; unique constraints on Person/Message/" +
-      "Forum(id), awaited ONLINE after the server starts (the " +
-      "offline import resolves relationships by id directly, so these " +
-      "aren't needed until IS1-IS7 query time; no Post/Comment(id) " +
-      "constraints — every by-id query below matches the shared :Message " +
-      "label, so Message(id) alone already covers them; no Message(creationDate) " +
-      "index — a query-plan audit confirmed it's never used); heap/page-" +
-      "cache sized from the memory actually visible " +
-      "to the Docker daemon via `neo4j-admin server memory-recommendation` " +
-      "(heuristic fallback if that command is unavailable), not a flat " +
-      "2g/2g constant; official LDBC SNB Interactive v1 Cypher for " +
-      "IS1-IS7, using native multi-label (:Message:Post/:Message:Comment) " +
-      "polymorphism instead of TypeGraph's ontological supertype " +
-      "workaround.",
+      "bulk-load path above roughly 10M records into an empty database; " +
+      "constraints awaited ONLINE after the server starts (the offline " +
+      "import resolves relationships by id directly); heap/page-cache sized " +
+      "from the memory actually visible to the Docker daemon via " +
+      "`neo4j-admin server memory-recommendation` (heuristic fallback if " +
+      "that command is unavailable); " +
+      QUERY_FAIRNESS,
+    unsupported: NEO4J_UNSUPPORTED,
     async load() {
       try {
         const memorySettings = await resolveNeo4jMemorySettings(options.log);
@@ -1033,15 +1555,23 @@ export const createNeo4jEngine: SnbEngineFactory = async (
             options.datasetRoot,
             options.log,
           );
-          await runNeo4jAdminImport(stageDir, dataVolume, options.log);
+          await runNeo4jAdminImport(
+            dockerCli,
+            stageDir,
+            dataVolume,
+            options.log,
+          );
         } finally {
           await rm(stageDir, { recursive: true, force: true });
         }
 
+        pluginDir = await stageGdsPluginDir(options.log);
         const port = await freePort();
         await runNeo4jContainer(
+          dockerCli,
           containerName,
           dataVolume,
+          pluginDir.dir,
           port,
           memorySettings,
         );
@@ -1049,15 +1579,126 @@ export const createNeo4jEngine: SnbEngineFactory = async (
         await waitForNeo4jBolt(containerName, driver);
         session = driver.session({ database: NEO4J_DATABASE });
         await ensureSchema(session);
+        await projectGdsGraph(session, gdsGraph);
         return pools;
       } catch (error) {
         await cleanup();
         throw error;
       }
     },
-    queries: createNeo4jQueries(requireSession),
+    queries: createNeo4jQueries(requireSession, gdsGraph),
+    target: `container ${NEO4J_IMAGE} with Graph Data Science ${PINNED_NEO4J_GDS_PLUGIN.version} mounted from the pinned jar`,
+    loadPath: "offline neo4j-admin database import full",
+    async versions() {
+      return readNeo4jVersions(requireSession(), NEO4J_DATABASE);
+    },
     async close() {
       await cleanup();
     },
   };
-};
+}
+
+/**
+ * A Neo4j server the harness did not start. The run uses the database named
+ * by `TYPEGRAPH_BENCH_NEO4J_DATABASE` (default `neo4j`), refuses it unless it
+ * is empty (`describeNonEmptyNeo4jDatabase`), loads it online, and on close
+ * removes exactly what it wrote. The server needs the Graph Data Science
+ * plugin installed; its version is recorded from `gds.version()`, not
+ * assumed from the pin. Memory sizing is the server's own configuration,
+ * recorded in the run's versions.
+ */
+function createNeo4jExternalEngine(
+  options: EngineOptions,
+  address: Neo4jServerAddress,
+): SnbEngineHandle {
+  const gdsGraph = gdsGraphName(process.pid, Date.now());
+  let driver: Driver | undefined;
+  let session: Session | undefined;
+  // Set only once the database was verified empty: before that, cleanup
+  // must not delete anything, because none of it would be ours.
+  let ownsDatabaseContents = false;
+
+  function requireSession(): Session {
+    if (session === undefined) {
+      throw new Error(
+        "Neo4j engine's queries were invoked before load() completed.",
+      );
+    }
+    return session;
+  }
+
+  async function cleanup(): Promise<void> {
+    if (session !== undefined && ownsDatabaseContents) {
+      await removeRunData(session, gdsGraph, options.log).catch(
+        (error: unknown) => {
+          options.log(
+            `cleanup on ${address.url} database ${address.database} failed: ${stringifyError(error)}`,
+          );
+        },
+      );
+    }
+    await session?.close().catch(() => undefined);
+    await driver?.close().catch(() => undefined);
+  }
+
+  return {
+    name: "neo4j",
+    fairness:
+      `existing Neo4j server ${address.url} (${EXTERNAL_NEO4J_URL_ENV}), ` +
+      `database ${address.database}, verified empty before the run; the ` +
+      "server's own memory configuration and GDS install (both recorded in " +
+      "the run's versions); ONLINE load in batched UNWIND transactions with " +
+      "the constraints created first (relationship writes look endpoints up " +
+      "by id), every batch checked against the server's created-entity " +
+      "counters; load time is not comparable with the offline import; " +
+      QUERY_FAIRNESS,
+    unsupported: NEO4J_UNSUPPORTED,
+    async load() {
+      try {
+        driver =
+          address.credentials === undefined ?
+            neo4j.driver(address.url)
+          : neo4j.driver(
+              address.url,
+              neo4j.auth.basic(
+                address.credentials.username,
+                address.credentials.password,
+              ),
+            );
+        await driver.verifyConnectivity({ database: address.database });
+        session = driver.session({ database: address.database });
+        const refusal = describeNonEmptyNeo4jDatabase(
+          await readNeo4jDatabaseContents(session),
+        );
+        if (refusal !== undefined) {
+          throw new Error(
+            `Neo4j database ${address.database} on ${address.url} is not empty (${refusal}). ` +
+              `A run needs an empty database it can own; point ${EXTERNAL_NEO4J_DATABASE_ENV} at one.`,
+          );
+        }
+        ownsDatabaseContents = true;
+        await ensureSchema(session);
+        const pools = await loadSnbDatasetOnline(
+          session,
+          options.datasetRoot,
+          options.log,
+        );
+        await session.run("CALL db.awaitIndexes(600)");
+        await projectGdsGraph(session, gdsGraph);
+        return pools;
+      } catch (error) {
+        await cleanup();
+        throw error;
+      }
+    },
+    queries: createNeo4jQueries(requireSession, gdsGraph),
+    target: `existing server ${address.url}, database ${address.database}`,
+    loadPath: `online batched UNWIND (${ONLINE_LOAD_BATCH_ROWS} rows per transaction)`,
+    async versions() {
+      return readNeo4jVersions(requireSession(), address.database);
+    },
+    async close() {
+      await cleanup();
+    },
+  };
+}

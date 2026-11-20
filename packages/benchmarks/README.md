@@ -43,6 +43,21 @@ claim of full official schema conformance.
 | --- | --- | --- |
 | Embedded | `typegraph-sqlite` (better-sqlite3, in-process) | `ladybugdb` (`@ladybugdb/core`, Kuzu-family, in-process) |
 | Server | `typegraph-postgres` (node-postgres, imperative docker container) | `neo4j` (pinned image, imperative docker container) |
+| Server | `typegraph-postgres` | `pggraph` (pgGraph PostgreSQL extension, pinned image, imperative docker container) |
+
+Pinned competitor versions (`src/real/harness/engine-pins.ts`, exact in
+`package.json`):
+
+| Engine | Pin |
+| --- | --- |
+| Neo4j | `neo4j:2026.10.2` by digest, Graph Data Science `2026.10.2` jar (SHA-256 checked, mounted as `/plugins`) |
+| pgGraph | `ghcr.io/evokoa/pggraph:1.2.1` by digest (PostgreSQL 17) |
+| LadybugDB | `@ladybugdb/core` `0.22.3` |
+| TypeGraph/PostgreSQL server | `pgvector/pgvector:0.8.7-pg18` by digest |
+
+Every run records the versions each engine reports while running (a version
+query, the extension catalog, `gds.version()`), not the pin, in the log,
+`results.json` and `summary.json`.
 
 Every query is implemented through the TypeGraph query builder for the
 TypeGraph engines (never hand-written SQL — see
@@ -112,9 +127,102 @@ cosmetic; without it, `dynamic/person_0_0.csv` won't be where
 smoke fixture under `fixtures/` is.
 
 Useful flags (all scripts): `--engines=typegraph-sqlite,neo4j` (default:
-all four), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
+all five), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
 `--output=<dir>` (default `bench-results/current/snb-<profile>`,
-gitignored).
+gitignored), `--no-history` (do not append to `reports/history.jsonl`),
+`--require-all-engines` (fail instead of skipping a requested engine the
+doctor cannot run).
+
+#### Running against existing servers
+
+Each server engine launches its own throwaway container by default. On a
+host that cannot start containers, point it at a server instead; the doctor
+then probes that server and does not require Docker for that engine.
+
+| Variable | Engine | Isolation and cleanup | Server requirements |
+| --- | --- | --- | --- |
+| `TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:port/db` | `typegraph-postgres` | Creates a fresh per-run database, never touches the database in the URL, drops the per-run database on close | Role with `CREATEDB` |
+| `TYPEGRAPH_BENCH_PGGRAPH_URL=postgresql://user:pass@host:port/db` | `pggraph` | Same per-run database, with `CREATE EXTENSION graph` in it; close runs `graph.reset(true)` and drops it | The pgGraph extension installed; a superuser role (the extension is untrusted and the load sets `graph.sync_mode`) |
+| `TYPEGRAPH_BENCH_NEO4J_URL=bolt://user:pass@host:7687` (+ optional `TYPEGRAPH_BENCH_NEO4J_DATABASE`, default `neo4j`) | `neo4j` | Requires the database to be empty (no nodes, constraints, non-lookup indexes or GDS projections) and refuses it otherwise; close deletes the run's nodes, its three `snb_*` constraints and its per-run GDS projection | Graph Data Science installed |
+
+Credentials in a URL are redacted in every log line and report. pgGraph keeps
+its CSR artifacts under the server's data directory; version 1.2.1 does not
+reclaim a dropped graph's artifact directory, so a pgGraph run on a shared
+server leaves that directory behind.
+
+Neo4j on an existing server cannot use the offline `neo4j-admin database
+import` the container path uses, so it loads online: nodes in batched
+`UNWIND` transactions as they stream, relationships after every node exists,
+with the same three uniqueness constraints created first. Every batch is
+checked against the server's created-node and created-relationship counters.
+Query timings stay comparable (same graph, same constraints, same GDS
+projection, same warm-up); load times are not, and every report names the
+load path each engine used.
+
+The run header prints the resolved `@nicia-ai/typegraph` entry path and the
+TypeGraph version and commit, so a run that picked up another checkout's
+build is visible.
+
+#### Comparison runs (all engines, smoke then SF1)
+
+`bench:snb:compare` is the entry point for a published comparison. It runs
+smoke-scale parity and then each real scale, each as one run of every
+selected engine (one parity check across all of them), and writes
+`report.md` plus the JSON files to `<output-root>/snb-<scale>/`. It passes
+`--check --require-all-engines`, so a parity mismatch, an engine failure, or
+a selected engine the doctor cannot run exits non-zero, and a failed smoke
+run stops before SF1. It does not append to `reports/history.jsonl` unless
+given `--history`.
+
+```bash
+# (a) Smoke parity, all five engines, containers started by the harness
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- --scales=smoke
+
+# (b) SF1, all five engines, containers (smoke parity runs first; omit
+# --data-dir-sf1 to use ~/.cache/typegraph/fixtures/ldbc-snb/sf1)
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- \
+  --scales=smoke,sf1 --data-dir-sf1=<extracted SF1 dir>
+
+# Either one against existing servers instead of containers
+TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:5432/db \
+TYPEGRAPH_BENCH_PGGRAPH_URL=postgresql://user:pass@host:5433/db \
+TYPEGRAPH_BENCH_NEO4J_URL=bolt://user:pass@host:7687 \
+  pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- --scales=smoke,sf1
+```
+
+`--engines=a,b` narrows the set, `--output-root=<dir>` picks where reports
+go, and `--requests-per-query`, `--warmup-requests`, `--seed` and
+`--queries` are forwarded to every scale.
+
+What the container path needs. Engines run one at a time, and each engine's
+containers and volumes are removed before the next engine starts.
+
+| Engine | Image | Ports | Volumes and files | Memory |
+| --- | --- | --- | --- | --- |
+| `typegraph-postgres` | `pgvector/pgvector:0.8.7-pg18` (pinned digest) | container 5432 on a free 127.0.0.1 port | anonymous data volume, removed with the container | server defaults, `fsync=off` |
+| `neo4j` | `neo4j:2026.10.2` (pinned digest) | container 7687 on a free 127.0.0.1 port | named `/data` volume (removed on close); the staged import CSVs (about the dataset's size) and the GDS jar bind-mounted from the OS temp dir; 256 MiB tmpfs each for `/logs` and `/tmp`; the GDS jar (about 70 MB, downloaded once from GitHub) cached in `~/.cache/typegraph/neo4j-plugins` | heap and page cache from `neo4j-admin server memory-recommendation` for the memory Docker reports, so most of the host; since 2026.09 the page cache is reserved in full at startup |
+| `pggraph` | `ghcr.io/evokoa/pggraph:1.2.1` (pinned digest, PostgreSQL 17) | container 5432 on a free 127.0.0.1 port | anonymous data volume, removed with the container | image defaults; pgGraph's own `graph.memory_limit_mb` (2 GiB default) bounds the CSR build |
+| `typegraph-sqlite` | none | none | database file in the OS temp dir | page cache sized from host memory |
+| `ladybugdb` | none | none | staged CSVs and database in the OS temp dir | default buffer pool |
+
+The container path calls the `docker` CLI, so Docker or Podman behind a
+`docker` alias both work. Where the two differ the harness takes the portable
+path: the Neo4j `/data` volume is created once, before the import that first
+uses it, and only when `volume inspect` finds no volume of that name (Podman,
+unlike Docker, refuses to create one that exists); teardown removes only the
+containers and volumes that still exist; host memory is read from Docker's
+`info` field or, failing that, Podman's.
+
+The Graph Data Science jar is fetched with Node's `fetch`, which ignores
+`HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set; on a proxied host set it,
+or place the pinned jar in `~/.cache/typegraph/neo4j-plugins/` beforehand
+(it is still checked against the pinned SHA-256).
+
+The published SF1 numbers come from an EC2 `c7i.4xlarge` (16 vCPU, 32 GiB)
+with a 150 GiB gp3 volume (`docs/ec2-benchmark-runner.md`); that is a known-good
+size for all five engines at SF1. The SF1 archive is 230 MB (zstd); the
+extracted CSVs are larger. Per-engine disk use at SF1 has not been measured
+on this branch.
 
 #### What every run writes
 
@@ -125,9 +233,13 @@ gitignored).
   engine versions, dataset parameters, hardware, git commit.
 - `bench-results/current/snb-<profile>/competitor-doctor.json` — which
   engines were runnable and why not, for the ones that weren't.
+- `bench-results/current/snb-<profile>/report.md` — the same run for a
+  reader: verdict, engine versions read from the running engines, where each
+  ran and how it loaded, parity per query, p50/p95 per engine.
 - `reports/history.jsonl` — one append per engine per run, labels
   `snb:IS1`..`snb:IS7`, alongside the synthetic suite's rows in the same
-  file.
+  file. `--no-history` skips it; `bench:snb:compare` skips it unless given
+  `--history`.
 
 #### Parity gate
 
@@ -166,7 +278,9 @@ invocation intentionally allows.
 #### Competitor doctor
 
 `src/real/harness/doctor.ts` checks Docker, `pg`/`better-sqlite3`,
-`neo4j-driver`, `@ladybugdb/core`, and image cache status, and records
+`neo4j-driver`, `@ladybugdb/core`, image cache status, and every server
+named by a `*_URL` variable (reachable, required extension or plugin, role
+privileges), and records
 every missing piece as an explicit `failed`/`skipped` row — never a silent
 skip. The harness only attempts engines the doctor reports runnable.
 

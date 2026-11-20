@@ -12,13 +12,16 @@
  * (`storage = dataDir ? PGDATA-on-disk : tmpfs`). `fsync=off` still labels
  * this as a fast, non-durable mode; only the RAM-vs-disk backing changed.
  */
+import { dockerCli, removeContainerIfPresent } from "./container-runtime";
 import { freePort, spawnCapture } from "./process";
-import { POSTGRES_IMAGE } from "./doctor";
+import { POSTGRES_IMAGE } from "./engine-pins";
 
 export type PostgresContainer = Readonly<{
   connectionString: string;
   /** e.g. "disk, fsync=off" — for the results doc's durability labels. */
   durabilityLabel: string;
+  /** Where the server runs, for the run header (credentials redacted). */
+  target: string;
   close(): Promise<void>;
 }>;
 
@@ -51,9 +54,13 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
   const connectionString = `postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${port}/${POSTGRES_DB}`;
 
   const close = async (): Promise<void> => {
-    await spawnCapture("docker", ["rm", "-f", container]).catch(
-      () => undefined,
-    );
+    // `-v` reclaims the anonymous /var/lib/postgresql/data volume the postgres
+    // image declares. Without it the volume outlives the container and every
+    // run leaks one — harmless at SF1 but at SF10 (~70GB each) they overflow
+    // the host disk and starve later engines ("database or disk is full").
+    await removeContainerIfPresent(dockerCli, container, {
+      anonymousVolumes: true,
+    }).catch(() => undefined);
   };
 
   try {
@@ -67,6 +74,7 @@ export async function startPostgresContainer(): Promise<PostgresContainer> {
     connectionString,
     durabilityLabel:
       "disk (container writable layer), fsync=off (fast mode — not a durability guarantee)",
+    target: `container ${POSTGRES_IMAGE}`,
     close,
   };
 }

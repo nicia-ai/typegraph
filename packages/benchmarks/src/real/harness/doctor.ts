@@ -2,20 +2,42 @@
  * Competitor preflight for the real-workload benchmark lanes. Every engine's
  * docker/package availability is checked and recorded as an explicit
  * "failed" row when missing — never a silent skip (harness requirement 3 in
- * docs/design/benchmark-program-plan.md). The four engines this program
+ * docs/design/benchmark-program-plan.md). The five engines this program
  * drives:
  *
  * - `typegraph-sqlite` — embedded (better-sqlite3), no external dependency.
  * - `typegraph-postgres` — needs a reachable PostgreSQL server; this program
- *   launches one imperatively (docker run + tmpfs), so it needs Docker.
- * - `neo4j` — imperative Docker container (docker run + tmpfs/named volume).
+ *   launches one imperatively (docker run), or uses the server named by
+ *   `TYPEGRAPH_BENCH_POSTGRES_URL`.
+ * - `neo4j` — imperative Docker container (docker run + named volume), or the
+ *   server named by `TYPEGRAPH_BENCH_NEO4J_URL`.
  * - `ladybugdb` — embedded (`@ladybugdb/core`), no external dependency.
+ * - `pggraph` — imperative Docker container running the pgGraph
+ *   PostgreSQL extension image, or the server named by
+ *   `TYPEGRAPH_BENCH_PGGRAPH_URL`; driven over `pg` like typegraph-postgres.
+ *
+ * A server engine on an existing server is probed there (reachable, the
+ * extension or plugin it needs, the role privileges its isolation needs)
+ * instead of requiring Docker.
  */
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { NEO4J_IMAGE, PGGRAPH_IMAGE, POSTGRES_IMAGE } from "./engine-pins";
+import {
+  probeNeo4jServer,
+  probePgGraphServer,
+  probePostgresServer,
+  type ProbeVerdict,
+} from "./external-server-probes";
+import {
+  EXTERNAL_NEO4J_URL_ENV,
+  EXTERNAL_PGGRAPH_URL_ENV,
+  EXTERNAL_POSTGRES_URL_ENV,
+  readExternalUrl,
+} from "./external-servers";
 import { spawnStatus, stringifyError, writeJsonFile } from "./process";
 
 const require = createRequire(import.meta.url);
@@ -25,24 +47,13 @@ export const SNB_ENGINE_NAMES = [
   "typegraph-postgres",
   "neo4j",
   "ladybugdb",
+  "pggraph",
 ] as const;
 export type SnbEngineName = (typeof SNB_ENGINE_NAMES)[number];
 
 export function isSnbEngineName(value: string): value is SnbEngineName {
   return (SNB_ENGINE_NAMES as readonly string[]).includes(value);
 }
-
-/**
- * Docker image tags pinned for reproducibility (also recorded in
- * summary.json). TypeGraph's Postgres migration unconditionally enables the
- * `vector` extension regardless of whether the graph declares any embedding
- * fields, so the image must be pgvector-enabled — matching the image this
- * repo's own CI already uses for Postgres tests (.github/workflows/ci.yml).
- */
-export const POSTGRES_IMAGE =
-  process.env["TYPEGRAPH_BENCH_POSTGRES_IMAGE"] ?? "pgvector/pgvector:pg18";
-export const NEO4J_IMAGE =
-  process.env["TYPEGRAPH_BENCH_NEO4J_IMAGE"] ?? "neo4j:2026.05.0";
 
 type CheckStatus = "ok" | "failed" | "skipped";
 
@@ -215,45 +226,107 @@ async function checkDockerImage(
 
 export type DoctorOptions = Readonly<{
   engines?: readonly SnbEngineName[];
+  /** Where the `*_URL` variables are read from (default `process.env`). */
+  env?: Readonly<Record<string, string | undefined>>;
 }>;
+
+type ServerEngine = "typegraph-postgres" | "neo4j" | "pggraph";
+
+type ServerEngineSpec = Readonly<{
+  urlEnv: string;
+  image: string;
+  /** Node package the engine drives the server with. */
+  driverPackage: string;
+  probe: (
+    url: string,
+    env: Readonly<Record<string, string | undefined>>,
+  ) => Promise<ProbeVerdict>;
+}>;
+
+/**
+ * The three server engines: each runs in a container the harness launches
+ * unless its `*_URL` variable names an existing server, in which case the
+ * doctor probes that server instead of requiring Docker.
+ */
+const SERVER_ENGINES: Readonly<Record<ServerEngine, ServerEngineSpec>> = {
+  "typegraph-postgres": {
+    urlEnv: EXTERNAL_POSTGRES_URL_ENV,
+    image: POSTGRES_IMAGE,
+    driverPackage: "pg",
+    probe: (url) => probePostgresServer(url),
+  },
+  neo4j: {
+    urlEnv: EXTERNAL_NEO4J_URL_ENV,
+    image: NEO4J_IMAGE,
+    driverPackage: "neo4j-driver",
+    probe: (url, env) => probeNeo4jServer(url, env),
+  },
+  pggraph: {
+    urlEnv: EXTERNAL_PGGRAPH_URL_ENV,
+    image: PGGRAPH_IMAGE,
+    driverPackage: "pg",
+    probe: (url) => probePgGraphServer(url),
+  },
+};
+
+const SERVER_ENGINE_NAMES = Object.keys(SERVER_ENGINES) as ServerEngine[];
 
 export async function runDoctor(
   options: DoctorOptions = {},
 ): Promise<DoctorResult> {
   const engines = options.engines ?? SNB_ENGINE_NAMES;
+  const env = options.env ?? process.env;
   const wants = (engine: SnbEngineName): boolean => engines.includes(engine);
 
   const checks: DoctorCheck[] = [];
   checks.push(await checkLoopback());
 
-  const dockerRequired = wants("typegraph-postgres") || wants("neo4j");
+  const externalUrls = new Map<ServerEngine, string>();
+  for (const engine of SERVER_ENGINE_NAMES) {
+    const url = readExternalUrl(env, SERVER_ENGINES[engine].urlEnv);
+    if (url !== undefined) externalUrls.set(engine, url);
+  }
+  const needsDocker = (engine: ServerEngine): boolean =>
+    wants(engine) && !externalUrls.has(engine);
+
   const docker = await checkCommand(
     "runtime",
     "Docker daemon",
     "docker",
     ["version", "--format", "{{.Server.Version}}"],
-    dockerRequired,
+    SERVER_ENGINE_NAMES.some((engine) => needsDocker(engine)),
   );
   checks.push(docker);
 
-  if (wants("typegraph-sqlite")) {
-    checks.push(await checkPackage("better-sqlite3", true));
+  const packages = new Set<string>();
+  if (wants("typegraph-sqlite")) packages.add("better-sqlite3");
+  if (wants("ladybugdb")) packages.add("@ladybugdb/core");
+  for (const engine of SERVER_ENGINE_NAMES) {
+    if (wants(engine)) packages.add(SERVER_ENGINES[engine].driverPackage);
   }
-  if (wants("typegraph-postgres")) {
-    checks.push(await checkPackage("pg", true));
-  }
-  if (wants("neo4j")) {
-    checks.push(await checkPackage("neo4j-driver", true));
-  }
-  if (wants("ladybugdb")) {
-    checks.push(await checkPackage("@ladybugdb/core", true));
+  for (const packageName of packages) {
+    checks.push(await checkPackage(packageName, true));
   }
 
-  if (wants("typegraph-postgres")) {
-    checks.push(await checkDockerImage(POSTGRES_IMAGE, docker.status === "ok"));
-  }
-  if (wants("neo4j")) {
-    checks.push(await checkDockerImage(NEO4J_IMAGE, docker.status === "ok"));
+  const serverReady = new Map<ServerEngine, boolean>();
+  for (const engine of SERVER_ENGINE_NAMES) {
+    if (!wants(engine)) continue;
+    const spec = SERVER_ENGINES[engine];
+    const url = externalUrls.get(engine);
+    if (url === undefined) {
+      checks.push(await checkDockerImage(spec.image, docker.status === "ok"));
+      serverReady.set(engine, docker.status === "ok");
+      continue;
+    }
+    const verdict = await spec.probe(url, env);
+    checks.push({
+      category: "external-server",
+      name: `${engine} (${spec.urlEnv})`,
+      status: verdict.ok ? "ok" : "failed",
+      required: true,
+      detail: verdict.detail,
+    });
+    serverReady.set(engine, verdict.ok);
   }
 
   const requiredFailed = (category: string, name: string): boolean =>
@@ -270,17 +343,20 @@ export async function runDoctor(
   function engineRunnable(engine: SnbEngineName): boolean {
     if (!wants(engine)) return false;
     switch (engine) {
-      case "typegraph-sqlite":
+      case "typegraph-sqlite": {
         return !requiredFailed("node-package", "better-sqlite3");
-      case "typegraph-postgres":
-        return docker.status === "ok" && !requiredFailed("node-package", "pg");
-      case "neo4j":
-        return (
-          docker.status === "ok" &&
-          !requiredFailed("node-package", "neo4j-driver")
-        );
-      case "ladybugdb":
+      }
+      case "ladybugdb": {
         return !requiredFailed("node-package", "@ladybugdb/core");
+      }
+      case "typegraph-postgres":
+      case "neo4j":
+      case "pggraph": {
+        return (
+          serverReady.get(engine) === true &&
+          !requiredFailed("node-package", SERVER_ENGINES[engine].driverPackage)
+        );
+      }
     }
   }
 
@@ -299,9 +375,10 @@ export async function runDoctor(
     checks,
     runnable,
     caveats: [
-      "Loopback TCP is expected only for services started and owned by the harness (docker-backed Postgres or Neo4j).",
+      "Loopback TCP is expected only for services started and owned by the harness (docker-backed PostgreSQL, Neo4j or pgGraph).",
       "This doctor does not require docker images to be cached; an uncached image is still pulled by the benchmark run.",
       "typegraph-sqlite and ladybugdb are embedded and never require Docker.",
+      `A server engine whose URL variable is set (${SERVER_ENGINE_NAMES.map((engine) => SERVER_ENGINES[engine].urlEnv).join(", ")}) is probed on that server and does not require Docker.`,
     ],
   };
 }

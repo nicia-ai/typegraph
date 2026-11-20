@@ -38,13 +38,13 @@ I'm publishing both results rather than only the flattering one.
 All five engines run through one shared harness
 ([`packages/benchmarks/src/real/`](https://github.com/nicia-ai/typegraph/tree/bench/pggraph-comparison-v2/packages/benchmarks/src/real)):
 
-| Engine                         | Version                                                                      |
-| ------------------------------ | ---------------------------------------------------------------------------- |
-| SQLite                         | 3.53.2 (via `better-sqlite3` 12.11.1)                                        |
-| PostgreSQL (TypeGraph backend) | 18.1 (`pgvector/pgvector:pg18` image)                                        |
-| Neo4j                          | `neo4j:2026.05.0` server image, `neo4j-driver` 6.2.0, GDS plugin             |
-| LadybugDB                      | `@ladybugdb/core` 0.18.0                                                     |
-| pgGraph                        | Evokoa pgGraph 0.1.8 (`ghcr.io/evokoa/pggraph:0.1.8`, bundles PostgreSQL 17) |
+| Engine                         | Version                                                               |
+| ------------------------------ | --------------------------------------------------------------------- |
+| SQLite                         | 3.53.2 (via `better-sqlite3` 12.11.1)                                 |
+| PostgreSQL (TypeGraph backend) | 18.1 (`pgvector/pgvector:pg18` image)                                 |
+| Neo4j                          | `neo4j:2026.05.0` server image, `neo4j-driver` 6.2.0, GDS plugin      |
+| LadybugDB                      | `@ladybugdb/core` 0.18.0                                              |
+| pgGraph                        | pgGraph 0.1.8 (`ghcr.io/evokoa/pggraph:0.1.8`, bundles PostgreSQL 17) |
 
 pgGraph is the new entrant, and I think it's clever. Rather than being a
 separate database, it's a Postgres extension that builds a derived CSR
