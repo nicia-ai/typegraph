@@ -148,6 +148,11 @@ export type SqliteExecutionAdapter = Readonly<
     clearStatementCache: () => void;
     profile: SqliteExecutionProfile;
     /**
+     * Executes a statement that returns no rows: through the prepared-statement
+     * cache on synchronous drivers, through drizzle's `db.run()` otherwise.
+     */
+    executeRun: (query: ExecutableSql) => Promise<void>;
+    /**
      * Executes a compiled statement that returns no rows through the
      * prepared-statement cache. Present only on synchronous drivers with a
      * preparable client — the CRUD write path falls back to drizzle's
@@ -725,6 +730,9 @@ export function createSqliteExecutionAdapter(
       },
       executeCompiled,
       executeCompiledRun,
+      executeRun(query: ExecutableSql): Promise<void> {
+        return executeCompiledRun(compile(query));
+      },
       executePreparedRunBatch,
       ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
       prepare(sqlText: string): PreparedSqlStatement {
@@ -747,6 +755,11 @@ export function createSqliteExecutionAdapter(
     execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
       return executeDrizzleQuery<TRow>(
         db,
+        isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
+      );
+    },
+    async executeRun(query: ExecutableSql): Promise<void> {
+      await db.run(
         isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
       );
     },

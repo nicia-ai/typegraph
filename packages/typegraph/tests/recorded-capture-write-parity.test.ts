@@ -98,6 +98,7 @@ describe("recorded-capture write-surface parity", () => {
       await runRecordedTransactionSavepoint(
         scope.backend,
         statementExecution,
+        "test savepoint",
         "typegraph_capture_restore_test",
         async () => {
           await scope.backend.insertNode({
@@ -137,6 +138,7 @@ describe("recorded-capture write-surface parity", () => {
         runRecordedTransactionSavepoint(
           scope.backend,
           statementExecution,
+          "test savepoint",
           "typegraph_capture_throw_test",
           async () => {
             await scope.backend.insertNode({
@@ -188,6 +190,7 @@ describe("recorded-capture write-surface parity", () => {
         runRecordedTransactionSavepoint(
           scope.backend,
           statementExecution,
+          "test savepoint",
           "typegraph_capture_release_test",
           async () => {
             await scope.backend.insertNode({
@@ -237,6 +240,7 @@ describe("recorded-capture write-surface parity", () => {
         await runRecordedTransactionSavepoint(
           scope.backend,
           statementExecution,
+          "test savepoint",
           "typegraph_capture_lock_test",
           async () => {
             await lockRecordedGraphWrite(scope.backend, "capture_lock");

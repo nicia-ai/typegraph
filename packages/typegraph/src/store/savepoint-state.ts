@@ -1,4 +1,5 @@
 import { backendDerivationRoot } from "../backend/derive-backend";
+import { runSavepointScope } from "../backend/savepoint-scope-exclusion";
 
 type Checkpoint = () => () => void;
 type SavepointEffect = Readonly<{
@@ -60,8 +61,29 @@ export function publishSavepointEffect(
   publish();
 }
 
-/** The one owner of savepoint-local state and success/error hook settlement. */
-export async function withSavepointState<T>(
+/**
+ * The one owner of TypeGraph savepoint scopes, their savepoint-local state and
+ * success/error hook settlement.
+ *
+ * The scope is open on its transaction session for its whole duration,
+ * settlement included: a savepoint's rollback undoes every statement issued
+ * on the session since it was taken, so while the scope is open a statement
+ * from outside it — and a second scope beside it — is refused rather than
+ * left for the rollback to undo ({@link runSavepointScope}). `operation`
+ * names the call holding the scope in that refusal. Because only nested
+ * scopes can open while one is open, the scope chain below only ever nests.
+ */
+export function withSavepointState<T>(
+  target: object,
+  operation: string,
+  run: (restore: (cause: unknown) => void) => Promise<T>,
+): Promise<T> {
+  return runSavepointScope(target, operation, () =>
+    runSavepointStateScope(target, run),
+  );
+}
+
+async function runSavepointStateScope<T>(
   target: object,
   run: (restore: (cause: unknown) => void) => Promise<T>,
 ): Promise<T> {

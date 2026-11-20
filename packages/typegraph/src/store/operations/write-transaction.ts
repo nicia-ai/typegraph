@@ -681,12 +681,15 @@ const FRAME_WRITES_SAVEPOINT = "typegraph_frame_writes";
  *
  * Call it AFTER every refusal the frame can reach: reads and judgments belong
  * before it, so a refusal costs no savepoint, and the locks the frame took
- * predate the savepoint and survive its rollback.
+ * predate the savepoint and survive its rollback. `operation` names the call
+ * in the refusal an overlapping call on the same transaction receives while
+ * the savepoint is open.
  */
 export async function runFrameWritesAsUnit<T>(
   ctx: Pick<WriteTransactionContext, "statementExecution">,
   target: Readonly<Pick<TransactionBackend, "executeStatement">>,
   transactionMode: WriteTransactionMode,
+  operation: string,
   writes: () => Promise<T>,
 ): Promise<T> {
   if (transactionMode !== "existing") return writes();
@@ -695,6 +698,7 @@ export async function runFrameWritesAsUnit<T>(
   return runRecordedTransactionSavepoint(
     target,
     statementExecution,
+    operation,
     FRAME_WRITES_SAVEPOINT,
     async () => ({ action: "release", value: await writes() }),
   );

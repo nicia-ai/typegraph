@@ -168,12 +168,14 @@ export function registerSavepointRecoveryIntegrationTests(
           await runRecordedTransactionSavepoint(
             transactionBackend(tx),
             statements,
+            "test savepoint",
             "test_outer_rollback",
             async () => {
               await tx.nodes.SavepointNote.create({ body: "rolled back" });
               await runRecordedTransactionSavepoint(
                 transactionBackend(tx),
                 statements,
+                "test savepoint",
                 "test_inner_release",
                 async () => {
                   await tx.nodes.SavepointNote.bulkCreate([
@@ -225,6 +227,7 @@ export function registerSavepointRecoveryIntegrationTests(
           await runRecordedTransactionSavepoint(
             transactionBackend(tx),
             statements,
+            "test savepoint",
             "test_hooks_outer",
             async () => {
               await tx.nodes.SavepointNote.create(
@@ -234,6 +237,7 @@ export function registerSavepointRecoveryIntegrationTests(
               await runRecordedTransactionSavepoint(
                 transactionBackend(tx),
                 statements,
+                "test savepoint",
                 "test_hooks_inner",
                 async () => {
                   await tx.nodes.SavepointNote.updateWhere({
@@ -331,6 +335,7 @@ export function registerSavepointRecoveryIntegrationTests(
               const result = await runRecordedTransactionSavepoint(
                 transactionBackend(tx),
                 statements,
+                "test savepoint",
                 "test_effects_outer",
                 async () => {
                   await inner.nodes.SavepointNote.create(
@@ -344,6 +349,7 @@ export function registerSavepointRecoveryIntegrationTests(
                   await runRecordedTransactionSavepoint(
                     transactionBackend(tx),
                     statements,
+                    "test savepoint",
                     "test_effects_inner",
                     async () => {
                       await inner.nodes.SavepointNote.create(
@@ -411,6 +417,7 @@ export function registerSavepointRecoveryIntegrationTests(
           runRecordedTransactionSavepoint(
             transactionBackend(tx),
             statements,
+            "test savepoint",
             "test_uncaught_failure",
             async () => {
               await tx.nodes.SavepointNote.create({ body: "rolled back" });

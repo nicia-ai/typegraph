@@ -443,6 +443,7 @@ describe("engine-native recorded time: transaction receipts", () => {
         await runRecordedTransactionSavepoint(
           transactionBackend(tx),
           statements,
+          "test savepoint",
           "test_native_rollback",
           async () => {
             await tx.nodes.Widget.create(

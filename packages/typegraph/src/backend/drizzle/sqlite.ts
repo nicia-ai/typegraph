@@ -68,7 +68,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
+import { sql as portableSql } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   type CompiledRowsSql,
@@ -108,6 +108,7 @@ import {
   REVISION_JOURNAL_ENTITY,
   type RevisionJournalEntity,
 } from "../revision-journal";
+import { registerTransactionSession } from "../savepoint-scope-exclusion";
 import {
   createSerializedExecutionQueue,
   runWithSerializedQueue,
@@ -144,6 +145,7 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
+import { guardSessionStatements } from "./execution/session-statement-guard";
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
@@ -822,7 +824,6 @@ function createSqliteOperationBackend(
 ): InternalOperationBackend {
   const {
     capabilities,
-    db,
     executionAdapter,
     atomicSqlProgramExecutor,
     operationStrategy,
@@ -844,7 +845,6 @@ function createSqliteOperationBackend(
   // drizzle's session on every call. Async drivers (remote libsql, D1)
   // have no statement cache and keep the drizzle fallback.
   const compiledExecute = executionAdapter.executeCompiled;
-  const compiledRun = executionAdapter.executeCompiledRun;
 
   function execGet<T>(query: ExecutableSql): Promise<T | undefined> {
     // Fallback uses db.all()[0], not db.get(): drizzle-team/drizzle-orm#1049
@@ -874,15 +874,9 @@ function createSqliteOperationBackend(
   }
 
   function execRun(query: ExecutableSql): Promise<void> {
-    return runWithSerializedQueue(serializedQueue, async () => {
-      if (compiledRun === undefined) {
-        await db.run(
-          isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
-        );
-        return;
-      }
-      await compiledRun(executionAdapter.compile(query));
-    });
+    return runWithSerializedQueue(serializedQueue, () =>
+      executionAdapter.executeRun(query),
+    );
   }
 
   const batchConfig = computeSqliteBatchChunkSizes(
@@ -2656,11 +2650,16 @@ export function buildSqliteEngineProfile(
 function createTransactionBackend(
   options: CreateSqliteTransactionBackendOptions,
 ): InternalOperationBackend {
-  const txExecutionAdapter =
+  // Every statement this backend issues goes through this adapter, so it is
+  // where a statement from outside an open TypeGraph savepoint scope on this
+  // native transaction is refused (`savepoint-scope-exclusion.ts`).
+  const txExecutionAdapter = guardSessionStatements(
     options.executionAdapter ??
-    createSqliteExecutionAdapter(options.db, {
-      profileHints: options.profileHints,
-    });
+      createSqliteExecutionAdapter(options.db, {
+        profileHints: options.profileHints,
+      }),
+    options.db,
+  );
 
   // The transaction-scoped backend shares the outer backend's
   // contribution materializer: the per-field vector table is provisioned
@@ -2682,7 +2681,11 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
-  return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  registerTransactionSession(txBackend, options.db);
+  const bound =
+    options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  registerTransactionSession(bound, options.db);
+  return bound;
 }
 
 // Re-export schema utilities

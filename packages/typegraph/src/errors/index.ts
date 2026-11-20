@@ -3490,6 +3490,64 @@ export class TransactionClosedError extends TypeGraphError {
   }
 }
 
+export type SavepointScopeConflictErrorDetails = Readonly<{
+  /**
+   * What was refused: the SQL statement TypeGraph was about to issue (named
+   * by its leading keyword, such as `INSERT statement`), or the savepoint
+   * scope another operation was about to open.
+   */
+  refused: string;
+  /** The operation whose savepoint scope was open on the transaction. */
+  holder: string;
+}>;
+
+/**
+ * Thrown when work on a transaction reaches the database while another
+ * call's TypeGraph savepoint scope is open on that same transaction, and the
+ * work is not part of that call.
+ *
+ * Some batch calls made inside `store.transaction(...)` — `bulkHardDelete`
+ * on a node or edge collection, an interchange import, an adopted merge
+ * apply — run their writes behind a savepoint, so a failure the callback
+ * catches leaves none of them committed. Rolling back to a savepoint undoes
+ * every statement issued on the transaction since the savepoint was taken,
+ * whoever issued it. A call started alongside the batch call without awaiting
+ * it (`Promise.all`) would share that rollback boundary, and the batch call's
+ * failure would silently undo writes the other call had already reported as
+ * successful. TypeGraph refuses the other call's statement instead, reads
+ * included, before anything is sent to the database, so the transaction is
+ * not aborted and stays usable.
+ *
+ * Statements the other call issued before the scope opened stay applied.
+ * Let this error propagate so the transaction rolls back, or retry the
+ * refused call once the batch call has settled.
+ */
+export class SavepointScopeConflictError extends TypeGraphError {
+  declare readonly details: SavepointScopeConflictErrorDetails;
+
+  constructor(
+    details: SavepointScopeConflictErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `${details.refused} refused: ${details.holder} holds an open TypeGraph ` +
+        "savepoint on this transaction, and rolling that savepoint back would " +
+        "undo this work too. Nothing was sent to the database.",
+      "SAVEPOINT_SCOPE_CONFLICT",
+      {
+        details,
+        category: "user",
+        suggestion:
+          `Await ${details.holder} before starting other work on the same ` +
+          "transaction; do not run it concurrently (Promise.all) with other " +
+          "calls on the transaction.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "SavepointScopeConflictError";
+  }
+}
+
 // ============================================================
 // Utility Functions
 // ============================================================

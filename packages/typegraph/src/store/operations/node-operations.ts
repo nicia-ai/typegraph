@@ -7898,6 +7898,7 @@ export async function executeNodeHardDeleteBatch<G extends GraphDef>(
         ctx,
         target,
         transactionMode,
+        `nodes.${kind}.bulkHardDelete`,
         () => applyPlannedNodeHardDeletes(ctx, session, target, kind, planned),
       );
       return { affectedCount: planned.length, cascadedParts };

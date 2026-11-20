@@ -1294,6 +1294,21 @@ export type RestrictedDeleteErrorDetails = Readonly<{
     edgeKinds: readonly string[];
 }>;
 
+// @public
+export class SavepointScopeConflictError extends TypeGraphError {
+    constructor(details: SavepointScopeConflictErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: SavepointScopeConflictErrorDetails;
+}
+
+// @public (undocumented)
+export type SavepointScopeConflictErrorDetails = Readonly<{
+    refused: string;
+    holder: string;
+}>;
+
 // @public (undocumented)
 export class SchemaChangedError extends TypeGraphError {
     constructor(details: SchemaChangedErrorDetails);

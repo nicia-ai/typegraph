@@ -425,6 +425,7 @@ describe("identity transition log", () => {
       await runRecordedTransactionSavepoint(
         scope.backend,
         statementExecution,
+        "test savepoint",
         "typegraph_identity_transition_checkpoint_test",
         async () => {
           await withRecordedIdentityMutationTarget(

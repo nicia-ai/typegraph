@@ -164,6 +164,7 @@ import {
   nowIso,
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
+import { registerTransactionSession } from "../savepoint-scope-exclusion";
 import {
   registerDriverSavepointScope,
   runSessionSavepoint,
@@ -272,6 +273,7 @@ import {
 } from "./execution/postgres-execution";
 import { createPostgresTransactionSession } from "./execution/postgres-transaction-session";
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
+import { guardSessionStatements } from "./execution/session-statement-guard";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
@@ -4268,9 +4270,15 @@ function createTransactionBackend(
   // compiled-text seam; changing every statement to that seam would also
   // bypass driver logging and other Drizzle session behavior merely because
   // this transaction can execute programs.
-  const txExecutionAdapter = createSerialExecutionAdapter(
-    session.operation,
-    getPinnedPostgresTransactionClient(options.db) ?? options.db,
+  const nativeSession =
+    getPinnedPostgresTransactionClient(options.db) ?? options.db;
+  // Every statement this backend issues goes through this adapter (the
+  // session atomic batch below through its `runExclusive`), so it is where a
+  // statement from outside an open TypeGraph savepoint scope on this native
+  // transaction is refused (`savepoint-scope-exclusion.ts`).
+  const txExecutionAdapter = guardSessionStatements(
+    createSerialExecutionAdapter(session.operation, nativeSession),
+    nativeSession,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =
@@ -4347,6 +4355,8 @@ function createTransactionBackend(
     options.isFirstParty ?
       markFirstPartyFactory(txOperationBackend)
     : txOperationBackend;
+  registerTransactionSession(txOperationBackend, nativeSession);
+  registerTransactionSession(backend, nativeSession);
   if (enterDriverScope !== undefined) {
     registerDriverSavepointScope(backend, enterDriverScope);
   }

@@ -79,6 +79,7 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
   return runRecordedTransactionSavepoint(
     transactionBackend(tx),
     statements,
+    "applyMergePlanInTransaction",
     ADOPTED_MERGE_APPLY_SAVEPOINT,
     async () => ({ action: "release", value: await apply() }),
   );

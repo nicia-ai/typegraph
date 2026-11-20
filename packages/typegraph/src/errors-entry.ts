@@ -103,6 +103,8 @@ export {
   type RecordedCaptureGuardError,
   RestrictedDeleteError,
   type RestrictedDeleteErrorDetails,
+  SavepointScopeConflictError,
+  type SavepointScopeConflictErrorDetails,
   SchemaChangedError,
   type SchemaChangedErrorDetails,
   SchemaContentConflictError,

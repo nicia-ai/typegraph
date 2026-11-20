@@ -2559,14 +2559,26 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
   const statementExecution = frame.statementExecution;
   const result = await runRecordedTransactionSavepoint<
     EdgeCreateGuardResult<T>
-  >(target, statementExecution, frame.allocateEdgeSavepoint(), async () => {
-    const guarded = await catchEdgeCreateRefusal(fn);
-    return guarded.ok ?
-        { action: "release", value: guarded }
-      : { action: "rollback", value: guarded, cause: guarded.cause };
-  });
+  >(
+    target,
+    statementExecution,
+    IMPORT_SAVEPOINT_OPERATION,
+    frame.allocateEdgeSavepoint(),
+    async () => {
+      const guarded = await catchEdgeCreateRefusal(fn);
+      return guarded.ok ?
+          { action: "release", value: guarded }
+        : { action: "rollback", value: guarded, cause: guarded.cause };
+    },
+  );
   return { result, rollbackProtection: "savepoint" };
 }
+
+/**
+ * The operation an import savepoint names when it refuses an overlapping call
+ * on the same transaction (`SavepointScopeConflictError`).
+ */
+const IMPORT_SAVEPOINT_OPERATION = "importGraph";
 
 /**
  * The stable prefix on every per-row refusal caused by an import UPDATE whose
@@ -2633,6 +2645,7 @@ async function updateNodeUnderWindowEnd(
   return runRecordedTransactionSavepoint<string | undefined>(
     frame.target,
     frame.statementExecution,
+    IMPORT_SAVEPOINT_OPERATION,
     frame.allocateEdgeSavepoint(),
     async () => {
       await applyWindowEnd();
@@ -5287,6 +5300,7 @@ async function settleEdgeRounds(
     const refusals = await runRecordedTransactionSavepoint<EdgeRoundRefusals>(
       frame.target,
       frame.statementExecution,
+      IMPORT_SAVEPOINT_OPERATION,
       frame.allocateEdgeSavepoint(),
       async () => {
         const judged = await round();
@@ -5404,6 +5418,7 @@ async function settleCompositionMoves(
         await runRecordedTransactionSavepoint<CompositionMovePass>(
           frame.target,
           frame.statementExecution,
+          IMPORT_SAVEPOINT_OPERATION,
           frame.allocateEdgeSavepoint(),
           async () => {
             const applied = await pass();

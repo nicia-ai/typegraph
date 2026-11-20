@@ -694,6 +694,10 @@ export function inheritRecordedTransactionBindings(
  * This is deliberately the only supported savepoint seam for recorded writes.
  * Savepoints issued directly through an adopted backend remain outside the
  * capture contract because TypeGraph cannot observe their rollback boundary.
+ *
+ * While the savepoint is open, TypeGraph refuses any statement on the same
+ * transaction from outside `fn`; `operation` names the call holding it in
+ * that `SavepointScopeConflictError` (see `withSavepointState`).
  */
 export async function runRecordedTransactionSavepoint<T>(
   target: TransactionControlTarget,
@@ -701,6 +705,7 @@ export async function runRecordedTransactionSavepoint<T>(
     BundleVerdictOf<typeof STATEMENT_EXECUTION>,
     { supported: true }
   >,
+  operation: string,
   savepoint: string,
   fn: () => Promise<SavepointDecision<T>>,
 ): Promise<T> {
@@ -733,7 +738,7 @@ export async function runRecordedTransactionSavepoint<T>(
     }
   };
 
-  return withSavepointState(target, (restoreState) =>
+  return withSavepointState(target, operation, (restoreState) =>
     runSessionSavepoint(
       {
         executeControl: (statement) =>
