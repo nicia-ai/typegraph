@@ -178,6 +178,11 @@ function daysInMonth(year: number, month: number): number {
  * proven equal to.
  */
 export function isCanonicalIsoDate(value: string): boolean {
+  // The round trip refused every input but a primitive string: its closing
+  // `===` compared the rendered text with the input itself, so a boxed
+  // `String`, or an object whose `toString()` is canonical text, failed it
+  // even though the coercing pattern test passed. Keep that boundary.
+  if (typeof value !== "string") return false;
   if (!CANONICAL_ISO_DATE_PATTERN.test(value)) return false;
   const year = digitsAt(value, 0, 4);
   const month = digitsAt(value, 5, 7);

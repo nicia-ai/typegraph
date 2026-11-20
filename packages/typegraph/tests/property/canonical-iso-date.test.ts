@@ -213,3 +213,38 @@ describe("isCanonicalIsoDate equivalence with the Date round-trip", () => {
     }
   });
 });
+
+/**
+ * Values a caller can pass where the type says `string`: a boxed `String` and
+ * an object whose `toString()` is canonical text both pass the coercing
+ * pattern test, and the oracle's closing `===` refused them.
+ */
+function nonPrimitiveForms(value: string): readonly unknown[] {
+  return [new Object(value), { toString: () => value }];
+}
+
+describe("isCanonicalIsoDate input boundary", () => {
+  it("refuses a non-primitive whose text is canonical, as the oracle does", () => {
+    fc.assert(
+      fc.property(
+        fc.date({
+          min: new Date("0000-01-01T00:00:00.000Z"),
+          max: new Date("9999-12-31T23:59:59.999Z"),
+          noInvalidDate: true,
+        }),
+        (date) => {
+          const text = date.toISOString();
+          expect(isCanonicalIsoDate(text)).toBe(true);
+          for (const form of nonPrimitiveForms(text)) {
+            const input = form as string;
+            expect({
+              verdict: isCanonicalIsoDate(input),
+              oracle: roundTripIsCanonicalIsoDate(input),
+            }).toEqual({ verdict: false, oracle: false });
+          }
+        },
+      ),
+      { numRuns: propertyRuns({ ci: 1000, local: 1000 }) },
+    );
+  });
+});
