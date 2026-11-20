@@ -550,6 +550,15 @@ only SQLite unit/property tests). The jobs are:
 | **Build artifacts** | `turbo run build` in parallel with the test jobs |
 | **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
+A separate scheduled workflow,
+[`.github/workflows/property-deep.yml`](../.github/workflows/property-deep.yml),
+runs `test:property` nightly with `TYPEGRAPH_PROPERTY_RUNS_SCALE=10`, which
+multiplies every `propertyRuns` budget (`tests/property/run-budget.ts`). It is
+not a merge gate. Run it on demand from the Actions tab with a different
+multiplier, or locally with `TYPEGRAPH_PROPERTY_RUNS_SCALE=10 pnpm
+test:property`. A suite that passes a literal `numRuns` is not scaled; give it a
+`propertyRuns` budget to include it.
+
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
 before publishing.

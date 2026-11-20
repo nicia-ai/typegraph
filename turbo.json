@@ -28,7 +28,8 @@
     },
     "test:property": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["TYPEGRAPH_PROPERTY_RUNS_SCALE"]
     },
     "bench": {
       "dependsOn": ["^build"],
