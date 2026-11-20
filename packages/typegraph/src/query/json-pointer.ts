@@ -132,6 +132,40 @@ type SegmentToString<Segment> =
   : Segment extends string ? Segment
   : string;
 
+/** RFC 6901's "after the last array element" token; never queryable. */
+const JSON_POINTER_END_OF_ARRAY_SEGMENT = "-";
+
+/**
+ * Whether a decoded pointer segment addresses an array element. A pointer
+ * string carries no type, so a dialect whose path syntax separates indexes
+ * from keys reads every all-digit segment as an index.
+ */
+export function isJsonPointerArrayIndexSegment(segment: string): boolean {
+  return /^\d+$/.test(segment);
+}
+
+export type UnaddressableObjectKeyReason =
+  "array_index" | "end_of_array" | "double_quote";
+
+/**
+ * Why a pointer segment cannot address the object key of the same name on
+ * every backend, or `undefined` when it can. An all-digit name is read as an
+ * array index wherever the path syntax tells indexes from keys, `-` is
+ * refused by {@link jsonPointer} outright, and a double quote has to be
+ * escaped inside a quoted SQLite path label, which SQLite 3.45 does not
+ * unescape (it finds no such key) while later versions and PostgreSQL read
+ * the key. Every other name, including one containing `/`, `~`, a backslash
+ * or a single quote, is escaped and round-trips as a key.
+ */
+export function unaddressableObjectKeyReason(
+  key: string,
+): UnaddressableObjectKeyReason | undefined {
+  if (key === JSON_POINTER_END_OF_ARRAY_SEGMENT) return "end_of_array";
+  if (isJsonPointerArrayIndexSegment(key)) return "array_index";
+  if (key.includes('"')) return "double_quote";
+  return undefined;
+}
+
 export function jsonPointer(segments: JsonPointerSegments): JsonPointer {
   if (segments.length > MAX_JSON_POINTER_DEPTH) {
     throw new Error(
@@ -144,7 +178,7 @@ export function jsonPointer(segments: JsonPointerSegments): JsonPointer {
   }
 
   const encoded = segments.map((segment) => {
-    if (segment === "-") {
+    if (segment === JSON_POINTER_END_OF_ARRAY_SEGMENT) {
       throw new Error(
         "JSON Pointer '-' segment is not allowed for query access",
       );
@@ -243,7 +277,7 @@ function assertJsonPointer(pointer: string): JsonPointer {
   }
 
   for (const segment of segments) {
-    if (segment === "-") {
+    if (segment === JSON_POINTER_END_OF_ARRAY_SEGMENT) {
       throw new Error(
         "JSON Pointer '-' segment is not allowed for query access",
       );

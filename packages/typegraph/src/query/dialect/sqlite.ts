@@ -8,7 +8,11 @@ import {
   SQLITE_PATH_DELIMITER,
   SQLITE_PATH_TOKEN_ESCAPES,
 } from "../../constants";
-import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import {
+  isJsonPointerArrayIndexSegment,
+  type JsonPointer,
+  parseJsonPointer,
+} from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
 import { fts5Strategy } from "./fulltext-strategy";
@@ -84,7 +88,7 @@ function toSqlitePath(pointer: JsonPointer): string {
   const parts: string[] = ["$"];
 
   for (const segment of segments) {
-    if (isArrayIndex(segment)) {
+    if (isJsonPointerArrayIndexSegment(segment)) {
       parts.push(`[${segment}]`);
     } else {
       // Quote the key to handle special characters
@@ -117,13 +121,6 @@ function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
   if (first === undefined) return sql`json('{}')`;
   if (rest.length === 0) return first;
   return sql`json_patch(${first}, ${mergeJsonObjects(rest)})`;
-}
-
-/**
- * Checks if a JSON pointer segment is an array index.
- */
-function isArrayIndex(segment: string): boolean {
-  return /^\d+$/.test(segment);
 }
 
 /**
@@ -241,13 +238,6 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   jsonExtract(column, pointer) {
     const path = toSqlitePath(pointer);
     return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
-  },
-
-  jsonObjectMember(column, key) {
-    // `->` keeps the member's stored JSON text, so a number reaches the
-    // path members exactly as written; the quoted label is never an index.
-    const path = toSqliteObjectPropertyPath(key);
-    return sql`(${column} -> ${sql.raw(escapeSqliteLiteral(path))})`;
   },
 
   jsonExtractText(column, pointer) {

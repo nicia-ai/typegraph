@@ -166,7 +166,7 @@ Options differ from the unweighted traversals:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
-| `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight |
+| `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote throws `ConfigurationError`: a JSON path cannot address it as an object key on every backend |
 | `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e288) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
@@ -195,11 +195,6 @@ visible edge of the selected kinds is audited; the call throws a typed
   SQLite's JSON parser rounds sub-denormal text like `1e-400` to `0`
   before SQL can observe it, so only PostgreSQL can reject that case;
 - **missing** without a configured `defaultWeight`.
-
-`weightProperty` names a top-level key of the edge's properties and is used
-exactly as written. It is never read as path syntax, so a property called `0`
-or `a/b` is that property, not an array index or a nested path. On SQLite the
-lookup uses the `->` operator, so weighted algorithms need SQLite 3.38 or later.
 
 The audit covers the selected edge kinds globally (not just edges the
 traversal happens to reach), so a data problem fails deterministically no
@@ -345,7 +340,7 @@ const weightedRelatedToAlice = await store.algorithms.personalizedPageRank({
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds defining transitions |
 | `nodeKinds` | `readonly NodeKinds<G>[]` | all visible kinds | Induced node subgraph to rank |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Follow stored, reversed, or undirected transitions |
-| `weightProperty` | `string` | *(none: every edge counts 1)* | Top-level edge property holding each edge's non-negative numeric weight |
+| `weightProperty` | `string` | *(none: every edge counts 1)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote throws `ConfigurationError`, as on `weightedShortestPath` |
 | `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; requires `weightProperty`, and must be non-negative and within the audit's upper bound (~9.7e288) |
 | `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
 | `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |

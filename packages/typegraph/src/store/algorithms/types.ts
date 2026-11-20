@@ -172,7 +172,9 @@ export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
   Readonly<{
     /**
      * Top-level edge property supplying each edge's non-negative numeric
-     * weight. The name is an object key, never path syntax.
+     * weight. An all-digit name, `"-"`, or a name containing a double quote
+     * throws `ConfigurationError`: a JSON path cannot address it as an
+     * object key on every backend.
      */
     weightProperty: string;
     /**
@@ -385,8 +387,8 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
      * Only the ratio between one node's out-edge weights matters; an edge
      * more than about 300 orders of magnitude lighter than its node's total
      * underflows that ratio, which PostgreSQL raises and SQLite rounds to
-     * zero. The name is an object key, never path syntax. Omit it for the
-     * unweighted walk.
+     * zero. An all-digit name, `"-"`, or a name containing a double quote
+     * throws `ConfigurationError`. Omit it for the unweighted walk.
      */
     weightProperty?: string;
     /**

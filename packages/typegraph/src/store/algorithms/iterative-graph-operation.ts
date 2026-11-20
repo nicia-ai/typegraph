@@ -19,6 +19,7 @@ import {
   currentReadInstant,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
+import { jsonPointer } from "../../query/json-pointer";
 import {
   countSqlParameters,
   sql,
@@ -39,7 +40,6 @@ import {
 } from "../../utils/sql-errors";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
-import { compileEdgeWeightOperand } from "./edge-weight-operand";
 import type { PathNode, TraversalDirection } from "./types";
 
 type QueryBackend = Pick<GraphBackend, "capabilities" | "execute">;
@@ -1009,8 +1009,10 @@ function compileWeightExpression(
   weightProperty: string,
   defaultWeight: number | undefined,
 ): SqlFragment {
-  const weight = compileEdgeWeightOperand(dialect, weightProperty);
-  const extracted = dialect.jsonExtractDouble(weight.value, weight.pointer);
+  const extracted = dialect.jsonExtractDouble(
+    sql.raw("e.props"),
+    jsonPointer([weightProperty]),
+  );
   // The default is cast for the same reason the extraction is a double: a
   // driver may bind an integer-valued number as an integer, and integer
   // aggregation overflows where double aggregation does not.

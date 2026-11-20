@@ -4,9 +4,13 @@ import {
   type InvalidEdgeWeightReason,
 } from "../../errors";
 import { compileKindFilter } from "../../query/compiler/predicate-utils";
+import {
+  jsonPointer,
+  type UnaddressableObjectKeyReason,
+  unaddressableObjectKeyReason,
+} from "../../query/json-pointer";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { compileEdgeWeightOperand } from "./edge-weight-operand";
 import type { IterativeGraphOperation } from "./iterative-graph-operation";
 
 /**
@@ -31,6 +35,17 @@ const MAX_EDGE_WEIGHT = Number.MAX_VALUE / 2 ** 64;
  */
 const MIN_EDGE_WEIGHT = Number.MIN_VALUE;
 
+const UNADDRESSABLE_WEIGHT_PROPERTY_EXPLANATIONS: Readonly<
+  Record<UnaddressableObjectKeyReason, string>
+> = {
+  array_index:
+    "an all-digit name is a JSON array index, not an object key, on some backends",
+  end_of_array:
+    'the name "-" is the JSON Pointer end-of-array token and cannot be queried',
+  double_quote:
+    "a name containing a double quote is not found by the JSON path of some backends",
+};
+
 type WeightAuditRow = Readonly<{
   edge_id: string;
   edge_kind: string;
@@ -53,6 +68,15 @@ export function assertWeightOptions(
     throw new ConfigurationError(
       `${algorithm} weightProperty must be a non-empty string.`,
       { weightProperty },
+    );
+  }
+  // The audit and the expansion address the weight through a JSON pointer,
+  // which cannot name every object key identically on every backend.
+  const unaddressable = unaddressableObjectKeyReason(weightProperty);
+  if (unaddressable !== undefined) {
+    throw new ConfigurationError(
+      `${algorithm} weightProperty ${JSON.stringify(weightProperty)} cannot be read as an edge property: ${UNADDRESSABLE_WEIGHT_PROPERTY_EXPLANATIONS[unaddressable]}.`,
+      { weightProperty, reason: unaddressable },
     );
   }
   // The same upper bound the audit applies to stored weights: a default
@@ -90,10 +114,8 @@ export async function assertValidEdgeWeights(
   defaultWeight: number | undefined,
 ): Promise<void> {
   const { dialect } = operation.ctx;
-  const { value: weightValue, pointer } = compileEdgeWeightOperand(
-    dialect,
-    weightProperty,
-  );
+  const pointer = jsonPointer([weightProperty]);
+  const propsColumn = sql.raw("e.props");
   // The inner projection extracts the JSON path once per edge; the outer
   // violation predicate then works over plain projected columns. Composing
   // the checks directly over `e.props` would re-parse the JSON payload for
@@ -101,16 +123,16 @@ export async function assertValidEdgeWeights(
   //
   // Both type predicates are never-NULL by contract, so the multi-branch
   // violation predicate below stays two-valued.
-  const isNumber = dialect.jsonPathIsNumber(weightValue, pointer);
-  const isMissing = dialect.jsonPathIsNull(weightValue, pointer);
-  const weightText = dialect.jsonExtractText(weightValue, pointer);
+  const isNumber = dialect.jsonPathIsNumber(propsColumn, pointer);
+  const isMissing = dialect.jsonPathIsNull(propsColumn, pointer);
+  const weightText = dialect.jsonExtractText(propsColumn, pointer);
   // CASE keeps the numeric extraction unreachable for non-numeric values:
   // PostgreSQL does not short-circuit OR/AND, and casting arbitrary text
   // would error before the audit could produce its typed report. The
   // extraction is jsonExtractNumber (PostgreSQL `numeric`), NOT the double
   // extraction the traversal uses: a JSON number beyond the float8 range
   // must reach the range check below instead of overflowing the cast.
-  const weightNumber = sql`CASE WHEN ${isNumber} THEN ${dialect.jsonExtractNumber(weightValue, pointer)} END`;
+  const weightNumber = sql`CASE WHEN ${isNumber} THEN ${dialect.jsonExtractNumber(propsColumn, pointer)} END`;
   const missingViolation =
     defaultWeight === undefined ?
       sql`audited.is_missing = 1`

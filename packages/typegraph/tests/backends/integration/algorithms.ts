@@ -72,11 +72,21 @@ const nodeKindInitializationKindSet = new Set(nodeKindInitializationKinds);
 type NodeKindInitializationStore = Store<typeof nodeKindInitializationGraph>;
 
 /**
- * Edge property names that are ordinary object keys but look like JSON path
- * syntax: an array index, the JSON Pointer end-of-array token, and names
- * carrying the characters JSON Pointer and SQL string literals escape.
+ * Edge property names that are ordinary object keys but carry characters
+ * JSON Pointer, SQLite's JSON path, or a SQL string literal treats specially.
+ * Every one must be read as the key it is, on every backend.
  */
-const PATH_LIKE_WEIGHT_PROPERTIES = ["0", "-", "a/b~c", "it's"] as const;
+const PATH_LIKE_WEIGHT_PROPERTIES = [
+  "a/b~c",
+  "it's",
+  String.raw`a\b`,
+  "a.b",
+  "[0]",
+  "-1",
+  "1.5",
+  "a b",
+  "é",
+] as const;
 const PATH_LIKE_STOPS = ["pl-a", "pl-b", "pl-c"] as const;
 const PathLikeStop = defineNode("PathLikeStop", {
   schema: z.object({ name: z.string() }),
@@ -908,7 +918,7 @@ export function registerAlgorithmIntegrationTests(
         expect(path?.totalWeight).toBe(0.1 + 0.2);
       });
 
-      it("reads the weight under any top-level property name, never as path syntax", async () => {
+      it("reads the weight under property names that carry path or quoting characters", async () => {
         for (const weightProperty of PATH_LIKE_WEIGHT_PROPERTIES) {
           const store = await seedPathLikeWeightGraph(context, weightProperty);
 
@@ -2123,7 +2133,7 @@ export function registerAlgorithmIntegrationTests(
         );
       });
 
-      it("reads the weight under any top-level property name, never as path syntax", async () => {
+      it("reads the weight under property names that carry path or quoting characters", async () => {
         for (const weightProperty of PATH_LIKE_WEIGHT_PROPERTIES) {
           const store = await seedPathLikeWeightGraph(context, weightProperty);
           const options = {
@@ -2164,6 +2174,64 @@ export function registerAlgorithmIntegrationTests(
               seeds: new Map([["pl-a", 1]]),
             }),
           );
+        }
+      });
+
+      it("refuses a weightProperty that cannot be addressed as an object key", async () => {
+        const store = context.getStore();
+        const algorithms = {
+          weightedShortestPath: (weightProperty: string) =>
+            store.algorithms.weightedShortestPath("unused-a", "unused-b", {
+              edges: ["knows"],
+              weightProperty,
+            }),
+          pageRank: (weightProperty: string) =>
+            store.algorithms.pageRank({ edges: ["knows"], weightProperty }),
+          personalizedPageRank: (weightProperty: string) =>
+            store.algorithms.personalizedPageRank({
+              edges: ["knows"],
+              weightProperty,
+              seeds: [{ id: "unused-a", kind: "Person" }],
+            }),
+        };
+        const refusals = [
+          {
+            weightProperty: "0",
+            reason: "array_index",
+            explanation:
+              "an all-digit name is a JSON array index, not an object key, on some backends",
+          },
+          {
+            weightProperty: "007",
+            reason: "array_index",
+            explanation:
+              "an all-digit name is a JSON array index, not an object key, on some backends",
+          },
+          {
+            weightProperty: 'a"b',
+            reason: "double_quote",
+            explanation:
+              "a name containing a double quote is not found by the JSON path of some backends",
+          },
+          {
+            weightProperty: "-",
+            reason: "end_of_array",
+            explanation:
+              'the name "-" is the JSON Pointer end-of-array token and cannot be queried',
+          },
+        ];
+
+        for (const [name, run] of Object.entries(algorithms)) {
+          for (const refusal of refusals) {
+            await expect(run(refusal.weightProperty)).rejects.toMatchObject({
+              code: "CONFIGURATION_ERROR",
+              message: `${name} weightProperty ${JSON.stringify(refusal.weightProperty)} cannot be read as an edge property: ${refusal.explanation}.`,
+              details: {
+                weightProperty: refusal.weightProperty,
+                reason: refusal.reason,
+              },
+            });
+          }
         }
       });
 
