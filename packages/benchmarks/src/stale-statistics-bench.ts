@@ -23,6 +23,9 @@
  * - `--print-sql` — print the text of each N's slowest statement
  * - `--sqlite` — run the same scenarios on in-memory SQLite (time only)
  * - `--statement-timeout=600000` — per-statement cap in milliseconds
+ * - `--autoanalyze-threshold=N` — keep autovacuum on the TypeGraph tables
+ *   with `autovacuum_analyze_scale_factor = 0` and this analyze threshold,
+ *   instead of disabling it
  *
  * The benchmark creates and drops its own database next to the one
  * `POSTGRES_URL` names (`<database>_stale_stats_bench`); it needs `CREATEDB`.
@@ -38,7 +41,16 @@ import {
   defineGraph,
   defineNode,
   type GraphBackend,
+  partOf,
 } from "@nicia-ai/typegraph";
+import {
+  asBranchId,
+  applyMergePlan,
+  branch,
+  planMerge,
+} from "@nicia-ai/typegraph/graph-merge";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+import { FORMAT_VERSION, importGraph } from "@nicia-ai/typegraph/interchange";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -66,6 +78,13 @@ const Holder = defineNode("Holder", {
   schema: z.object({ name: z.string() }),
 });
 const link = defineEdge("link");
+const Show = defineNode("Show", { schema: z.object({ title: z.string() }) });
+const Clip = defineNode("Clip", { schema: z.object({ title: z.string() }) });
+const clipOf = defineEdge("clipOf");
+const itemStatusIndex = defineNodeIndex(Item, {
+  fields: ["status"],
+  name: "stale_stats_item_status",
+});
 
 const graph = defineGraph({
   id: GRAPH_ID,
@@ -82,10 +101,20 @@ const graph = defineGraph({
       ],
     },
     Holder: { type: Holder },
+    Show: { type: Show },
+    Clip: { type: Clip },
   },
   edges: {
     link: { type: link, from: [Holder], to: [Item] },
+    clipOf: {
+      type: clipOf,
+      from: [Clip],
+      to: [Show],
+      cardinality: "oneActive",
+    },
   },
+  ontology: [partOf(Clip, Show, { via: clipOf })],
+  indexes: [itemStatusIndex],
 });
 
 type BenchStore = Awaited<
@@ -101,6 +130,7 @@ type Options = Readonly<{
   printSql: boolean;
   sqlite: boolean;
   statementTimeoutMs: number;
+  autoanalyzeThreshold: number | undefined;
 }>;
 
 function parseOptions(argv: readonly string[]): Options {
@@ -122,6 +152,12 @@ function parseOptions(argv: readonly string[]): Options {
       value("statement-timeout") ?? "600000",
       10,
     ),
+    autoanalyzeThreshold: (() => {
+      const threshold = value("autoanalyze-threshold");
+      return threshold === undefined ? undefined : (
+          Number.parseInt(threshold, 10)
+        );
+    })(),
   };
 }
 
@@ -271,13 +307,24 @@ const TYPEGRAPH_TABLES_QUERY = `
   WHERE schemaname = 'public' AND tablename LIKE 'typegraph_%'
 `;
 
-async function disableAutovacuum(pool: pg.Pool): Promise<void> {
+/**
+ * Disables autovacuum on the TypeGraph tables, or — with
+ * `--autoanalyze-threshold=N` — leaves it on with a size-independent analyze
+ * trigger of N changed rows, the storage parameters statistics maintenance
+ * could recommend.
+ */
+async function configureAutovacuum(
+  pool: pg.Pool,
+  autoanalyzeThreshold: number | undefined,
+): Promise<void> {
   const tables = await pool.query<{ tablename: string }>(
     TYPEGRAPH_TABLES_QUERY,
   );
   for (const row of tables.rows) {
     await pool.query(
-      `ALTER TABLE "${row.tablename}" SET (autovacuum_enabled = false, toast.autovacuum_enabled = false)`,
+      autoanalyzeThreshold === undefined ?
+        `ALTER TABLE "${row.tablename}" SET (autovacuum_enabled = false, toast.autovacuum_enabled = false)`
+      : `ALTER TABLE "${row.tablename}" SET (autovacuum_enabled = true, autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = ${autoanalyzeThreshold})`,
     );
   }
 }
@@ -346,11 +393,12 @@ async function createPostgresHarness(
   instrumentPool(pool, recorder);
   const tables = createPostgresTables();
   await pool.query(generatePostgresMigrationSQL(tables));
-  await disableAutovacuum(pool);
+  await configureAutovacuum(pool, options.autoanalyzeThreshold);
   const backend = createPostgresBackend(drizzleNodePostgres(pool), { tables });
   const [store] = await createStoreWithSchema(graph, backend, {
     autoRefreshStatistics: false,
   });
+  await store.materializeIndexes({ refreshStatistics: false });
   await prefill(pool, options.prefill);
   const analyzeMs = await analyzeAll(pool);
   console.log(
@@ -480,6 +528,7 @@ async function report(
 
 type ScenarioContext = Readonly<{
   store: BenchStore;
+  backend: GraphBackend;
   pool: pg.Pool | undefined;
   recorder: Recorder;
   options: Options;
@@ -530,10 +579,279 @@ async function updateWhereScenario(context: ScenarioContext): Promise<void> {
   );
 }
 
+/** The size the sibling audit runs every operation at (`--sizes` overrides). */
+function siblingSize(options: Options): number {
+  return options.sizes.length === 1 ? (options.sizes[0] ?? 10_000) : 10_000;
+}
+
+async function insertFreshClips(
+  store: BenchStore,
+  count: number,
+): Promise<
+  Readonly<{
+    clipIds: readonly string[];
+    to: Awaited<ReturnType<BenchStore["nodes"]["Show"]["create"]>>;
+  }>
+> {
+  const batch = freshSequence++;
+  const from = await store.nodes.Show.create({ title: `from-${batch}` });
+  const to = await store.nodes.Show.create({ title: `to-${batch}` });
+  const clipIds: string[] = [];
+  for (let offset = 0; offset < count; offset += INSERT_CHUNK) {
+    const size = Math.min(INSERT_CHUNK, count - offset);
+    const created = await store.nodes.Clip.bulkCreate(
+      Array.from({ length: size }, (_, index) => ({
+        props: { title: `clip-${batch}-${offset + index}` },
+        partOf: { whole: from },
+      })),
+    );
+    for (const clip of created) clipIds.push(clip.id);
+  }
+  return { clipIds, to };
+}
+
+/**
+ * Every set-wise write or read-then-write with a candidate-set shape, each at
+ * N fresh rows under stale statistics. Each operation gets its own fresh rows
+ * so one operation's writes cannot warm the next one's.
+ */
+async function siblingsScenario(context: ScenarioContext): Promise<void> {
+  const { store, recorder, options } = context;
+  const n = siblingSize(options);
+  async function run(label: string, operation: () => Promise<unknown>) {
+    await report(
+      await measure(recorder, label, n, "stale", operation),
+      context.pool,
+      options,
+    );
+  }
+
+  const casIds = await insertFreshItems(store, n);
+  await run("compareAndSet (one id among N fresh)", () =>
+    store.nodes.Item.compareAndSet(asItemId(casIds.at(-1)), {
+      expected: { status: "pending" },
+      patch: { status: "swapped" },
+    }),
+  );
+
+  const deleteIds = await insertFreshItems(store, n);
+  await run("bulkDelete", () =>
+    store.nodes.Item.bulkDelete(deleteIds.map((id) => asItemId(id))),
+  );
+
+  const hardDeleteIds = await insertFreshItems(store, n);
+  await run("bulkHardDelete", () =>
+    store.nodes.Item.bulkHardDelete(hardDeleteIds.map((id) => asItemId(id))),
+  );
+
+  const findIds = await insertFreshItems(store, n);
+  const findBatch = freshSequence - 1;
+  await run("bulkFindByConstraint", () =>
+    store.nodes.Item.bulkFindByConstraint(
+      "item_code",
+      findIds.map((_, ordinal) => ({
+        props: {
+          status: "pending",
+          ordinal,
+          code: `code-${findBatch}-${ordinal}`,
+        },
+      })),
+    ),
+  );
+  await run("bulkFindByIndex (status, N probes)", () =>
+    store.nodes.Item.bulkFindByIndex(
+      itemStatusIndex.name,
+      findIds.map(() => ({ props: { status: "pending" } })),
+      { limitPerInput: 1 },
+    ),
+  );
+
+  const importIds = await insertFreshItems(store, n);
+  await run("importGraph onConflict update", async () => {
+    const result = await importGraph(
+      store,
+      {
+        formatVersion: FORMAT_VERSION,
+        exportedAt: new Date().toISOString(),
+        source: { type: "external", description: "stale-statistics bench" },
+        nodes: importIds.map((id, ordinal) => ({
+          kind: TARGET_KIND,
+          id,
+          properties: {
+            status: "imported",
+            ordinal,
+            code: `import-${id}`,
+          },
+        })),
+        edges: [],
+      },
+      {
+        onConflict: "update",
+        onUnknownProperty: "error",
+        validateReferences: false,
+        refreshStatistics: false,
+      },
+    );
+    if (!result.success) {
+      throw new Error(`import failed: ${JSON.stringify(result.errors[0])}`);
+    }
+  });
+
+  const { clipIds, to } = await insertFreshClips(store, n);
+  await run("bulkReparent", () =>
+    store.nodes.Clip.bulkReparent(
+      clipIds.map((id) => ({
+        id: id as Parameters<BenchStore["nodes"]["Clip"]["reparent"]>[0],
+        options: { whole: to },
+      })),
+    ),
+  );
+
+  await mergeApplySibling(context, n);
+}
+
+/**
+ * Merge apply: a branch rewrites N fresh target rows and the plan is applied
+ * back onto the stale target table.
+ */
+async function mergeApplySibling(
+  context: ScenarioContext,
+  n: number,
+): Promise<void> {
+  const { recorder, options } = context;
+  const [target] = await createStoreWithSchema(graph, context.backend, {
+    autoRefreshStatistics: false,
+    revisionTracking: true,
+  });
+  const ids = await insertFreshItems(target, n);
+  const fixture = createLocalSqliteBackend({ tables: createSqliteTables() });
+  try {
+    const branched = await branch(
+      target,
+      () => Promise.resolve(fixture.backend),
+      {
+        id: asBranchId(`stale-stats-${freshSequence}`),
+      },
+    );
+    if (!branched.success) throw branched.error;
+    const source = branched.data;
+    for (const id of ids) {
+      await source.store.nodes.Item.update(asItemId(id), { status: "merged" });
+    }
+    const planned = await planMerge(target, [source]);
+    if (!planned.success) throw planned.error;
+    await report(
+      await measure(recorder, "merge apply (N updated rows)", n, "stale", () =>
+        applyMergePlan(target, planned.data),
+      ),
+      context.pool,
+      options,
+    );
+  } finally {
+    await fixture.backend.close();
+  }
+}
+
+function asItemId(
+  id: string | undefined,
+): Parameters<BenchStore["nodes"]["Item"]["getById"]>[0] {
+  if (id === undefined) throw new Error("no fresh item id");
+  return id as Parameters<BenchStore["nodes"]["Item"]["getById"]>[0];
+}
+
+const SLOPE_BATCHES = 500;
+const SLOPE_BATCH_SIZE = 20;
+
+/**
+ * A long run of small write batches: each batch creates 20 Items and one
+ * Holder-to-Item edge per Item, in one transaction. Logs per-batch time and,
+ * every 50 batches, the per-shape statement time of the last 50 batches.
+ */
+async function slopeScenario(context: ScenarioContext): Promise<void> {
+  const { store, recorder } = context;
+  const holder = await store.nodes.Holder.create({ name: "slope-holder" });
+  const window: RecordedStatement[] = [];
+  const batchTimes: number[] = [];
+  for (let batchIndex = 0; batchIndex < SLOPE_BATCHES; batchIndex++) {
+    recorder.statements = [];
+    const started = performance.now();
+    await store.transaction(async (tx) => {
+      const items = await tx.nodes.Item.bulkCreate(
+        Array.from({ length: SLOPE_BATCH_SIZE }, (_, index) => ({
+          props: {
+            status: "slope",
+            ordinal: index,
+            code: `slope-${batchIndex}-${index}`,
+          },
+        })),
+      );
+      await tx.edges.link.bulkCreate(
+        items.map((item) => ({ from: holder, to: item, props: {} })),
+      );
+    });
+    batchTimes.push(performance.now() - started);
+    window.push(...recorder.statements);
+    if ((batchIndex + 1) % 50 === 0) {
+      const recent = batchTimes.slice(-50);
+      console.log(
+        JSON.stringify({
+          label: "slope",
+          batches: batchIndex + 1,
+          meanBatchMs:
+            Math.round(
+              (recent.reduce((sum, value) => sum + value, 0) / recent.length) *
+                100,
+            ) / 100,
+          top: totalsByShape(window)
+            .slice(0, 6)
+            .map((entry) => ({
+              shape: entry.shape,
+              count: entry.count,
+              meanMs: Math.round((entry.ms / entry.count) * 1000) / 1000,
+            })),
+        }),
+      );
+      window.length = 0;
+    }
+  }
+}
+
+/** What one ANALYZE of the TypeGraph tables costs on the pre-filled table. */
+async function analyzeCostScenario(context: ScenarioContext): Promise<void> {
+  const samples: number[] = [];
+  for (let sample = 0; sample < 5; sample++) {
+    samples.push(await context.analyze());
+  }
+  console.log(
+    JSON.stringify({
+      label: "analyze all TypeGraph tables",
+      samplesMs: samples.map((sample) => Math.round(sample)),
+    }),
+  );
+  if (context.pool === undefined) return;
+  for (const table of ["typegraph_nodes", "typegraph_edges"]) {
+    const timings: number[] = [];
+    for (let sample = 0; sample < 5; sample++) {
+      const started = performance.now();
+      await context.pool.query(`ANALYZE "${table}"`);
+      timings.push(performance.now() - started);
+    }
+    console.log(
+      JSON.stringify({
+        label: `analyze ${table}`,
+        samplesMs: timings.map((timing) => Math.round(timing)),
+      }),
+    );
+  }
+}
+
 const SCENARIOS: Readonly<
   Record<string, (context: ScenarioContext) => Promise<void>>
 > = {
   "update-where": updateWhereScenario,
+  siblings: siblingsScenario,
+  slope: slopeScenario,
+  "analyze-cost": analyzeCostScenario,
 };
 
 async function runPostgres(options: Options): Promise<void> {
@@ -541,6 +859,7 @@ async function runPostgres(options: Options): Promise<void> {
   try {
     const context: ScenarioContext = {
       store: harness.store,
+      backend: harness.backend,
       pool: harness.pool,
       recorder: harness.recorder,
       options,
@@ -563,10 +882,12 @@ async function runSqlite(options: Options): Promise<void> {
   const [store] = await createStoreWithSchema(graph, backend, {
     autoRefreshStatistics: false,
   });
+  await store.materializeIndexes({ refreshStatistics: false });
   const recorder: Recorder = { statements: [] };
   try {
     const context: ScenarioContext = {
       store,
+      backend,
       pool: undefined,
       recorder,
       options,
