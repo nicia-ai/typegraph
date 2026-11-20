@@ -23,12 +23,15 @@
  * - `--print-sql` — print the text of each N's slowest statement
  * - `--sqlite` — run the same scenarios on in-memory SQLite (time only)
  * - `--statement-timeout=600000` — per-statement cap in milliseconds
+ * - `--analyze-every=N` — slope only: ANALYZE the TypeGraph tables after
+ *   every N batches
  * - `--autoanalyze-threshold=N` — keep autovacuum on the TypeGraph tables
  *   with `autovacuum_analyze_scale_factor = 0` and this analyze threshold,
  *   instead of disabling it
  *
  * The benchmark creates and drops its own database next to the one
- * `POSTGRES_URL` names (`<database>_stale_stats_bench`); it needs `CREATEDB`.
+ * `POSTGRES_URL` names (`<database>_stale_stats_<scenario>`), so scenarios
+ * can run side by side; it needs `CREATEDB`.
  */
 import { performance } from "node:perf_hooks";
 
@@ -131,6 +134,7 @@ type Options = Readonly<{
   sqlite: boolean;
   statementTimeoutMs: number;
   autoanalyzeThreshold: number | undefined;
+  analyzeEvery: number | undefined;
 }>;
 
 function parseOptions(argv: readonly string[]): Options {
@@ -152,6 +156,10 @@ function parseOptions(argv: readonly string[]): Options {
       value("statement-timeout") ?? "600000",
       10,
     ),
+    analyzeEvery: (() => {
+      const every = value("analyze-every");
+      return every === undefined ? undefined : Number.parseInt(every, 10);
+    })(),
     autoanalyzeThreshold: (() => {
       const threshold = value("autoanalyze-threshold");
       return threshold === undefined ? undefined : (
@@ -281,12 +289,15 @@ function slowest(
 // Database lifecycle
 // ---------------------------------------------------------------------------
 
-function benchDatabaseUrl(baseUrl: string): Readonly<{
+function benchDatabaseUrl(
+  baseUrl: string,
+  scenario: string,
+): Readonly<{
   url: string;
   name: string;
 }> {
   const url = new URL(baseUrl);
-  const name = `${url.pathname.slice(1)}_stale_stats_bench`;
+  const name = `${url.pathname.slice(1)}_stale_stats_${scenario.replaceAll("-", "_")}`;
   url.pathname = `/${name}`;
   return { url: url.toString(), name };
 }
@@ -382,7 +393,7 @@ type PostgresHarness = Readonly<{
 async function createPostgresHarness(
   options: Options,
 ): Promise<PostgresHarness> {
-  const { url, name } = benchDatabaseUrl(getPostgresUrl());
+  const { url, name } = benchDatabaseUrl(getPostgresUrl(), options.scenario);
   await recreateDatabase(getPostgresUrl(), name);
   const recorder: Recorder = { statements: [] };
   const pool = new Pool({
@@ -791,6 +802,10 @@ async function slopeScenario(context: ScenarioContext): Promise<void> {
     });
     batchTimes.push(performance.now() - started);
     window.push(...recorder.statements);
+    const analyzeEvery = context.options.analyzeEvery;
+    if (analyzeEvery !== undefined && (batchIndex + 1) % analyzeEvery === 0) {
+      await context.analyze();
+    }
     if ((batchIndex + 1) % 50 === 0) {
       const recent = batchTimes.slice(-50);
       console.log(
