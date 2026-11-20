@@ -205,6 +205,11 @@ containers and volumes are removed before the next engine starts.
 | `typegraph-sqlite` | none | none | database file in the OS temp dir | page cache sized from host memory |
 | `ladybugdb` | none | none | staged CSVs and database in the OS temp dir | default buffer pool |
 
+The Graph Data Science jar is fetched with Node's `fetch`, which ignores
+`HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1` is set; on a proxied host set it,
+or place the pinned jar in `~/.cache/typegraph/neo4j-plugins/` beforehand
+(it is still checked against the pinned SHA-256).
+
 The published SF1 numbers come from an EC2 `c7i.4xlarge` (16 vCPU, 32 GiB)
 with a 150 GiB gp3 volume (`docs/ec2-benchmark-runner.md`); that is a known-good
 size for all five engines at SF1. The SF1 archive is 230 MB (zstd); the
