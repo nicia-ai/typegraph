@@ -19,7 +19,11 @@
  * - `--sizes=1000,2500,5000,10000,20000` — the fresh-row counts N
  * - `--prefill=300000` — rows of other graphs and kinds
  * - `--fresh` — also run every N after `ANALYZE` (the "fresh" column)
- * - `--explain` — print the plan of each N's slowest statement
+ * - `--explain` — print the plan of each N's slowest statement. Every
+ *   statement is explained in place, immediately before it runs, on its own
+ *   connection inside a savepoint (or a rolled-back transaction) — so the
+ *   plan is the measured statement's, against the rows it writes. Timings in
+ *   this mode include the rehearsal's effects on the table.
  * - `--print-sql` — print the text of each N's slowest statement
  * - `--sqlite` — run the same scenarios on in-memory SQLite (time only)
  * - `--statement-timeout=600000` — per-statement cap in milliseconds
@@ -29,10 +33,13 @@
  *   with `autovacuum_analyze_scale_factor = 0` and this analyze threshold,
  *   instead of disabling it
  *
- * The benchmark creates and drops its own database next to the one
- * `POSTGRES_URL` names (`<database>_stale_stats_<scenario>`), so scenarios
- * can run side by side; it needs `CREATEDB`.
+ * The benchmark creates a database of its own with a random name
+ * (`typegraph_stale_stats_<hex>`) on the server `POSTGRES_URL` names, so runs
+ * can go side by side, and drops only that database when it finishes; it
+ * never drops a database it did not create. It needs `CREATEDB`. Every flag is
+ * validated before any statement runs.
  */
+import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
@@ -137,35 +144,52 @@ type Options = Readonly<{
   analyzeEvery: number | undefined;
 }>;
 
+/** A flag's whole-number value, refused unless it is one (`minimum` up). */
+function parseCount(name: string, raw: string, minimum: number): number {
+  if (!/^\d+$/.test(raw) || Number.parseInt(raw, 10) < minimum) {
+    throw new Error(
+      `--${name} must be a whole number of at least ${minimum}, got "${raw}".`,
+    );
+  }
+  return Number.parseInt(raw, 10);
+}
+
+/**
+ * Parses and validates every flag. An unknown scenario or a malformed number
+ * is refused here, before the benchmark connects to anything.
+ */
 function parseOptions(argv: readonly string[]): Options {
   function value(name: string): string | undefined {
     const prefix = `--${name}=`;
     return argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
   }
+  function optionalCount(name: string, minimum: number): number | undefined {
+    const raw = value(name);
+    return raw === undefined ? undefined : parseCount(name, raw, minimum);
+  }
+  const scenario = value("scenario") ?? "update-where";
+  if (scenario !== "all" && !Object.hasOwn(SCENARIOS, scenario)) {
+    throw new Error(
+      `--scenario must be one of all, ${Object.keys(SCENARIOS).join(", ")}; got "${scenario}".`,
+    );
+  }
   return {
-    scenario: value("scenario") ?? "update-where",
+    scenario,
     sizes: (value("sizes") ?? "1000,2500,5000,10000,20000")
       .split(",")
-      .map((size) => Number.parseInt(size, 10)),
-    prefill: Number.parseInt(value("prefill") ?? "300000", 10),
+      .map((size) => parseCount("sizes", size, 1)),
+    prefill: parseCount("prefill", value("prefill") ?? "300000", 0),
     fresh: argv.includes("--fresh"),
     explain: argv.includes("--explain"),
     printSql: argv.includes("--print-sql"),
     sqlite: argv.includes("--sqlite"),
-    statementTimeoutMs: Number.parseInt(
+    statementTimeoutMs: parseCount(
+      "statement-timeout",
       value("statement-timeout") ?? "600000",
-      10,
+      0,
     ),
-    analyzeEvery: (() => {
-      const every = value("analyze-every");
-      return every === undefined ? undefined : Number.parseInt(every, 10);
-    })(),
-    autoanalyzeThreshold: (() => {
-      const threshold = value("autoanalyze-threshold");
-      return threshold === undefined ? undefined : (
-          Number.parseInt(threshold, 10)
-        );
-    })(),
+    analyzeEvery: optionalCount("analyze-every", 1),
+    autoanalyzeThreshold: optionalCount("autoanalyze-threshold", 0),
   };
 }
 
@@ -177,10 +201,14 @@ type RecordedStatement = Readonly<{
   text: string;
   values: readonly unknown[];
   ms: number;
+  /** `EXPLAIN (ANALYZE, BUFFERS)` of the statement, under `--explain`. */
+  plan: string | undefined;
 }>;
 
 type Recorder = {
   statements: RecordedStatement[];
+  /** Whether to explain every statement in place before it runs. */
+  explain: boolean;
 };
 
 type QueryConfigLike = Readonly<{ text: string; values?: unknown[] }>;
@@ -202,31 +230,114 @@ function statementValues(first: unknown, second: unknown): readonly unknown[] {
   return [];
 }
 
+type RunQuery = (
+  text: string,
+  values?: readonly unknown[],
+) => Promise<pg.QueryResult<Record<string, unknown>>>;
+
+const EXPLAINABLE_STATEMENT = /^\s*(select|insert|update|delete|with)\b/i;
+const EXPLAIN_SAVEPOINT = "tg_bench_explain";
+
+/**
+ * `EXPLAIN (ANALYZE, BUFFERS)` of a statement about to run on `run`'s
+ * connection, rolled back so the statement then runs against the same rows:
+ * inside a savepoint when the connection is in a transaction, in a
+ * transaction of its own otherwise.
+ */
+async function explainInPlace(
+  run: RunQuery,
+  text: string,
+  values: readonly unknown[],
+  inTransaction: boolean,
+): Promise<string> {
+  try {
+    await run(inTransaction ? `SAVEPOINT ${EXPLAIN_SAVEPOINT}` : "BEGIN");
+  } catch (error) {
+    return `(not explained: ${error instanceof Error ? error.message : String(error)})`;
+  }
+  try {
+    const result = await run(`EXPLAIN (ANALYZE, BUFFERS) ${text}`, values);
+    return result.rows.map((row) => String(row["QUERY PLAN"])).join("\n");
+  } catch (error) {
+    return `(explain failed: ${error instanceof Error ? error.message : String(error)})`;
+  } finally {
+    if (inTransaction) {
+      await run(`ROLLBACK TO SAVEPOINT ${EXPLAIN_SAVEPOINT}`);
+      await run(`RELEASE SAVEPOINT ${EXPLAIN_SAVEPOINT}`);
+    } else {
+      await run("ROLLBACK");
+    }
+  }
+}
+
+/** How a statement moves its connection in or out of a transaction. */
+function transactionEffect(text: string): "begin" | "end" | undefined {
+  const folded = text.trim().toLowerCase();
+  if (folded.startsWith("begin") || folded.startsWith("start transaction")) {
+    return "begin";
+  }
+  if (folded === "commit" || folded === "end" || folded === "rollback") {
+    return "end";
+  }
+  return undefined;
+}
+
 /**
  * Times every statement any pooled client runs. `pg.Pool#query` and drizzle's
  * transaction sessions both end in `Client#query`, so wrapping each client as
- * it connects covers every statement the store issues.
+ * it connects covers every statement the store issues. Under `--explain`,
+ * each promise-style statement is first explained in place
+ * ({@link explainInPlace}); its recorded time is the statement's alone.
  */
 function instrumentPool(pool: pg.Pool, recorder: Recorder): void {
   pool.on("connect", (client) => {
     const original = client.query.bind(client) as (
       ...args: unknown[]
     ) => unknown;
+    const run: RunQuery = (text, values) =>
+      original(
+        text,
+        values === undefined ? undefined : [...values],
+      ) as ReturnType<RunQuery>;
+    let inTransaction = false;
     (client as unknown as { query: (...args: unknown[]) => unknown }).query = (
       ...args: unknown[]
     ) => {
       const text = statementText(args[0]);
       if (text === undefined) return original(...args);
       const values = statementValues(args[0], args[1]);
+      const effect = transactionEffect(text);
+      if (effect !== undefined) inTransaction = effect === "begin";
+      const last = args.at(-1);
+      if (
+        recorder.explain &&
+        typeof last !== "function" &&
+        EXPLAINABLE_STATEMENT.test(text)
+      ) {
+        return (async () => {
+          const plan = await explainInPlace(run, text, values, inTransaction);
+          const started = performance.now();
+          try {
+            return await (original(...args) as Promise<unknown>);
+          } finally {
+            recorder.statements.push({
+              text,
+              values,
+              ms: performance.now() - started,
+              plan,
+            });
+          }
+        })();
+      }
       const started = performance.now();
       function record(): void {
         recorder.statements.push({
           text: text ?? "",
           values,
           ms: performance.now() - started,
+          plan: undefined,
         });
       }
-      const last = args.at(-1);
       if (typeof last === "function") {
         const callback = last as (...callbackArgs: unknown[]) => void;
         return original(...args.slice(0, -1), (...callbackArgs: unknown[]) => {
@@ -289,28 +400,59 @@ function slowest(
 // Database lifecycle
 // ---------------------------------------------------------------------------
 
-function benchDatabaseUrl(
-  baseUrl: string,
-  scenario: string,
-): Readonly<{
-  url: string;
-  name: string;
-}> {
-  const url = new URL(baseUrl);
-  const name = `${url.pathname.slice(1)}_stale_stats_${scenario.replaceAll("-", "_")}`;
-  url.pathname = `/${name}`;
-  return { url: url.toString(), name };
+/** The only database names this benchmark creates, and so may drop. */
+const BENCH_DATABASE_NAME = /^typegraph_stale_stats_[0-9a-f]{16}$/;
+
+/** A fresh database name: a fixed prefix and 64 random bits, 38 bytes. */
+function benchDatabaseName(): string {
+  return `typegraph_stale_stats_${randomBytes(8).toString("hex")}`;
 }
 
-async function recreateDatabase(baseUrl: string, name: string): Promise<void> {
+function benchDatabaseUrl(baseUrl: string, name: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = `/${name}`;
+  return url.toString();
+}
+
+async function withAdmin(
+  baseUrl: string,
+  run: (admin: pg.Client) => Promise<void>,
+): Promise<void> {
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
   try {
-    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-    await admin.query(`CREATE DATABASE "${name}"`);
+    await run(admin);
   } finally {
     await admin.end();
   }
+}
+
+function assertBenchDatabaseName(name: string): void {
+  if (!BENCH_DATABASE_NAME.test(name)) {
+    throw new Error(`Refusing to touch database "${name}".`);
+  }
+}
+
+/**
+ * Creates the run's database. `CREATE DATABASE` fails on an existing name, so
+ * a run can never adopt — and later drop — a database it did not create.
+ */
+async function createBenchDatabase(
+  baseUrl: string,
+  name: string,
+): Promise<void> {
+  assertBenchDatabaseName(name);
+  await withAdmin(baseUrl, async (admin) => {
+    await admin.query(`CREATE DATABASE "${name}"`);
+  });
+}
+
+/** Drops the database {@link createBenchDatabase} created for this run. */
+async function dropBenchDatabase(baseUrl: string, name: string): Promise<void> {
+  assertBenchDatabaseName(name);
+  await withAdmin(baseUrl, async (admin) => {
+    await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
+  });
 }
 
 const TYPEGRAPH_TABLES_QUERY = `
@@ -393,38 +535,53 @@ type PostgresHarness = Readonly<{
 async function createPostgresHarness(
   options: Options,
 ): Promise<PostgresHarness> {
-  const { url, name } = benchDatabaseUrl(getPostgresUrl(), options.scenario);
-  await recreateDatabase(getPostgresUrl(), name);
-  const recorder: Recorder = { statements: [] };
+  const baseUrl = getPostgresUrl();
+  const name = benchDatabaseName();
+  await createBenchDatabase(baseUrl, name);
+  console.log(`created database ${name}`);
+  const recorder: Recorder = { statements: [], explain: false };
   const pool = new Pool({
-    connectionString: url,
+    connectionString: benchDatabaseUrl(baseUrl, name),
     max: 4,
     options: `-c statement_timeout=${options.statementTimeoutMs}`,
   });
-  instrumentPool(pool, recorder);
-  const tables = createPostgresTables();
-  await pool.query(generatePostgresMigrationSQL(tables));
-  await configureAutovacuum(pool, options.autoanalyzeThreshold);
-  const backend = createPostgresBackend(drizzleNodePostgres(pool), { tables });
-  const [store] = await createStoreWithSchema(graph, backend, {
-    autoRefreshStatistics: false,
-  });
-  await store.materializeIndexes({ refreshStatistics: false });
-  await prefill(pool, options.prefill);
-  const analyzeMs = await analyzeAll(pool);
-  console.log(
-    `prefilled ${options.prefill} nodes and ${options.prefill} edges; analyze took ${Math.round(analyzeMs)} ms`,
-  );
-  return {
-    store,
-    backend,
-    pool,
-    recorder,
-    close: async () => {
-      await backend.close();
-      await pool.end();
-    },
-  };
+  async function dropDatabase(): Promise<void> {
+    await pool.end();
+    await dropBenchDatabase(baseUrl, name);
+  }
+  try {
+    instrumentPool(pool, recorder);
+    const tables = createPostgresTables();
+    await pool.query(generatePostgresMigrationSQL(tables));
+    await configureAutovacuum(pool, options.autoanalyzeThreshold);
+    const backend = createPostgresBackend(drizzleNodePostgres(pool), {
+      tables,
+    });
+    const [store] = await createStoreWithSchema(graph, backend, {
+      autoRefreshStatistics: false,
+    });
+    await store.materializeIndexes({ refreshStatistics: false });
+    await prefill(pool, options.prefill);
+    const analyzeMs = await analyzeAll(pool);
+    console.log(
+      `prefilled ${options.prefill} nodes and ${options.prefill} edges; analyze took ${Math.round(analyzeMs)} ms`,
+    );
+    // Explain only the scenarios' statements, not the setup's.
+    recorder.explain = options.explain;
+    return {
+      store,
+      backend,
+      pool,
+      recorder,
+      close: async () => {
+        await backend.close();
+        await dropDatabase();
+      },
+    };
+  } catch (error) {
+    await dropDatabase();
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,29 +641,7 @@ async function measure(
   return { label, n, statistics, ms, statements };
 }
 
-async function explain(
-  pool: pg.Pool,
-  statement: RecordedStatement,
-): Promise<string> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await client.query<{ "QUERY PLAN": string }>(
-      `EXPLAIN (ANALYZE, BUFFERS) ${statement.text}`,
-      [...statement.values],
-    );
-    return result.rows.map((row) => row["QUERY PLAN"]).join("\n");
-  } finally {
-    await client.query("ROLLBACK");
-    client.release();
-  }
-}
-
-async function report(
-  measurement: Measurement,
-  pool: pg.Pool | undefined,
-  options: Options,
-): Promise<void> {
+function report(measurement: Measurement, options: Options): void {
   const top = totalsByShape(measurement.statements).slice(0, 3);
   console.log(
     JSON.stringify({
@@ -526,9 +661,9 @@ async function report(
   if (options.printSql && worst !== undefined) {
     console.log(`--- SQL ${measurement.label}\n${worst.text}\n---`);
   }
-  if (options.explain && pool !== undefined && worst !== undefined) {
+  if (options.explain && worst?.plan !== undefined) {
     console.log(
-      `--- EXPLAIN ${measurement.label} N=${measurement.n} ${measurement.statistics}\n${await explain(pool, worst)}\n---`,
+      `--- EXPLAIN ${measurement.label} N=${measurement.n} ${measurement.statistics}\n${worst.plan}\n---`,
     );
   }
 }
@@ -554,38 +689,35 @@ async function updateWhereScenario(context: ScenarioContext): Promise<void> {
     for (const n of options.sizes) {
       const ids = await insertFreshItems(store, n);
       if (statistics === "fresh") await context.analyze();
-      await report(
+      report(
         await measure(recorder, "updateWhere id.in", n, statistics, () =>
           store.nodes.Item.updateWhere({
             where: (item) => item.id.in([...ids]),
             patch: { status: "promoted" },
           }),
         ),
-        context.pool,
         options,
       );
     }
   }
   // Small-N controls: one id, and a predicate with no id list.
   const [single] = await insertFreshItems(store, 1);
-  await report(
+  report(
     await measure(recorder, "updateWhere single id", 1, "stale", () =>
       store.nodes.Item.updateWhere({
         where: (item) => item.id.eq(single ?? ""),
         patch: { status: "single" },
       }),
     ),
-    context.pool,
     options,
   );
-  await report(
+  report(
     await measure(recorder, "updateWhere predicate", 0, "stale", () =>
       store.nodes.Item.updateWhere({
         where: (item) => item.ordinal.eq(-1),
         patch: { status: "none" },
       }),
     ),
-    context.pool,
     options,
   );
 }
@@ -630,11 +762,7 @@ async function siblingsScenario(context: ScenarioContext): Promise<void> {
   const { store, recorder, options } = context;
   const n = siblingSize(options);
   async function run(label: string, operation: () => Promise<unknown>) {
-    await report(
-      await measure(recorder, label, n, "stale", operation),
-      context.pool,
-      options,
-    );
+    report(await measure(recorder, label, n, "stale", operation), options);
   }
 
   const casIds = await insertFreshItems(store, n);
@@ -751,11 +879,10 @@ async function mergeApplySibling(
     }
     const planned = await planMerge(target, [source]);
     if (!planned.success) throw planned.error;
-    await report(
+    report(
       await measure(recorder, "merge apply (N updated rows)", n, "stale", () =>
         applyMergePlan(target, planned.data),
       ),
-      context.pool,
       options,
     );
   } finally {
@@ -898,7 +1025,7 @@ async function runSqlite(options: Options): Promise<void> {
     autoRefreshStatistics: false,
   });
   await store.materializeIndexes({ refreshStatistics: false });
-  const recorder: Recorder = { statements: [] };
+  const recorder: Recorder = { statements: [], explain: false };
   try {
     const context: ScenarioContext = {
       store,
