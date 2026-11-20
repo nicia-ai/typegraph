@@ -6,6 +6,11 @@
  * uniquely constrained kind spent ~15 s in that loop alone. The count of
  * claim-key encodings is the deterministic measure: it doubles with the set
  * when the comparison is bucketed by claim row, and quadruples when it is not.
+ *
+ * The refusal of two members that compete for one claim must stay with that
+ * in-set check: the persisted-claim probe and the claim rebuild that follow it
+ * would also fail on such a set, but only after reading and rewriting claim
+ * rows, so the refusal case counts the calls that reach them.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -16,6 +21,11 @@ import {
   defineNode,
   type GraphBackend,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
+import type { TransactionBackend } from "../src/backend/types";
 import type * as TupleKey from "../src/utils/tuple-key";
 import { createTestBackend } from "./test-utils";
 
@@ -67,6 +77,54 @@ async function seededStore(backend: GraphBackend, count: number) {
   return store;
 }
 
+/** The backend members a set update's claim maintenance reaches, in order. */
+const CLAIM_MEMBERS = [
+  "updateNodeSet",
+  "checkUniqueBatch",
+  "hardDeleteUniquesByNodeIds",
+  "insertUniqueBatch",
+] as const;
+
+type ClaimMember = (typeof CLAIM_MEMBERS)[number];
+
+/**
+ * Counts {@link CLAIM_MEMBERS} calls on `backend` and on every transaction it
+ * opens, where the set update runs.
+ */
+function countingClaimMembers(backend: GraphBackend): Readonly<{
+  backend: GraphBackend;
+  counts: Record<ClaimMember, number>;
+}> {
+  const counts = Object.fromEntries(
+    CLAIM_MEMBERS.map((member) => [member, 0]),
+  ) as Record<ClaimMember, number>;
+  function counted<T extends GraphBackend | TransactionBackend>(target: T): T {
+    const overrides: Record<string, unknown> = {};
+    for (const member of CLAIM_MEMBERS) {
+      const original: unknown = Reflect.get(target, member);
+      if (typeof original !== "function") continue;
+      overrides[member] = (...args: unknown[]) => {
+        counts[member] += 1;
+        return (original as (...callArguments: unknown[]) => unknown).apply(
+          target,
+          args,
+        );
+      };
+    }
+    return deriveBackend<T, Partial<T>>(
+      target,
+      overrides as ExactBackendOverlay<T, Partial<T>>,
+    );
+  }
+  return {
+    backend: deriveBackend(counted(backend), {
+      transaction: (run, options) =>
+        backend.transaction((target) => run(counted(target)), options),
+    }),
+    counts,
+  };
+}
+
 async function encodingsForUpdateOf(count: number): Promise<number> {
   const store = await seededStore(createTestBackend(), count);
   encodings.count = 0;
@@ -91,8 +149,10 @@ describe("set-update uniqueness validation", () => {
     expect(large / small).toBeLessThan(2.5);
   });
 
-  it("still refuses two rewritten rows that compete for one claim, writing nothing", async () => {
-    const store = await seededStore(createTestBackend(), 3);
+  it("refuses two rewritten rows that compete for one claim in the set itself, before any claim row is read or rewritten", async () => {
+    const { backend, counts } = countingClaimMembers(createTestBackend());
+    const store = await seededStore(backend, 3);
+    for (const member of CLAIM_MEMBERS) counts[member] = 0;
 
     await expect(
       store.nodes.Ticket.updateWhere({
@@ -106,6 +166,15 @@ describe("set-update uniqueness validation", () => {
     const stored = await store.nodes.Ticket.getById(
       "ticket-0" as Parameters<typeof store.nodes.Ticket.getById>[0],
     );
+
     expect(stored?.code).toBe("code-0");
+    // The row write ran (its after-images are what the check reads); the
+    // persisted-claim probe and the rebuild never did.
+    expect(counts).toEqual({
+      updateNodeSet: 1,
+      checkUniqueBatch: 0,
+      hardDeleteUniquesByNodeIds: 0,
+      insertUniqueBatch: 0,
+    });
   });
 });
