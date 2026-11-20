@@ -5407,6 +5407,8 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions & Ite
     edges: readonly EdgeKinds<G>[];
     nodeKinds?: readonly NodeKinds<G>[];
     direction?: TraversalDirection;
+    weightProperty?: string;
+    defaultWeight?: number;
     dampingFactor?: number;
     tolerance?: number;
     maxIterations?: number;

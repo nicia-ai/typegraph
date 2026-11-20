@@ -338,7 +338,7 @@ export interface DialectAdapter {
    * results (e.g. graph traversal weights) are backend-identical.
    *
    * @example
-   * SQLite: json_extract(column, '$.path')
+   * SQLite: CAST(json_extract(column, '$.path') AS REAL)
    * PostgreSQL: (column #>> ARRAY['path'])::double precision
    */
   readonly jsonExtractDouble: (

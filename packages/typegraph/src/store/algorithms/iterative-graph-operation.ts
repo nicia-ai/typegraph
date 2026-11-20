@@ -1013,8 +1013,11 @@ function compileWeightExpression(
     sql.raw("e.props"),
     jsonPointer([weightProperty]),
   );
+  // The default is cast for the same reason the extraction is a double: a
+  // driver may bind an integer-valued number as an integer, and integer
+  // aggregation overflows where double aggregation does not.
   return defaultWeight === undefined ? extracted : (
-      sql`COALESCE(${extracted}, ${defaultWeight})`
+      sql`COALESCE(${extracted}, CAST(${defaultWeight} AS DOUBLE PRECISION))`
     );
 }
 

@@ -2,12 +2,14 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
+  isJsonPointerEndOfArraySegment,
   joinJsonPointers,
   jsonPointer,
   type JsonPointerInput,
   MAX_JSON_POINTER_DEPTH,
   normalizeJsonPointer,
   parseJsonPointer,
+  unaddressableObjectKeyReason,
 } from "../../src/query/json-pointer";
 
 // Generator for valid pointer segments (string or non-negative integer)
@@ -144,5 +146,17 @@ describe("JSON Pointer Properties", () => {
         expect(!hasTilde || containsTilde0).toBe(true);
       }),
     );
+  });
+
+  it("refuses the end-of-array segment wherever a pointer is built or classified", () => {
+    const refusal = "JSON Pointer '-' segment is not allowed for query access";
+
+    expect(isJsonPointerEndOfArraySegment("-")).toBe(true);
+    expect(isJsonPointerEndOfArraySegment("--")).toBe(false);
+    expect(() => jsonPointer(["items", "-"])).toThrow(refusal);
+    expect(() =>
+      normalizeJsonPointer("/items/-" as JsonPointerInput<unknown>),
+    ).toThrow(refusal);
+    expect(unaddressableObjectKeyReason("-")).toBe("end_of_array");
   });
 });

@@ -391,6 +391,26 @@ describe("temporary table cleanup assertion", () => {
 // Test Setup
 // ============================================================
 
+/**
+ * The distinct statements of one run in first-issued order, with the run's
+ * random working-table suffix and insignificant whitespace removed so two
+ * runs of the same plan compare equal.
+ */
+function distinctNormalizedStatements(
+  statements: readonly string[],
+): readonly string[] {
+  return [
+    ...new Set(
+      statements.map((statement) =>
+        statement
+          .replaceAll(/typegraph_iterative_\w+/gu, "typegraph_iterative_RUN")
+          .replaceAll(/\s+/gu, " ")
+          .trim(),
+      ),
+    ),
+  ];
+}
+
 describe("store.algorithms", () => {
   let backend: GraphBackend;
   let store: Store<TestGraph>;
@@ -2291,6 +2311,49 @@ describe("store.algorithms", () => {
           /SET\s+"?score"?\s*=\s*"?next_score"?/.test(statement),
         ),
       ).toBe(false);
+    });
+
+    it("issues the unweighted statements unchanged by the edge-weight options", async () => {
+      // The snapshot was recorded before edge weights existed, so any drift
+      // in what an unweighted run sends to the database fails here.
+      const statements: string[] = [];
+      const rankStore = createStore(
+        testGraph,
+        createStatementCountingBackend(createTestBackend(), statements),
+      );
+      const [alpha, beta, gamma] = await Promise.all([
+        rankStore.nodes.Person.create({ name: "Rank alpha" }, { id: "rank-a" }),
+        rankStore.nodes.Person.create({ name: "Rank beta" }, { id: "rank-b" }),
+        rankStore.nodes.Person.create({ name: "Rank gamma" }, { id: "rank-c" }),
+      ]);
+      await Promise.all([
+        rankStore.edges.knows.create(alpha, beta, {}),
+        rankStore.edges.knows.create(beta, gamma, {}),
+        rankStore.edges.knows.create(gamma, gamma, {}),
+      ]);
+
+      const runs = {
+        out: () => rankStore.algorithms.pageRank({ edges: ["knows"] }),
+        both: () =>
+          rankStore.algorithms.pageRank({
+            edges: ["knows"],
+            direction: "both",
+          }),
+        personalized: () =>
+          rankStore.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [{ id: alpha.id, kind: "Person" }],
+          }),
+      };
+      for (const [name, run] of Object.entries(runs)) {
+        statements.length = 0;
+        const scores = await run();
+        expect({
+          statementCount: statements.length,
+          distinctStatements: distinctNormalizedStatements(statements),
+          scores,
+        }).toMatchSnapshot(name);
+      }
     });
 
     it("computes the analytic two-node personalized solution", async () => {

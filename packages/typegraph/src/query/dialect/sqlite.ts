@@ -8,7 +8,11 @@ import {
   SQLITE_PATH_DELIMITER,
   SQLITE_PATH_TOKEN_ESCAPES,
 } from "../../constants";
-import { type JsonPointer, parseJsonPointer } from "../json-pointer";
+import {
+  isJsonPointerArrayIndexSegment,
+  type JsonPointer,
+  parseJsonPointer,
+} from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
 import { fts5Strategy } from "./fulltext-strategy";
@@ -84,7 +88,7 @@ function toSqlitePath(pointer: JsonPointer): string {
   const parts: string[] = ["$"];
 
   for (const segment of segments) {
-    if (isArrayIndex(segment)) {
+    if (isJsonPointerArrayIndexSegment(segment)) {
       parts.push(`[${segment}]`);
     } else {
       // Quote the key to handle special characters
@@ -117,13 +121,6 @@ function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
   if (first === undefined) return sql`json('{}')`;
   if (rest.length === 0) return first;
   return sql`json_patch(${first}, ${mergeJsonObjects(rest)})`;
-}
-
-/**
- * Checks if a JSON pointer segment is an array index.
- */
-function isArrayIndex(segment: string): boolean {
-  return /^\d+$/.test(segment);
 }
 
 /**
@@ -261,10 +258,12 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   },
 
   jsonExtractDouble(column, pointer) {
-    // json_extract already yields INTEGER/REAL affinity for JSON numbers,
-    // and SQLite arithmetic on those values is IEEE 754 double.
+    // json_extract yields INTEGER for an integer-valued JSON number, and
+    // INTEGER arithmetic is exact 64-bit: SUM over such values raises
+    // "integer overflow" where a double would simply grow. The cast makes
+    // every extracted number REAL; NULL stays NULL.
     const path = toSqlitePath(pointer);
-    return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
+    return sql`CAST(json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))}) AS REAL)`;
   },
 
   jsonExtractBoolean(column, pointer) {

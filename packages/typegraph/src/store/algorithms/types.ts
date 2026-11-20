@@ -172,13 +172,15 @@ export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
   Readonly<{
     /**
      * Top-level edge property supplying each edge's non-negative numeric
-     * weight.
+     * weight. An all-digit name, `"-"`, or a name containing a double quote
+     * or a NUL character throws `ConfigurationError`: a JSON path cannot
+     * address it as an object key on every backend.
      */
     weightProperty: string;
     /**
      * Weight substituted for edges missing `weightProperty`. Must be a
      * non-negative number within the same upper bound the audit applies to
-     * stored weights (~9.7e289, so accumulated path sums can never
+     * stored weights (~9.7e288, so accumulated path sums can never
      * overflow). Without it, a missing weight throws
      * `InvalidEdgeWeightError`.
      */
@@ -374,6 +376,29 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     nodeKinds?: readonly NodeKinds<G>[];
     /** Transition direction. Defaults to `"out"`. */
     direction?: TraversalDirection;
+    /**
+     * Top-level edge property supplying each edge's non-negative numeric
+     * weight. When set, a node's rank is distributed over its out-edges in
+     * proportion to their weights instead of equally, and a node whose
+     * out-edge weights sum to zero is treated as dangling. The same audit as
+     * `weightedShortestPath` runs before any round: a negative, non-numeric
+     * or out-of-range weight on any visible edge of the selected kinds, or a
+     * missing one with no `defaultWeight`, throws `InvalidEdgeWeightError`.
+     * Only the ratio between one node's out-edge weights matters. Rank that
+     * shrinks below the double range along very light edges (one ratio, or
+     * a product of ratios along a path, under about 1e-308) is rounded to
+     * zero by SQLite and raised as SQLSTATE 22003 by PostgreSQL. An
+     * all-digit name, `"-"`, or a name containing a double quote or a NUL
+     * character throws `ConfigurationError`. Omit it for the unweighted
+     * walk.
+     */
+    weightProperty?: string;
+    /**
+     * Weight substituted for edges missing `weightProperty`. Must be a
+     * non-negative number within the audit's upper bound (~9.7e288), and
+     * requires `weightProperty`.
+     */
+    defaultWeight?: number;
     /** Probability of following an edge. Defaults to `0.85`. */
     dampingFactor?: number;
     /** Maximum accepted per-node score change. Defaults to `1e-8`. */

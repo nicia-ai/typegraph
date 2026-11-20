@@ -5176,6 +5176,8 @@ type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeM
     edges: readonly EdgeKinds<G>[];
     nodeKinds?: readonly NodeKinds<G>[];
     direction?: TraversalDirection$1;
+    weightProperty?: string;
+    defaultWeight?: number;
     dampingFactor?: number;
     tolerance?: number;
     maxIterations?: number;

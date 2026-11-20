@@ -2886,6 +2886,74 @@ export function registerRecordedTimeIntegrationTests(
       expect(replayed?.totalWeight).toBe(5);
     });
 
+    it("reconstructs weighted PageRank at recorded instants", async () => {
+      const store = await createHistoryStore(context);
+      const a = await store.nodes.Person.create({ name: "RA", age: 1 });
+      const b = await store.nodes.Person.create({ name: "RB", age: 2 });
+      const c = await store.nodes.Person.create({ name: "RC", age: 3 });
+      await store.edges.knows.create(a, b, { weight: 1 });
+      await store.edges.knows.create(a, c, { weight: 1 });
+      const beforeHeavyEdge = await readRecordedClock(store);
+
+      // A heavy parallel edge appears later; the weight audit, the out-weight
+      // sums and every round must read the recorded relation at the pin.
+      await store.edges.knows.create(a, c, { weight: 9 });
+      const afterHeavyEdge = await readRecordedClock(store);
+
+      const options = {
+        edges: ["knows"],
+        weightProperty: "weight",
+        seeds: [{ id: a.id, kind: "Person" }],
+      } as const;
+      const scoreRatio = (
+        scores: readonly Readonly<{ id: string; score: number }>[],
+      ): number =>
+        (scores.find((row) => row.id === c.id)?.score ?? Number.NaN) /
+        (scores.find((row) => row.id === b.id)?.score ?? Number.NaN);
+
+      // b and c hold no teleport mass, so their scores stand in the ratio of
+      // the weights a sends them.
+      const early = await store
+        .asOfRecorded(beforeHeavyEdge)
+        .personalizedPageRank(options);
+      expect(scoreRatio(early)).toBeCloseTo(1, 6);
+
+      const late = await store
+        .asOfRecorded(afterHeavyEdge)
+        .algorithms.personalizedPageRank(options);
+      expect(scoreRatio(late)).toBeCloseTo(10, 6);
+
+      // History is immutable: replaying the earlier pin still sees one edge.
+      const replayed = await store
+        .asOfRecorded(beforeHeavyEdge)
+        .personalizedPageRank(options);
+      expect(scoreRatio(replayed)).toBeCloseTo(1, 6);
+    });
+
+    it("audits PageRank edge weights at recorded instants", async () => {
+      const store = await createHistoryStore(context);
+      const a = await store.nodes.Person.create({ name: "AA", age: 1 });
+      const b = await store.nodes.Person.create({ name: "AB", age: 2 });
+      await store.edges.knows.create(a, b, { weight: 1 });
+      const beforeInvalidWeight = await readRecordedClock(store);
+
+      await store.edges.knows.create(a, b, { weight: -1 });
+      const afterInvalidWeight = await readRecordedClock(store);
+
+      const options = { edges: ["knows"], weightProperty: "weight" } as const;
+
+      // The invalid weight is not part of the earlier recorded relation.
+      await expect(
+        store.asOfRecorded(beforeInvalidWeight).algorithms.pageRank(options),
+      ).resolves.toHaveLength(2);
+      await expect(
+        store.asOfRecorded(afterInvalidWeight).algorithms.pageRank(options),
+      ).rejects.toMatchObject({
+        name: "InvalidEdgeWeightError",
+        details: { reason: "negative", property: "weight" },
+      });
+    });
+
     it("reconstructs label propagation at recorded instants", async () => {
       const store = await createHistoryStore(context);
       const [alpha, beta, gamma] = await Promise.all([
