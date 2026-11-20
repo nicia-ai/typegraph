@@ -243,6 +243,13 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
   },
 
+  jsonObjectMember(column, key) {
+    // `->` keeps the member's stored JSON text, so a number reaches the
+    // path members exactly as written; the quoted label is never an index.
+    const path = toSqliteObjectPropertyPath(key);
+    return sql`(${column} -> ${sql.raw(escapeSqliteLiteral(path))})`;
+  },
+
   jsonExtractText(column, pointer) {
     // SQLite's json_extract returns the native JSON type, which works
     // for text comparisons. For explicit text, we use the same function.
@@ -257,10 +264,12 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   },
 
   jsonExtractDouble(column, pointer) {
-    // json_extract already yields INTEGER/REAL affinity for JSON numbers,
-    // and SQLite arithmetic on those values is IEEE 754 double.
+    // json_extract yields INTEGER for an integer-valued JSON number, and
+    // INTEGER arithmetic is exact 64-bit: SUM over such values raises
+    // "integer overflow" where a double would simply grow. The cast makes
+    // every extracted number REAL; NULL stays NULL.
     const path = toSqlitePath(pointer);
-    return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
+    return sql`CAST(json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))}) AS REAL)`;
   },
 
   jsonExtractBoolean(column, pointer) {

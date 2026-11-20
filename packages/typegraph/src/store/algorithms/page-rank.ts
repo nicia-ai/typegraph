@@ -457,33 +457,51 @@ async function accumulateOutWeights(
 
 /**
  * The share of a source's rank one expanded edge row carries, before it is
- * divided by the source's total: the edge's own weight on a weighted run
- * (the `weight` column every weighted expansion carries), one otherwise.
- * Summed per source it is the out-weight; a source whose total is zero is
- * dangling, weighted or not.
+ * divided by the source's total: the edge's weight on a weighted run (the
+ * `weight` column every weighted expansion carries), one otherwise. Summed
+ * per source it is the out-weight; a source whose total is zero is dangling,
+ * weighted or not.
+ *
+ * `both` emits one row per edge endpoint, and a self-loop appears in both
+ * branches, so each of its incidences must count half as much as any other
+ * incidence for the physical edge to keep its own total. Parallel self-loops
+ * remain distinct. The unweighted walk halves the self-loop's incidences.
+ * The weighted walk doubles every other incidence instead: only the ratio of
+ * a source's transition weights matters, doubling a double is exact, and
+ * halving the smallest one would round to zero and erase the edge.
  */
 function compileTransitionWeight(
   operation: IterativeGraphOperation,
 ): SqlFragment {
-  const edgeWeight =
-    operation.weightExpression === undefined ? sql`1.0` : sql`expanded.weight`;
-  if (operation.direction !== "both") return edgeWeight;
-  // `both` emits one row per edge endpoint. A self-loop appears in both
-  // branches, so each incidence contributes one half and the physical edge
-  // retains its own total transition weight. Parallel self-loops remain
-  // distinct.
-  const selfLoopWeight =
-    operation.weightExpression === undefined ?
-      sql`0.5`
-    : sql`0.5 * expanded.weight`;
+  const weighted = operation.weightExpression !== undefined;
+  if (operation.direction !== "both") {
+    return weighted ? sql`expanded.weight` : sql`1.0`;
+  }
+  const selfLoopIncidence = weighted ? sql`expanded.weight` : sql`0.5`;
+  const otherIncidence = weighted ? sql`2.0 * expanded.weight` : sql`1.0`;
   return sql`
     CASE
       WHEN expanded.source_id = expanded.target_id
        AND expanded.source_kind = expanded.target_kind
-      THEN ${selfLoopWeight}
-      ELSE ${edgeWeight}
+      THEN ${selfLoopIncidence}
+      ELSE ${otherIncidence}
     END
   `;
+}
+
+/**
+ * One expanded edge row's contribution to its target. The weighted walk
+ * normalizes the edge's weight by its source's total before multiplying by
+ * the source's score: a weight's scale then never meets a score, so a lone
+ * edge of any accepted weight carries its source's whole rank. The unweighted
+ * walk keeps the order it has always had, and with it its exact scores.
+ */
+function compileEdgeContribution(
+  operation: IterativeGraphOperation,
+): SqlFragment {
+  return operation.weightExpression === undefined ?
+      sql`source_score * transition_weight / source_out_weight`
+    : sql`source_score * (transition_weight / source_out_weight)`;
 }
 
 async function runPowerIterationRound(
@@ -585,7 +603,7 @@ async function accumulateContributions(
       SELECT
         target_id,
         target_kind,
-        SUM(source_score * transition_weight / source_out_weight) AS score
+        SUM(${compileEdgeContribution(operation)}) AS score
       FROM scoped_edges
       GROUP BY target_id, target_kind
     )

@@ -2930,6 +2930,30 @@ export function registerRecordedTimeIntegrationTests(
       expect(scoreRatio(replayed)).toBeCloseTo(1, 6);
     });
 
+    it("audits PageRank edge weights at recorded instants", async () => {
+      const store = await createHistoryStore(context);
+      const a = await store.nodes.Person.create({ name: "AA", age: 1 });
+      const b = await store.nodes.Person.create({ name: "AB", age: 2 });
+      await store.edges.knows.create(a, b, { weight: 1 });
+      const beforeInvalidWeight = await readRecordedClock(store);
+
+      await store.edges.knows.create(a, b, { weight: -1 });
+      const afterInvalidWeight = await readRecordedClock(store);
+
+      const options = { edges: ["knows"], weightProperty: "weight" } as const;
+
+      // The invalid weight is not part of the earlier recorded relation.
+      await expect(
+        store.asOfRecorded(beforeInvalidWeight).algorithms.pageRank(options),
+      ).resolves.toHaveLength(2);
+      await expect(
+        store.asOfRecorded(afterInvalidWeight).algorithms.pageRank(options),
+      ).rejects.toMatchObject({
+        name: "InvalidEdgeWeightError",
+        details: { reason: "negative", property: "weight" },
+      });
+    });
+
     it("reconstructs label propagation at recorded instants", async () => {
       const store = await createHistoryStore(context);
       const [alpha, beta, gamma] = await Promise.all([

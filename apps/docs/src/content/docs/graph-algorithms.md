@@ -196,6 +196,11 @@ visible edge of the selected kinds is audited; the call throws a typed
   before SQL can observe it, so only PostgreSQL can reject that case;
 - **missing** without a configured `defaultWeight`.
 
+`weightProperty` names a top-level key of the edge's properties and is used
+exactly as written. It is never read as path syntax, so a property called `0`
+or `a/b` is that property, not an array index or a nested path. On SQLite the
+lookup uses the `->` operator, so weighted algorithms need SQLite 3.38 or later.
+
 The audit covers the selected edge kinds globally (not just edges the
 traversal happens to reach), so a data problem fails deterministically no
 matter which endpoints you query. Weight arithmetic uses IEEE 754 double
@@ -370,9 +375,13 @@ selected kinds, or a missing one with no `defaultWeight`, throws
 `InvalidEdgeWeightError`. The audit covers the selected edge kinds as a whole,
 including edges whose endpoints `nodeKinds` leaves out. `defaultWeight` without
 `weightProperty` throws `ConfigurationError`. Without `weightProperty` the
-walk, its statements and its scores are the unweighted ones. Weights within
-one call that differ by hundreds of orders of magnitude can underflow the
-double range, which PostgreSQL reports as an error and SQLite rounds to zero.
+walk, its statements and its scores are the unweighted ones.
+
+Only the ratio between one node's out-edge weights matters, so their scale
+does not: a node's lone out-edge carries its whole rank at any accepted weight.
+The one limit is a ratio the double range cannot hold. An edge more than about
+300 orders of magnitude lighter than its node's total out-weight underflows,
+which PostgreSQL reports as an error and SQLite rounds to zero.
 
 PageRank uses double-precision arithmetic on both backends. Repeated runs on
 SQLite are deterministic; on PostgreSQL a plan change between runs can reorder

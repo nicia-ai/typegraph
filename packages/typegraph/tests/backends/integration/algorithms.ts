@@ -72,6 +72,66 @@ const nodeKindInitializationKindSet = new Set(nodeKindInitializationKinds);
 type NodeKindInitializationStore = Store<typeof nodeKindInitializationGraph>;
 
 /**
+ * Edge property names that are ordinary object keys but look like JSON path
+ * syntax: an array index, the JSON Pointer end-of-array token, and names
+ * carrying the characters JSON Pointer and SQL string literals escape.
+ */
+const PATH_LIKE_WEIGHT_PROPERTIES = ["0", "-", "a/b~c", "it's"] as const;
+const PATH_LIKE_STOPS = ["pl-a", "pl-b", "pl-c"] as const;
+const PathLikeStop = defineNode("PathLikeStop", {
+  schema: z.object({ name: z.string() }),
+});
+const pathLikeRoute = defineEdge("pathLikeRoute", {
+  schema: z.object(
+    Object.fromEntries(
+      PATH_LIKE_WEIGHT_PROPERTIES.map((property) => [
+        property,
+        z.number().optional(),
+      ]),
+    ),
+  ),
+});
+
+function stop(id: string) {
+  return { kind: "PathLikeStop" as const, id };
+}
+
+/**
+ * a -> c directly at weight 5, or through b at 1 + 1, with every weight
+ * stored under `property`. The b -> c edge stores no weight at all. Each
+ * property gets a graph of its own, so no other property's edges are audited.
+ */
+async function seedPathLikeWeightGraph(
+  context: IntegrationTestContext,
+  property: (typeof PATH_LIKE_WEIGHT_PROPERTIES)[number],
+) {
+  const store = await context.createStore(
+    defineGraph({
+      id: `algorithm_path_like_weight_${PATH_LIKE_WEIGHT_PROPERTIES.indexOf(property)}`,
+      nodes: { PathLikeStop: { type: PathLikeStop } },
+      edges: {
+        pathLikeRoute: {
+          type: pathLikeRoute,
+          from: [PathLikeStop],
+          to: [PathLikeStop],
+        },
+      },
+    }),
+  );
+  for (const id of PATH_LIKE_STOPS) {
+    await store.nodes.PathLikeStop.create({ name: id }, { id });
+  }
+  await store.edges.pathLikeRoute.create(stop("pl-a"), stop("pl-c"), {
+    [property]: 5,
+  });
+  await store.edges.pathLikeRoute.create(stop("pl-a"), stop("pl-b"), {
+    [property]: 1,
+  });
+  await store.edges.pathLikeRoute.create(stop("pl-b"), stop("pl-c"), {});
+  return store;
+}
+
+/**
  * The seed statement binds three identifiers plus its two temporal bounds, so
  * a 28-parameter ceiling leaves room for exactly 23 node kinds per statement.
  */
@@ -173,7 +233,8 @@ const WEIGHTED_PAGE_RANK_SCORE_DIGITS = 10;
  * Plain power iteration, the oracle for weighted PageRank: rank leaves a node
  * in proportion to its out-edge weights, a node whose out-weights sum to zero
  * hands its rank to the teleport distribution, and an undirected walk counts
- * a self-loop once.
+ * a self-loop once. Each weight is divided by its source's total before it
+ * meets a score, so only the ratio of weights matters, whatever their scale.
  */
 function referencePageRank(
   input: ReferencePageRankInput,
@@ -223,10 +284,9 @@ function referencePageRank(
       next.set(
         edge.to,
         requireDefined(next.get(edge.to)) +
-          (dampingFactor *
+          dampingFactor *
             requireDefined(current.get(edge.from)) *
-            edge.weight) /
-            outWeight,
+            (edge.weight / outWeight),
       );
     }
     const maximumChange = Math.max(
@@ -284,6 +344,43 @@ async function seedWeightedRankGraph(store: IntegrationStore): Promise<void> {
       weight: edge.weight,
     });
   }
+}
+
+/**
+ * Three people, with only the given edges between them, ranked by `weight`
+ * and compared with the reference.
+ */
+async function expectWeightedRanksToMatchReference(
+  store: IntegrationStore,
+  edges: readonly ReferenceEdge[],
+  direction: "out" | "both",
+): Promise<void> {
+  const nodes = ["ws-a", "ws-b", "ws-c"];
+  for (const id of nodes) {
+    await store.nodes.Person.create({ name: `Weight scale ${id}` }, { id });
+  }
+  for (const edge of edges) {
+    await createWeightedRankEdge(store, edge.from, edge.to, {
+      weight: edge.weight,
+    });
+  }
+
+  const scores = await store.algorithms.pageRank({
+    edges: ["knows"],
+    nodeKinds: ["Person"],
+    direction,
+    weightProperty: "weight",
+    tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+  });
+
+  expectScoresToMatchReference(
+    scores,
+    referencePageRank({ nodes, edges, direction }),
+  );
+  expect(scores.reduce((total, row) => total + row.score, 0)).toBeCloseTo(
+    1,
+    WEIGHTED_PAGE_RANK_SCORE_DIGITS,
+  );
 }
 
 async function createWeightedRankEdge(
@@ -809,6 +906,35 @@ export function registerAlgorithmIntegrationTests(
         // Both backends must do IEEE 754 double arithmetic — a decimal
         // NUMERIC accumulation would yield exactly 0.3 and diverge.
         expect(path?.totalWeight).toBe(0.1 + 0.2);
+      });
+
+      it("reads the weight under any top-level property name, never as path syntax", async () => {
+        for (const weightProperty of PATH_LIKE_WEIGHT_PROPERTIES) {
+          const store = await seedPathLikeWeightGraph(context, weightProperty);
+
+          await expect(
+            store.algorithms.weightedShortestPath("pl-a", "pl-c", {
+              edges: ["pathLikeRoute"],
+              weightProperty,
+            }),
+            `weightProperty ${weightProperty}`,
+          ).rejects.toMatchObject({
+            name: "InvalidEdgeWeightError",
+            details: { reason: "missing", property: weightProperty },
+          });
+
+          const path = await store.algorithms.weightedShortestPath(
+            "pl-a",
+            "pl-c",
+            { edges: ["pathLikeRoute"], weightProperty, defaultWeight: 1 },
+          );
+          expect(path?.totalWeight, `weightProperty ${weightProperty}`).toBe(2);
+          expect(path?.nodes.map((node) => node.id)).toEqual([
+            "pl-a",
+            "pl-b",
+            "pl-c",
+          ]);
+        }
       });
 
       it("honors the temporal coordinate, including through a pinned StoreView", async () => {
@@ -1955,6 +2081,142 @@ export function registerAlgorithmIntegrationTests(
             });
           }
         }
+      });
+
+      it("sums integer-valued weights beyond the 64-bit integer range", async () => {
+        // Each weight is stored as a JSON integer; their sum is not one.
+        await expectWeightedRanksToMatchReference(
+          context.getStore(),
+          [
+            { from: "ws-a", to: "ws-b", weight: 5e18 },
+            { from: "ws-a", to: "ws-c", weight: 5e18 },
+          ],
+          "out",
+        );
+      });
+
+      it("follows a lone edge with certainty however small its weight", async () => {
+        await expectWeightedRanksToMatchReference(
+          context.getStore(),
+          [{ from: "ws-a", to: "ws-b", weight: Number.MIN_VALUE }],
+          "out",
+        );
+      });
+
+      it("keeps an undirected self-loop however small its weight", async () => {
+        await expectWeightedRanksToMatchReference(
+          context.getStore(),
+          [{ from: "ws-a", to: "ws-a", weight: Number.MIN_VALUE }],
+          "both",
+        );
+      });
+
+      it("weighs an undirected self-loop once against its node's other edges", async () => {
+        await expectWeightedRanksToMatchReference(
+          context.getStore(),
+          [
+            { from: "ws-a", to: "ws-a", weight: 3 },
+            { from: "ws-a", to: "ws-b", weight: 1 },
+            { from: "ws-c", to: "ws-a", weight: 2 },
+          ],
+          "both",
+        );
+      });
+
+      it("reads the weight under any top-level property name, never as path syntax", async () => {
+        for (const weightProperty of PATH_LIKE_WEIGHT_PROPERTIES) {
+          const store = await seedPathLikeWeightGraph(context, weightProperty);
+          const options = {
+            edges: ["pathLikeRoute"],
+            weightProperty,
+            tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+          } as const;
+
+          await expect(
+            store.algorithms.pageRank(options),
+            `weightProperty ${weightProperty}`,
+          ).rejects.toMatchObject({
+            name: "InvalidEdgeWeightError",
+            details: { reason: "missing", property: weightProperty },
+          });
+
+          const defaultWeight = 3;
+          const reference = {
+            nodes: PATH_LIKE_STOPS,
+            edges: [
+              { from: "pl-a", to: "pl-c", weight: 5 },
+              { from: "pl-a", to: "pl-b", weight: 1 },
+              { from: "pl-b", to: "pl-c", weight: defaultWeight },
+            ],
+          };
+          expectScoresToMatchReference(
+            await store.algorithms.pageRank({ ...options, defaultWeight }),
+            referencePageRank(reference),
+          );
+          expectScoresToMatchReference(
+            await store.algorithms.personalizedPageRank({
+              ...options,
+              defaultWeight,
+              seeds: [{ id: "pl-a", kind: "PathLikeStop" }],
+            }),
+            referencePageRank({
+              ...reference,
+              seeds: new Map([["pl-a", 1]]),
+            }),
+          );
+        }
+      });
+
+      it("audits only the edge weights visible at the temporal coordinate", async () => {
+        const store = context.getStore();
+        const { PAST, BEFORE, EDGE_ENDED } = TEMPORAL_ANCHORS;
+        const [alpha, beta] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Audit temporal alpha" },
+            { id: "wa-a", validFrom: PAST },
+          ),
+          store.nodes.Person.create(
+            { name: "Audit temporal beta" },
+            { id: "wa-b", validFrom: PAST },
+          ),
+        ]);
+        await store.edges.knows.create(
+          alpha,
+          beta,
+          { weight: 1 },
+          { validFrom: PAST },
+        );
+        // An invalid weight that was only ever valid in the past.
+        await store.edges.knows.create(
+          alpha,
+          beta,
+          { weight: -1 },
+          { validFrom: PAST, validTo: EDGE_ENDED },
+        );
+        const options = {
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          weightProperty: "weight",
+        } as const;
+        const refusal = {
+          name: "InvalidEdgeWeightError",
+          details: { reason: "negative", property: "weight" },
+        };
+
+        await expect(store.algorithms.pageRank(options)).resolves.toHaveLength(
+          2,
+        );
+        await expect(
+          store.asOf(BEFORE).algorithms.pageRank(options),
+        ).rejects.toMatchObject(refusal);
+        await expect(
+          store.algorithms.personalizedPageRank({
+            ...options,
+            seeds: [{ id: alpha.id, kind: "Person" }],
+            temporalMode: "asOf",
+            asOf: BEFORE,
+          }),
+        ).rejects.toMatchObject(refusal);
       });
 
       it("reads edge weights at the temporal coordinate, including through a pinned StoreView", async () => {

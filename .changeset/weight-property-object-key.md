@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+`weightedShortestPath` reads `weightProperty` as a top-level object key exactly as written, on every backend. The name used to be turned into a JSON path, so on SQLite a property called `0` was looked up as array index 0 of the edge's properties and every weight was reported missing or silently replaced by `defaultWeight`, while PostgreSQL read the key; and a property called `-` threw a plain `Error` about JSON Pointer syntax on both. The weight audit and the traversal now share one lookup through a new `DialectAdapter` member, `jsonObjectMember(column, key)`, which returns the JSON value stored under a top-level key (`column -> '$."key"'` on SQLite, which needs SQLite 3.38 or later, and `column -> 'key'` on PostgreSQL). A custom `DialectAdapter` must implement it. On SQLite, `DialectAdapter.jsonExtractDouble` now casts its result to `REAL`, so an integer-valued JSON number is a double there as its contract says, and a `defaultWeight` is bound as a double on both backends.

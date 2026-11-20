@@ -255,6 +255,10 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`${column} #> ${path}`;
   },
 
+  jsonObjectMember(column, key) {
+    return sql`(${column} -> ${sql.raw(inlineSqlStringLiteral(key, "postgres"))})`;
+  },
+
   jsonExtractText(column, pointer) {
     // #>> returns text value at path
     const path = toPostgresPath(pointer);

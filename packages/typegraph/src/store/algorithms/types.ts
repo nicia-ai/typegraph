@@ -172,7 +172,7 @@ export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
   Readonly<{
     /**
      * Top-level edge property supplying each edge's non-negative numeric
-     * weight.
+     * weight. The name is an object key, never path syntax.
      */
     weightProperty: string;
     /**
@@ -382,9 +382,11 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
      * `weightedShortestPath` runs before any round: a negative, non-numeric
      * or out-of-range weight on any visible edge of the selected kinds, or a
      * missing one with no `defaultWeight`, throws `InvalidEdgeWeightError`.
-     * Weights differing by hundreds of orders of magnitude within one call
-     * can underflow the double range, which PostgreSQL raises and SQLite
-     * rounds to zero. Omit it for the unweighted walk.
+     * Only the ratio between one node's out-edge weights matters; an edge
+     * more than about 300 orders of magnitude lighter than its node's total
+     * underflows that ratio, which PostgreSQL raises and SQLite rounds to
+     * zero. The name is an object key, never path syntax. Omit it for the
+     * unweighted walk.
      */
     weightProperty?: string;
     /**

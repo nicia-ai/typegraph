@@ -292,6 +292,25 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /**
+   * The JSON value stored under one top-level key of a JSON object, as a
+   * JSON operand the path members accept with the root pointer. SQL NULL
+   * when the key is absent.
+   *
+   * The key is data, never path syntax: a JSON pointer cannot tell the
+   * object key `0` from the array index 0, nor carry the key `-`, so a
+   * caller-named property is looked up here instead of through a pointer.
+   *
+   * @example
+   * SQLite: (column -> '$."key"')
+   * PostgreSQL: (column -> 'key')
+   */
+  readonly jsonObjectMember: (
+    this: void,
+    column: SqlFragment,
+    key: string,
+  ) => SqlFragment;
+
+  /**
    * Extracts a JSON value at a path as text.
    *
    * @example
@@ -326,7 +345,7 @@ export interface DialectAdapter {
    * results (e.g. graph traversal weights) are backend-identical.
    *
    * @example
-   * SQLite: json_extract(column, '$.path')
+   * SQLite: CAST(json_extract(column, '$.path') AS REAL)
    * PostgreSQL: (column #>> ARRAY['path'])::double precision
    */
   readonly jsonExtractDouble: (

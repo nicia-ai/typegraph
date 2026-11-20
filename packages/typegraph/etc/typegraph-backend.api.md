@@ -1941,6 +1941,7 @@ export interface DialectAdapter {
     readonly jsonExtractNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractText: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonHasPath: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
+    readonly jsonObjectMember: (this: void, column: SqlFragment, key: string) => SqlFragment;
     readonly jsonPathIsNotNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
